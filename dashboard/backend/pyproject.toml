@@ -1,0 +1,26 @@
+[tool.poetry]
+name = "ai-hedge-fund-dashboard-backend"
+version = "0.1.0"
+description = "FastAPI backend for the AI Hedge Fund dashboard"
+authors = ["Yuhan Wang <wyuhan2321@gmail.com>"]
+package-mode = false
+
+[tool.poetry.dependencies]
+python = "^3.11"
+fastapi = "^0.115"
+uvicorn = { extras = ["standard"], version = "^0.30" }
+aiosqlite = "^0.20"
+pydantic = "^2.7"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8"
+pytest-asyncio = "^0.23"
+httpx = "^0.27"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"

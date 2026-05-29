@@ -1,0 +1,32 @@
+[Unit]
+Description=AI Hedge Fund Dashboard (FastAPI)
+After=network-online.target hedge-fund-bot.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/hedge-fund/dashboard/backend
+Environment="PATH=/root/.local/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="PYTHONPATH=/root/hedge-fund/dashboard/backend:/root/hedge-fund"
+Environment="HEDGE_FUND_REPO_PATH=/root/hedge-fund"
+Environment="DASHBOARD_DB_PATH=/root/hedge-fund/dashboard/data/dashboard.db"
+Environment="DASHBOARD_HOST=127.0.0.1"
+Environment="DASHBOARD_PORT=8001"
+Environment="DASHBOARD_DAILY_BUDGET_USD=0.30"
+Environment="DASHBOARD_PER_IP_HOURLY_LIMIT=5"
+# Set DASHBOARD_OWNER_TOKEN via EnvironmentFile=/etc/hedge-fund/dashboard.env
+# so it doesn't end up in journalctl. Example contents:
+#   DASHBOARD_OWNER_TOKEN=<a random 32+ char secret>
+EnvironmentFile=-/etc/hedge-fund/dashboard.env
+ExecStart=/root/.local/bin/poetry run uvicorn app.main:app \
+    --host ${DASHBOARD_HOST} \
+    --port ${DASHBOARD_PORT} \
+    --proxy-headers \
+    --forwarded-allow-ips=127.0.0.1
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:/root/hedge-fund/logs/dashboard.log
+StandardError=append:/root/hedge-fund/logs/dashboard.err
+
+[Install]
+WantedBy=multi-user.target
