@@ -1,0 +1,56 @@
+"""Run one pass of lateral expansion and push the result to Telegram.
+
+Usage:
+    poetry run python scripts/lateral_to_telegram.py
+"""
+
+from __future__ import annotations
+
+import logging
+
+from dotenv import load_dotenv
+
+from v2.archive import Archive
+from v2.data import CachedFDClient
+from v2.lateral import DEFAULT_SEEDS, LATERAL_FILTERS, run_lateral_expansion
+from v2.reporting import TelegramNotifier, format_lateral_result, notify_on_error
+from v2.screening import TECH_30
+
+# Show INFO from the orchestrator so we can watch progress.
+logging.basicConfig(level=logging.INFO, format="  [%(levelname)s] %(message)s")
+
+load_dotenv()
+
+
+@notify_on_error("Lateral Expansion")
+def main() -> None:
+    seeds = DEFAULT_SEEDS
+    universe = set(TECH_30)
+
+    print(f"Lateral expansion · {len(seeds)} seeds: {', '.join(seeds)}")
+    with CachedFDClient() as fd:
+        result = run_lateral_expansion(
+            seeds=seeds,
+            universe=universe,
+            fd_client=fd,
+            filter_config=LATERAL_FILTERS,
+        )
+
+    passers = sum(
+        1 for n in result.neighbors
+        if n.exists and not n.already_in_universe and n.passed_filter
+    )
+    hallucinated = sum(1 for n in result.neighbors if not n.exists)
+    print(
+        f"\nDone. {len(result.neighbors)} unique candidates · "
+        f"{passers} passed full filter · {hallucinated} hallucinations"
+    )
+
+    print("Pushing to Telegram...")
+    notifier = TelegramNotifier(archive=Archive(agent="lateral"))
+    notifier.send_text(format_lateral_result(result))
+    print("Pushed.")
+
+
+if __name__ == "__main__":
+    main()
