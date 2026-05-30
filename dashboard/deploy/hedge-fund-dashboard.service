@@ -17,6 +17,7 @@ Environment="DASHBOARD_PER_IP_HOURLY_LIMIT=5"
 # Set DASHBOARD_OWNER_TOKEN via EnvironmentFile=/etc/hedge-fund/dashboard.env
 # so it doesn't end up in journalctl. Example contents:
 #   DASHBOARD_OWNER_TOKEN=<a random 32+ char secret>
+EnvironmentFile=-/root/hedge-fund/.env
 EnvironmentFile=-/etc/hedge-fund/dashboard.env
 ExecStart=/root/.local/bin/poetry run uvicorn app.main:app \
     --host ${DASHBOARD_HOST} \

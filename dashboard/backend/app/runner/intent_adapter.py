@@ -1,28 +1,17 @@
 """Bridge between user free-form text and the v2 responders.
 
-Real wiring path (production):
-    1. classify_intent(text) → Intent(name, args) using v2.bot.intent
-       (which the observability layer has already monkey-patched, so a
-       trace event fires automatically).
-    2. RESPONDER_DISPATCH[intent.name](args) → str reply.
-       Each responder is a thin shim that calls the same v2 module the
-       Telegram bot's responder does, but skipping the Telegram-specific
-       Update/Context wrapping.
-
-The dispatch table below leaves a `_stub_responder` placeholder for
-every intent. The placeholder issues a couple of representative trace
-events so the dashboard demo is visually complete even on machines where
-v2/data and live API keys are not present.
-
-To wire a real responder, replace the entry in DISPATCH with a callable
-that takes (args: dict) -> str and uses the underlying v2 module directly.
-The observability hooks installed at startup will record every FD / LLM /
-Tavily / DB call along the way without further code changes.
+Production wiring: each intent maps to a callable that delegates into the
+v2.bot.responders module (or v2.bot.state / v2.bot.commands for cases the
+responders don't directly expose). The observability layer has already
+monkey-patched FD, DeepSeek and Tavily clients, so a trace event fires
+automatically when each external call happens.
 """
 
 from __future__ import annotations
 
+import html as _html
 import logging
+import re
 import time
 from typing import Any, Callable, Optional
 
@@ -38,24 +27,34 @@ ResponderFn = Callable[[dict[str, Any]], str]
 # ---------------------------------------------------------------------------
 
 def classify(text: str) -> tuple[str, dict[str, Any]]:
-    """Run v2.bot.intent.classify_intent if available; fall back to a
-    keyword-based stub when the module can't import (e.g. local dev with
-    no DeepSeek key).
+    """Run v2.bot.intent.classify if available; fall back to keyword stub.
+
+    Falls back when:
+      - the v2 module fails to import / call (no API key, etc.)
+      - the LLM call returned `intent == "unknown"` (often a sign the key
+        is missing and the v2 module swallowed the error)
     """
     try:
         from v2.bot import intent as bot_intent
 
-        result = bot_intent.classify_intent(text)
-        name = getattr(result, "name", None) or (
-            result.get("name") if isinstance(result, dict) else None
-        )
-        args = getattr(result, "args", None) or (
-            result.get("args") if isinstance(result, dict) else None
-        ) or {}
-        if name:
-            return str(name), dict(args)
+        result = bot_intent.classify(text)
+        if isinstance(result, dict):
+            intent_name = str(result.get("intent") or "")
+            if intent_name and intent_name != "unknown":
+                args: dict[str, Any] = {}
+                for key in ("ticker", "manager", "etf", "direction"):
+                    v = result.get(key)
+                    if v:
+                        args[key] = v
+                tp = result.get("target_price")
+                if tp:
+                    try:
+                        args["target_price"] = float(tp)
+                    except (TypeError, ValueError):
+                        pass
+                return intent_name, args
     except Exception as exc:
-        logger.info("falling back to stub classifier: %s", exc)
+        logger.info("falling back to keyword classifier: %s", exc)
 
     return _stub_classify(text)
 
@@ -64,7 +63,6 @@ _KEYWORD_MAP: list[tuple[str, str]] = [
     ("为什么", "explain_move"),
     ("why", "explain_move"),
     ("怎么样", "summary"),
-    ("怎么", "summary"),
     ("summary", "summary"),
     ("产业链", "chain"),
     ("chain", "chain"),
@@ -84,24 +82,19 @@ _KEYWORD_MAP: list[tuple[str, str]] = [
     ("盈亏", "pnl_view"),
     ("pnl", "pnl_view"),
     ("watchlist", "watchlist_view"),
+    ("关注", "watchlist_view"),
     ("settings", "settings"),
     ("设置", "settings"),
 ]
 
 
 def _stub_classify(text: str) -> tuple[str, dict[str, Any]]:
-    """Pure-Python keyword classifier used when DeepSeek isn't available.
-
-    Pulls the first uppercase token of length 2-5 as the ticker when the
-    intent suggests one.
-    """
     lower = text.lower()
     intent_name = "unknown"
     for kw, name in _KEYWORD_MAP:
         if kw in lower:
             intent_name = name
             break
-
     args: dict[str, Any] = {}
     if intent_name in {"explain_move", "summary", "chain", "holders_view"}:
         ticker = _extract_ticker(text)
@@ -119,25 +112,146 @@ def _extract_ticker(text: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
-# Responder dispatch
+# HTML → Markdown — v2 responders emit Telegram HTML; dashboard chat is plain
+# ---------------------------------------------------------------------------
+
+def _telegram_html_to_md(s: str) -> str:
+    """Convert Telegram-flavored HTML to lightweight Markdown."""
+    s = re.sub(r"<b>(.*?)</b>", r"**\1**", s, flags=re.DOTALL)
+    s = re.sub(r"<i>(.*?)</i>", r"_\1_", s, flags=re.DOTALL)
+    s = re.sub(r"<code>(.*?)</code>", r"`\1`", s, flags=re.DOTALL)
+    s = re.sub(r'<a\s+href="([^"]+)">(.*?)</a>', r"[\2](\1)", s, flags=re.DOTALL)
+    s = re.sub(r"<[^>]+>", "", s)  # strip anything else
+    return _html.unescape(s)
+
+
+# ---------------------------------------------------------------------------
+# Real responder shims — each takes args dict, returns plain text/markdown
+# ---------------------------------------------------------------------------
+
+def _r_explain_move(args):
+    from v2.bot import responders
+    ticker = (args.get("ticker") or "NVDA").upper()
+    return _telegram_html_to_md(responders.explain_move(ticker))
+
+
+def _r_summary(args):
+    from v2.bot import responders
+    ticker = (args.get("ticker") or "NVDA").upper()
+    return _telegram_html_to_md(responders.summary(ticker))
+
+
+def _r_chain(args):
+    from v2.bot import responders
+    ticker = (args.get("ticker") or "NVDA").upper()
+    return _telegram_html_to_md(responders.chain(ticker))
+
+
+def _r_thirteen_f(args):
+    from v2.bot import responders
+    target = args.get("manager") or args.get("ticker") or "brk"
+    out = responders.institutional_quick(str(target))
+    if isinstance(out, list):
+        joined = "\n\n━━━━━━━━━━━━━━━━━━━━\n\n".join(out)
+    else:
+        joined = str(out)
+    return _telegram_html_to_md(joined)
+
+
+def _r_holders_view(args):
+    from v2.bot import responders
+    ticker = (args.get("ticker") or "NVDA").upper()
+    return _telegram_html_to_md(responders.holders(ticker))
+
+
+def _r_etf_view(args):
+    from v2.bot import responders
+    symbol = (args.get("etf") or args.get("ticker") or "ARKK").upper()
+    return _telegram_html_to_md(responders.etf_view(symbol))
+
+
+def _r_find_anomalies(args):
+    from v2.bot.commands import _recent_anomalies
+    return _telegram_html_to_md(_recent_anomalies())
+
+
+def _r_settings(args):
+    from v2.bot import responders
+    return _telegram_html_to_md(responders.settings_view())
+
+
+def _r_alert_set(args):
+    from v2.bot import responders
+    ticker = (args.get("ticker") or "").upper()
+    target_price = float(args.get("target_price") or 0)
+    direction = (args.get("direction") or "above").lower()
+    if not ticker or target_price <= 0:
+        return "🚫 需要指定 ticker 和 target_price。\n例：「提醒我 NVDA 突破 130」"
+    return _telegram_html_to_md(responders.alert_set(ticker, target_price, direction))
+
+
+def _r_alert_list(args):
+    from v2.bot import responders
+    return _telegram_html_to_md(responders.alert_list_view())
+
+
+def _r_alert_remove(args):
+    from v2.bot import responders
+    try:
+        alert_id = int(args.get("alert_id") or args.get("ticker") or 0)
+    except (TypeError, ValueError):
+        alert_id = 0
+    if alert_id <= 0:
+        return "🚫 需要指定 alert_id（数字）"
+    return _telegram_html_to_md(responders.alert_remove_view(alert_id))
+
+
+def _r_portfolio_view(args):
+    from v2.bot import responders
+    return _telegram_html_to_md(responders.portfolio_view())
+
+
+def _r_pnl_view(args):
+    from v2.bot import responders
+    return _telegram_html_to_md(responders.pnl_view())
+
+
+def _r_watchlist_view(args):
+    from v2.bot import state
+    items = state.watchlist_list()
+    if not items:
+        return "📋 Watchlist 为空。用 /add TICKER 添加。"
+    lines = [f"📋 **Watchlist ({len(items)})**"]
+    for it in items:
+        lines.append(f"• `{it['ticker']}`  · _added {it['added_at'][:10]}_")
+    return "\n".join(lines)
+
+
+def _r_unknown(args):
+    return (
+        "🤔 没听懂这个问题。试试：\n"
+        "• 「NVDA 为什么跌？」 → explain_move\n"
+        "• 「巴菲特最新持仓」 → 13F card\n"
+        "• 「Cathie 今天买啥」 → ARKK 当日持仓\n"
+        "• 「谁持有 NVDA」 → 反查机构\n"
+        "• 「最近有什么异动」 → archive 列表"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Dispatcher
 # ---------------------------------------------------------------------------
 
 def run_intent(intent: str, args: dict[str, Any]) -> str:
-    """Dispatch to the registered responder. Emits events along the way.
-
-    Real responders live in v2.bot.responders but take Telegram Update
-    objects, so this layer bridges by calling lower-level v2 modules.
-    On a stub deployment (no API keys), `_stub_responder` produces a
-    short, visually realistic event trace.
-    """
-    fn = DISPATCH.get(intent, _stub_responder)
+    fn = DISPATCH.get(intent, _r_unknown)
     emit("module_enter", name=fn.__name__, intent=intent, args=args)
     t0 = time.perf_counter()
     try:
         reply = fn(args)
     except Exception as exc:
         emit("error", where=fn.__name__, message=str(exc))
-        raise
+        logger.exception("responder %s failed", fn.__name__)
+        reply = f"❌ {fn.__name__} failed: `{type(exc).__name__}: {exc}`"
     finally:
         emit(
             "module_exit",
@@ -147,53 +261,20 @@ def run_intent(intent: str, args: dict[str, Any]) -> str:
     return reply
 
 
-def _stub_responder(args: dict[str, Any]) -> str:
-    """Demo-only responder. Emits a small handful of plausible events so
-    the trace panel renders something interesting without burning real API
-    spend. Replace via real wiring in DISPATCH below.
-    """
-    import random
-
-    ticker = args.get("ticker", "NVDA")
-
-    emit("api_call", provider="fd", endpoint="get_prices",
-         ticker=ticker, cache="miss", elapsed_ms=random.randint(200, 500))
-    emit("api_call", provider="fd", endpoint="get_fundamentals",
-         ticker=ticker, cache="hit", elapsed_ms=random.randint(2, 8))
-    emit("api_call", provider="tavily", endpoint="search",
-         query=f"{ticker} latest news", num_results=5,
-         cost_usd=0.005, elapsed_ms=random.randint(800, 1400))
-    emit("llm_call", provider="deepseek", model="deepseek-chat",
-         prompt_preview=f"Synthesize attribution for {ticker} ...",
-         response_preview="(stub response — wire real responder for full output)",
-         input_tokens=1840, output_tokens=220, cost_usd=0.000319,
-         elapsed_ms=random.randint(1800, 2400))
-    emit("db_write", db="chroma",
-         fn="add_attribution", elapsed_ms=random.randint(5, 20))
-
-    return (
-        f"⚠️ Stub mode: dashboard responder for `{ticker}` not yet wired.\n"
-        "Connect v2 responders in app/runner/intent_adapter.py DISPATCH "
-        "to see real attributions."
-    )
-
-
-# Real responders should replace these entries on the production VPS.
-# Each must accept a dict and return a str.
 DISPATCH: dict[str, ResponderFn] = {
-    "explain_move": _stub_responder,
-    "summary": _stub_responder,
-    "chain": _stub_responder,
-    "thirteen_f": _stub_responder,
-    "holders_view": _stub_responder,
-    "etf_view": _stub_responder,
-    "find_anomalies": _stub_responder,
-    "settings": _stub_responder,
-    "alert_set": _stub_responder,
-    "alert_list": _stub_responder,
-    "alert_remove": _stub_responder,
-    "portfolio_view": _stub_responder,
-    "pnl_view": _stub_responder,
-    "watchlist_view": _stub_responder,
-    "unknown": _stub_responder,
+    "explain_move":   _r_explain_move,
+    "summary":        _r_summary,
+    "chain":          _r_chain,
+    "thirteen_f":     _r_thirteen_f,
+    "holders_view":   _r_holders_view,
+    "etf_view":       _r_etf_view,
+    "find_anomalies": _r_find_anomalies,
+    "settings":       _r_settings,
+    "alert_set":      _r_alert_set,
+    "alert_list":     _r_alert_list,
+    "alert_remove":   _r_alert_remove,
+    "portfolio_view": _r_portfolio_view,
+    "pnl_view":       _r_pnl_view,
+    "watchlist_view": _r_watchlist_view,
+    "unknown":        _r_unknown,
 }
