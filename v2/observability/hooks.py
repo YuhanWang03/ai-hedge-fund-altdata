@@ -128,18 +128,29 @@ def _patch_fd_client() -> int:
 # DeepSeek LLM (langchain_deepseek.ChatDeepSeek.invoke / .ainvoke)
 # ---------------------------------------------------------------------------
 
+# Prompts and responses are forwarded to the dashboard verbatim up to this
+# many characters. The hedge-fund agents' real prompts run 1.5–4 KB; the
+# largest (Generator with Tier-1/2 evidence) reaches ~10 KB. 16 KB leaves
+# headroom for outliers without risking SSE buffer pressure.
+_PREVIEW_CAP = 16 * 1024
+
+
+def _cap_str(s: str, limit: int = _PREVIEW_CAP) -> str:
+    if len(s) <= limit:
+        return s
+    return s[:limit] + f"\n... (truncated, {len(s) - limit} more chars)"
+
+
 def _llm_summarize(messages: Any) -> str:
-    """Best-effort textual preview of a LangChain message list / string."""
+    """Best-effort textual rendering of a LangChain message list / string."""
     try:
         if isinstance(messages, str):
-            return messages[:500]
-        # LangChain typically passes a list[BaseMessage].
+            return _cap_str(messages)
         parts = []
         for m in messages if isinstance(messages, (list, tuple)) else [messages]:
             content = getattr(m, "content", None) or str(m)
             parts.append(str(content))
-        joined = "\n".join(parts)
-        return joined[:500]
+        return _cap_str("\n".join(parts))
     except Exception:
         return "<unprintable>"
 
@@ -152,9 +163,9 @@ def _llm_response_preview(result: Any) -> tuple[str, int, int]:
     try:
         content = getattr(result, "content", None)
         if content is not None:
-            preview = str(content)[:500]
+            preview = _cap_str(str(content))
         else:
-            preview = str(result)[:500]
+            preview = _cap_str(str(result))
         meta = getattr(result, "usage_metadata", None) or {}
         in_tok = int(meta.get("input_tokens", 0) or 0)
         out_tok = int(meta.get("output_tokens", 0) or 0)
@@ -303,7 +314,7 @@ def _patch_intent_classifier() -> int:
 
         emit(
             "intent_classified",
-            input_text=text[:200],
+            input_text=_cap_str(text, 2048),
             intent=intent_name,
             args=intent_args,
             elapsed_ms=elapsed_ms,
