@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { PipelineBar } from '../PipelineBar'
+import { intentLabel } from '../../pipelines'
 import { useSession } from '../../store/session'
 import { TraceEvent } from './TraceEvent'
 
@@ -30,6 +31,7 @@ export function TracePanel() {
   const startEvent = events.find((e) => e.type === 'session_start')
   const endEvent = events.find((e) => e.type === 'session_end')
   const intentEvent = events.find((e) => e.type === 'intent_classified')
+  const userText = typeof startEvent?.text === 'string' ? startEvent.text : ''
   const isReplayed = events.some((e) => e.replayed)
 
   const llmCount = events.filter((e) => e.type === 'llm_call').length
@@ -44,23 +46,36 @@ export function TracePanel() {
       {/* Header */}
       <div className="px-5 py-3 border-b border-ink-200 bg-white">
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <h2 className="text-sm font-semibold text-ink-800">
+          <div className="flex items-center gap-3 min-w-0">
+            <h2 className="text-sm font-semibold text-ink-800 shrink-0">
               Execution Trace
             </h2>
+            {userText && (
+              <span
+                className="text-sm text-ink-700 truncate max-w-[40ch]"
+                title={userText}
+              >
+                「{userText}」
+              </span>
+            )}
             {isReplayed && (
-              <span className="text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-200 mono">
+              <span className="text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-200 mono shrink-0">
                 Replay · cached
               </span>
             )}
-            {intentEvent && (
-              <span className="text-xs mono text-ink-500">
-                intent:{' '}
-                <span className="text-accent-intent">
-                  {String(intentEvent.intent ?? '?')}
+            {intentEvent && (() => {
+              const rawIntent = String(intentEvent.intent ?? '')
+              const label = intentLabel(rawIntent)
+              if (!label) return null
+              return (
+                <span
+                  className="text-xs px-2 py-0.5 rounded-full bg-rose-50 text-rose-700 border border-rose-200 shrink-0"
+                  title={`intent: ${rawIntent}`}
+                >
+                  🎯 {label}
                 </span>
-              </span>
-            )}
+              )
+            })()}
           </div>
           <div className="flex items-center gap-4 text-xs mono text-ink-500">
             {hasExplanations && (
