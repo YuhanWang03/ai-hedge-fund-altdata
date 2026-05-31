@@ -11,6 +11,7 @@ import { renderToString } from 'react-dom/server'
 import React from 'react'
 import { TraceEvent } from '../src/components/TracePanel/TraceEvent.tsx'
 import { PipelineBar } from '../src/components/PipelineBar.tsx'
+import { isSessionComplete, shouldHighlight } from '../src/event_to_step.ts'
 
 const cases = [
   {
@@ -264,7 +265,114 @@ for (const c of cases) {
   }
 }
 
-const totalChecks = cases.length + pipelineCases.length
+// ---- Liquid-glass highlight: logic + rendered class -----------------------
+
+const highlightCases = [
+  {
+    name: 'glass_highlight_before_completion',
+    // Mid-flight events: edgar fired but session_end hasn't arrived.
+    events: [
+      { type: 'session_start',     session_id: 's', seq: 1, ts_ms: 0 },
+      { type: 'intent_classified', session_id: 's', seq: 2, ts_ms: 0, intent: 'thirteen_f' },
+      { type: 'api_call',          session_id: 's', seq: 3, ts_ms: 0, provider: 'edgar', endpoint: 'Company.get_filings' },
+    ],
+    cached: false,
+    highlightedStepId: 'edgar',
+    expectComplete: false,
+    expectHighlight: false,
+  },
+  {
+    name: 'glass_highlight_after_completion',
+    events: [
+      { type: 'session_start',     session_id: 's', seq: 1, ts_ms: 0 },
+      { type: 'intent_classified', session_id: 's', seq: 2, ts_ms: 0, intent: 'thirteen_f' },
+      { type: 'api_call',          session_id: 's', seq: 3, ts_ms: 0, provider: 'edgar', endpoint: 'Company.get_filings' },
+      { type: 'api_call',          session_id: 's', seq: 4, ts_ms: 0, provider: 'edgar', endpoint: 'Filing.obj' },
+      { type: 'session_end',       session_id: 's', seq: 5, ts_ms: 0 },
+    ],
+    cached: false,
+    highlightedStepId: 'edgar',
+    expectComplete: true,
+    expectHighlight: true,
+    // Both api_call(edgar) events must light up; the session_start must not.
+    highlightSeqs: [3, 4],
+    nonHighlightSeqs: [1, 2, 5],
+  },
+  {
+    name: 'glass_highlight_cached_replay',
+    events: [],
+    cached: true,
+    highlightedStepId: 'ark',
+    expectComplete: true,
+    // No events to assert per-row, but the predicate should be ready to fire.
+    expectHighlight: true,
+    sampleEvent: { type: 'api_call', session_id: 's', seq: 1, ts_ms: 0, provider: 'ark_csv', endpoint: 'fetch' },
+  },
+]
+
+for (const c of highlightCases) {
+  const complete = isSessionComplete(c.events, !!c.cached)
+  if (complete !== c.expectComplete) {
+    failures++
+    console.log(`✗ ${c.name}`)
+    console.log(`    isSessionComplete expected ${c.expectComplete}, got ${complete}`)
+    continue
+  }
+
+  let ok = true
+
+  // Per-event predicate.
+  if (c.highlightSeqs) {
+    for (const ev of c.events) {
+      const want = c.highlightSeqs.includes(ev.seq)
+      const got = shouldHighlight(ev, c.highlightedStepId, complete)
+      if (want !== got) {
+        ok = false
+        console.log(`    ${c.name}: shouldHighlight(seq=${ev.seq}) want=${want} got=${got}`)
+      }
+    }
+  }
+
+  // Cached path needs a sample event to confirm the predicate works.
+  if (c.sampleEvent) {
+    const got = shouldHighlight(c.sampleEvent, c.highlightedStepId, complete)
+    if (got !== c.expectHighlight) {
+      ok = false
+      console.log(`    ${c.name}: sample shouldHighlight expected ${c.expectHighlight}, got ${got}`)
+    }
+  }
+
+  // For the before-completion case, every event must NOT highlight.
+  if (c.expectHighlight === false && c.events.length > 0) {
+    for (const ev of c.events) {
+      if (shouldHighlight(ev, c.highlightedStepId, complete)) {
+        ok = false
+        console.log(`    ${c.name}: seq=${ev.seq} unexpectedly highlighted before completion`)
+      }
+    }
+  }
+
+  // Finally, render a representative event and check the DOM class.
+  const sample = c.sampleEvent ?? c.events.find((e) => e.type === 'api_call')
+  if (sample) {
+    const isHighlighted = shouldHighlight(sample, c.highlightedStepId, complete)
+    const html = renderToString(React.createElement(TraceEvent, {
+      event: sample,
+      highlighted: isHighlighted,
+    }))
+    const hasGlassClass = html.includes('glass-highlight')
+    if (hasGlassClass !== isHighlighted) {
+      ok = false
+      console.log(`    ${c.name}: rendered glass-highlight class mismatch — class=${hasGlassClass}, expected=${isHighlighted}`)
+    }
+  }
+
+  if (ok) console.log(`✓ ${c.name}`)
+  else { failures++; console.log(`✗ ${c.name}`) }
+}
+
+
+const totalChecks = cases.length + pipelineCases.length + highlightCases.length
 if (failures > 0) {
   console.error(`\n${failures} render check(s) failed.`)
   process.exit(1)

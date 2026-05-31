@@ -9,10 +9,15 @@ interface SessionState {
   events: TraceEvent[]
   chat: ChatMessage[]
 
+  // Active pipeline-pill highlight, or null when nothing is highlighted.
+  // Only takes effect after the session is complete (see isSessionComplete).
+  highlightedStepId: string | null
+
   startSession: (id: string, userText: string, intent: string | null, cached: boolean) => void
   pushEvent: (ev: TraceEvent) => void
   pushChat: (msg: ChatMessage) => void
   markChatCached: (sessionId: string, cachedAtMs: number) => void
+  setHighlightedStepId: (stepId: string | null) => void
   reset: () => void
 }
 
@@ -22,6 +27,7 @@ export const useSession = create<SessionState>((set) => ({
   currentCached: false,
   events: [],
   chat: [],
+  highlightedStepId: null,
 
   startSession: (id, userText, intent, cached) =>
     set((s) => ({
@@ -30,6 +36,8 @@ export const useSession = create<SessionState>((set) => ({
       currentCached: cached,
       // Keep prior events as history? No — wipe trace per query.
       events: [],
+      // Clear any pill highlight left over from the previous query.
+      highlightedStepId: null,
       chat: [
         ...s.chat,
         {
@@ -79,11 +87,14 @@ export const useSession = create<SessionState>((set) => ({
       ),
     })),
 
+  setHighlightedStepId: (stepId) => set({ highlightedStepId: stepId }),
+
   reset: () => set({
     currentSessionId: null,
     currentIntent: null,
     currentCached: false,
     events: [],
     chat: [],
+    highlightedStepId: null,
   }),
 }))
