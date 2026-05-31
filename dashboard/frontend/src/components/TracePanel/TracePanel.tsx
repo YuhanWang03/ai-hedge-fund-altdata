@@ -80,7 +80,7 @@ export function TracePanel() {
       </div>
 
       {/* Stream */}
-      <div ref={containerRef} className="flex-1 overflow-y-auto px-5 py-4 space-y-8">
+      <div ref={containerRef} className="flex-1 overflow-y-auto px-5 py-4 space-y-12">
         {events.length === 0 && (
           <div className="text-ink-400 text-sm text-center mt-20">
             发起一次查询后，每个模块调用、LLM prompt、API call、DB
