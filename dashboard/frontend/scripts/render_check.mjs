@@ -11,6 +11,8 @@ import { renderToString } from 'react-dom/server'
 import React from 'react'
 import { TraceEvent } from '../src/components/TracePanel/TraceEvent.tsx'
 import { PipelineBar } from '../src/components/PipelineBar.tsx'
+import { ChatModeToggle } from '../src/components/ChatModeToggle.tsx'
+import { AutoPushPanel } from '../src/components/AutoPushPanel.tsx'
 import { eventToStep, isSessionComplete, shouldHighlight } from '../src/event_to_step.ts'
 
 const cases = [
@@ -555,7 +557,79 @@ for (const c of highlightCases) {
 }
 
 
-const totalChecks = cases.length + pipelineCases.length + highlightCases.length + mapCases.length
+// ---- Chat mode toggle + auto-push panel (Phase 1 UI shell) ----------------
+
+const chatModeCases = [
+  {
+    name: 'ChatModeToggle_renders_both_segments',
+    element: React.createElement(ChatModeToggle, { mode: 'qa', onChange: () => {} }),
+    expect: ['📨 自动推送', '💬 用户问答'],
+  },
+  {
+    name: 'ChatModeToggle_active_segment_has_blue_bg',
+    element: React.createElement(ChatModeToggle, { mode: 'auto_push', onChange: () => {} }),
+    expect: ['📨 自动推送', '💬 用户问答', 'bg-blue-500'],
+  },
+  {
+    name: 'ChatModeToggle_inactive_segment_is_transparent',
+    element: React.createElement(ChatModeToggle, { mode: 'qa', onChange: () => {} }),
+    expect: ['bg-blue-500', 'text-slate-600'],
+  },
+  {
+    name: 'AutoPushPanel_renders_6_mock_cards_sorted_desc',
+    element: React.createElement(AutoPushPanel),
+    expect: [
+      // The 2 anomaly cards + 4 other agent cards.
+      '盘中异动 · IBM',
+      'Berkshire 13F · 2026-Q1',
+      '科技股筛选',
+      'ARK 每日持仓',
+      '产业链横向扩展 · AMD',
+      '盘中异动 · CRM',
+      '点击查看完整 Trace',
+      '📡 最近 2 个交易日推送',
+    ],
+  },
+  {
+    name: 'AutoPushPanel_sorts_newest_first',
+    element: React.createElement(AutoPushPanel),
+    customAssert: (html) => {
+      // 18:00 ET cards (id 2, 5) should appear before 17:30 (id 3) before
+      // 17:00 (id 4) before 14:32 (id 6) before 10:15 (id 1). We can't
+      // assert the full order without parsing, but we can require that
+      // an 18:00 timestamp appears before a 10:15 timestamp in the HTML.
+      const i1800 = html.indexOf('18:00 ET')
+      const i1015 = html.indexOf('10:15 ET')
+      if (i1800 < 0 || i1015 < 0) return 'missing expected timestamps'
+      if (i1800 >= i1015) return `expected 18:00 before 10:15, got positions ${i1800} vs ${i1015}`
+      return null
+    },
+  },
+]
+
+for (const c of chatModeCases) {
+  const html = renderToString(c.element)
+  let ok = true
+  for (const needle of (c.expect ?? [])) {
+    if (!html.includes(needle)) {
+      ok = false
+      failures++
+      console.log(`✗ ${c.name}: missing ${JSON.stringify(needle)}`)
+    }
+  }
+  if (c.customAssert) {
+    const err = c.customAssert(html)
+    if (err) {
+      ok = false
+      failures++
+      console.log(`✗ ${c.name}: ${err}`)
+    }
+  }
+  if (ok) console.log(`✓ ${c.name}`)
+}
+
+
+const totalChecks = cases.length + pipelineCases.length + highlightCases.length + mapCases.length + chatModeCases.length
 if (failures > 0) {
   console.error(`\n${failures} render check(s) failed.`)
   process.exit(1)
