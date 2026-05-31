@@ -22,6 +22,7 @@ from app.budget import refund_query, settle_query
 from app.cache import cache_key, expires_at_ms
 from app.config import SETTINGS
 from app.db.store import Store
+from app.runner.event_explanations import lookup as lookup_explanation
 from app.runner.intent_adapter import classify, run_intent
 from app.runner.session import END_OF_STREAM, Session, SessionManager
 from v2.observability import TRACE_CTX, Trace, estimate_cost
@@ -51,6 +52,12 @@ async def run_query(
     def sink(ev: dict) -> None:
         # Called from worker thread or main loop. Always push via the main
         # loop so the asyncio.Queue isn't touched off-loop.
+        # Attach a product-friendly explanation if we have one. The lookup
+        # is a pure dict read and won't raise; events without a match just
+        # carry no explanation field and render without the disclosure.
+        explanation = lookup_explanation(ev)
+        if explanation is not None:
+            ev["explanation"] = explanation
         session.events.append(ev)
         cost = ev.get("cost_usd")
         if cost:

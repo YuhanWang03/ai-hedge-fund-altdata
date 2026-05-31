@@ -1,6 +1,14 @@
 import type { TraceEvent as Ev } from '../../types'
 
-interface Props { event: Ev }
+interface Props {
+  event: Ev
+  // When set (non-null), forces the explanation disclosure to that state.
+  // Bumped from TracePanel via the global toggle.
+  forceExplanationOpen?: boolean | null
+  // Increments on each global toggle so React remounts the <details>
+  // element and the new initial `open` value sticks.
+  explanationBump?: number
+}
 
 // Row shape inside transform/detect_changes events.
 interface ChangeRow {
@@ -90,7 +98,7 @@ const TYPE_LABELS: Record<string, { label: string; color: string }> = {
   error:             { label: '✗ error',         color: 'text-red-600' },
 }
 
-export function TraceEvent({ event }: Props) {
+export function TraceEvent({ event, forceExplanationOpen, explanationBump }: Props) {
   const meta = TYPE_LABELS[event.type] ?? { label: event.type, color: 'text-ink-500' }
 
   // Type-specific body renderers
@@ -260,12 +268,38 @@ export function TraceEvent({ event }: Props) {
     )
   }
 
+  // The product-friendly explanation panel. Default closed; can be force-
+  // opened from the parent's "expand all" toggle via a key bump.
+  const expl = event.explanation
+  const explKey = `expl_${event.session_id ?? '?'}_${event.seq ?? 0}_${explanationBump ?? 0}`
+  const explanationBlock = expl ? (
+    <details
+      key={explKey}
+      open={forceExplanationOpen === null || forceExplanationOpen === undefined ? undefined : forceExplanationOpen}
+      className="mt-2 text-xs"
+    >
+      <summary className="text-slate-500 cursor-pointer select-none hover:text-slate-700">
+        📖 解析
+      </summary>
+      <div className="mt-1 pl-3 border-l-2 border-slate-200 space-y-1 text-slate-700">
+        <div>📍 <span className="text-slate-500">来源</span> {expl.source}</div>
+        <div>🔧 <span className="text-slate-500">方式</span> {expl.how}</div>
+        <div>📦 <span className="text-slate-500">内容</span> {expl.what}</div>
+        <div>💾 <span className="text-slate-500">存储</span> {expl.store}</div>
+        <div>➡️ <span className="text-slate-500">下一步</span> {expl.next}</div>
+      </div>
+    </details>
+  ) : null
+
   return (
     <div className="flex items-start gap-2">
       <div className={`text-[11px] mono ${meta.color} w-32 shrink-0 pt-1`}>
         {meta.label}
       </div>
-      <div className="flex-1 min-w-0">{body}</div>
+      <div className="flex-1 min-w-0">
+        {body}
+        {explanationBlock}
+      </div>
     </div>
   )
 }

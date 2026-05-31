@@ -16,6 +16,14 @@ export type EventType =
   | 'error'
   | 'stream_close'
 
+export interface EventExplanation {
+  source: string
+  how: string
+  what: string
+  store: string
+  next: string
+}
+
 export interface TraceEvent {
   type: EventType
   session_id?: string
@@ -24,6 +32,7 @@ export interface TraceEvent {
   replayed?: boolean
   cached_from?: string
   cached_at_ms?: number
+  explanation?: EventExplanation
   // type-specific fields are merged in
   [key: string]: unknown
 }
