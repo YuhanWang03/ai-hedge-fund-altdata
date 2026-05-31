@@ -195,32 +195,55 @@ const pipelineCases = [
     ],
   },
   {
+    // Order verified against v2/monitoring/attributor.py:attribute():
+    //   _search_news → _entity_filter → _synthesize (Generator) →
+    //   _verify_reasons (Verifier) → memory.remember.
+    // ChromaDB write surfaces as db_write { db: 'chroma', fn: 'remember' }.
     name: 'pipeline_bar_explain_move_full_done',
     props: {
       intent: 'explain_move',
       events: [
         { type: 'session_start',     session_id: 's', seq: 1,  ts_ms: 0 },
         { type: 'intent_classified', session_id: 's', seq: 2,  ts_ms: 0, intent: 'explain_move' },
-        { type: 'api_call',          session_id: 's', seq: 3,  ts_ms: 0, provider: 'fd', endpoint: 'CachedFDClient.get_prices' },
-        { type: 'api_call',          session_id: 's', seq: 4,  ts_ms: 0, provider: 'fd', endpoint: 'CachedFDClient.get_insider_trades' },
-        { type: 'api_call',          session_id: 's', seq: 5,  ts_ms: 0, provider: 'tavily', endpoint: 'search' },
-        { type: 'llm_call',          session_id: 's', seq: 6,  ts_ms: 0, role: 'verifier' },
-        { type: 'llm_call',          session_id: 's', seq: 7,  ts_ms: 0, role: 'generator' },
-        { type: 'db_write',          session_id: 's', seq: 8,  ts_ms: 0, fn: 'anomaly_memory_remember' },
+        { type: 'api_call',          session_id: 's', seq: 3,  ts_ms: 0, provider: 'fd',     endpoint: 'CachedFDClient.get_prices' },
+        { type: 'api_call',          session_id: 's', seq: 4,  ts_ms: 0, provider: 'tavily', endpoint: 'search' },
+        // get_company_facts isn't in the pipeline (it's a side-fetch for
+        // entity matching) — must NOT light any pill.
+        { type: 'api_call',          session_id: 's', seq: 5,  ts_ms: 0, provider: 'fd',     endpoint: 'CachedFDClient.get_company_facts' },
+        { type: 'llm_call',          session_id: 's', seq: 6,  ts_ms: 0, role: 'generator' },
+        { type: 'llm_call',          session_id: 's', seq: 7,  ts_ms: 0, role: 'verifier' },
+        { type: 'db_write',          session_id: 's', seq: 8,  ts_ms: 0, db: 'chroma', fn: 'remember' },
         { type: 'render',            session_id: 's', seq: 9,  ts_ms: 0, card: 'anomaly_card' },
         { type: 'chat_message',      session_id: 's', seq: 10, ts_ms: 0, text: 'done' },
         { type: 'session_end',       session_id: 's', seq: 11, ts_ms: 0 },
       ],
     },
-    expect: ['输入', '行情', '新闻', '归因', '卡片', '回复', 'bg-emerald-500'],
-    // After session_end, no pill should be marked active.
-    expectAbsent: ['animate-pulse', 'bg-blue-500'],
+    expect: ['输入', '意图', '行情', '新闻', '归因', '评级', '记忆', '卡片', '回复', 'bg-emerald-500'],
+    // After session_end: no active marker, no pending pills should remain
+    // (every step in the pipeline was triggered).
+    expectAbsent: ['animate-pulse', 'bg-blue-500', 'text-slate-400'],
   },
   {
     name: 'pipeline_bar_cached_replay',
     props: { intent: 'etf_view', events: [], cached: true },
     expect: ['输入', '意图', 'ARK', '对比', '卡片', '回复', 'bg-emerald-500', 'Replay'],
     expectAbsent: ['animate-pulse', 'bg-blue-500'],
+  },
+  {
+    name: 'pipeline_bar_pill_self_highlight',
+    // Cached so every pill is done; ARK pill is the highlighted one.
+    props: {
+      intent: 'etf_view', events: [], cached: true,
+      highlightedStepId: 'ark',
+    },
+    expect: [
+      'pill-glass-highlight',   // the highlighted pill picks up the glass class
+    ],
+  },
+  {
+    name: 'pipeline_bar_no_pill_highlight_when_none_active',
+    props: { intent: 'etf_view', events: [], cached: true },
+    expectAbsent: ['pill-glass-highlight'],
   },
 ]
 

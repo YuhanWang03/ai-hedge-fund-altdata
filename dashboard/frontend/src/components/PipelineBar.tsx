@@ -18,11 +18,15 @@ interface Props {
   // Called when the user clicks a done/active pill after the session has
   // finished. Lets the parent attach a highlight ring to matching events.
   onPillActivate?: (stepId: string) => void
+  // ID of the currently highlighted step (driven by the click handler).
+  // The matching pill itself gets the glass ring so it's clear which one
+  // is "active" in the highlight sense.
+  highlightedStepId?: string | null
 }
 
 type State = 'pending' | 'active' | 'done' | 'error'
 
-export function PipelineBar({ intent, events, cached, onPillActivate }: Props) {
+export function PipelineBar({ intent, events, cached, onPillActivate, highlightedStepId }: Props) {
   const complete = isSessionComplete(events, !!cached)
   const pipeline = useMemo(() => getPipeline(intent), [intent])
   const { states, firstEventBySeq } = useMemo(() => {
@@ -92,6 +96,7 @@ export function PipelineBar({ intent, events, cached, onPillActivate }: Props) {
           <StepPill
             stepId={stepId}
             state={states[stepId] ?? 'pending'}
+            highlighted={highlightedStepId === stepId}
             onClick={() => onClickStep(stepId)}
           />
           {idx < pipeline.length - 1 && <Arrow />}
@@ -103,8 +108,8 @@ export function PipelineBar({ intent, events, cached, onPillActivate }: Props) {
 }
 
 function StepPill({
-  stepId, state, onClick,
-}: { stepId: string; state: State; onClick: () => void }) {
+  stepId, state, onClick, highlighted,
+}: { stepId: string; state: State; onClick: () => void; highlighted: boolean }) {
   const def = STEP_DEFS[stepId] ?? { icon: '·', label: stepId }
   const colorByState: Record<State, string> = {
     pending: 'bg-white border-slate-200 text-slate-400',
@@ -126,7 +131,8 @@ function StepPill({
           'w-8 h-8 rounded-full border flex items-center justify-center text-sm leading-none ' +
           'transition-all duration-300 ' +
           colorByState[state] +
-          (interactive ? ' cursor-pointer group-hover:scale-110' : ' cursor-default')
+          (interactive ? ' cursor-pointer group-hover:scale-110' : ' cursor-default') +
+          (highlighted ? ' pill-glass-highlight' : '')
         }
       >
         <span>{def.icon}</span>

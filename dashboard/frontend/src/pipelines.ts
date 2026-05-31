@@ -35,7 +35,11 @@ export const STEP_DEFS: Record<string, StepDef> = {
 
 export const PIPELINES: Record<string, string[]> = {
   thirteen_f:       ['input', 'classify', 'edgar', 'aggregate', 'detect', 'llm_interpret', 'render', 'reply'],
-  explain_move:     ['input', 'classify', 'price', 'insider', 'news', 'verify', 'generate', 'memory', 'render', 'reply'],
+  // Confirmed against v2/monitoring/attributor.py:attribute():
+  // _search_news → _entity_filter → _synthesize (Generator) → _verify_reasons
+  // (Verifier) → memory.remember. Price is fetched upstream by the responder;
+  // insider trades are NOT called on this path (it's purely news-based).
+  explain_move:     ['input', 'classify', 'price', 'news', 'generate', 'verify', 'memory', 'render', 'reply'],
   summary:          ['input', 'classify', 'price', 'fundamentals', 'insider', 'news', 'llm_interpret', 'render', 'reply'],
   chain:            ['input', 'classify', 'price', 'llm_propose', 'news', 'filter', 'render', 'reply'],
   etf_view:         ['input', 'classify', 'ark', 'detect', 'render', 'reply'],
