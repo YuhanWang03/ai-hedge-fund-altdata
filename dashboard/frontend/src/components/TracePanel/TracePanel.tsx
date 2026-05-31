@@ -1,10 +1,22 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useSession } from '../../store/session'
 import { TraceEvent } from './TraceEvent'
 
 export function TracePanel() {
   const events = useSession((s) => s.events)
   const containerRef = useRef<HTMLDivElement>(null)
+
+  // Global "expand all explanations" state. `forceOpen=null` means each
+  // <details> uses its own toggle state. Clicking the button flips
+  // forceOpen and bumps the key so React remounts each <details> with the
+  // new initial `open` value.
+  const [forceOpen, setForceOpen] = useState<boolean | null>(null)
+  const [bump, setBump] = useState(0)
+  const toggleAll = () => {
+    setForceOpen((prev) => (prev === true ? false : true))
+    setBump((k) => k + 1)
+  }
+  const hasExplanations = events.some((e) => !!e.explanation)
 
   useEffect(() => {
     const el = containerRef.current
@@ -48,6 +60,15 @@ export function TracePanel() {
             )}
           </div>
           <div className="flex items-center gap-4 text-xs mono text-ink-500">
+            {hasExplanations && (
+              <button
+                onClick={toggleAll}
+                className="text-slate-600 hover:text-slate-900 px-2 py-0.5 rounded border border-slate-200 bg-white hover:bg-slate-50"
+                title="批量展开/收起每个事件下方的「📖 解析」"
+              >
+                {forceOpen === true ? '📖 收起所有解析' : '📖 展开所有解析'}
+              </button>
+            )}
             <span>API <span className="text-ink-800">{apiCount}</span></span>
             <span>LLM <span className="text-ink-800">{llmCount}</span></span>
             <span>DB <span className="text-ink-800">{dbCount}</span></span>
@@ -67,7 +88,12 @@ export function TracePanel() {
           </div>
         )}
         {events.map((ev, i) => (
-          <TraceEvent key={`${ev.session_id}_${ev.seq ?? i}`} event={ev} />
+          <TraceEvent
+            key={`${ev.session_id}_${ev.seq ?? i}`}
+            event={ev}
+            forceExplanationOpen={forceOpen}
+            explanationBump={bump}
+          />
         ))}
         {startEvent && !endEvent && (
           <div className="text-xs mono text-ink-400 animate-pulse">

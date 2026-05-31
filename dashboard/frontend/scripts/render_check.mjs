@@ -63,18 +63,53 @@ const cases = [
     },
     expect: ['institutional_summary', 'num_managers', '1', 'num_changes', '7'],
   },
+  {
+    name: 'event with explanation renders 📖 解析 disclosure',
+    event: {
+      type: 'transform', session_id: 's', seq: 5, ts_ms: 0,
+      op: 'cusip_aggregate', before: 30, after: 29,
+      explanation: {
+        source: '上一步 EDGAR Filing.obj 返回的原始持仓列表',
+        how:    'Python 字典按 CUSIP 分组',
+        what:   '去重后的持仓列表',
+        store:  'scheduler 路径写 edgar.db',
+        next:   '送入 detect_changes() 跟前一季度对比',
+      },
+    },
+    // <details> + summary label + each of the 5 emoji rows + the actual text
+    expect: [
+      '<details', '📖 解析',
+      '📍', '上一步 EDGAR Filing.obj',
+      '🔧', 'CUSIP 分组',
+      '📦', '去重后的持仓列表',
+      '💾', 'edgar.db',
+      '➡️', 'detect_changes',
+    ],
+  },
+  {
+    name: 'event without explanation must NOT render disclosure',
+    event: {
+      type: 'transform', session_id: 's', seq: 6, ts_ms: 0,
+      op: 'unknown_op', extra: 'something',
+      // no explanation field
+    },
+    expect: ['unknown_op'],
+    expectAbsent: ['📖 解析', '<details'],
+  },
 ]
 
 let failures = 0
 for (const c of cases) {
   const html = renderToString(React.createElement(TraceEvent, { event: c.event }))
   const missing = c.expect.filter((needle) => !html.includes(needle))
-  if (missing.length === 0) {
+  const unwanted = (c.expectAbsent ?? []).filter((needle) => html.includes(needle))
+  if (missing.length === 0 && unwanted.length === 0) {
     console.log(`✓ ${c.name}`)
   } else {
     failures++
     console.log(`✗ ${c.name}`)
-    console.log(`    missing: ${missing.map((m) => JSON.stringify(m)).join(', ')}`)
+    if (missing.length) console.log(`    missing: ${missing.map((m) => JSON.stringify(m)).join(', ')}`)
+    if (unwanted.length) console.log(`    must-not-contain but found: ${unwanted.map((m) => JSON.stringify(m)).join(', ')}`)
     console.log(`    html: ${html}`)
   }
 }
