@@ -213,10 +213,25 @@ export function TraceEvent({ event, forceExplanationOpen, explanationBump }: Pro
       </div>
     )
   } else if (event.type === 'module_enter' || event.type === 'module_exit') {
+    const isEntry = event.type === 'module_enter'
     body = (
-      <div className="mono text-xs text-indigo-700">
-        {String(event.name ?? '')}
-        {typeof event.elapsed_ms === 'number' ? `  (${event.elapsed_ms}ms)` : ''}
+      <div className={
+        'mono text-xs px-3 py-2 rounded border ' +
+        (isEntry
+          ? 'bg-indigo-50 border-indigo-200 text-indigo-900'
+          : 'bg-ink-50 border-ink-200 text-ink-600')
+      }>
+        <div className="flex items-center justify-between">
+          <span className="font-medium">{String(event.name ?? '')}</span>
+          <span className="text-ink-500">
+            {typeof event.elapsed_ms === 'number' ? `${event.elapsed_ms}ms` : ''}
+          </span>
+        </div>
+        {isEntry && typeof event.intent === 'string' && (
+          <div className="text-ink-600 mt-0.5">
+            intent: <span className="text-ink-500">{String(event.intent)}</span>
+          </div>
+        )}
       </div>
     )
   } else if (event.type === 'error') {
