@@ -96,6 +96,54 @@ const cases = [
     expect: ['unknown_op'],
     expectAbsent: ['📖 解析', '<details'],
   },
+  {
+    name: 'transform with explanation must NOT dump it as a chip',
+    event: {
+      type: 'transform', session_id: 's', seq: 7, ts_ms: 1234567,
+      op: 'cusip_aggregate', before: 30, after: 29,
+      manager: 'Berkshire Hathaway', accession: '25-26-226661',
+      explanation: {
+        source: 'EDGAR Filing.obj',
+        how:    'Python 字典按 CUSIP 分组',
+        what:   '去重后的持仓列表',
+        store:  'edgar.db',
+        next:   'detect_changes()',
+      },
+    },
+    expect: [
+      // Heading + the four legitimate chip fields.
+      'cusip_aggregate', 'before', '30', 'after', '29', 'Berkshire Hathaway', '25-26-226661',
+      // Formatted disclosure shows up exactly once with the prose.
+      '📖 解析', '📍', '🔧', '📦', '💾', '➡️',
+      'EDGAR Filing.obj', 'CUSIP 分组', '去重后的持仓列表', 'edgar.db', 'detect_changes()',
+    ],
+    expectAbsent: [
+      // The raw JSON-dump form: "explanation: {...}" must NOT appear in
+      // the chip strip. (The formatted block uses 来源/方式/etc. labels,
+      // never the literal English key "explanation".)
+      'explanation:',
+      '{"source"',
+      // Wire metadata must never leak into chips either.
+      'session_id:', 'seq:', 'ts_ms:',
+    ],
+  },
+  {
+    name: 'render card with explanation must NOT dump it as a chip',
+    event: {
+      type: 'render', session_id: 's', seq: 8, ts_ms: 0,
+      card: 'portfolio_snapshot', manager: 'Berkshire', quarter: '2026-Q1',
+      positions_shown: 10, positions_total: 29, total_value_usd: 263_100_000_000,
+      explanation: {
+        source: 'EDGAR 取回并 CUSIP 聚合后的持仓列表',
+        how:    'Python 按市值排序取前 N',
+        what:   '组合卡：Top N 持仓 + 总组合价值',
+        store:  '不持久化',
+        next:   '塞进 chat_message 推送',
+      },
+    },
+    expect: ['portfolio_snapshot', '$263.10B', '📖 解析', 'CUSIP 聚合'],
+    expectAbsent: ['explanation:', '{"source"'],
+  },
 ]
 
 let failures = 0
