@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { PipelineBar } from '../PipelineBar'
 import { intentLabel } from '../../pipelines'
+import { isSessionComplete, shouldHighlight } from '../../event_to_step'
 import { useSession } from '../../store/session'
 import { TraceEvent } from './TraceEvent'
 
@@ -8,7 +9,11 @@ export function TracePanel() {
   const events = useSession((s) => s.events)
   const intent = useSession((s) => s.currentIntent)
   const cached = useSession((s) => s.currentCached)
+  const highlightedStepId = useSession((s) => s.highlightedStepId)
+  const setHighlightedStepId = useSession((s) => s.setHighlightedStepId)
   const containerRef = useRef<HTMLDivElement>(null)
+
+  const sessionComplete = isSessionComplete(events, cached)
 
   // Global "expand all explanations" state. `forceOpen=null` means each
   // <details> uses its own toggle state. Clicking the button flips
@@ -100,12 +105,24 @@ export function TracePanel() {
       {/* Pipeline progress (sticky beneath the header) */}
       {intent && (
         <div className="sticky top-0 z-10 bg-white border-b border-slate-200">
-          <PipelineBar intent={intent} events={events} cached={cached} />
+          <PipelineBar
+            intent={intent}
+            events={events}
+            cached={cached}
+            onPillActivate={setHighlightedStepId}
+          />
         </div>
       )}
 
       {/* Stream */}
-      <div ref={containerRef} className="flex-1 overflow-y-auto px-5 py-4 space-y-12">
+      <div
+        ref={containerRef}
+        onClick={(e) => {
+          // Click anywhere outside an event row clears the highlight.
+          if (e.target === e.currentTarget) setHighlightedStepId(null)
+        }}
+        className="flex-1 overflow-y-auto px-5 py-4 space-y-12"
+      >
         {events.length === 0 && (
           <div className="text-ink-400 text-sm text-center mt-20">
             发起一次查询后，每个模块调用、LLM prompt、API call、DB
@@ -118,6 +135,7 @@ export function TracePanel() {
             event={ev}
             forceExplanationOpen={forceOpen}
             explanationBump={bump}
+            highlighted={shouldHighlight(ev, highlightedStepId, sessionComplete)}
           />
         ))}
         {startEvent && !endEvent && (

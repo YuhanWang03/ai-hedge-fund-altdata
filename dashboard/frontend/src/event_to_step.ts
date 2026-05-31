@@ -70,3 +70,26 @@ export function eventToStep(event: TraceEvent): string | null {
 
   return null
 }
+
+
+// ---- Highlight helper ----------------------------------------------------
+
+/**
+ * Pure predicate used by TracePanel to decide whether a given event should
+ * carry the "liquid glass" highlight ring. Gating both on session-complete
+ * and on a matching step ID keeps the in-flight UX unchanged.
+ */
+export function shouldHighlight(
+  event: TraceEvent,
+  highlightedStepId: string | null,
+  sessionComplete: boolean,
+): boolean {
+  if (!sessionComplete || !highlightedStepId) return false
+  return eventToStep(event) === highlightedStepId
+}
+
+
+export function isSessionComplete(events: TraceEvent[], cached: boolean): boolean {
+  if (cached) return true
+  return events.some((e) => e.type === 'session_end')
+}

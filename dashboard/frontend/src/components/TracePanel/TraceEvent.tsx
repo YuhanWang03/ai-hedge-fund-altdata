@@ -8,6 +8,9 @@ interface Props {
   // Increments on each global toggle so React remounts the <details>
   // element and the new initial `open` value sticks.
   explanationBump?: number
+  // When true, wraps the row in a liquid-glass highlight ring. Driven
+  // by TracePanel via the pipeline pill click after session completion.
+  highlighted?: boolean
 }
 
 // Row shape inside transform/detect_changes events.
@@ -114,7 +117,7 @@ const TYPE_LABELS: Record<string, { label: string; color: string }> = {
   error:             { label: '✗ error',         color: 'text-red-600' },
 }
 
-export function TraceEvent({ event, forceExplanationOpen, explanationBump }: Props) {
+export function TraceEvent({ event, forceExplanationOpen, explanationBump, highlighted }: Props) {
   const meta = TYPE_LABELS[event.type] ?? { label: event.type, color: 'text-ink-500' }
 
   // Type-specific body renderers
@@ -320,7 +323,10 @@ export function TraceEvent({ event, forceExplanationOpen, explanationBump }: Pro
   ) : null
 
   return (
-    <div className="flex items-start gap-2" data-event-seq={event.seq}>
+    <div
+      className={'flex items-start gap-2' + (highlighted ? ' glass-highlight' : '')}
+      data-event-seq={event.seq}
+    >
       <div className={`text-[11px] mono ${meta.color} w-32 shrink-0 pt-1`}>
         {meta.label}
       </div>

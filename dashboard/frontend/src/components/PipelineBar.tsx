@@ -7,7 +7,7 @@
 // matching event.
 
 import { useMemo } from 'react'
-import { eventToStep } from '../event_to_step'
+import { eventToStep, isSessionComplete } from '../event_to_step'
 import { getPipeline, STEP_DEFS } from '../pipelines'
 import type { TraceEvent } from '../types'
 
@@ -15,11 +15,15 @@ interface Props {
   intent: string | null
   events: TraceEvent[]
   cached?: boolean
+  // Called when the user clicks a done/active pill after the session has
+  // finished. Lets the parent attach a highlight ring to matching events.
+  onPillActivate?: (stepId: string) => void
 }
 
 type State = 'pending' | 'active' | 'done' | 'error'
 
-export function PipelineBar({ intent, events, cached }: Props) {
+export function PipelineBar({ intent, events, cached, onPillActivate }: Props) {
+  const complete = isSessionComplete(events, !!cached)
   const pipeline = useMemo(() => getPipeline(intent), [intent])
   const { states, firstEventBySeq } = useMemo(() => {
     if (!pipeline) return { states: {}, firstEventBySeq: {} as Record<string, number> }
@@ -70,11 +74,15 @@ export function PipelineBar({ intent, events, cached }: Props) {
 
   if (!pipeline) return null
 
-  const scrollToStep = (stepId: string) => {
+  const onClickStep = (stepId: string) => {
     const seq = firstEventBySeq[stepId]
-    if (seq === undefined) return
-    const el = document.querySelector(`[data-event-seq="${seq}"]`)
-    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    if (seq !== undefined) {
+      const el = document.querySelector(`[data-event-seq="${seq}"]`)
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }
+    // Highlight only after the session is done; mid-stream we keep it
+    // distraction-free and only scroll.
+    if (complete && onPillActivate) onPillActivate(stepId)
   }
 
   return (
@@ -84,7 +92,7 @@ export function PipelineBar({ intent, events, cached }: Props) {
           <StepPill
             stepId={stepId}
             state={states[stepId] ?? 'pending'}
-            onClick={() => scrollToStep(stepId)}
+            onClick={() => onClickStep(stepId)}
           />
           {idx < pipeline.length - 1 && <Arrow />}
         </span>
