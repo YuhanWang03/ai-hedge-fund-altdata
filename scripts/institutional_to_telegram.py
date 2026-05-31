@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 
 from v2.archive import Archive
 from v2.institutional import run_institutional_pipeline
-from v2.observability import capture_trace, install_all
+from v2.observability import capture_trace_with_framing, install_all
 from v2.reporting import (
     TelegramNotifier,
     format_institutional_messages,
@@ -36,7 +36,11 @@ def main() -> None:
     # different managers are interleaved — we'd need a deeper refactor to
     # split them cleanly. For dashboard purposes, the summary card carries
     # the full trace; per-manager cards carry titles only.
-    with capture_trace() as trace:
+    with capture_trace_with_framing(
+        agent="institutional", intent="thirteen_f",
+        text="(自动推送) 13F 总览",
+        responder_name="_r_institutional",
+    ) as trace:
         report = run_institutional_pipeline(universe=set(TECH_30))
 
         print(
@@ -49,6 +53,11 @@ def main() -> None:
             return
 
         messages = format_institutional_messages(report)
+        # First message (the summary card) is what the saved trace is
+        # attached to. Emit chat_message with the summary so the trace
+        # has a closing reply event.
+        if messages:
+            trace.emit("chat_message", role="bot", text=messages[0][:500])
 
     print(f"Pushing {len(messages)} messages to Telegram...")
 

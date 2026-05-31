@@ -1,22 +1,24 @@
 // Read-only feed of recent automated pushes. Fetches /api/recent_pushes
-// on mount, subscribes to /sse/auto_push for live updates, and on card
-// click loads the full trace into the session store so TracePanel +
-// ChatPanel both reflect the selected archive row.
+// on mount, subscribes to /sse/auto_push for live updates. Clicking a
+// card both (a) inline-expands the full text_html within the card and
+// (b) routes the trace + push metadata into sessionStore.pushDetail so
+// TracePanel can render it. Crucially, this NEVER touches the user-chat
+// fields — switching back to 用户问答 mode leaves the conversation
+// history intact.
 
 import { useEffect, useRef, useState } from 'react'
 import {
   fetchPushDetail,
   fetchRecentPushes,
   openAutoPushStream,
+  type PushDetail,
   type PushSummary,
 } from '../api/auto_push'
 import { useSession } from '../store/session'
 import type { TraceEvent } from '../types'
 
-// Agent name (set by each scheduler script when constructing Archive) →
-// the intent ID the dashboard's PipelineBar understands. Anything not in
-// the map falls back to null, which makes the pipeline bar disappear (a
-// safe default — the trace still renders).
+// Agent → dashboard intent. Drives PipelineBar pill selection when the
+// user clicks a card.
 const AGENT_TO_INTENT: Record<string, string> = {
   anomaly:       'explain_move',
   institutional: 'thirteen_f',
@@ -25,7 +27,6 @@ const AGENT_TO_INTENT: Record<string, string> = {
   screen:        'summary',
 }
 
-// Visual icon per agent, falls back to 🔔.
 const AGENT_ICON: Record<string, string> = {
   anomaly:       '⚡',
   institutional: '🏛',
@@ -37,7 +38,6 @@ const AGENT_ICON: Record<string, string> = {
 
 
 function formatTs(ts: string): string {
-  // ISO 8601 → "MM-DD HH:MM UTC" for compactness in the card header.
   try {
     const d = new Date(ts)
     if (isNaN(d.getTime())) return ts
@@ -56,9 +56,10 @@ export function AutoPushPanel() {
   const [pushes, setPushes] = useState<PushSummary[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  // Per-card expansion state: id → full PushDetail (or 'loading').
+  const [expanded, setExpanded] = useState<Record<number, PushDetail | 'loading'>>({})
   const [selectedId, setSelectedId] = useState<number | null>(null)
-  const [loadingTrace, setLoadingTrace] = useState(false)
-  const loadPush = useSession((s) => s.loadPush)
+  const setPushDetail = useSession((s) => s.setPushDetail)
   const containerRef = useRef<HTMLDivElement>(null)
 
   // Initial backfill + live SSE subscription.
@@ -85,9 +86,6 @@ export function AutoPushPanel() {
           return [row, ...prev]
         })
       },
-      () => {
-        /* stream closed — handled by browser auto-reconnect */
-      },
     )
     return () => {
       cancelled = true
@@ -96,51 +94,50 @@ export function AutoPushPanel() {
   }, [])
 
   const onCardClick = async (p: PushSummary) => {
-    if (loadingTrace) return
     setSelectedId(p.id)
-    if (!p.has_trace) {
-      // Still load the card text so the chat panel renders it, even if
-      // there's no trace to replay.
-      try {
-        setLoadingTrace(true)
-        const detail = await fetchPushDetail(p.id)
-        loadPush({
-          sessionId: `push_${p.id}`,
-          intent: AGENT_TO_INTENT[p.agent] ?? null,
-          label: detail.push.title ?? p.title ?? `${p.agent} push`,
-          events: [],
-          replyText: detail.push.text_html,
-          ts_ms: Date.parse(p.ts) || Date.now(),
-        })
-      } catch (err) {
-        setError(`failed to load push ${p.id}: ${(err as Error).message}`)
-      } finally {
-        setLoadingTrace(false)
-      }
+    // Toggle: clicking the already-expanded card collapses + clears the
+    // trace view.
+    if (expanded[p.id] && expanded[p.id] !== 'loading') {
+      setExpanded((prev) => {
+        const next = { ...prev }
+        delete next[p.id]
+        return next
+      })
+      setPushDetail(null)
+      setSelectedId(null)
       return
     }
+    setExpanded((prev) => ({ ...prev, [p.id]: 'loading' }))
     try {
-      setLoadingTrace(true)
       const detail = await fetchPushDetail(p.id)
-      loadPush({
-        sessionId: `push_${p.id}`,
+      setExpanded((prev) => ({ ...prev, [p.id]: detail }))
+      // Route into TracePanel via pushDetail (NOT user-chat). ChatPanel
+      // is unaffected.
+      setPushDetail({
+        pushId: p.id,
         intent: AGENT_TO_INTENT[p.agent] ?? null,
-        label: detail.push.title ?? p.title ?? `${p.agent} push`,
         events: detail.events as TraceEvent[],
-        replyText: detail.push.text_html,
-        ts_ms: Date.parse(p.ts) || Date.now(),
+        push: {
+          ts: detail.push.ts,
+          agent: detail.push.agent,
+          title: detail.push.title,
+          text_html: detail.push.text_html,
+          tickers: detail.push.tickers,
+        },
       })
     } catch (err) {
-      setError(`failed to load trace for push ${p.id}: ${(err as Error).message}`)
-    } finally {
-      setLoadingTrace(false)
+      setError(`failed to load push ${p.id}: ${(err as Error).message}`)
+      setExpanded((prev) => {
+        const next = { ...prev }
+        delete next[p.id]
+        return next
+      })
     }
   }
 
-  const cards = pushes
   const headerText = loading
     ? '📡 加载中…'
-    : `📡 最近 ${cards.length} 条推送（过去 2 天） · 每日 02:00 UTC 清理`
+    : `📡 最近 ${pushes.length} 条推送（过去 2 天） · 每日 02:00 UTC 清理`
 
   return (
     <div className="flex-1 flex flex-col bg-white min-h-0">
@@ -154,13 +151,16 @@ export function AutoPushPanel() {
             ⚠️ {error}
           </div>
         )}
-        {!loading && !error && cards.length === 0 && (
+        {!loading && !error && pushes.length === 0 && (
           <div className="text-slate-400 text-sm text-center mt-12">
             暂无推送（开盘后 17:00 ET 起会逐步入账）
           </div>
         )}
-        {cards.map((p) => {
+        {pushes.map((p) => {
           const isSelected = selectedId === p.id
+          const expansion = expanded[p.id]
+          const isExpanded = expansion && expansion !== 'loading'
+          const isLoadingThis = expansion === 'loading'
           const icon = AGENT_ICON[p.agent] ?? '🔔'
           const title = p.title ?? `${p.agent} push`
           return (
@@ -185,13 +185,18 @@ export function AutoPushPanel() {
                   {formatTs(p.ts)}
                 </span>
               </header>
-              {p.preview && (
+              {/* Preview: always shown until expanded */}
+              {p.preview && !isExpanded && (
                 <div
                   className="text-[12px] text-slate-600 whitespace-pre-wrap line-clamp-4 leading-snug"
-                  // The preview is sanitized HTML from archive.db (which
-                  // came from our own formatters). Using innerHTML keeps
-                  // the bold/code tags rendered like a Telegram message.
                   dangerouslySetInnerHTML={{ __html: p.preview }}
+                />
+              )}
+              {/* Expanded full HTML, inline within the card */}
+              {expansion && expansion !== 'loading' && (
+                <div
+                  className="text-[13px] text-slate-800 whitespace-pre-wrap leading-relaxed border-t border-slate-100 pt-3"
+                  dangerouslySetInnerHTML={{ __html: expansion.push.text_html ?? p.preview }}
                 />
               )}
               <div className="flex items-center justify-between text-[11px]">
@@ -199,7 +204,11 @@ export function AutoPushPanel() {
                   {p.has_trace ? '✓ 有完整 Trace' : '（无 Trace）'}
                 </span>
                 <span className={isSelected ? 'text-blue-700 font-medium' : 'text-slate-500'}>
-                  {isSelected ? '✓ 已加载' : '点击查看完整 Trace →'}
+                  {isLoadingThis
+                    ? '… 加载中'
+                    : isExpanded
+                      ? '✓ 已展开 · 再次点击收起'
+                      : '点击展开完整内容 + 查看 Trace →'}
                 </span>
               </div>
             </article>

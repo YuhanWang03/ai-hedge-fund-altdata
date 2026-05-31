@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 
 from v2.archive import Archive
 from v2.data import CachedFDClient
-from v2.observability import capture_trace, install_all
+from v2.observability import capture_trace_with_framing, install_all
 from v2.reporting import TelegramNotifier, format_screening_result, notify_on_error
 from v2.screening import DEFAULT_FILTERS, TECH_30, narrate, run_screening
 
@@ -22,7 +22,11 @@ def main() -> None:
     install_all()  # arm the trace hooks so capture_trace gets events
     print(f"Scanning {len(TECH_30)} tickers...")
 
-    with capture_trace() as trace:
+    with capture_trace_with_framing(
+        agent="screen", intent="summary",
+        text="(自动推送) 科技股筛选",
+        responder_name="_r_daily_screen",
+    ) as trace:
         with CachedFDClient() as fd:
             result = run_screening(TECH_30, fd, DEFAULT_FILTERS)
 
@@ -38,6 +42,7 @@ def main() -> None:
                 c.bear = note.get("bear", "") or ""
 
         text = format_screening_result(result)
+        trace.emit("chat_message", role="bot", text=text[:500])
 
     notifier = TelegramNotifier(archive=Archive(agent="screen"))
     notifier.send_text(

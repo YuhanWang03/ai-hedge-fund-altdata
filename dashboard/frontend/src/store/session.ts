@@ -1,16 +1,52 @@
 import { create } from 'zustand'
 import type { ChatMessage, TraceEvent } from '../types'
 
+/**
+ * What a "user chat" view holds: the trace + chat for the latest
+ * interactive query the user typed. Owns chat history.
+ */
+interface UserChatView {
+  currentSessionId: string | null
+  currentIntent: string | null
+  currentCached: boolean
+  events: TraceEvent[]
+  chat: ChatMessage[]
+}
+
+/**
+ * What a "push detail" view holds: the trace + reply text for an
+ * auto-push card the user clicked in AutoPushPanel. Independent of
+ * the chat history.
+ */
+export interface PushDetailView {
+  pushId: number
+  intent: string | null
+  events: TraceEvent[]
+  push: {
+    ts: string
+    agent: string
+    title: string | null
+    text_html: string | null
+    tickers: string | null
+  }
+}
+
 interface SessionState {
-  // Currently displayed session (most recent).
+  // User-chat view (default mode). Owned by ChatPanel; TracePanel reads
+  // from here when chatMode === 'qa'.
   currentSessionId: string | null
   currentIntent: string | null
   currentCached: boolean
   events: TraceEvent[]
   chat: ChatMessage[]
 
-  // Active pipeline-pill highlight, or null when nothing is highlighted.
-  // Only takes effect after the session is complete (see isSessionComplete).
+  // Push-detail view (auto_push mode). When non-null, TracePanel reads
+  // events/intent from here instead of from the user-chat fields.
+  // ChatPanel NEVER reads this — auto-push clicks don't pollute the
+  // user's conversation history.
+  pushDetail: PushDetailView | null
+
+  // Active pipeline-pill highlight (shared across both views).
   highlightedStepId: string | null
 
   startSession: (id: string, userText: string, intent: string | null, cached: boolean) => void
@@ -19,19 +55,10 @@ interface SessionState {
   markChatCached: (sessionId: string, cachedAtMs: number) => void
   setHighlightedStepId: (stepId: string | null) => void
   /**
-   * Replay a fully-archived push into the panels. Used by AutoPushPanel
-   * when the user clicks a feed card: fetches the full trace + text and
-   * dumps it into the session state so TracePanel + ChatPanel both
-   * re-render against it.
+   * Set the push-detail view (auto-push card click). Replaces any prior
+   * pushDetail. Pass null to clear.
    */
-  loadPush: (args: {
-    sessionId: string
-    intent: string | null
-    label: string                  // shown as the "user text" header
-    events: TraceEvent[]
-    replyText: string | null
-    ts_ms: number
-  }) => void
+  setPushDetail: (detail: PushDetailView | null) => void
   reset: () => void
 }
 
@@ -41,6 +68,7 @@ export const useSession = create<SessionState>((set) => ({
   currentCached: false,
   events: [],
   chat: [],
+  pushDetail: null,
   highlightedStepId: null,
 
   startSession: (id, userText, intent, cached) =>
@@ -103,40 +131,11 @@ export const useSession = create<SessionState>((set) => ({
 
   setHighlightedStepId: (stepId) => set({ highlightedStepId: stepId }),
 
-  loadPush: ({ sessionId, intent, label, events, replyText, ts_ms }) =>
-    set(() => {
-      // Build a synthetic chat: a "user message" carrying the push title
-      // + a "bot message" carrying the full HTML reply. Replace any
-      // prior chat — feed clicks are independent of the chat history.
-      const chat: ChatMessage[] = [
-        {
-          id: `push_label_${sessionId}`,
-          role: 'user',
-          text: label,
-          ts_ms,
-          sessionId,
-        },
-      ]
-      if (replyText) {
-        chat.push({
-          id: `push_reply_${sessionId}`,
-          role: 'bot',
-          text: replyText,
-          ts_ms,
-          sessionId,
-          cached: true,
-          cachedAtMs: ts_ms,
-        })
-      }
-      return {
-        currentSessionId: sessionId,
-        currentIntent: intent,
-        currentCached: true,    // archived runs are by definition "replay"
-        events,
-        chat,
-        highlightedStepId: null,
-      }
-    }),
+  setPushDetail: (detail) =>
+    // Setting/clearing the push-detail view leaves the user-chat fields
+    // and the chat history untouched. We do reset highlightedStepId so
+    // a click on one push doesn't leave a glass ring from another.
+    set({ pushDetail: detail, highlightedStepId: null }),
 
   reset: () => set({
     currentSessionId: null,
@@ -144,6 +143,7 @@ export const useSession = create<SessionState>((set) => ({
     currentCached: false,
     events: [],
     chat: [],
+    pushDetail: null,
     highlightedStepId: null,
   }),
 }))

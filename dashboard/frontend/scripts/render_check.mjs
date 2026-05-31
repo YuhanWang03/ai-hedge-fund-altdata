@@ -607,7 +607,124 @@ for (const c of chatModeCases) {
 }
 
 
-const totalChecks = cases.length + pipelineCases.length + highlightCases.length + mapCases.length + chatModeCases.length
+// ---- Phase 2 bug-fix regressions -----------------------------------------
+
+// Bug 1: capture_trace_with_framing must emit session_start / intent_classified
+// and bracket the work with module_enter/exit + session_end. We validate the
+// Python side via a subprocess invocation since it's a v2/ helper.
+{
+  const { spawnSync } = await import('node:child_process')
+  const py = spawnSync('python3', [
+    '-c',
+    `
+import json, sys
+sys.path.insert(0, '/home/user/ai-hedge-fund-altdata')
+from v2.observability import capture_trace_with_framing, emit
+
+with capture_trace_with_framing(agent='etf', intent='etf_view',
+                                text='t', responder_name='_r_etf_snapshot') as trace:
+    emit('api_call', provider='ark_csv', endpoint='fetch_holdings')
+    trace.emit('chat_message', role='bot', text='done')
+
+types = [e['type'] for e in trace.events]
+print(json.dumps(types))
+`,
+  ], { encoding: 'utf-8' })
+
+  const name = 'bug1_capture_trace_with_framing_emits_session_start_and_end'
+  if (py.status === 0) {
+    const types = JSON.parse(py.stdout.trim())
+    const expected = [
+      'session_start', 'intent_classified', 'module_enter',
+      'api_call', 'chat_message', 'module_exit', 'session_end',
+    ]
+    const ok = expected.every((t) => types.includes(t))
+    if (ok) console.log(`✓ ${name}`)
+    else {
+      failures++
+      console.log(`✗ ${name}: got types ${JSON.stringify(types)}, missing ${expected.filter(t => !types.includes(t))}`)
+    }
+  } else {
+    failures++
+    console.log(`✗ ${name}: python check failed`)
+    console.log(py.stderr)
+  }
+}
+
+
+// Bug 2: empty pushDetail must show "no trace data" message, not the
+// generic dashboard-empty hint. Tested via the extracted EmptyState
+// component to avoid zustand-SSR-snapshot quirks.
+{
+  const { EmptyState } = await import('../src/components/TracePanel/EmptyState.tsx')
+  const name = 'bug2_empty_old_push_shows_legacy_message'
+
+  const oldPushHtml = renderToString(
+    React.createElement(EmptyState, {
+      showingPushDetail: true,
+      pushTs: '2026-05-15T00:00:00+00:00',
+    }),
+  )
+  const ok1 =
+    oldPushHtml.includes('trace 捕获机制上线之前') &&
+    oldPushHtml.includes('2026-05-15') &&
+    !oldPushHtml.includes('发起一次查询后')
+  if (ok1) console.log(`✓ ${name} (old-push path)`)
+  else { failures++; console.log(`✗ ${name} (old-push): ${oldPushHtml.slice(0, 400)}`) }
+
+  // And the inverse — without pushDetail, the generic hint must show.
+  const dashHtml = renderToString(
+    React.createElement(EmptyState, {
+      showingPushDetail: false,
+      pushTs: null,
+    }),
+  )
+  const ok2 =
+    dashHtml.includes('发起一次查询后') &&
+    !dashHtml.includes('trace 捕获机制上线之前')
+  if (ok2) console.log(`✓ ${name} (dashboard path)`)
+  else { failures++; console.log(`✗ ${name} (dashboard): ${dashHtml.slice(0, 400)}`) }
+}
+
+
+// Bug 3: setting pushDetail must NOT touch the user-chat fields (chat,
+// events, currentSessionId).
+{
+  const { useSession } = await import('../src/store/session.ts')
+  const name = 'bug3_pushDetail_and_userChat_are_independent'
+  useSession.getState().reset()
+  useSession.getState().startSession('sess_user', 'NVDA?', 'explain_move', false)
+  const before = {
+    chatLen: useSession.getState().chat.length,
+    sid: useSession.getState().currentSessionId,
+    intent: useSession.getState().currentIntent,
+  }
+  useSession.getState().setPushDetail({
+    pushId: 1, intent: 'etf_view', events: [],
+    push: { ts: '2026-05-31T18:00:00+00:00', agent: 'etf',
+            title: 'ARK', text_html: null, tickers: null },
+  })
+  const after = useSession.getState()
+  if (
+    after.chat.length === before.chatLen &&
+    after.currentSessionId === before.sid &&
+    after.currentIntent === before.intent &&
+    after.pushDetail !== null &&
+    after.pushDetail.pushId === 1
+  ) {
+    console.log(`✓ ${name}`)
+  } else {
+    failures++
+    console.log(`✗ ${name}: chat or user-chat state was mutated`)
+    console.log(`   before: ${JSON.stringify(before)}`)
+    console.log(`   after: chatLen=${after.chat.length} sid=${after.currentSessionId} intent=${after.currentIntent} pushDetail=${after.pushDetail !== null}`)
+  }
+  useSession.getState().reset()
+}
+
+
+// Bug 1 + bug 2 (×2 paths) + bug 3.
+const totalChecks = cases.length + pipelineCases.length + highlightCases.length + mapCases.length + chatModeCases.length + 4
 if (failures > 0) {
   console.error(`\n${failures} render check(s) failed.`)
   process.exit(1)
