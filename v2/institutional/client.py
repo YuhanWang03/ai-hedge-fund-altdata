@@ -13,6 +13,7 @@ import os
 from edgar import Company, set_identity
 
 from v2.institutional.models import Filing, Position
+from v2.observability import emit
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +122,14 @@ def _parse_one(
     # on INSERT OR REPLACE — losing all but the last. Aggregating once at
     # source fixes both the display AND the persistence layer.
     positions = _aggregate_by_cusip(raw_positions)
+    emit(
+        "transform",
+        op="cusip_aggregate",
+        before=len(raw_positions),
+        after=len(positions),
+        manager=manager_name,
+        accession=accession[-12:],
+    )
     total_value = sum(p.market_value for p in positions)
 
     filing_obj = Filing(

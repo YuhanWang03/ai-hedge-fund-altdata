@@ -10,6 +10,8 @@ export type EventType =
   | 'api_call'
   | 'llm_call'
   | 'db_write'
+  | 'transform'
+  | 'render'
   | 'chat_message'
   | 'error'
   | 'stream_close'

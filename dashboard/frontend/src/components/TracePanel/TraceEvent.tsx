@@ -2,6 +2,24 @@ import type { TraceEvent as Ev } from '../../types'
 
 interface Props { event: Ev }
 
+const MONEY_FIELD = /(?:_usd|value|cost|amount|spend|budget)/i
+
+function formatValue(v: unknown, key?: string): string {
+  if (v === null || v === undefined) return '—'
+  if (typeof v === 'number') {
+    if (key && MONEY_FIELD.test(key)) {
+      if (v >= 1e9) return `$${(v / 1e9).toFixed(2)}B`
+      if (v >= 1e6) return `$${(v / 1e6).toFixed(2)}M`
+      if (v >= 1e3) return `$${(v / 1e3).toFixed(1)}K`
+      return `$${v.toFixed(2)}`
+    }
+    if (Number.isInteger(v) && Math.abs(v) >= 1e3) return v.toLocaleString()
+    return String(v)
+  }
+  if (typeof v === 'string') return v
+  return JSON.stringify(v)
+}
+
 const TYPE_LABELS: Record<string, { label: string; color: string }> = {
   session_start:     { label: '▶ session start', color: 'text-ink-500' },
   session_end:       { label: '■ session end',   color: 'text-ink-500' },
@@ -11,6 +29,8 @@ const TYPE_LABELS: Record<string, { label: string; color: string }> = {
   api_call:          { label: '↗ api',           color: 'text-accent-fd' },
   llm_call:          { label: '✻ llm',           color: 'text-accent-llm' },
   db_write:          { label: '▾ db write',      color: 'text-accent-db' },
+  transform:         { label: '⟳ transform',     color: 'text-violet-600' },
+  render:            { label: '▦ render',        color: 'text-teal-600' },
   chat_message:      { label: '✉ reply',         color: 'text-ink-500' },
   error:             { label: '✗ error',         color: 'text-red-600' },
 }
@@ -125,6 +145,40 @@ export function TraceEvent({ event }: Props) {
       <div className="mono text-xs px-3 py-2 rounded border bg-red-50 border-red-200 text-red-900">
         <div className="font-medium">{String(event.where ?? 'error')}</div>
         <div>{String(event.message ?? '')}</div>
+      </div>
+    )
+  } else if (event.type === 'transform') {
+    // Internal data transformation — CUSIP aggregation, change detection, etc.
+    const op = String(event.op ?? '?')
+    // Build a compact "key: value" strip from every non-meta payload field.
+    const skip = new Set(['type', 'session_id', 'seq', 'ts_ms', 'op', 'replayed', 'cached_from', 'cached_at_ms'])
+    const fields = Object.entries(event).filter(([k]) => !skip.has(k))
+    body = (
+      <div className="mono text-xs px-3 py-2 rounded border bg-violet-50 border-violet-200 text-violet-900">
+        <div className="font-medium">{op}</div>
+        <div className="text-ink-700 mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5">
+          {fields.map(([k, v]) => (
+            <span key={k}>
+              {k}: <span className="text-ink-500">{formatValue(v, k)}</span>
+            </span>
+          ))}
+        </div>
+      </div>
+    )
+  } else if (event.type === 'render') {
+    const card = String(event.card ?? '?')
+    const skip = new Set(['type', 'session_id', 'seq', 'ts_ms', 'card', 'replayed', 'cached_from', 'cached_at_ms'])
+    const fields = Object.entries(event).filter(([k]) => !skip.has(k))
+    body = (
+      <div className="mono text-xs px-3 py-2 rounded border bg-teal-50 border-teal-200 text-teal-900">
+        <div className="font-medium">{card}</div>
+        <div className="text-ink-700 mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5">
+          {fields.map(([k, v]) => (
+            <span key={k}>
+              {k}: <span className="text-ink-500">{formatValue(v, k)}</span>
+            </span>
+          ))}
+        </div>
       </div>
     )
   } else if (event.type === 'chat_message') {
