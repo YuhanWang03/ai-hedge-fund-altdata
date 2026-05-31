@@ -27,6 +27,7 @@ export function TraceEvent({ event }: Props) {
       fd: 'bg-blue-50 border-blue-200 text-blue-900',
       tavily: 'bg-emerald-50 border-emerald-200 text-emerald-900',
       alpaca: 'bg-cyan-50 border-cyan-200 text-cyan-900',
+      edgar: 'bg-slate-50 border-slate-300 text-slate-800',
     }
     const css = colorByProvider[provider] ?? 'bg-ink-100 border-ink-200 text-ink-800'
     body = (
