@@ -23,7 +23,7 @@ from dotenv import load_dotenv
 
 from v2.archive import Archive
 from v2.etf import SUPPORTED_FUNDS, fetch_holdings, save_snapshot
-from v2.observability import capture_trace, install_all
+from v2.observability import capture_trace_with_framing, install_all
 from v2.reporting import notify_on_error
 
 logging.basicConfig(
@@ -44,8 +44,15 @@ def main() -> int:
     last_snap_date = ""
 
     # Capture the full 4-fund pipeline as one trace so the dashboard feed
-    # can replay every fetch + save snapshot.
-    with capture_trace() as trace:
+    # can replay every fetch + save snapshot. capture_trace_with_framing
+    # auto-emits session_start / intent_classified / module_enter on entry
+    # and module_exit / session_end on exit, matching the dashboard
+    # executor's frame so PipelineBar lights up.
+    with capture_trace_with_framing(
+        agent="etf", intent="etf_view",
+        text="(自动推送) ARK 每日持仓",
+        responder_name="_r_etf_snapshot",
+    ) as trace:
         for symbol in SUPPORTED_FUNDS:
             logger.info("Fetching %s ...", symbol)
             try:
@@ -77,11 +84,25 @@ def main() -> int:
             f"{' · '.join(fetched)} 当日 snapshot 已入库 · "
             f"{total_rows:,} position-rows"
         )
-        events = getattr(trace, "events", []) or []
+        # Emit chat_message inside the trace so the saved trace_json has
+        # a complete reply event. (We do this AFTER the with-block above
+        # already exited — but trace.events is captured by closure and
+        # we want the rendering "reply" recorded.) Easiest: append the
+        # event directly to trace.events; emit() is a no-op now that
+        # TRACE_CTX is unbound.
+        import time as _time
+        trace.events.append({
+            "type": "chat_message",
+            "session_id": trace.session_id,
+            "seq": len(trace.events) + 1,
+            "ts_ms": int(_time.time() * 1000),
+            "role": "bot",
+            "text": body[:500],
+        })
         Archive(agent="etf").save_text(
             body,
             tickers=fetched,
-            trace_json=json.dumps(events, ensure_ascii=False) if events else None,
+            trace_json=json.dumps(trace.events, ensure_ascii=False) if trace.events else None,
             title="ARK 每日持仓",
             expires_at=(datetime.now(timezone.utc) + timedelta(days=2)).isoformat(),
         )

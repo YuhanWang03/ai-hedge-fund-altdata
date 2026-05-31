@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 from v2.archive import Archive
 from v2.data import CachedFDClient
 from v2.lateral import DEFAULT_SEEDS, LATERAL_FILTERS, run_lateral_expansion
-from v2.observability import capture_trace, install_all
+from v2.observability import capture_trace_with_framing, install_all
 from v2.reporting import TelegramNotifier, format_lateral_result, notify_on_error
 from v2.screening import TECH_30
 
@@ -31,7 +31,11 @@ def main() -> None:
 
     print(f"Lateral expansion · {len(seeds)} seeds: {', '.join(seeds)}")
 
-    with capture_trace() as trace:
+    with capture_trace_with_framing(
+        agent="lateral", intent="chain",
+        text="(自动推送) 产业链横向扩展",
+        responder_name="_r_lateral_expansion",
+    ) as trace:
         with CachedFDClient() as fd:
             result = run_lateral_expansion(
                 seeds=seeds,
@@ -50,6 +54,7 @@ def main() -> None:
             f"{passers} passed full filter · {hallucinated} hallucinations"
         )
         text = format_lateral_result(result)
+        trace.emit("chat_message", role="bot", text=text[:500])
 
     print("Pushing to Telegram...")
     notifier = TelegramNotifier(archive=Archive(agent="lateral"))

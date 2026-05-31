@@ -3,12 +3,28 @@ import { PipelineBar } from '../PipelineBar'
 import { intentLabel } from '../../pipelines'
 import { isSessionComplete, shouldHighlight } from '../../event_to_step'
 import { useSession } from '../../store/session'
+import { useUIStore } from '../../stores/uiStore'
+import { EmptyState } from './EmptyState'
 import { TraceEvent } from './TraceEvent'
 
 export function TracePanel() {
-  const events = useSession((s) => s.events)
-  const intent = useSession((s) => s.currentIntent)
-  const cached = useSession((s) => s.currentCached)
+  // Choose the data source based on the user's chat-mode selection:
+  //   - auto_push  → show the clicked push's trace (pushDetail)
+  //   - qa         → show the active user-chat trace
+  // ChatPanel always reads user-chat fields, so this split prevents
+  // auto-push clicks from polluting the conversation history.
+  const chatMode = useUIStore((s) => s.chatMode)
+  const userEvents = useSession((s) => s.events)
+  const userIntent = useSession((s) => s.currentIntent)
+  const userCached = useSession((s) => s.currentCached)
+  const pushDetail = useSession((s) => s.pushDetail)
+
+  const showingPushDetail = chatMode === 'auto_push' && pushDetail !== null
+  const events = showingPushDetail ? (pushDetail!.events as typeof userEvents) : userEvents
+  const intent = showingPushDetail ? pushDetail!.intent : userIntent
+  // Archived pushes are always "complete" — they ran to completion.
+  const cached = showingPushDetail ? true : userCached
+
   const highlightedStepId = useSession((s) => s.highlightedStepId)
   const setHighlightedStepId = useSession((s) => s.setHighlightedStepId)
   const containerRef = useRef<HTMLDivElement>(null)
@@ -125,10 +141,10 @@ export function TracePanel() {
         className="flex-1 overflow-y-auto px-5 py-4 space-y-12"
       >
         {events.length === 0 && (
-          <div className="text-ink-400 text-sm text-center mt-20">
-            发起一次查询后，每个模块调用、LLM prompt、API call、DB
-            写入都会出现在这里。
-          </div>
+          <EmptyState
+            showingPushDetail={showingPushDetail}
+            pushTs={pushDetail?.push.ts ?? null}
+          />
         )}
         {events.map((ev, i) => (
           <TraceEvent

@@ -19,7 +19,7 @@ from v2.archive import Archive
 from v2.data import CachedFDClient
 from v2.memory import AnomalyMemory
 from v2.monitoring import DEFAULT_CONFIG, attribute, run_monitoring
-from v2.observability import capture_trace, install_all
+from v2.observability import capture_trace_with_framing, install_all
 from v2.reporting import (
     TelegramNotifier,
     format_anomaly_alert,
@@ -60,13 +60,18 @@ def main() -> None:
         notifier = TelegramNotifier(archive=Archive(agent="anomaly"))
         for anomaly in anomalies:
             print(f"  Attributing {anomaly.ticker}...")
-            with capture_trace() as trace:
+            with capture_trace_with_framing(
+                agent="anomaly", intent="explain_move",
+                text=f"(自动推送) 异动 {anomaly.ticker}",
+                responder_name="_r_anomaly_monitor",
+            ) as trace:
                 attribute(anomaly, fd_client=fd, memory=memory)
                 chart = render_price_sparkline(
                     anomaly.recent_prices,
                     title=f"{anomaly.ticker} · 最近 {len(anomaly.recent_prices)} 日",
                 )
                 caption = format_anomaly_alert(anomaly)
+                trace.emit("chat_message", role="bot", text=caption[:500])
             notifier.send_photo(
                 chart, caption=caption,
                 trace=trace,

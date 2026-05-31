@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from v2.etf.models import ETFHolding
+from v2.observability import emit
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _DB_PATH = _PROJECT_ROOT / "data" / "etf.db"
@@ -60,7 +61,12 @@ def save_snapshot(etf: str, snap_date: str, holdings: list[ETFHolding]) -> int:
                 for h in holdings
             ],
         )
-        return len(holdings)
+        n = len(holdings)
+        emit(
+            "db_write", db="etf.db", fn="save_snapshot",
+            etf=etf, snap_date=snap_date, rows=n,
+        )
+        return n
 
 
 def get_snapshot(etf: str, snap_date: str) -> list[dict]:
