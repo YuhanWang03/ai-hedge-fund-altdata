@@ -259,7 +259,7 @@ def _patch_tavily() -> int:
 
 
 # ---------------------------------------------------------------------------
-# Intent classifier (v2.bot.intent.classify_intent)
+# Intent classifier (v2.bot.intent.classify)
 # ---------------------------------------------------------------------------
 
 def _patch_intent_classifier() -> int:
@@ -269,7 +269,10 @@ def _patch_intent_classifier() -> int:
         logger.debug("v2.bot.intent not importable: %s", exc)
         return 0
 
-    fn = getattr(mod, "classify_intent", None)
+    # Real entry point is `classify`; older drafts named it `classify_intent`.
+    # Patch whichever exists.
+    fn_name = "classify" if hasattr(mod, "classify") else "classify_intent"
+    fn = getattr(mod, fn_name, None)
     if fn is None or _already_wrapped(fn):
         return 0
 
@@ -281,13 +284,23 @@ def _patch_intent_classifier() -> int:
         t0 = time.perf_counter()
         result = fn(text, *args, **kwargs)
         elapsed_ms = int((time.perf_counter() - t0) * 1000)
-        # The classifier returns either an object or dict; introspect both.
-        intent_name = getattr(result, "name", None) or (
-            result.get("name") if isinstance(result, dict) else None
-        )
-        intent_args = getattr(result, "args", None) or (
-            result.get("args") if isinstance(result, dict) else None
-        )
+
+        # The production classifier returns a dict like
+        # {"intent": "thirteen_f", "ticker": "...", "manager": "brk", ...}.
+        # Older code used dataclass attribute access; support both.
+        intent_name = None
+        intent_args: Any = None
+        if isinstance(result, dict):
+            intent_name = result.get("intent") or result.get("name")
+            # Surface every non-empty arg field except intent itself.
+            intent_args = {
+                k: v for k, v in result.items()
+                if k not in {"intent", "name", "raw"} and v not in (None, "", 0, 0.0)
+            }
+        else:
+            intent_name = getattr(result, "intent", None) or getattr(result, "name", None)
+            intent_args = getattr(result, "args", None)
+
         emit(
             "intent_classified",
             input_text=text[:200],
@@ -297,8 +310,55 @@ def _patch_intent_classifier() -> int:
         )
         return result
 
-    setattr(mod, "classify_intent", _mark_wrapped(wrapper, fn))
+    setattr(mod, fn_name, _mark_wrapped(wrapper, fn))
     return 1
+
+
+# ---------------------------------------------------------------------------
+# EDGAR (edgartools.Company / .get_filings)
+# ---------------------------------------------------------------------------
+
+def _wrap_edgar_method(class_name: str, method_name: str):
+    def make_wrapper(original):
+        @functools.wraps(original)
+        def wrapper(self, *args, **kwargs):
+            trace = current_trace()
+            if trace is None:
+                return original(self, *args, **kwargs)
+            t0 = time.perf_counter()
+            ident = getattr(self, "cik", None) or getattr(self, "name", None) or "?"
+            try:
+                return original(self, *args, **kwargs)
+            finally:
+                emit(
+                    "api_call",
+                    provider="edgar",
+                    endpoint=f"{class_name}.{method_name}",
+                    ticker=str(ident)[:40],
+                    elapsed_ms=int((time.perf_counter() - t0) * 1000),
+                )
+        return wrapper
+    return make_wrapper
+
+
+def _patch_edgar() -> int:
+    try:
+        mod = importlib.import_module("edgar")
+    except Exception as exc:
+        logger.debug("edgartools not importable: %s", exc)
+        return 0
+    count = 0
+    cls = getattr(mod, "Company", None)
+    if cls is not None:
+        for attr in ("get_filings", "get_facts", "get_financials", "latest"):
+            if _patch_method(cls, attr, _wrap_edgar_method("Company", attr)):
+                count += 1
+    cls = getattr(mod, "Filing", None)
+    if cls is not None:
+        for attr in ("obj", "xbrl", "html", "text"):
+            if _patch_method(cls, attr, _wrap_edgar_method("Filing", attr)):
+                count += 1
+    return count
 
 
 # ---------------------------------------------------------------------------
@@ -326,23 +386,60 @@ def _wrap_db_write(db_name: str):
     return make_wrapper
 
 
-def _patch_archive_store() -> int:
+def _patch_module_db_writes(module_path: str, db_label: str, prefixes: tuple[str, ...]) -> int:
+    """Patch every function in `module_path` whose name starts with one of
+    the prefixes (typically save_, log_, insert_, write_, store_, remember).
+    """
     try:
-        mod = importlib.import_module("v2.archive.store")
+        mod = importlib.import_module(module_path)
     except Exception as exc:
-        logger.debug("v2.archive.store not importable: %s", exc)
+        logger.debug("%s not importable: %s", module_path, exc)
         return 0
     count = 0
     for attr in dir(mod):
-        if not (attr.startswith("log_") or attr.startswith("insert_") or attr.startswith("write_")):
+        if not attr.startswith(prefixes):
             continue
         fn = getattr(mod, attr)
         if not callable(fn) or _already_wrapped(fn):
             continue
-        wrapper = _mark_wrapped(_wrap_db_write("archive")(fn), fn)
+        wrapper = _mark_wrapped(_wrap_db_write(db_label)(fn), fn)
         setattr(mod, attr, wrapper)
         count += 1
     return count
+
+
+def _patch_class_db_methods(
+    module_path: str, class_name: str, db_label: str, methods: tuple[str, ...]
+) -> int:
+    try:
+        mod = importlib.import_module(module_path)
+    except Exception as exc:
+        logger.debug("%s not importable: %s", module_path, exc)
+        return 0
+    cls = getattr(mod, class_name, None)
+    if cls is None:
+        return 0
+    count = 0
+    for name in methods:
+        if _patch_method(cls, name, _wrap_db_write(db_label)):
+            count += 1
+    return count
+
+
+def _patch_archive_store() -> int:
+    write_prefixes = ("log_", "insert_", "write_", "save_", "store_", "remember")
+    n = 0
+    n += _patch_module_db_writes("v2.archive.store", "archive", write_prefixes)
+    n += _patch_module_db_writes("v2.institutional.tracker", "edgar.db", write_prefixes)
+    n += _patch_module_db_writes("v2.etf.tracker", "etf.db", write_prefixes)
+    n += _patch_module_db_writes("v2.bot.state", "bot_state.db", write_prefixes)
+    n += _patch_module_db_writes("v2.streamer.tracker", "options.db", write_prefixes)
+    n += _patch_module_db_writes("v2.screening.cache", "screening_cache.db", write_prefixes)
+    # ChromaDB-backed memory uses a class with .remember / .add etc.
+    n += _patch_class_db_methods(
+        "v2.memory.store", "AnomalyMemory", "chroma", ("remember", "add", "store"),
+    )
+    return n
 
 
 # ---------------------------------------------------------------------------
@@ -358,8 +455,9 @@ def install_all() -> list[str]:
         ("fd", _patch_fd_client),
         ("deepseek", _patch_deepseek),
         ("tavily", _patch_tavily),
+        ("edgar", _patch_edgar),
         ("intent", _patch_intent_classifier),
-        ("archive", _patch_archive_store),
+        ("db_writes", _patch_archive_store),
     ]
     for tag, fn in matrix:
         try:

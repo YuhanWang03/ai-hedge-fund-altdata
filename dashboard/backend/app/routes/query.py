@@ -13,7 +13,7 @@ from app.auth import Caller, resolve_caller
 from app.budget import reserve_for_query
 from app.cache import try_replay
 from app.runner.executor import replay_cached, run_query
-from app.runner.intent_adapter import classify
+from app.runner.intent_adapter import _stub_classify
 from app.runner.session import Session
 from v2.observability import estimate_cost
 
@@ -52,11 +52,11 @@ async def post_query(
     store = request.app.state.store
     manager = request.app.state.session_manager
 
-    # Cheap keyword pre-classify so the budget estimate matches the actual
-    # intent class, and so we can short-circuit on cache hit before charging.
-    intent_name, intent_args = await asyncio.get_running_loop().run_in_executor(
-        None, classify, text
-    )
+    # Cheap keyword pre-classify for budget reservation and the guest
+    # whitelist gate. We deliberately use the keyword stub (zero cost)
+    # here; the real LLM-backed classifier runs inside the trace context
+    # in run_query so its tokens show up in the dashboard.
+    intent_name, intent_args = _stub_classify(text)
 
     # Guest may run only whitelisted intents. Reject early so we don't
     # debit budget for something we'll refuse anyway.
