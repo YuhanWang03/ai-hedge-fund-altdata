@@ -23,7 +23,7 @@ export function ChatPanel() {
     setText('')
     try {
       const resp = await postQuery(t)
-      startSession(resp.session_id, t)
+      startSession(resp.session_id, t, resp.intent ?? null, !!resp.cached)
 
       const close = openTraceStream(
         resp.sse_url,

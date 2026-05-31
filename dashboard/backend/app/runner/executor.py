@@ -22,7 +22,7 @@ from app.budget import refund_query, settle_query
 from app.cache import cache_key, expires_at_ms
 from app.config import SETTINGS
 from app.db.store import Store
-from app.runner.event_explanations import lookup as lookup_explanation
+from app.runner.event_explanations import llm_role, lookup as lookup_explanation
 from app.runner.intent_adapter import classify, run_intent
 from app.runner.session import END_OF_STREAM, Session, SessionManager
 from v2.observability import TRACE_CTX, Trace, estimate_cost
@@ -58,6 +58,13 @@ async def run_query(
         explanation = lookup_explanation(ev)
         if explanation is not None:
             ev["explanation"] = explanation
+        # Attach a semantic role to LLM calls so the frontend pipeline bar
+        # can identify intent_classifier / verifier / generator etc. without
+        # re-implementing the prompt fingerprint heuristic.
+        if ev.get("type") == "llm_call":
+            role = llm_role(ev)
+            if role is not None:
+                ev["role"] = role
         session.events.append(ev)
         cost = ev.get("cost_usd")
         if cost:

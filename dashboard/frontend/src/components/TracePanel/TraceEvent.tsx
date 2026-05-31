@@ -320,7 +320,7 @@ export function TraceEvent({ event, forceExplanationOpen, explanationBump }: Pro
   ) : null
 
   return (
-    <div className="flex items-start gap-2">
+    <div className="flex items-start gap-2" data-event-seq={event.seq}>
       <div className={`text-[11px] mono ${meta.color} w-32 shrink-0 pt-1`}>
         {meta.label}
       </div>
