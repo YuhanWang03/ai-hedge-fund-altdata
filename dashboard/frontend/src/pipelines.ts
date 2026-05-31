@@ -2,6 +2,28 @@
 // list of step IDs; STEP_DEFS holds the visual metadata for each step.
 // Step IDs are the contract between pipelines (this file) and the
 // event-to-step mapper (event_to_step.ts).
+//
+// Concurrency note:
+//
+// The pipeline bar assumes steps execute as a linear time sequence. Today
+// the v2/ codebase runs the explain_move / thirteen_f / etc. paths
+// strictly sequentially, so the assumption holds.
+//
+// If a future change introduces concurrency (e.g. chain verifying N
+// neighbor relations in parallel, or explain_move firing FD + Tavily
+// fetches in parallel), the options are:
+//
+//   Option A (recommended): keep this linear bar. Multiple concurrent
+//     events mapping to the same pill complete one at a time; the pill
+//     transitions active → done once any of them finishes. Other
+//     concurrent events on the same step are still visible in the
+//     trace stream below.
+//
+//   Option B: render the pipeline as a fork/join tree. Only worth the
+//     extra complexity if a concurrent branch is wide (>= 3 parallel
+//     children) and shows up on a frequently-used path.
+//
+// No special handling needed for the current code base.
 
 export interface StepDef {
   icon: string

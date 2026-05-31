@@ -11,7 +11,7 @@ import { renderToString } from 'react-dom/server'
 import React from 'react'
 import { TraceEvent } from '../src/components/TracePanel/TraceEvent.tsx'
 import { PipelineBar } from '../src/components/PipelineBar.tsx'
-import { isSessionComplete, shouldHighlight } from '../src/event_to_step.ts'
+import { eventToStep, isSessionComplete, shouldHighlight } from '../src/event_to_step.ts'
 
 const cases = [
   {
@@ -288,6 +288,39 @@ for (const c of cases) {
   }
 }
 
+// ---- eventToStep pure-logic mappings --------------------------------------
+
+const mapCases = [
+  // New mappings introduced this round.
+  { ev: { type: 'module_enter', name: '_r_explain_move' }, want: 'classify' },
+  { ev: { type: 'module_enter', name: '_r_thirteen_f' },   want: 'classify' },
+  { ev: { type: 'module_exit',  name: '_r_explain_move' }, want: 'reply' },
+  { ev: { type: 'module_exit',  name: '_r_thirteen_f' },   want: 'reply' },
+  // Pre-existing mappings users asked for explicit coverage on.
+  { ev: { type: 'db_read',  table: 'watchlist' },          want: 'sqlite_read' },
+  { ev: { type: 'db_query', table: 'alerts' },             want: 'sqlite_read' },
+  { ev: { type: 'validate', what: 'ticker_format' },       want: 'validate' },
+  // Sanity: ChromaDB write resolves via db label (regression guard for
+  // the "remember" vs "anomaly_memory_remember" bug fixed last round).
+  { ev: { type: 'db_write', db: 'chroma', fn: 'remember' }, want: 'memory' },
+  // Sanity: generic SQLite write doesn't collide with memory.
+  { ev: { type: 'db_write', db: 'edgar.db', fn: 'save_filing' }, want: 'sqlite_write' },
+  // Sanity: events without any pipeline meaning return null.
+  { ev: { type: 'session_end' },                            want: null },
+  { ev: { type: 'error', where: 'tavily' },                 want: null },
+]
+
+for (const { ev, want } of mapCases) {
+  const got = eventToStep(ev)
+  if (got === want) {
+    console.log(`✓ eventToStep: ${JSON.stringify(ev)} → ${want}`)
+  } else {
+    failures++
+    console.log(`✗ eventToStep: ${JSON.stringify(ev)} → ${got} (expected ${want})`)
+  }
+}
+
+
 // ---- Liquid-glass highlight: logic + rendered class -----------------------
 
 const highlightCases = [
@@ -395,7 +428,7 @@ for (const c of highlightCases) {
 }
 
 
-const totalChecks = cases.length + pipelineCases.length + highlightCases.length
+const totalChecks = cases.length + pipelineCases.length + highlightCases.length + mapCases.length
 if (failures > 0) {
   console.error(`\n${failures} render check(s) failed.`)
   process.exit(1)

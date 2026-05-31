@@ -31,6 +31,16 @@ export function eventToStep(event: TraceEvent): string | null {
 
   if (type === 'session_start') return 'input'
 
+  // Module enter/exit aren't standalone steps but they sit at clear
+  // shoulders of the pipeline: module_enter fires right after the
+  // classifier picks a responder (so it belongs to classify), and
+  // module_exit fires after all data work is done and the responder is
+  // about to return the formatted reply (so it belongs to reply).
+  // Without these the highlight ring on classify/reply pills would miss
+  // the matching event rows in the trace.
+  if (type === 'module_enter') return 'classify'
+  if (type === 'module_exit') return 'reply'
+
   if (type === 'intent_classified') return 'classify'
   if (type === 'llm_call' && role === 'intent_classifier') return 'classify'
 
