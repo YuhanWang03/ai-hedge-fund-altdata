@@ -18,7 +18,7 @@ function stripFdClassPrefix(endpoint: string): string {
   return endpoint
 }
 
-export function eventToStep(event: TraceEvent): string | null {
+export function eventToStep(event: TraceEvent, intent?: string): string | null {
   // Cast to string so we can match forward-compatible event types that
   // aren't yet in the EventType union (db_read / db_query / validate /
   // reply will be added when their emit sites land).
@@ -51,7 +51,16 @@ export function eventToStep(event: TraceEvent): string | null {
   if (type === 'api_call' && provider === 'fd') {
     const m = stripFdClassPrefix(endpoint)
     if (m === 'get_prices') return 'price'
-    if (m === 'get_financial_metrics' || m === 'get_earnings' || m === 'get_company_facts') return 'fundamentals'
+    if (m === 'get_financial_metrics' || m === 'get_earnings') return 'fundamentals'
+    if (m === 'get_company_facts') {
+      // Intent-aware fallback. In summary / chain etc. the company-facts
+      // endpoint feeds the fundamentals/news mix. In explain_move it is
+      // ONLY used by attributor._lookup_company_name() to widen the
+      // entity filter on Tavily results, so it conceptually belongs to
+      // the news step there (where the pipeline actually has a pill).
+      if (intent === 'explain_move') return 'news'
+      return 'fundamentals'
+    }
     if (m === 'get_insider_trades') return 'insider'
   }
 
@@ -92,14 +101,19 @@ export function eventToStep(event: TraceEvent): string | null {
  * Pure predicate used by TracePanel to decide whether a given event should
  * carry the "liquid glass" highlight ring. Gating both on session-complete
  * and on a matching step ID keeps the in-flight UX unchanged.
+ *
+ * Threads `intent` so eventToStep's intent-aware fallbacks (e.g.
+ * get_company_facts → news in explain_move) take effect when matching
+ * a highlighted pill.
  */
 export function shouldHighlight(
   event: TraceEvent,
   highlightedStepId: string | null,
   sessionComplete: boolean,
+  intent?: string,
 ): boolean {
   if (!sessionComplete || !highlightedStepId) return false
-  return eventToStep(event) === highlightedStepId
+  return eventToStep(event, intent) === highlightedStepId
 }
 
 

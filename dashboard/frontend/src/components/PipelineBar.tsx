@@ -38,7 +38,7 @@ export function PipelineBar({ intent, events, cached, onPillActivate, highlighte
     let sawErrorStep: string | null = null
 
     for (const ev of events) {
-      const step = eventToStep(ev)
+      const step = eventToStep(ev, intent ?? undefined)
       if (step && pipeline.includes(step) && firstSeqByStep[step] === undefined) {
         firstSeqByStep[step] = typeof ev.seq === 'number' ? ev.seq : 0
       }
