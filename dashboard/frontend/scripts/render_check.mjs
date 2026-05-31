@@ -230,6 +230,104 @@ const pipelineCases = [
     expectAbsent: ['animate-pulse', 'bg-blue-500'],
   },
   {
+    // etf_view: 6-pill pipeline. ark_csv api_call lights ARK, etf_diff
+    // transform lights 对比, then render lights 卡片, chat_message lights
+    // 回复. After session_end every pill should be emerald.
+    name: 'pipeline_bar_etf_view_full_done',
+    props: {
+      intent: 'etf_view',
+      events: [
+        { type: 'session_start',     session_id: 's', seq: 1,  ts_ms: 0 },
+        { type: 'intent_classified', session_id: 's', seq: 2,  ts_ms: 0, intent: 'etf_view' },
+        { type: 'api_call',          session_id: 's', seq: 3,  ts_ms: 0, provider: 'ark_csv', endpoint: 'fetch_holdings' },
+        { type: 'transform',         session_id: 's', seq: 4,  ts_ms: 0, op: 'etf_diff' },
+        { type: 'render',            session_id: 's', seq: 5,  ts_ms: 0, card: 'etf_snapshot' },
+        { type: 'chat_message',      session_id: 's', seq: 6,  ts_ms: 0, text: 'done' },
+        { type: 'session_end',       session_id: 's', seq: 7,  ts_ms: 0 },
+      ],
+    },
+    expect: ['输入', '意图', 'ARK', '对比', '卡片', '回复', 'bg-emerald-500'],
+    expectAbsent: ['text-slate-400', 'animate-pulse', 'bg-blue-500'],
+  },
+  {
+    // watchlist_view: 5-pill pipeline. db_read fires for sqlite_read,
+    // render fires for 卡片. Tests db_read → sqlite_read mapping.
+    name: 'pipeline_bar_watchlist_view_full_done',
+    props: {
+      intent: 'watchlist_view',
+      events: [
+        { type: 'session_start',     session_id: 's', seq: 1, ts_ms: 0 },
+        { type: 'intent_classified', session_id: 's', seq: 2, ts_ms: 0, intent: 'watchlist_view' },
+        { type: 'db_read',           session_id: 's', seq: 3, ts_ms: 0, db: 'bot_state.db', table: 'watchlist' },
+        { type: 'render',            session_id: 's', seq: 4, ts_ms: 0, card: 'watchlist_card' },
+        { type: 'chat_message',      session_id: 's', seq: 5, ts_ms: 0, text: 'done' },
+        { type: 'session_end',       session_id: 's', seq: 6, ts_ms: 0 },
+      ],
+    },
+    expect: ['输入', '意图', '查询', '卡片', '回复', 'bg-emerald-500'],
+    expectAbsent: ['text-slate-400', 'animate-pulse'],
+  },
+  {
+    // portfolio_view: 5 pills. Alpaca api_call lights 📡 Alpaca, render
+    // lights 卡片.
+    name: 'pipeline_bar_portfolio_view_full_done',
+    props: {
+      intent: 'portfolio_view',
+      events: [
+        { type: 'session_start',     session_id: 's', seq: 1, ts_ms: 0 },
+        { type: 'intent_classified', session_id: 's', seq: 2, ts_ms: 0, intent: 'portfolio_view' },
+        { type: 'api_call',          session_id: 's', seq: 3, ts_ms: 0, provider: 'alpaca', endpoint: 'get_account' },
+        { type: 'api_call',          session_id: 's', seq: 4, ts_ms: 0, provider: 'alpaca', endpoint: 'get_all_positions' },
+        { type: 'render',            session_id: 's', seq: 5, ts_ms: 0, card: 'portfolio_card' },
+        { type: 'chat_message',      session_id: 's', seq: 6, ts_ms: 0, text: 'done' },
+        { type: 'session_end',       session_id: 's', seq: 7, ts_ms: 0 },
+      ],
+    },
+    expect: ['输入', '意图', 'Alpaca', '卡片', '回复', 'bg-emerald-500'],
+    expectAbsent: ['text-slate-400'],
+  },
+  {
+    // chain (产业链): proposer LLM + filter transform light up.
+    name: 'pipeline_bar_chain_full_done',
+    props: {
+      intent: 'chain',
+      events: [
+        { type: 'session_start',     session_id: 's', seq: 1, ts_ms: 0 },
+        { type: 'intent_classified', session_id: 's', seq: 2, ts_ms: 0, intent: 'chain' },
+        { type: 'api_call',          session_id: 's', seq: 3, ts_ms: 0, provider: 'fd', endpoint: 'CachedFDClient.get_prices' },
+        { type: 'llm_call',          session_id: 's', seq: 4, ts_ms: 0, role: 'proposer' },
+        { type: 'api_call',          session_id: 's', seq: 5, ts_ms: 0, provider: 'tavily', endpoint: 'search' },
+        { type: 'transform',         session_id: 's', seq: 6, ts_ms: 0, op: 'filter' },
+        { type: 'render',            session_id: 's', seq: 7, ts_ms: 0, card: 'lateral_result' },
+        { type: 'chat_message',      session_id: 's', seq: 8, ts_ms: 0, text: 'done' },
+        { type: 'session_end',       session_id: 's', seq: 9, ts_ms: 0 },
+      ],
+    },
+    expect: ['输入', '意图', '行情', '提议', '新闻', '筛选', '卡片', '回复', 'bg-emerald-500'],
+    expectAbsent: ['text-slate-400'],
+  },
+  {
+    // summary: narrator LLM lights 解读.
+    name: 'pipeline_bar_summary_full_done',
+    props: {
+      intent: 'summary',
+      events: [
+        { type: 'session_start',     session_id: 's', seq: 1, ts_ms: 0 },
+        { type: 'intent_classified', session_id: 's', seq: 2, ts_ms: 0, intent: 'summary' },
+        { type: 'api_call',          session_id: 's', seq: 3, ts_ms: 0, provider: 'fd', endpoint: 'CachedFDClient.get_prices' },
+        { type: 'api_call',          session_id: 's', seq: 4, ts_ms: 0, provider: 'fd', endpoint: 'CachedFDClient.get_financial_metrics' },
+        { type: 'api_call',          session_id: 's', seq: 5, ts_ms: 0, provider: 'fd', endpoint: 'CachedFDClient.get_insider_trades' },
+        { type: 'api_call',          session_id: 's', seq: 6, ts_ms: 0, provider: 'tavily', endpoint: 'search' },
+        { type: 'llm_call',          session_id: 's', seq: 7, ts_ms: 0, role: 'narrator' },
+        { type: 'render',            session_id: 's', seq: 8, ts_ms: 0, card: 'summary_card' },
+        { type: 'chat_message',      session_id: 's', seq: 9, ts_ms: 0, text: 'done' },
+        { type: 'session_end',       session_id: 's', seq: 10, ts_ms: 0 },
+      ],
+    },
+    expect: ['输入', '意图', '行情', '财务', '内部人', '新闻', '解读', '卡片', '回复', 'bg-emerald-500'],
+    expectAbsent: ['text-slate-400'],
+  },
+  {
     name: 'pipeline_bar_pill_self_highlight',
     // Cached so every pill is done; ARK pill is the highlighted one.
     props: {
@@ -308,6 +406,15 @@ const mapCases = [
   // Sanity: events without any pipeline meaning return null.
   { ev: { type: 'session_end' },                            want: null },
   { ev: { type: 'error', where: 'tavily' },                 want: null },
+  // New api providers covered by the Tier-1/Tier-2 batch.
+  { ev: { type: 'api_call', provider: 'ark_csv', endpoint: 'fetch_holdings' }, want: 'ark' },
+  { ev: { type: 'api_call', provider: 'alpaca',  endpoint: 'get_account' },     want: 'alpaca' },
+  { ev: { type: 'api_call', provider: 'alpaca',  endpoint: 'get_all_positions' }, want: 'alpaca' },
+  // New transform op.
+  { ev: { type: 'transform', op: 'etf_diff' },              want: 'detect' },
+  // New db_write fn names for state-table writes (bot_state.db).
+  { ev: { type: 'db_write', db: 'bot_state.db', fn: 'alert_add' },        want: 'sqlite_write' },
+  { ev: { type: 'db_write', db: 'bot_state.db', fn: 'watchlist_add' },    want: 'sqlite_write' },
 ]
 
 for (const { ev, want } of mapCases) {

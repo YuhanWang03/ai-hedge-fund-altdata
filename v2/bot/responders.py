@@ -19,6 +19,7 @@ import numpy as np
 
 from v2.data import CachedFDClient
 from v2.institutional import MANAGERS
+from v2.observability import emit
 from v2.institutional.client import fetch_recent_13f
 from v2.institutional.detector import detect_changes
 from v2.institutional.models import InstitutionalReport
@@ -185,6 +186,8 @@ def summary(ticker: str) -> str:
             title = html.escape((h.get("title") or "")[:90])
             lines.append(f"   • {title}")
 
+    emit("render", card="summary_card",
+         ticker=ticker, num_news=len(headlines or []))
     return "\n".join(lines)
 
 
@@ -373,6 +376,7 @@ def holders(ticker_input: str) -> str:
     from v2.institutional.tracker import get_db
 
     ticker = ticker_input.strip().upper()
+    emit("validate", what="ticker", input=ticker_input[:40], passed=bool(ticker) and ticker.isalpha())
     if not ticker or not ticker.isalpha():
         return f"<b>🚫 Invalid ticker: {html.escape(ticker_input)}</b>"
 
@@ -381,6 +385,8 @@ def holders(ticker_input: str) -> str:
     unknown: list[str] = []
 
     try:
+        emit("db_read", db="edgar.db", table="filings+positions",
+             where=f"cross-manager lookup for {ticker}")
         with get_db() as conn:
             for cik, manager_name in MANAGERS:
                 row = conn.execute(
@@ -417,6 +423,8 @@ def holders(ticker_input: str) -> str:
         return f"❌ DB error: <code>{html.escape(str(exc))}</code>"
 
     held.sort(key=lambda h: h["value"], reverse=True)
+    emit("render", card="holders_card",
+         ticker=ticker, num_held=len(held), num_not_held=len(not_held))
     return format_holders(ticker, held, not_held, unknown)
 
 
@@ -436,6 +444,8 @@ def etf_view(symbol_input: str) -> str:
     )
 
     symbol = symbol_input.strip().upper()
+    emit("validate", what="ticker", input=symbol_input[:40],
+         passed=symbol in SUPPORTED_FUNDS, allowed=list(SUPPORTED_FUNDS))
     if symbol not in SUPPORTED_FUNDS:
         return (
             f"<b>🚫 Unsupported ETF: {html.escape(symbol_input)}</b>\n"
@@ -457,6 +467,8 @@ def etf_view(symbol_input: str) -> str:
     # Persist + diff against the prior snapshot (different date) if available
     daily_changes = None
     try:
+        emit("db_read", db="etf.db", table="etf_snapshots",
+             where=f"latest prior snapshot for {symbol} before {snapshot_date}")
         prev = get_latest_snapshot_before(symbol, snapshot_date)
         if prev:
             daily_changes = compute_daily_changes(prev, holdings)
@@ -464,6 +476,10 @@ def etf_view(symbol_input: str) -> str:
     except Exception as exc:
         logger.warning("ETF persistence failed for %s: %s", symbol, exc)
 
+    emit("render", card="etf_snapshot",
+         etf=symbol, snapshot_date=snapshot_date,
+         positions=len(holdings),
+         changes=len(daily_changes) if daily_changes else 0)
     return format_etf_snapshot(
         symbol, holdings, snapshot_date,
         top_n=15, daily_changes=daily_changes,
@@ -496,6 +512,10 @@ def _pos_to_dict(p) -> dict:
 def alert_set(ticker: str, target_price: float, direction: str = "above") -> str:
     """Create one price alert and return a confirmation card."""
     from v2.bot import state
+    emit("validate", what="ticker", input=ticker[:40], passed=True)
+    emit("validate", what="price",
+         price=float(target_price), direction=direction,
+         passed=target_price > 0 and direction in ("above", "below"))
     try:
         alert_id = state.alert_add(ticker, direction, target_price)
     except ValueError as exc:
@@ -513,7 +533,10 @@ def alert_set(ticker: str, target_price: float, direction: str = "above") -> str
 def alert_list_view() -> str:
     """Return the user's open alerts as a Telegram card."""
     from v2.bot import state
+    emit("db_read", db="bot_state.db", table="alerts",
+         where="fired_at IS NULL")
     alerts = state.alert_list(include_fired=False)
+    emit("render", card="alerts_list", num_alerts=len(alerts))
     return format_alert_list(alerts)
 
 
@@ -540,6 +563,8 @@ def portfolio_view() -> str:
     except Exception as exc:
         logger.exception("/portfolio failed")
         return f"❌ Error: <code>{html.escape(str(exc))}</code>"
+    emit("render", card="portfolio_card",
+         positions=len(snap.get("positions") or []))
     return format_portfolio(snap)
 
 
@@ -553,6 +578,8 @@ def pnl_view() -> str:
     except Exception as exc:
         logger.exception("/pnl failed")
         return f"❌ Error: <code>{html.escape(str(exc))}</code>"
+    emit("render", card="pnl_card",
+         positions=len(snap.get("positions") or []))
     return format_pnl(snap)
 
 
@@ -560,6 +587,7 @@ def settings_view() -> str:
     monitor = MonitorConfig()
     screen = DEFAULT_FILTERS
     lateral = LATERAL_FILTERS
+    emit("render", card="settings_card")
 
     return "\n".join([
         "<b>⚙️ Settings (read-only)</b>",

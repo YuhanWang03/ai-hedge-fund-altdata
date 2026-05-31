@@ -574,6 +574,12 @@ def format_lateral_result(result: LateralResult) -> str:
     # Defensive truncation if we somehow blow past 4096
     if len(body) > 4000:
         body = body[:3950] + "\n<i>(truncated)</i>"
+    emit(
+        "render",
+        card="lateral_result",
+        seeds=len(result.seed_groups or []),
+        verified_neighbors=sum(len(g.neighbors or []) for g in result.seed_groups or []),
+    )
     return body
 
 
@@ -860,6 +866,7 @@ def format_portfolio(snapshot: dict) -> str:
 
     if len(positions) > 15:
         lines.append(f"<i>其余 {len(positions) - 15} 个持仓省略</i>")
+    emit("render", card="portfolio_card", positions=len(positions))
     return "\n".join(lines)
 
 
@@ -885,6 +892,7 @@ def format_pnl(snapshot: dict) -> str:
         f"空头敞口 <code>${_short_money(abs(snapshot.get('short_value', 0)))}</code>",
         f"持仓数 <code>{snapshot.get('position_count', 0)}</code>",
     ]
+    emit("render", card="pnl_card")
     return "\n".join(lines)
 
 
@@ -909,6 +917,7 @@ def format_alert_list(alerts: list[dict]) -> str:
         )
     lines.append("")
     lines.append("<i>用 <code>/alert_remove ID</code> 删除任一条。</i>")
+    emit("render", card="alerts_list", num_alerts=len(alerts))
     return "\n".join(lines)
 
 
@@ -1017,6 +1026,9 @@ def format_holders(
         lines.append(
             "<i>下次 scheduler 跑完（周二 / 周五 18:00 ET）会补齐。</i>"
         )
+    emit("render", card="holders_card", ticker=ticker,
+         num_held=len(held or []), num_not_held=len(not_held or []),
+         num_unknown=len(unknown or []))
     return "\n".join(lines)
 
 
@@ -1095,6 +1107,10 @@ def format_etf_snapshot(
                     f"<code>{c.get('shares_diff_pct', 0):+.1%}</code>"
                 )
 
+    emit("render", card="etf_snapshot",
+         etf=etf, snapshot_date=snapshot_date,
+         positions=len(holdings or []),
+         daily_changes=len(daily_changes or []))
     return "\n".join(lines)
 
 

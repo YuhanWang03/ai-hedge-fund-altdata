@@ -82,14 +82,26 @@ def fetch_holdings(symbol: str) -> tuple[list[ETFHolding], str]:
     Returns (holdings, snapshot_date_iso). snapshot_date_iso comes from the
     CSV's own date column if present; falls back to today.
     """
+    import time as _time
+    from v2.observability import emit
     symbol = symbol.upper()
     url = _ARK_URLS.get(symbol)
     if url is None:
         raise ValueError(f"Unsupported ETF: {symbol}")
 
+    t0 = _time.perf_counter()
     resp = requests.get(url, headers={"User-Agent": _UA}, timeout=20)
     resp.raise_for_status()
     text = resp.text
+    elapsed_ms = int((_time.perf_counter() - t0) * 1000)
+    emit(
+        "api_call",
+        provider="ark_csv",
+        endpoint="fetch_holdings",
+        ticker=symbol,
+        bytes=len(text),
+        elapsed_ms=elapsed_ms,
+    )
 
     # Strip any leading blank/comment lines until we hit the header row.
     lines = text.splitlines()

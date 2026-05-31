@@ -91,6 +91,27 @@ _API: dict[tuple[str, str], Explanation] = {
         "store":  "不持久化（每次都跑实时搜索）",
         "next":   "先进实体过滤丢掉无关结果，再由 Verifier LLM 按来源打 Tier 评分",
     },
+    ("ark_csv", "fetch_holdings"): {
+        "source": "ARK Invest 官网每日发布的持仓 CSV（公开免费）",
+        "how":    "HTTP GET 拉单个 ETF 的 CSV，解析后归一化字段",
+        "what":   "当日全量持仓：ticker / 公司名 / 股数 / 市值 / 仓位百分比",
+        "store":  "不持久化（ETF 数据库的 save_snapshot 步骤再写）",
+        "next":   "对比昨日快照算单日调仓差异，识别新进/减持/清仓",
+    },
+    ("alpaca", "get_account"): {
+        "source": "Alpaca paper 账户接口",
+        "how":    "HTTP GET 带 API key + secret；alpaca-py 库封装",
+        "what":   "账户余额：组合价值 / 现金 / 购买力 / paper 标记",
+        "store":  "不持久化",
+        "next":   "拼进 /portfolio 卡片或 /pnl 卡片的头部",
+    },
+    ("alpaca", "get_all_positions"): {
+        "source": "Alpaca paper 账户的持仓接口",
+        "how":    "HTTP GET 带 API key；返回所有未平仓头寸",
+        "what":   "每只标的：股数 / 平均成本 / 现价 / 未实现盈亏",
+        "store":  "不持久化",
+        "next":   "和 get_account 一起拼成 /portfolio 或 /pnl 完整卡片",
+    },
 }
 
 
@@ -110,6 +131,13 @@ _TRANSFORM: dict[str, Explanation] = {
         "store":  "不持久化（每次查询重算）",
         "next":   "前 20 笔送 DeepSeek 让 LLM 写一句话解读",
     },
+    "etf_diff": {
+        "source": "今天和昨天两份 ARK 持仓快照",
+        "how":    "Python 按 ticker 配对，算单日股数变动百分比",
+        "what":   "调仓表：新进 / 减持 / 清仓 + 仓位百分比变化",
+        "store":  "不持久化（来源数据已经在 etf.db）",
+        "next":   "送入 ETF 卡片格式化器，作为「24h 变动」段落显示",
+    },
     "entity_filter": {
         "source": "上一步 Tavily 搜索返回的新闻列表",
         "how":    "Python 子串匹配：要求标题或正文同时出现 ticker 和公司名 token",
@@ -123,6 +151,13 @@ _TRANSFORM: dict[str, Explanation] = {
         "what":   "每条新闻附 Tier 标签 + 总体 Tier 分布",
         "store":  "不持久化",
         "next":   "Tier 3 整体丢弃；Tier 1+2 送 Generator LLM 做归因合成",
+    },
+    "filter": {
+        "source": "上一步 LLM 提议或检测器的候选列表",
+        "how":    "Python 阈值判断 + Tavily 共现验证，淘汰未通过的候选",
+        "what":   "通过过滤的候选 + 各类淘汰原因计数",
+        "store":  "不持久化",
+        "next":   "通过的候选进入下一步（产业链卡片渲染、推送等）",
     },
 }
 
@@ -158,6 +193,20 @@ _LLM_BY_ROLE: dict[str, Explanation] = {
         "store":  "归因结果通过 anomaly_memory_remember 写入 ChromaDB",
         "next":   "拼成异动卡片，通过 chat_message 推送给用户",
     },
+    "proposer": {
+        "source": "用户输入的种子 ticker（产业链查询）",
+        "how":    "DeepSeek-chat 严格 prompt：列出每只种子的供应商/客户/同业/受益方",
+        "what":   "JSON：每个种子配 N 个邻居 ticker + 关系标签",
+        "store":  "不持久化",
+        "next":   "邻居关系交给 Tavily 共现验证，没在同篇新闻共现的丢弃",
+    },
+    "narrator": {
+        "source": "筛选器通过的候选股 + 当周相对同业表现 + Tavily 新闻摘要",
+        "how":    "DeepSeek-chat 模板填充模式：模型只写定性短语，数字由 Python 注入",
+        "what":   "每只股票一组 bull + bear 各 ≤30 字判断",
+        "store":  "不持久化",
+        "next":   "和数字一起拼成 /summary 卡片显示给用户",
+    },
 }
 
 
@@ -191,6 +240,76 @@ _RENDER: dict[str, Explanation] = {
         "store":  "不持久化",
         "next":   "通过 chat_message 推送；同时归因结果异步写入 ChromaDB RAG",
     },
+    "lateral_result": {
+        "source": "Proposer 提议 + Tavily 验证后通过的邻居列表",
+        "how":    "字符串模板：种子 ticker 一组 + 4 类邻居（供应商/客户/同业/受益方）",
+        "what":   "产业链卡片：每个种子下面挂通过验证的邻居 + 关系标签",
+        "store":  "不持久化",
+        "next":   "通过 chat_message 推送给用户",
+    },
+    "summary_card": {
+        "source": "FD 多端点（价格 / 财务 / 财报 / 内部人）+ Tavily 新闻摘要",
+        "how":    "字符串模板：把多维数据拼成五段式个股快照",
+        "what":   "个股综合卡：价格走势 + 关键财务 + 财报 surprise + 内部人 + 近期新闻",
+        "store":  "不持久化",
+        "next":   "通过 chat_message 推送给用户",
+    },
+    "holders_card": {
+        "source": "edgar.db 跨 10 位 manager 的当前持仓查询结果",
+        "how":    "Python 按市值排序持有方，未持有的也列出来对比",
+        "what":   "反查卡片：哪些 manager 持有该 ticker + 持仓规模/占比 + 已退出的 manager",
+        "store":  "不持久化",
+        "next":   "通过 chat_message 推送给用户",
+    },
+    "etf_snapshot": {
+        "source": "ARK CSV 当日持仓 + 与昨日的 etf_diff 结果",
+        "how":    "字符串模板：今日 Top N 持仓 + 24h 调仓变动",
+        "what":   "ETF 卡片：基金标识 / 快照日期 / Top N 持仓 / 单日调仓表",
+        "store":  "不持久化（来源数据已写入 etf.db）",
+        "next":   "通过 chat_message 推送给用户",
+    },
+    "portfolio_card": {
+        "source": "Alpaca get_account + get_all_positions 返回结果",
+        "how":    "字符串模板：账户头部 + 每只持仓一行",
+        "what":   "Alpaca 持仓卡：现金 / 组合价值 / 购买力 / 各只持仓盈亏",
+        "store":  "不持久化",
+        "next":   "通过 chat_message 推送给用户",
+    },
+    "pnl_card": {
+        "source": "Alpaca 账户 + 持仓快照",
+        "how":    "Python 计算当日开仓-现价收益 + 多空敞口",
+        "what":   "P&L 卡片：当日总盈亏 + 各持仓单独盈亏 + 多空敞口",
+        "store":  "不持久化",
+        "next":   "通过 chat_message 推送给用户",
+    },
+    "alerts_list": {
+        "source": "bot_state.db 的 alerts 表（未触发的提醒）",
+        "how":    "SQL SELECT WHERE fired_at IS NULL；按 ID 排序",
+        "what":   "提醒列表卡片：每条提醒 ID / ticker / 方向 / 目标价格",
+        "store":  "不持久化",
+        "next":   "通过 chat_message 推送给用户",
+    },
+    "watchlist_card": {
+        "source": "bot_state.db 的 watchlist 表",
+        "how":    "SQL SELECT，按添加时间排序",
+        "what":   "关注列表卡：每只 ticker + 添加日期 + 用户备注",
+        "store":  "不持久化",
+        "next":   "通过 chat_message 推送给用户",
+    },
+    "anomalies_list": {
+        "source": "archive.db 的最近异动推送记录（盘后 ② 异动监测的输出）",
+        "how":    "SQL SELECT 最近 N 天的 anomaly 类型事件，按时间倒序",
+        "what":   "近期异动列表：每条异动 ticker + 日期 + 简短 chip",
+        "store":  "不持久化",
+        "next":   "通过 chat_message 推送给用户",
+    },
+    "settings_card": {
+        "source": "MonitorConfig + DEFAULT_FILTERS + LATERAL_FILTERS 三组静态阈值",
+        "how":    "字符串模板把每组配置打印成易读的中文段落",
+        "what":   "只读设置卡：异动阈值 / 筛选阈值 / 产业链扩展阈值",
+        "store":  "不持久化（配置静态）",
+        "next":   "通过 chat_message 推送给用户",
+    },
 }
 
 
@@ -203,12 +322,47 @@ _DB_WRITE: dict[str, Explanation] = {
         "store":  "持久化到 data/edgar.db",
         "next":   "供 /holders 反查、周日 ④b backfill 校验、scheduler 推送去重",
     },
-    "anomaly_memory_remember": {
+    "save_snapshot": {
+        "source": "ARK CSV fetch_holdings 解析出的当日持仓",
+        "how":    "SQLite INSERT OR REPLACE 到 etf.db",
+        "what":   "etf_snapshots 表：（基金 + 日期 + ticker）+ 股数 + 市值 + 仓位百分比",
+        "store":  "持久化到 data/etf.db",
+        "next":   "下次同基金查询时，作为「昨日」基准供 etf_diff 对比",
+    },
+    "remember": {
         "source": "Anomaly 对象 + Generator 归因结果",
         "how":    "ChromaDB add()，先用 OpenAI text-embedding-3-small 把文本向量化",
         "what":   "异动事件 + 归因摘要（向量化嵌入，即把文本变成数字坐标，方便后续按相似度检索）",
         "store":  "持久化到 chroma/ 向量数据库",
         "next":   "未来用户问类似异动时，RAG 检索能召回历史归因做对照",
+    },
+    "alert_add": {
+        "source": "用户输入的 ticker + 方向 + 目标价格（已通过校验）",
+        "how":    "SQLite INSERT 到 bot_state.db 的 alerts 表",
+        "what":   "新建一条 alert：自增 ID / ticker / 方向 / 目标价格 / 创建时间",
+        "store":  "持久化到 data/bot_state.db",
+        "next":   "streamer 服务每分钟轮询时会看到这条新提醒",
+    },
+    "alert_remove": {
+        "source": "用户指定的 alert ID",
+        "how":    "SQLite DELETE FROM alerts WHERE id=?",
+        "what":   "删除该 ID 的提醒（如果不存在则 0 行受影响）",
+        "store":  "持久化到 data/bot_state.db",
+        "next":   "下次 streamer 轮询不再看到该提醒",
+    },
+    "watchlist_add": {
+        "source": "用户输入的 ticker（已通过校验）+ 可选备注",
+        "how":    "SQLite INSERT 到 bot_state.db 的 watchlist 表（重复添加会被忽略）",
+        "what":   "watchlist 表新增一行：ticker / 添加时间 / 备注",
+        "store":  "持久化到 data/bot_state.db",
+        "next":   "盘后 agent 推送时会优先关注 watchlist 里的 ticker",
+    },
+    "watchlist_remove": {
+        "source": "用户指定的 ticker",
+        "how":    "SQLite DELETE FROM watchlist WHERE ticker=?",
+        "what":   "删除该 ticker 的关注（如果不存在则 0 行受影响）",
+        "store":  "持久化到 data/bot_state.db",
+        "next":   "盘后 agent 不再特别推送该 ticker",
     },
     "archive_push": {
         "source": "已推送给用户的卡片完整文本 + 事件类型 + 时间戳",
@@ -220,7 +374,61 @@ _DB_WRITE: dict[str, Explanation] = {
 }
 
 
-# Per-responder explanations (module_enter events) keyed by responder function name.
+# db_read events keyed by table or function name (we accept both since the
+# emit site may carry either field). The hook layer doesn't auto-instrument
+# read paths; emits are placed manually in v2/bot/responders.py.
+_DB_READ: dict[str, Explanation] = {
+    "edgar.db": {
+        "source": "data/edgar.db 的 filings + positions 表",
+        "how":    "SQLite SELECT；遍历 10 位 manager 找该 ticker 的当前持仓",
+        "what":   "每个 manager 的当前持仓行（股数 / 市值 / 占比 / 季度）",
+        "store":  "只读（不写回）",
+        "next":   "按市值排序后送入 holders_card 渲染",
+    },
+    "etf.db": {
+        "source": "data/etf.db 的 etf_snapshots 表",
+        "how":    "SQLite SELECT 最近一天的快照（按日期倒序 LIMIT 1）",
+        "what":   "昨日完整持仓列表 + 快照日期，用作今日对比基准",
+        "store":  "只读",
+        "next":   "和今日 fetch_holdings 结果一起送入 compute_daily_changes()",
+    },
+    "bot_state.db": {
+        "source": "data/bot_state.db 的 watchlist / alerts / settings 表",
+        "how":    "SQLite SELECT，按用途单独一句 SQL",
+        "what":   "用户关注列表 / 未触发提醒 / 个性化配置",
+        "store":  "只读",
+        "next":   "送入对应卡片渲染器（watchlist_card / alerts_list / settings_card）",
+    },
+    "archive.db": {
+        "source": "data/archive.db 的事件推送日志",
+        "how":    "SQLite SELECT 最近 N 天 type='anomaly' 的记录",
+        "what":   "近期异动事件列表（ticker / 日期 / chip 摘要）",
+        "store":  "只读",
+        "next":   "送入 anomalies_list 卡片渲染",
+    },
+}
+
+
+# validate events keyed by `what` field
+_VALIDATE: dict[str, Explanation] = {
+    "ticker": {
+        "source": "用户输入的字符串",
+        "how":    "正则 + 长度判断：纯字母 + 长度 2-5",
+        "what":   "通过则标准化为大写 ticker；不通过返回友好错误",
+        "store":  "不持久化",
+        "next":   "通过的 ticker 进入后续 SQL 写入或外部 API 调用",
+    },
+    "price": {
+        "source": "用户输入的数字 / 方向字符串",
+        "how":    "Python 类型转换 + 范围检查（>0 + 方向 ∈ {above, below}）",
+        "what":   "标准化的浮点价格 + 方向枚举",
+        "store":  "不持久化",
+        "next":   "送入 bot_state.alert_add() 写到 alerts 表",
+    },
+}
+
+
+# Per-responder explanations (module_enter events) keyed by responder name.
 _MODULE: dict[str, Explanation] = {
     "_r_thirteen_f": {
         "source": "前一步 intent 分类的结果",
@@ -232,9 +440,107 @@ _MODULE: dict[str, Explanation] = {
     "_r_explain_move": {
         "source": "前一步 intent 分类的结果",
         "how":    "调用 v2.monitoring.attribute() 的轻量封装",
-        "what":   "整体流程：拉价格 → 检测异动 → 拉新闻 → Verifier 评级 → Generator 归因 → 写 RAG",
+        "what":   "整体流程：拉价格 → 拉新闻 → Generator 归因 → Verifier 评级 → 写 RAG → 拼卡",
         "store":  "归因结果持久化到 ChromaDB",
         "next":   "执行 6 步流程，最终通过 chat_message 推送异动卡",
+    },
+    "_r_chain": {
+        "source": "前一步 intent 分类的结果",
+        "how":    "调用 v2.lateral 的产业链横向扩展 pipeline",
+        "what":   "整体流程：DeepSeek 提议邻居 → Tavily 共现验证 → 阈值过滤 → 拼卡",
+        "store":  "不持久化",
+        "next":   "执行 4 步流程，最终通过 chat_message 推送产业链卡",
+    },
+    "_r_summary": {
+        "source": "前一步 intent 分类的结果",
+        "how":    "调用 v2.bot.responders.summary() 的轻量封装",
+        "what":   "整体流程：拉价格 + 财务 + 财报 + 内部人 + 新闻 → LLM 拼叙述",
+        "store":  "不持久化（read-only）",
+        "next":   "执行 6 步流程，最终通过 chat_message 推送综合卡",
+    },
+    "_r_holders_view": {
+        "source": "前一步 intent 分类的结果",
+        "how":    "调用 v2.bot.responders.holders() 的轻量封装",
+        "what":   "整体流程：遍历 10 位 manager 查 edgar.db → 排序 → 拼卡",
+        "store":  "不持久化（read-only，不连 EDGAR）",
+        "next":   "执行 3 步流程，最终通过 chat_message 推送反查卡",
+    },
+    "_r_etf_view": {
+        "source": "前一步 intent 分类的结果",
+        "how":    "调用 v2.bot.responders.etf_view() 的轻量封装",
+        "what":   "整体流程：拉 CSV → 跟昨日 diff → 写 etf.db → 拼卡",
+        "store":  "持久化今日快照到 etf.db",
+        "next":   "执行 4 步流程，最终通过 chat_message 推送 ETF 卡",
+    },
+    "_r_portfolio_view": {
+        "source": "前一步 intent 分类的结果",
+        "how":    "调用 v2.bot.responders.portfolio_view() 的轻量封装",
+        "what":   "整体流程：Alpaca get_account + get_all_positions → 拼卡",
+        "store":  "不持久化",
+        "next":   "执行 2 步流程，最终通过 chat_message 推送持仓卡",
+    },
+    "_r_pnl_view": {
+        "source": "前一步 intent 分类的结果",
+        "how":    "调用 v2.bot.responders.pnl_view() 的轻量封装",
+        "what":   "整体流程：Alpaca get_account + get_all_positions → 算 P&L → 拼卡",
+        "store":  "不持久化",
+        "next":   "执行 3 步流程，最终通过 chat_message 推送 P&L 卡",
+    },
+    "_r_alert_set": {
+        "source": "前一步 intent 分类的结果 + 用户输入的 ticker/价格/方向",
+        "how":    "调用 v2.bot.responders.alert_set() 的轻量封装",
+        "what":   "整体流程：校验输入 → INSERT 到 bot_state.db → 返回确认卡",
+        "store":  "持久化新提醒到 bot_state.db",
+        "next":   "执行 3 步流程，最终通过 chat_message 推送确认卡",
+    },
+    "_r_alert_list": {
+        "source": "前一步 intent 分类的结果",
+        "how":    "调用 v2.bot.responders.alert_list_view() 的轻量封装",
+        "what":   "整体流程：SELECT 未触发提醒 → 拼成列表卡",
+        "store":  "不持久化（read-only）",
+        "next":   "执行 2 步流程，最终通过 chat_message 推送提醒列表",
+    },
+    "_r_alert_remove": {
+        "source": "前一步 intent 分类的结果 + 用户指定的 alert ID",
+        "how":    "调用 v2.bot.responders.alert_remove_view() 的轻量封装",
+        "what":   "整体流程：DELETE 该 ID → 返回确认/错误卡",
+        "store":  "持久化删除到 bot_state.db",
+        "next":   "执行 2 步流程，最终通过 chat_message 推送结果",
+    },
+    "_r_watchlist_view": {
+        "source": "前一步 intent 分类的结果",
+        "how":    "调用 v2.bot.state.watchlist_list() 的轻量封装",
+        "what":   "整体流程：SELECT watchlist → 按时间排序 → 拼卡",
+        "store":  "不持久化（read-only）",
+        "next":   "执行 2 步流程，最终通过 chat_message 推送关注列表",
+    },
+    "_r_watchlist_add": {
+        "source": "前一步 intent 分类的结果 + 用户输入的 ticker",
+        "how":    "调用 v2.bot.state.watchlist_add() 的轻量封装",
+        "what":   "整体流程：校验 ticker → INSERT 到 watchlist → 返回确认卡",
+        "store":  "持久化新关注到 bot_state.db",
+        "next":   "执行 3 步流程，最终通过 chat_message 推送确认",
+    },
+    "_r_watchlist_remove": {
+        "source": "前一步 intent 分类的结果 + 用户指定的 ticker",
+        "how":    "调用 v2.bot.state.watchlist_remove() 的轻量封装",
+        "what":   "整体流程：DELETE FROM watchlist WHERE ticker=? → 返回结果",
+        "store":  "持久化删除到 bot_state.db",
+        "next":   "执行 2 步流程，最终通过 chat_message 推送结果",
+    },
+    "_r_settings": {
+        "source": "前一步 intent 分类的结果",
+        "how":    "调用 v2.bot.responders.settings_view() 的轻量封装",
+        "what":   "整体流程：读取静态配置常量 → 拼成只读设置卡",
+        "store":  "不持久化（配置不写）",
+        "next":   "执行 2 步流程，最终通过 chat_message 推送设置卡",
+    },
+    "_r_find_anomalies": {
+        "source": "前一步 intent 分类的结果",
+        "how":    "调用 v2.archive 的近期推送查询",
+        "what":   "整体流程：SELECT archive.db 近 N 天 anomaly 事件 → 拼成列表卡",
+        "store":  "不持久化（read-only）",
+        "next":   "执行 2 步流程，最终通过 chat_message 推送异动列表",
     },
 }
 
@@ -279,6 +585,10 @@ _LLM_PROMPT_FINGERPRINTS: list[tuple[str, str]] = [
     ("归因理由的因果链", "verifier"),
     ("股票异动归因分析师", "generator"),
     ("机构持仓分析师", "interpret_changes"),
+    # v2/lateral/discover.py — "你是一名资深科技股研究分析师。给定一组种子股票..."
+    ("种子股票", "proposer"),
+    # v2/screening/narrator.py — "你是一名资深科技股分析师。对每只股票给出 bull + bear..."
+    ("bull + bear", "narrator"),
 ]
 
 
@@ -317,6 +627,20 @@ def lookup(event: dict[str, Any]) -> Optional[Explanation]:
     if et == "db_write":
         fn = str(event.get("fn") or "")
         return _DB_WRITE.get(fn)
+    if et == "db_read":
+        # Prefer db label (covers the watchlist/alerts/settings family that
+        # share bot_state.db). Fall back to a table=... field if the emit
+        # site carries one.
+        db = str(event.get("db") or "")
+        if db and db in _DB_READ:
+            return _DB_READ[db]
+        table = str(event.get("table") or "")
+        if table and table in _DB_READ:
+            return _DB_READ[table]
+        return None
+    if et == "validate":
+        what = str(event.get("what") or "")
+        return _VALIDATE.get(what)
     if et == "module_enter":
         name = str(event.get("name") or "")
         return _MODULE.get(name)
