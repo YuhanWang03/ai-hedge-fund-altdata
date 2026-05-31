@@ -2,6 +2,61 @@ import type { TraceEvent as Ev } from '../../types'
 
 interface Props { event: Ev }
 
+// Row shape inside transform/detect_changes events.
+interface ChangeRow {
+  ticker: string
+  issuer: string
+  action: 'new' | 'exit' | 'increase' | 'decrease' | string
+  current_value: number
+  change_value: number
+}
+
+// Human-readable verbs + the chip color for each ChangeType.
+const ACTION_META: Record<string, { label: string; chip: string; sign: '+' | '-' | '' }> = {
+  new:      { label: '🟢 新进',   chip: 'bg-green-100 text-green-800 border-green-300',   sign: '+' },
+  increase: { label: '🟢 加仓',   chip: 'bg-green-100 text-green-800 border-green-300',   sign: '+' },
+  decrease: { label: '🟡 减仓',   chip: 'bg-yellow-100 text-yellow-900 border-yellow-300', sign: '-' },
+  exit:     { label: '🔴 清仓',   chip: 'bg-red-100 text-red-800 border-red-300',         sign: '-' },
+}
+
+function shortMoney(v: number): string {
+  const sign = v < 0 ? '-' : ''
+  const abs = Math.abs(v)
+  if (abs >= 1e9) return `${sign}$${(abs / 1e9).toFixed(2)}B`
+  if (abs >= 1e6) return `${sign}$${(abs / 1e6).toFixed(1)}M`
+  if (abs >= 1e3) return `${sign}$${(abs / 1e3).toFixed(1)}K`
+  return `${sign}$${abs.toFixed(0)}`
+}
+
+function ChangesTable({ changes }: { changes: ChangeRow[] }) {
+  return (
+    <div className="mt-2 border border-violet-200 rounded overflow-hidden">
+      <table className="w-full mono text-[11px] leading-tight">
+        <tbody>
+          {changes.map((c, i) => {
+            const meta = ACTION_META[c.action] ?? { label: c.action, chip: 'bg-ink-100 text-ink-700 border-ink-200', sign: '' as const }
+            return (
+              <tr key={`${c.ticker}_${i}`} className={i % 2 ? 'bg-violet-50/40' : 'bg-white/60'}>
+                <td className="px-2 py-1 font-medium text-ink-800 w-16 truncate">{c.ticker}</td>
+                <td className="px-2 py-1 text-ink-600 truncate">{c.issuer}</td>
+                <td className="px-2 py-1 w-20 text-right">
+                  <span className={`inline-block px-1.5 py-0.5 rounded border ${meta.chip}`}>
+                    {meta.label}
+                  </span>
+                </td>
+                <td className="px-2 py-1 w-20 text-right text-ink-800">{shortMoney(c.current_value)}</td>
+                <td className="px-2 py-1 w-20 text-right text-ink-600">
+                  {c.change_value !== 0 ? `${c.change_value > 0 ? '+' : ''}${shortMoney(c.change_value)}` : '—'}
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
 const MONEY_FIELD = /(?:_usd|value|cost|amount|spend|budget)/i
 
 function formatValue(v: unknown, key?: string): string {
@@ -150,8 +205,10 @@ export function TraceEvent({ event }: Props) {
   } else if (event.type === 'transform') {
     // Internal data transformation — CUSIP aggregation, change detection, etc.
     const op = String(event.op ?? '?')
-    // Build a compact "key: value" strip from every non-meta payload field.
-    const skip = new Set(['type', 'session_id', 'seq', 'ts_ms', 'op', 'replayed', 'cached_from', 'cached_at_ms'])
+    // detect_changes carries a `changes` array we render as a compact table.
+    const changes = Array.isArray(event.changes) ? (event.changes as ChangeRow[]) : null
+    // The flat scalar chips. Skip array-shaped payloads since we render them below.
+    const skip = new Set(['type', 'session_id', 'seq', 'ts_ms', 'op', 'replayed', 'cached_from', 'cached_at_ms', 'changes'])
     const fields = Object.entries(event).filter(([k]) => !skip.has(k))
     body = (
       <div className="mono text-xs px-3 py-2 rounded border bg-violet-50 border-violet-200 text-violet-900">
@@ -163,6 +220,7 @@ export function TraceEvent({ event }: Props) {
             </span>
           ))}
         </div>
+        {changes && changes.length > 0 && <ChangesTable changes={changes} />}
       </div>
     )
   } else if (event.type === 'render') {

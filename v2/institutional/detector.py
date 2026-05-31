@@ -92,6 +92,16 @@ def detect_changes(
         significant_changes=len(changes),
         manager=manager_name,
         quarter=quarter,
+        changes=[
+            {
+                "ticker": c.ticker or (c.cusip or "")[:8],
+                "issuer": (c.issuer_name or "")[:40],
+                "action": c.change_type,  # "new" | "exit" | "increase" | "decrease"
+                "current_value": c.current_value,
+                "change_value": c.current_value - c.prev_value,
+            }
+            for c in changes
+        ],
     )
     return changes
 
