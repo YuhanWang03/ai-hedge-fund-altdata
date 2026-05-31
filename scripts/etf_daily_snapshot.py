@@ -4,8 +4,9 @@ For each ARK fund, fetches the latest CSV and saves to data/etf.db.
 Builds a cumulative time series that the bot's /etf command uses to
 compute 24h rebalances.
 
-Telegram-quiet by design: pure data ingestion. Significant-rebalance
-alerts could be layered on top later.
+Telegram-quiet by design: pure data ingestion. The dashboard auto-push
+feed picks it up via a direct archive write (no Telegram message),
+so the trace still appears in the dashboard.
 
 Triggered by the scheduler Mon-Fri 17:00 ET — ARK posts daily files
 around 16:00 ET, giving us an hour of buffer.
@@ -13,12 +14,16 @@ around 16:00 ET, giving us an hour of buffer.
 
 from __future__ import annotations
 
+import json
 import logging
 import sys
+from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 
+from v2.archive import Archive
 from v2.etf import SUPPORTED_FUNDS, fetch_holdings, save_snapshot
+from v2.observability import capture_trace, install_all
 from v2.reporting import notify_on_error
 
 logging.basicConfig(
@@ -31,30 +36,55 @@ logger = logging.getLogger(__name__)
 @notify_on_error("etf-daily")
 def main() -> int:
     load_dotenv()
+    install_all()
 
     total_funds = 0
     total_rows = 0
+    fetched: list[str] = []
+    last_snap_date = ""
 
-    for symbol in SUPPORTED_FUNDS:
-        logger.info("Fetching %s ...", symbol)
-        try:
-            holdings, snap_date = fetch_holdings(symbol)
-        except Exception as exc:
-            logger.warning("  %s fetch failed: %s", symbol, exc)
-            continue
+    # Capture the full 4-fund pipeline as one trace so the dashboard feed
+    # can replay every fetch + save snapshot.
+    with capture_trace() as trace:
+        for symbol in SUPPORTED_FUNDS:
+            logger.info("Fetching %s ...", symbol)
+            try:
+                holdings, snap_date = fetch_holdings(symbol)
+            except Exception as exc:
+                logger.warning("  %s fetch failed: %s", symbol, exc)
+                continue
 
-        if not holdings:
-            logger.warning("  %s returned no holdings", symbol)
-            continue
+            if not holdings:
+                logger.warning("  %s returned no holdings", symbol)
+                continue
 
-        try:
-            n = save_snapshot(symbol, snap_date, holdings)
-            logger.info("  %s · %s · %d rows saved", symbol, snap_date, n)
-            total_funds += 1
-            total_rows += n
-        except Exception as exc:
-            logger.warning("  %s save failed: %s", symbol, exc)
-            continue
+            try:
+                n = save_snapshot(symbol, snap_date, holdings)
+                logger.info("  %s · %s · %d rows saved", symbol, snap_date, n)
+                total_funds += 1
+                total_rows += n
+                fetched.append(symbol)
+                last_snap_date = snap_date
+            except Exception as exc:
+                logger.warning("  %s save failed: %s", symbol, exc)
+                continue
+
+    # Telegram-quiet archive write so the dashboard feed sees this run.
+    if fetched:
+        body = (
+            f"<b>📈 ARK 每日持仓 · {last_snap_date}</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"{' · '.join(fetched)} 当日 snapshot 已入库 · "
+            f"{total_rows:,} position-rows"
+        )
+        events = getattr(trace, "events", []) or []
+        Archive(agent="etf").save_text(
+            body,
+            tickers=fetched,
+            trace_json=json.dumps(events, ensure_ascii=False) if events else None,
+            title="ARK 每日持仓",
+            expires_at=(datetime.now(timezone.utc) + timedelta(days=2)).isoformat(),
+        )
 
     logger.info(
         "Done. %d funds · %d position-rows saved.",

@@ -17,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import SETTINGS
 from app.db.store import open_store_factory
-from app.routes import history, meta, query, trace
+from app.routes import auto_push, history, meta, query, trace
 from app.runner.session import SessionManager
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -73,3 +73,7 @@ app.include_router(query.router, prefix="/api", tags=["query"])
 app.include_router(trace.router, tags=["trace"])
 app.include_router(history.router, prefix="/api", tags=["history"])
 app.include_router(meta.router, prefix="/api", tags=["meta"])
+# Auto-push feed: REST routes under /api, SSE under /sse (the nginx
+# config's /sse/ block disables buffering so the stream isn't held).
+app.include_router(auto_push.router, prefix="/api", tags=["auto_push"])
+app.include_router(auto_push.sse_router, tags=["auto_push_sse"])

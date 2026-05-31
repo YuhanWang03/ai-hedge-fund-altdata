@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 
 from v2.archive import Archive
 from v2.institutional import run_institutional_pipeline
+from v2.observability import capture_trace, install_all
 from v2.reporting import (
     TelegramNotifier,
     format_institutional_messages,
@@ -27,24 +28,47 @@ load_dotenv()
 
 @notify_on_error("Institutional 13F")
 def main() -> None:
+    install_all()
     print("Running institutional 13F pipeline...")
-    report = run_institutional_pipeline(universe=set(TECH_30))
 
-    print(
-        f"\nDone. {len(report.new_filings)} new filings · "
-        f"{len(report.changes)} significant changes"
-    )
+    # Capture the entire pipeline trace under one Trace object. The
+    # underlying run touches every manager in a tight loop, so events for
+    # different managers are interleaved — we'd need a deeper refactor to
+    # split them cleanly. For dashboard purposes, the summary card carries
+    # the full trace; per-manager cards carry titles only.
+    with capture_trace() as trace:
+        report = run_institutional_pipeline(universe=set(TECH_30))
 
-    if not report.new_filings:
-        print("No new 13F filings since last run — staying silent.")
-        return
+        print(
+            f"\nDone. {len(report.new_filings)} new filings · "
+            f"{len(report.changes)} significant changes"
+        )
 
-    messages = format_institutional_messages(report)
+        if not report.new_filings:
+            print("No new 13F filings since last run — staying silent.")
+            return
+
+        messages = format_institutional_messages(report)
+
     print(f"Pushing {len(messages)} messages to Telegram...")
+
+    # Manager name for each per-manager message (preserves new_filings
+    # order — same order format_institutional_messages produced).
+    manager_names = [f.manager_name for f in report.new_filings]
 
     notifier = TelegramNotifier(archive=Archive(agent="institutional"))
     for i, msg in enumerate(messages, 1):
-        notifier.send_text(msg)
+        # First message is the summary header; the rest are per-manager.
+        is_summary = i == 1
+        if is_summary:
+            title = f"13F 总览 · {len(report.new_filings)} managers"
+            attached_trace = trace
+        else:
+            manager = manager_names[i - 2] if i - 2 < len(manager_names) else "?"
+            title = f"13F · {manager}"
+            attached_trace = None  # avoid duplicating ~30KB per manager
+
+        notifier.send_text(msg, trace=attached_trace, title=title)
         print(f"  [{i}/{len(messages)}] sent")
         if i < len(messages):
             time.sleep(0.3)   # gentle pacing to avoid rate limit spikes

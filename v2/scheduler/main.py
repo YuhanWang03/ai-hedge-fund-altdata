@@ -15,6 +15,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from v2.scheduler.jobs import (
     anomaly_monitor_job,
+    archive_cleanup_job,
     daily_screen_job,
     etf_daily_job,
     institutional_backfill_job,
@@ -82,6 +83,17 @@ def build_scheduler() -> BlockingScheduler:
         CronTrigger(hour=17, minute=0, day_of_week="mon-fri"),
         id="etf_daily",
         name="⑤ ETF Daily Snapshot (Mon-Fri)",
+        misfire_grace_time=3600,
+        coalesce=True,
+    )
+
+    # ⑥ Archive cleanup — sweep dashboard-feed rows past their 2-day TTL.
+    # 02:00 UTC chosen to avoid the 17:00–18:30 ET push window.
+    scheduler.add_job(
+        archive_cleanup_job,
+        CronTrigger(hour=2, minute=0),
+        id="archive_cleanup",
+        name="⑥ Archive Cleanup",
         misfire_grace_time=3600,
         coalesce=True,
     )

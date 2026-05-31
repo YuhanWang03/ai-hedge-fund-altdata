@@ -55,15 +55,19 @@ async def resolve_caller(
     request: Request,
     x_owner_token: str | None = Header(default=None, alias="X-Owner-Token"),
 ) -> Caller:
-    """FastAPI dependency. Identifies the caller; does not enforce limits."""
+    """FastAPI dependency. Identifies the caller; does not enforce limits.
+
+    Token sources (first hit wins):
+        1. X-Owner-Token header  (preferred, used by all REST calls)
+        2. ?token= query parameter  (SSE fallback — EventSource can't
+           set custom headers in the browser)
+    """
     ip = _client_ip(request)
-    if (
-        SETTINGS.owner_token
-        and x_owner_token is not None
-        and x_owner_token == SETTINGS.owner_token
-    ):
+    token = x_owner_token or request.query_params.get("token")
+
+    if SETTINGS.owner_token and token is not None and token == SETTINGS.owner_token:
         return Caller(kind="owner", ip=ip)
-    if x_owner_token is not None and x_owner_token != SETTINGS.owner_token:
+    if token is not None and token != SETTINGS.owner_token:
         # Wrong token presented — treat as a misconfigured owner attempt,
         # not silent guest fallback, so the user notices.
         raise HTTPException(status_code=401, detail="invalid_owner_token")

@@ -66,3 +66,31 @@ def institutional_backfill_job() -> None:
 
 def etf_daily_job() -> None:
     _run("etf_daily_snapshot.py")
+
+
+def archive_cleanup_job() -> None:
+    """Daily sweep — remove archive rows past their expires_at watermark.
+
+    The dashboard auto-push feed retains 2 calendar days of pushes (set by
+    TelegramNotifier when it writes the row). Without this sweep the
+    archive grows unbounded. Runs at 02:00 UTC so we never collide with
+    the 17:00–18:30 ET cron block.
+    """
+    import sqlite3
+    from datetime import datetime, timezone
+    db = _PROJECT_ROOT / "data" / "archive.db"
+    if not db.exists():
+        logger.info("archive_cleanup: no archive.db yet, skipping")
+        return
+    now_iso = datetime.now(timezone.utc).isoformat()
+    conn = sqlite3.connect(str(db), timeout=10.0)
+    try:
+        cur = conn.execute(
+            "DELETE FROM pushes WHERE expires_at IS NOT NULL AND expires_at < ?",
+            (now_iso,),
+        )
+        conn.commit()
+        deleted = cur.rowcount
+    finally:
+        conn.close()
+    logger.info("archive_cleanup: deleted %d expired rows", deleted)
