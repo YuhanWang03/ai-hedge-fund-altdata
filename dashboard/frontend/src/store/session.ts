@@ -4,10 +4,12 @@ import type { ChatMessage, TraceEvent } from '../types'
 interface SessionState {
   // Currently displayed session (most recent).
   currentSessionId: string | null
+  currentIntent: string | null
+  currentCached: boolean
   events: TraceEvent[]
   chat: ChatMessage[]
 
-  startSession: (id: string, userText: string) => void
+  startSession: (id: string, userText: string, intent: string | null, cached: boolean) => void
   pushEvent: (ev: TraceEvent) => void
   pushChat: (msg: ChatMessage) => void
   markChatCached: (sessionId: string, cachedAtMs: number) => void
@@ -16,12 +18,16 @@ interface SessionState {
 
 export const useSession = create<SessionState>((set) => ({
   currentSessionId: null,
+  currentIntent: null,
+  currentCached: false,
   events: [],
   chat: [],
 
-  startSession: (id, userText) =>
+  startSession: (id, userText, intent, cached) =>
     set((s) => ({
       currentSessionId: id,
+      currentIntent: intent,
+      currentCached: cached,
       // Keep prior events as history? No — wipe trace per query.
       events: [],
       chat: [
@@ -73,5 +79,11 @@ export const useSession = create<SessionState>((set) => ({
       ),
     })),
 
-  reset: () => set({ currentSessionId: null, events: [], chat: [] }),
+  reset: () => set({
+    currentSessionId: null,
+    currentIntent: null,
+    currentCached: false,
+    events: [],
+    chat: [],
+  }),
 }))

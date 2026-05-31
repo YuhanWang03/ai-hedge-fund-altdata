@@ -294,6 +294,11 @@ def _llm_role(event: dict[str, Any]) -> Optional[str]:
     return None
 
 
+# Public alias — the executor attaches this to llm_call events so the
+# frontend's pipeline mapper can read `event.role` directly.
+llm_role = _llm_role
+
+
 def lookup(event: dict[str, Any]) -> Optional[Explanation]:
     """Return the explanation for one event, or None if we don't have one."""
     et = event.get("type")
@@ -325,4 +330,4 @@ def lookup(event: dict[str, Any]) -> Optional[Explanation]:
     return None
 
 
-__all__ = ["Explanation", "lookup"]
+__all__ = ["Explanation", "lookup", "llm_role"]

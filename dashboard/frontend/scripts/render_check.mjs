@@ -10,6 +10,7 @@
 import { renderToString } from 'react-dom/server'
 import React from 'react'
 import { TraceEvent } from '../src/components/TracePanel/TraceEvent.tsx'
+import { PipelineBar } from '../src/components/PipelineBar.tsx'
 
 const cases = [
   {
@@ -158,7 +159,96 @@ const cases = [
   },
 ]
 
+const pipelineCases = [
+  {
+    name: 'pipeline_bar_unknown_intent_hidden',
+    props: { intent: 'unknown', events: [] },
+    expect: [],          // component returns null
+    expectExactEmpty: true,
+  },
+  {
+    name: 'pipeline_bar_missing_intent_hidden',
+    props: { intent: '', events: [] },
+    expectExactEmpty: true,
+  },
+  {
+    name: 'pipeline_bar_thirteen_f_progressive',
+    props: {
+      intent: 'thirteen_f',
+      events: [
+        { type: 'session_start',     session_id: 's', seq: 1, ts_ms: 0 },
+        { type: 'llm_call',          session_id: 's', seq: 2, ts_ms: 0, role: 'intent_classifier', prompt_preview: '' },
+        { type: 'intent_classified', session_id: 's', seq: 3, ts_ms: 0, intent: 'thirteen_f' },
+        { type: 'api_call',          session_id: 's', seq: 4, ts_ms: 0, provider: 'edgar', endpoint: 'Company.get_filings' },
+      ],
+    },
+    // All 8 labels appear; emerald-500 for done, blue-500+animate-pulse for active.
+    expect: [
+      '输入', '意图', 'EDGAR', '聚合', '对比', '解读', '卡片', '回复',
+      'bg-emerald-500',   // at least one done pill
+      'bg-blue-500',      // the next-to-fire (aggregate) is active
+      'animate-pulse',    // active pulses
+    ],
+    expectAbsent: [
+      'Replay',           // not a cached run
+    ],
+  },
+  {
+    name: 'pipeline_bar_explain_move_full_done',
+    props: {
+      intent: 'explain_move',
+      events: [
+        { type: 'session_start',     session_id: 's', seq: 1,  ts_ms: 0 },
+        { type: 'intent_classified', session_id: 's', seq: 2,  ts_ms: 0, intent: 'explain_move' },
+        { type: 'api_call',          session_id: 's', seq: 3,  ts_ms: 0, provider: 'fd', endpoint: 'CachedFDClient.get_prices' },
+        { type: 'api_call',          session_id: 's', seq: 4,  ts_ms: 0, provider: 'fd', endpoint: 'CachedFDClient.get_insider_trades' },
+        { type: 'api_call',          session_id: 's', seq: 5,  ts_ms: 0, provider: 'tavily', endpoint: 'search' },
+        { type: 'llm_call',          session_id: 's', seq: 6,  ts_ms: 0, role: 'verifier' },
+        { type: 'llm_call',          session_id: 's', seq: 7,  ts_ms: 0, role: 'generator' },
+        { type: 'db_write',          session_id: 's', seq: 8,  ts_ms: 0, fn: 'anomaly_memory_remember' },
+        { type: 'render',            session_id: 's', seq: 9,  ts_ms: 0, card: 'anomaly_card' },
+        { type: 'chat_message',      session_id: 's', seq: 10, ts_ms: 0, text: 'done' },
+        { type: 'session_end',       session_id: 's', seq: 11, ts_ms: 0 },
+      ],
+    },
+    expect: ['输入', '行情', '新闻', '归因', '卡片', '回复', 'bg-emerald-500'],
+    // After session_end, no pill should be marked active.
+    expectAbsent: ['animate-pulse', 'bg-blue-500'],
+  },
+  {
+    name: 'pipeline_bar_cached_replay',
+    props: { intent: 'etf_view', events: [], cached: true },
+    expect: ['输入', '意图', 'ARK', '对比', '卡片', '回复', 'bg-emerald-500', 'Replay'],
+    expectAbsent: ['animate-pulse', 'bg-blue-500'],
+  },
+]
+
 let failures = 0
+for (const c of pipelineCases) {
+  const html = renderToString(React.createElement(PipelineBar, c.props))
+  if (c.expectExactEmpty) {
+    if (html === '' || html === '<!-- -->' || html === null) {
+      console.log(`✓ ${c.name}`)
+    } else {
+      failures++
+      console.log(`✗ ${c.name}`)
+      console.log(`    expected empty render, got: ${html}`)
+    }
+    continue
+  }
+  const missing = (c.expect ?? []).filter((n) => !html.includes(n))
+  const unwanted = (c.expectAbsent ?? []).filter((n) => html.includes(n))
+  if (missing.length === 0 && unwanted.length === 0) {
+    console.log(`✓ ${c.name}`)
+  } else {
+    failures++
+    console.log(`✗ ${c.name}`)
+    if (missing.length) console.log(`    missing: ${missing.map((m) => JSON.stringify(m)).join(', ')}`)
+    if (unwanted.length) console.log(`    must-not-contain but found: ${unwanted.map((m) => JSON.stringify(m)).join(', ')}`)
+    console.log(`    html: ${html.slice(0, 800)}…`)
+  }
+}
+
 for (const c of cases) {
   const html = renderToString(React.createElement(TraceEvent, { event: c.event }))
   const missing = c.expect.filter((needle) => !html.includes(needle))
@@ -174,8 +264,9 @@ for (const c of cases) {
   }
 }
 
+const totalChecks = cases.length + pipelineCases.length
 if (failures > 0) {
   console.error(`\n${failures} render check(s) failed.`)
   process.exit(1)
 }
-console.log(`\nAll ${cases.length} render checks passed.`)
+console.log(`\nAll ${totalChecks} render checks passed.`)

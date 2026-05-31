@@ -1,9 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
+import { PipelineBar } from '../PipelineBar'
 import { useSession } from '../../store/session'
 import { TraceEvent } from './TraceEvent'
 
 export function TracePanel() {
   const events = useSession((s) => s.events)
+  const intent = useSession((s) => s.currentIntent)
+  const cached = useSession((s) => s.currentCached)
   const containerRef = useRef<HTMLDivElement>(null)
 
   // Global "expand all explanations" state. `forceOpen=null` means each
@@ -78,6 +81,13 @@ export function TracePanel() {
           </div>
         </div>
       </div>
+
+      {/* Pipeline progress (sticky beneath the header) */}
+      {intent && (
+        <div className="sticky top-0 z-10 bg-white border-b border-slate-200">
+          <PipelineBar intent={intent} events={events} cached={cached} />
+        </div>
+      )}
 
       {/* Stream */}
       <div ref={containerRef} className="flex-1 overflow-y-auto px-5 py-4 space-y-12">
