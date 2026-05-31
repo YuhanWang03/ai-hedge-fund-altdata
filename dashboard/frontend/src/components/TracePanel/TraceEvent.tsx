@@ -157,7 +157,7 @@ export function TraceEvent({ event }: Props) {
       <div className="mono text-xs px-3 py-2 rounded border bg-violet-50 border-violet-200 text-violet-900">
         <div className="font-medium">{op}</div>
         <div className="text-ink-700 mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5">
-          {fields.map(([k, v]) => (
+          {fields.length === 0 ? <span className="text-ink-400">(no fields)</span> : fields.map(([k, v]) => (
             <span key={k}>
               {k}: <span className="text-ink-500">{formatValue(v, k)}</span>
             </span>
@@ -173,7 +173,7 @@ export function TraceEvent({ event }: Props) {
       <div className="mono text-xs px-3 py-2 rounded border bg-teal-50 border-teal-200 text-teal-900">
         <div className="font-medium">{card}</div>
         <div className="text-ink-700 mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5">
-          {fields.map(([k, v]) => (
+          {fields.length === 0 ? <span className="text-ink-400">(no fields)</span> : fields.map(([k, v]) => (
             <span key={k}>
               {k}: <span className="text-ink-500">{formatValue(v, k)}</span>
             </span>

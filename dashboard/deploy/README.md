@@ -54,15 +54,30 @@ curl http://127.0.0.1:8001/api/health
 
 ## 2. Frontend
 
-Build static bundle locally OR on the VPS:
+Build static bundle locally OR on the VPS. Vite content-hashes JS/CSS
+filenames so cache busting is automatic — **as long as `index.html`
+itself isn't being served stale**. The wipe-and-replace flow:
 
 ```bash
 cd /root/hedge-fund/dashboard/frontend
 npm install
-npm run build
+rm -rf dist node_modules/.vite          # nuke any prior dist + Vite cache
+npm run build                            # → dist/assets/index-<hash>.js
+npx tsx scripts/render_check.mjs         # optional: SSR-asserts that
+                                         # transform / render bodies have
+                                         # chips, not just the type label
+sudo rm -rf /var/www/dashboard           # wipe stale assets
 sudo mkdir -p /var/www/dashboard
 sudo cp -r dist/* /var/www/dashboard/
+sudo systemctl reload nginx              # in case nginx cached index.html
 ```
+
+After redeploying, **hard-refresh** the browser (Cmd-Shift-R / Ctrl-F5)
+or open DevTools → Network → "Disable cache" — modern browsers usually
+honor the new content hash, but a sticky service worker or aggressive
+proxy can serve the old `index-*.js`. The render_check.mjs script gives
+you ground truth before you touch nginx: if it passes, the bundle
+itself is correct.
 
 ## 3. nginx
 
