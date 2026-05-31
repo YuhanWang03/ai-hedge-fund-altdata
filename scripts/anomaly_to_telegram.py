@@ -19,6 +19,7 @@ from v2.archive import Archive
 from v2.data import CachedFDClient
 from v2.memory import AnomalyMemory
 from v2.monitoring import DEFAULT_CONFIG, attribute, run_monitoring
+from v2.observability import capture_trace, install_all
 from v2.reporting import (
     TelegramNotifier,
     format_anomaly_alert,
@@ -32,6 +33,7 @@ load_dotenv()
 
 @notify_on_error("Anomaly Monitor")
 def main() -> None:
+    install_all()
     print(f"Monitoring {len(TECH_30)} tickers...")
     # Keep FD context open through attribution so we can fetch company names
     # for the entity-filter step.
@@ -58,12 +60,19 @@ def main() -> None:
         notifier = TelegramNotifier(archive=Archive(agent="anomaly"))
         for anomaly in anomalies:
             print(f"  Attributing {anomaly.ticker}...")
-            attribute(anomaly, fd_client=fd, memory=memory)
-            chart = render_price_sparkline(
-                anomaly.recent_prices,
-                title=f"{anomaly.ticker} · 最近 {len(anomaly.recent_prices)} 日",
+            with capture_trace() as trace:
+                attribute(anomaly, fd_client=fd, memory=memory)
+                chart = render_price_sparkline(
+                    anomaly.recent_prices,
+                    title=f"{anomaly.ticker} · 最近 {len(anomaly.recent_prices)} 日",
+                )
+                caption = format_anomaly_alert(anomaly)
+            notifier.send_photo(
+                chart, caption=caption,
+                trace=trace,
+                title=f"异动 · {anomaly.ticker}",
+                tickers=[anomaly.ticker],
             )
-            notifier.send_photo(chart, caption=format_anomaly_alert(anomaly))
             print(
                 f"    pushed ({len(anomaly.reasons)} reasons, "
                 f"{len(anomaly.next_steps)} next-steps, "

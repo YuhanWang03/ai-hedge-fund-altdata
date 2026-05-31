@@ -1,129 +1,211 @@
-// Read-only feed of recent automated pushes (scheduler + streamer agents).
-// Phase 1: hard-coded mock data, no backend wiring. Phase 2 will replace
-// MOCK_PUSHES with a fetch from a new /api/pushes endpoint and the
-// "查看完整 Trace" button will navigate to a replay view.
+// Read-only feed of recent automated pushes. Fetches /api/recent_pushes
+// on mount, subscribes to /sse/auto_push for live updates, and on card
+// click loads the full trace into the session store so TracePanel +
+// ChatPanel both reflect the selected archive row.
 
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import {
+  fetchPushDetail,
+  fetchRecentPushes,
+  openAutoPushStream,
+  type PushSummary,
+} from '../api/auto_push'
+import { useSession } from '../store/session'
+import type { TraceEvent } from '../types'
 
-interface PushRecord {
-  id: number
-  agent: string
-  icon: string
-  title: string
-  timestamp: string  // already formatted as "YYYY-MM-DD HH:MM ET"
-  body: string
+// Agent name (set by each scheduler script when constructing Archive) →
+// the intent ID the dashboard's PipelineBar understands. Anything not in
+// the map falls back to null, which makes the pipeline bar disappear (a
+// safe default — the trace still renders).
+const AGENT_TO_INTENT: Record<string, string> = {
+  anomaly:       'explain_move',
+  institutional: 'thirteen_f',
+  lateral:       'chain',
+  etf:           'etf_view',
+  screen:        'summary',
 }
 
-const MOCK_PUSHES: PushRecord[] = [
-  {
-    id: 1,
-    agent: 'anomaly',
-    icon: '⚡',
-    title: '盘中异动 · IBM',
-    timestamp: '2026-05-29 10:15 ET',
-    body: '📈 现价 $297.97  +7.45%\n📊 成交量 28.4M · 节奏 3.6× · 已交易 11%\n★ 逆势上涨（XLK +0.40%）',
-  },
-  {
-    id: 2,
-    agent: 'institutional',
-    icon: '🏛',
-    title: 'Berkshire 13F · 2026-Q1',
-    timestamp: '2026-05-29 18:00 ET',
-    body: '新进 DAL $2.6B · 大幅加仓 GOOGL → 5.9%\n清仓 V / MA / DPZ / UNH',
-  },
-  {
-    id: 3,
-    agent: 'screen',
-    icon: '📋',
-    title: '科技股筛选 · 7 candidates',
-    timestamp: '2026-05-29 17:30 ET',
-    body: 'NVDA / META / GOOGL / AMD / AVGO / CRWD / PANW 通过筛选',
-  },
-  {
-    id: 4,
-    agent: 'etf',
-    icon: '📈',
-    title: 'ARK 每日持仓',
-    timestamp: '2026-05-29 17:00 ET',
-    body: 'ARKK / ARKW / ARKG / ARKF 当日 snapshot 已入库',
-  },
-  {
-    id: 5,
-    agent: 'lateral',
-    icon: '🕸',
-    title: '产业链横向扩展 · AMD',
-    timestamp: '2026-05-29 18:00 ET',
-    body: 'Tavily 验证通过 4 个邻居：CRWD / NET / DDOG / PANW',
-  },
-  {
-    id: 6,
-    agent: 'anomaly',
-    icon: '⚡',
-    title: '盘中异动 · CRM',
-    timestamp: '2026-05-29 14:32 ET',
-    body: '📈 +6.04%  节奏 2.6×  对比 XLK +5.13pp ★ 逆势',
-  },
-]
+// Visual icon per agent, falls back to 🔔.
+const AGENT_ICON: Record<string, string> = {
+  anomaly:       '⚡',
+  institutional: '🏛',
+  lateral:       '🕸',
+  etf:           '📈',
+  screen:        '📋',
+  intraday:      '⚡',
+}
 
-// Sort newest first. Timestamp strings sort lexicographically because
-// they're "YYYY-MM-DD HH:MM ET".
-const SORTED_PUSHES = [...MOCK_PUSHES].sort((a, b) => b.timestamp.localeCompare(a.timestamp))
+
+function formatTs(ts: string): string {
+  // ISO 8601 → "MM-DD HH:MM UTC" for compactness in the card header.
+  try {
+    const d = new Date(ts)
+    if (isNaN(d.getTime())) return ts
+    const pad = (n: number) => String(n).padStart(2, '0')
+    return (
+      `${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ` +
+      `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())} UTC`
+    )
+  } catch {
+    return ts
+  }
+}
 
 
 export function AutoPushPanel() {
-  const [toast, setToast] = useState<string | null>(null)
+  const [pushes, setPushes] = useState<PushSummary[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [selectedId, setSelectedId] = useState<number | null>(null)
+  const [loadingTrace, setLoadingTrace] = useState(false)
+  const loadPush = useSession((s) => s.loadPush)
+  const containerRef = useRef<HTMLDivElement>(null)
 
-  const showToast = (msg: string) => {
-    setToast(msg)
-    window.setTimeout(() => setToast(null), 2400)
+  // Initial backfill + live SSE subscription.
+  useEffect(() => {
+    let cancelled = false
+    fetchRecentPushes(2)
+      .then((rows) => {
+        if (!cancelled) {
+          setPushes(rows)
+          setLoading(false)
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setError(err.message ?? 'failed to load recent pushes')
+          setLoading(false)
+        }
+      })
+
+    const close = openAutoPushStream(
+      (row) => {
+        setPushes((prev) => {
+          if (prev.some((p) => p.id === row.id)) return prev
+          return [row, ...prev]
+        })
+      },
+      () => {
+        /* stream closed — handled by browser auto-reconnect */
+      },
+    )
+    return () => {
+      cancelled = true
+      close()
+    }
+  }, [])
+
+  const onCardClick = async (p: PushSummary) => {
+    if (loadingTrace) return
+    setSelectedId(p.id)
+    if (!p.has_trace) {
+      // Still load the card text so the chat panel renders it, even if
+      // there's no trace to replay.
+      try {
+        setLoadingTrace(true)
+        const detail = await fetchPushDetail(p.id)
+        loadPush({
+          sessionId: `push_${p.id}`,
+          intent: AGENT_TO_INTENT[p.agent] ?? null,
+          label: detail.push.title ?? p.title ?? `${p.agent} push`,
+          events: [],
+          replyText: detail.push.text_html,
+          ts_ms: Date.parse(p.ts) || Date.now(),
+        })
+      } catch (err) {
+        setError(`failed to load push ${p.id}: ${(err as Error).message}`)
+      } finally {
+        setLoadingTrace(false)
+      }
+      return
+    }
+    try {
+      setLoadingTrace(true)
+      const detail = await fetchPushDetail(p.id)
+      loadPush({
+        sessionId: `push_${p.id}`,
+        intent: AGENT_TO_INTENT[p.agent] ?? null,
+        label: detail.push.title ?? p.title ?? `${p.agent} push`,
+        events: detail.events as TraceEvent[],
+        replyText: detail.push.text_html,
+        ts_ms: Date.parse(p.ts) || Date.now(),
+      })
+    } catch (err) {
+      setError(`failed to load trace for push ${p.id}: ${(err as Error).message}`)
+    } finally {
+      setLoadingTrace(false)
+    }
   }
+
+  const cards = pushes
+  const headerText = loading
+    ? '📡 加载中…'
+    : `📡 最近 ${cards.length} 条推送（过去 2 天） · 每日 02:00 UTC 清理`
 
   return (
     <div className="flex-1 flex flex-col bg-white min-h-0">
       <div className="px-4 py-2 border-b border-slate-100 bg-slate-50">
-        <div className="text-[11px] text-slate-500">
-          📡 最近 2 个交易日推送 · 数据每日 0:00 UTC 清理
-        </div>
+        <div className="text-[11px] text-slate-500">{headerText}</div>
       </div>
 
-      <div className="flex-1 overflow-y-auto px-3 py-3 space-y-3">
-        {SORTED_PUSHES.length === 0 && (
-          <div className="text-slate-400 text-sm text-center mt-12">暂无推送</div>
+      <div ref={containerRef} className="flex-1 overflow-y-auto px-3 py-3 space-y-3">
+        {error && (
+          <div className="text-xs px-3 py-2 rounded bg-amber-50 text-amber-700 border border-amber-200">
+            ⚠️ {error}
+          </div>
         )}
-        {SORTED_PUSHES.map((p) => (
-          <article
-            key={p.id}
-            className="bg-white border border-slate-200 rounded-lg p-4 space-y-3 shadow-sm"
-            data-push-id={p.id}
-            data-agent={p.agent}
-          >
-            <header className="flex items-baseline justify-between gap-2">
-              <h3 className="text-sm font-medium text-ink-800">
-                <span className="mr-1.5">{p.icon}</span>
-                {p.title}
-              </h3>
-              <span className="text-[11px] text-slate-500 mono shrink-0">{p.timestamp}</span>
-            </header>
-            <div className="border-t border-slate-100" />
-            <div className="text-[13px] text-slate-700 whitespace-pre-wrap leading-relaxed">
-              {p.body}
-            </div>
-            <button
-              type="button"
-              onClick={() => showToast('Phase 2 即将上线：trace 回放')}
-              className="text-xs text-slate-500 bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded transition-colors"
+        {!loading && !error && cards.length === 0 && (
+          <div className="text-slate-400 text-sm text-center mt-12">
+            暂无推送（开盘后 17:00 ET 起会逐步入账）
+          </div>
+        )}
+        {cards.map((p) => {
+          const isSelected = selectedId === p.id
+          const icon = AGENT_ICON[p.agent] ?? '🔔'
+          const title = p.title ?? `${p.agent} push`
+          return (
+            <article
+              key={p.id}
+              className={
+                'border rounded-lg p-4 space-y-3 cursor-pointer transition-all ' +
+                (isSelected
+                  ? 'bg-blue-50 border-blue-300 shadow-md'
+                  : 'bg-white border-slate-200 shadow-sm hover:border-slate-300 hover:shadow-md')
+              }
+              onClick={() => onCardClick(p)}
+              data-push-id={p.id}
+              data-agent={p.agent}
             >
-              点击查看完整 Trace
-            </button>
-          </article>
-        ))}
+              <header className="flex items-baseline justify-between gap-2">
+                <h3 className="text-sm font-medium text-ink-800 truncate">
+                  <span className="mr-1.5">{icon}</span>
+                  {title}
+                </h3>
+                <span className="text-[11px] text-slate-500 mono shrink-0">
+                  {formatTs(p.ts)}
+                </span>
+              </header>
+              {p.preview && (
+                <div
+                  className="text-[12px] text-slate-600 whitespace-pre-wrap line-clamp-4 leading-snug"
+                  // The preview is sanitized HTML from archive.db (which
+                  // came from our own formatters). Using innerHTML keeps
+                  // the bold/code tags rendered like a Telegram message.
+                  dangerouslySetInnerHTML={{ __html: p.preview }}
+                />
+              )}
+              <div className="flex items-center justify-between text-[11px]">
+                <span className="text-slate-400">
+                  {p.has_trace ? '✓ 有完整 Trace' : '（无 Trace）'}
+                </span>
+                <span className={isSelected ? 'text-blue-700 font-medium' : 'text-slate-500'}>
+                  {isSelected ? '✓ 已加载' : '点击查看完整 Trace →'}
+                </span>
+              </div>
+            </article>
+          )
+        })}
       </div>
-
-      {toast && (
-        <div className="fixed bottom-6 right-6 z-50 px-4 py-3 rounded-lg bg-ink-800 text-white text-sm shadow-lg">
-          {toast}
-        </div>
-      )}
     </div>
   )
 }

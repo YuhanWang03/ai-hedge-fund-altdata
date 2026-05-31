@@ -60,10 +60,32 @@ CREATE TABLE IF NOT EXISTS pushes (
     image_path      TEXT,
     tickers         TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_pushes_ts     ON pushes(ts DESC);
-CREATE INDEX IF NOT EXISTS idx_pushes_agent  ON pushes(agent);
-CREATE INDEX IF NOT EXISTS idx_pushes_tickers ON pushes(tickers);
+CREATE INDEX IF NOT EXISTS idx_pushes_ts        ON pushes(ts DESC);
+CREATE INDEX IF NOT EXISTS idx_pushes_agent     ON pushes(agent);
+CREATE INDEX IF NOT EXISTS idx_pushes_tickers   ON pushes(tickers);
 """
+
+# Columns added by Phase 2 (dashboard auto-push feed). Each is added
+# idempotently at startup via PRAGMA table_info — SQLite's
+# ADD COLUMN IF NOT EXISTS only landed in 3.35 and we want to support older.
+_PHASE2_COLUMNS = (
+    ("trace_json",  "TEXT"),  # JSON dump of v2.observability trace events
+    ("title",       "TEXT"),  # short human title for the feed card
+    ("expires_at",  "TEXT"),  # ISO ts after which the row may be cleaned up
+)
+
+# Indexes that depend on Phase 2 columns; created AFTER the columns exist.
+_PHASE2_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_pushes_expires ON pushes(expires_at);
+"""
+
+
+def _ensure_phase2_columns(conn: sqlite3.Connection) -> None:
+    """Add the trace/title/expires_at columns if they're not already there."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(pushes)")}
+    for name, ddl in _PHASE2_COLUMNS:
+        if name not in cols:
+            conn.execute(f"ALTER TABLE pushes ADD COLUMN {name} {ddl}")
 
 
 class Archive:
@@ -79,6 +101,8 @@ class Archive:
         _IMG_ROOT.mkdir(parents=True, exist_ok=True)
         with self._conn() as conn:
             conn.executescript(_SCHEMA)
+            _ensure_phase2_columns(conn)
+            conn.executescript(_PHASE2_INDEXES)
 
     @contextmanager
     def _conn(self):
@@ -99,13 +123,23 @@ class Archive:
         text: str,
         *,
         tickers: Iterable[str] = (),
+        trace_json: str | None = None,
+        title: str | None = None,
+        expires_at: str | None = None,
     ) -> int:
-        """Archive a text push. Returns the row id (also useful as a handle)."""
+        """Archive a text push. Returns the row id (also useful as a handle).
+
+        Phase 2 fields are all optional — callers that don't pass them get
+        the same behavior as before.
+        """
         return self._insert(
             msg_type="text",
             text_html=text,
             image_path=None,
             tickers=self._resolve_tickers(text, tickers),
+            trace_json=trace_json,
+            title=title,
+            expires_at=expires_at,
         )
 
     def save_photo(
@@ -114,6 +148,9 @@ class Archive:
         caption: str = "",
         *,
         tickers: Iterable[str] = (),
+        trace_json: str | None = None,
+        title: str | None = None,
+        expires_at: str | None = None,
     ) -> int:
         """Archive a photo push (image written to disk + caption to DB)."""
         ts_iso = _now_iso()
@@ -145,6 +182,9 @@ class Archive:
             image_path=rel_path,
             tickers=self._resolve_tickers(caption or "", tickers),
             ts_override=ts_iso,
+            trace_json=trace_json,
+            title=title,
+            expires_at=expires_at,
         )
 
     # ------------------------------------------------------------------
@@ -159,15 +199,20 @@ class Archive:
         image_path: str | None,
         tickers: str | None,
         ts_override: str | None = None,
+        trace_json: str | None = None,
+        title: str | None = None,
+        expires_at: str | None = None,
     ) -> int:
         ts = ts_override or _now_iso()
         try:
             with self._conn() as conn:
                 cur = conn.execute(
                     """INSERT INTO pushes
-                       (ts, agent, msg_type, text_html, image_path, tickers)
-                       VALUES (?, ?, ?, ?, ?, ?)""",
-                    (ts, self._agent, msg_type, text_html, image_path, tickers),
+                       (ts, agent, msg_type, text_html, image_path,
+                        tickers, trace_json, title, expires_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (ts, self._agent, msg_type, text_html, image_path,
+                     tickers, trace_json, title, expires_at),
                 )
                 return cur.lastrowid or 0
         except sqlite3.Error as exc:

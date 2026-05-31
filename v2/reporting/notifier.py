@@ -14,9 +14,15 @@ two methods — no inheritance needed.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
-from typing import Protocol, runtime_checkable
+from typing import Iterable, Protocol, runtime_checkable
+
+# Pushes are retained in archive.db for two calendar days. The cleanup job
+# (v2.scheduler.jobs.archive_cleanup_job) sweeps expired rows once a day.
+_RETENTION_DAYS = 2
 
 
 @runtime_checkable
@@ -61,14 +67,50 @@ class TelegramNotifier:
         self._chat_id = chat_id or os.environ["TELEGRAM_CHAT_ID"]
         self._archive = archive
 
-    def send_text(self, text: str) -> None:
+    def send_text(
+        self,
+        text: str,
+        *,
+        trace=None,
+        title: str | None = None,
+        tickers: Iterable[str] = (),
+    ) -> None:
+        """Push to Telegram + archive a row.
+
+        New Phase-2 kwargs are optional:
+        - trace: a v2.observability.Trace (with .events). Persisted to the
+          archive row's trace_json column for dashboard replay.
+        - title: short human label for the dashboard feed card.
+        - tickers: optional ticker list to record alongside the row.
+        """
         if self._archive is not None:
-            self._archive.save_text(text)
+            self._archive.save_text(
+                text,
+                tickers=tickers,
+                trace_json=_trace_to_json(trace),
+                title=title,
+                expires_at=_expires_at(),
+            )
         asyncio.run(self._send_text(text))
 
-    def send_photo(self, image: bytes, caption: str = "") -> None:
+    def send_photo(
+        self,
+        image: bytes,
+        caption: str = "",
+        *,
+        trace=None,
+        title: str | None = None,
+        tickers: Iterable[str] = (),
+    ) -> None:
         if self._archive is not None:
-            self._archive.save_photo(image, caption)
+            self._archive.save_photo(
+                image,
+                caption,
+                tickers=tickers,
+                trace_json=_trace_to_json(trace),
+                title=title,
+                expires_at=_expires_at(),
+            )
         asyncio.run(self._send_photo(image, caption))
 
     async def _send_text(self, text: str) -> None:
@@ -91,3 +133,22 @@ class TelegramNotifier:
                 caption=caption,
                 parse_mode="HTML",
             )
+
+
+def _trace_to_json(trace) -> str | None:
+    """Serialize a Trace's events list to JSON, or None if no trace bound."""
+    if trace is None:
+        return None
+    events = getattr(trace, "events", None)
+    if not events:
+        return None
+    try:
+        return json.dumps(events, ensure_ascii=False)
+    except (TypeError, ValueError):
+        # Best-effort — never let archive serialization break a push.
+        return None
+
+
+def _expires_at() -> str:
+    """ISO 8601 timestamp two calendar days from now (UTC)."""
+    return (datetime.now(timezone.utc) + timedelta(days=_RETENTION_DAYS)).isoformat()

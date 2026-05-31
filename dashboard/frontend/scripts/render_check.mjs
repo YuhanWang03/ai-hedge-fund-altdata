@@ -576,34 +576,12 @@ const chatModeCases = [
     expect: ['bg-blue-500', 'text-slate-600'],
   },
   {
-    name: 'AutoPushPanel_renders_6_mock_cards_sorted_desc',
+    // Phase 2 changed AutoPushPanel from a static mock to a fetcher.
+    // SSR captures only the initial render (useEffect doesn't fire),
+    // so we expect the loading header.
+    name: 'AutoPushPanel_initial_render_shows_loading_header',
     element: React.createElement(AutoPushPanel),
-    expect: [
-      // The 2 anomaly cards + 4 other agent cards.
-      '盘中异动 · IBM',
-      'Berkshire 13F · 2026-Q1',
-      '科技股筛选',
-      'ARK 每日持仓',
-      '产业链横向扩展 · AMD',
-      '盘中异动 · CRM',
-      '点击查看完整 Trace',
-      '📡 最近 2 个交易日推送',
-    ],
-  },
-  {
-    name: 'AutoPushPanel_sorts_newest_first',
-    element: React.createElement(AutoPushPanel),
-    customAssert: (html) => {
-      // 18:00 ET cards (id 2, 5) should appear before 17:30 (id 3) before
-      // 17:00 (id 4) before 14:32 (id 6) before 10:15 (id 1). We can't
-      // assert the full order without parsing, but we can require that
-      // an 18:00 timestamp appears before a 10:15 timestamp in the HTML.
-      const i1800 = html.indexOf('18:00 ET')
-      const i1015 = html.indexOf('10:15 ET')
-      if (i1800 < 0 || i1015 < 0) return 'missing expected timestamps'
-      if (i1800 >= i1015) return `expected 18:00 before 10:15, got positions ${i1800} vs ${i1015}`
-      return null
-    },
+    expect: ['📡 加载中'],
   },
 ]
 

@@ -18,6 +18,20 @@ interface SessionState {
   pushChat: (msg: ChatMessage) => void
   markChatCached: (sessionId: string, cachedAtMs: number) => void
   setHighlightedStepId: (stepId: string | null) => void
+  /**
+   * Replay a fully-archived push into the panels. Used by AutoPushPanel
+   * when the user clicks a feed card: fetches the full trace + text and
+   * dumps it into the session state so TracePanel + ChatPanel both
+   * re-render against it.
+   */
+  loadPush: (args: {
+    sessionId: string
+    intent: string | null
+    label: string                  // shown as the "user text" header
+    events: TraceEvent[]
+    replyText: string | null
+    ts_ms: number
+  }) => void
   reset: () => void
 }
 
@@ -88,6 +102,41 @@ export const useSession = create<SessionState>((set) => ({
     })),
 
   setHighlightedStepId: (stepId) => set({ highlightedStepId: stepId }),
+
+  loadPush: ({ sessionId, intent, label, events, replyText, ts_ms }) =>
+    set(() => {
+      // Build a synthetic chat: a "user message" carrying the push title
+      // + a "bot message" carrying the full HTML reply. Replace any
+      // prior chat — feed clicks are independent of the chat history.
+      const chat: ChatMessage[] = [
+        {
+          id: `push_label_${sessionId}`,
+          role: 'user',
+          text: label,
+          ts_ms,
+          sessionId,
+        },
+      ]
+      if (replyText) {
+        chat.push({
+          id: `push_reply_${sessionId}`,
+          role: 'bot',
+          text: replyText,
+          ts_ms,
+          sessionId,
+          cached: true,
+          cachedAtMs: ts_ms,
+        })
+      }
+      return {
+        currentSessionId: sessionId,
+        currentIntent: intent,
+        currentCached: true,    // archived runs are by definition "replay"
+        events,
+        chat,
+        highlightedStepId: null,
+      }
+    }),
 
   reset: () => set({
     currentSessionId: null,
