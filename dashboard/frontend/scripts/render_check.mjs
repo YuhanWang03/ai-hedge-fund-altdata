@@ -64,6 +64,18 @@ const cases = [
     expect: ['institutional_summary', 'num_managers', '1', 'num_changes', '7'],
   },
   {
+    name: 'module_enter renders inside a bordered indigo box',
+    event: {
+      type: 'module_enter', session_id: 's', seq: 3, ts_ms: 0,
+      name: '_r_thirteen_f', intent: 'thirteen_f',
+    },
+    expect: [
+      '_r_thirteen_f',
+      // Must have the same box treatment as api / llm / db_write cards.
+      'rounded border', 'bg-indigo-50', 'border-indigo-200',
+    ],
+  },
+  {
     name: 'event with explanation renders 📖 解析 disclosure',
     event: {
       type: 'transform', session_id: 's', seq: 5, ts_ms: 0,
