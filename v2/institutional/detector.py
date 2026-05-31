@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from v2.institutional.models import PositionChange
+from v2.observability import emit
 
 # Position size floor — ignore dust positions (likely passive index allocations)
 _MIN_VALUE = 10_000_000.0     # $10M
@@ -83,6 +84,15 @@ def detect_changes(
         type_order.get(c.change_type, 99),
         -max(c.current_value, c.prev_value),
     ))
+    emit(
+        "transform",
+        op="detect_changes",
+        current_positions=len(current_positions),
+        prior_positions=len(prev_positions) if prev_positions else 0,
+        significant_changes=len(changes),
+        manager=manager_name,
+        quarter=quarter,
+    )
     return changes
 
 

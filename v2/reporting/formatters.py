@@ -52,6 +52,7 @@ from v2.backtesting.models import BacktestResult
 from v2.institutional.models import InstitutionalReport, PositionChange
 from v2.lateral.models import CATEGORIES, LateralResult
 from v2.monitoring.models import Anomaly
+from v2.observability import emit
 from v2.screening.models import ScreenResult
 
 
@@ -643,12 +644,25 @@ def format_institutional_messages(report: InstitutionalReport) -> list[str]:
 
     # 1) Summary header
     messages.append(_format_institutional_summary(report))
+    emit(
+        "render",
+        card="institutional_summary",
+        num_managers=len(report.new_filings),
+        num_changes=len(report.changes),
+    )
 
     # 2) One message per manager (preserves new_filings order)
     total = len(report.new_filings)
     for idx, filing in enumerate(report.new_filings, 1):
         m_changes = by_manager.get(filing.manager_name, [])
         messages.append(_format_one_manager(filing, m_changes, idx, total))
+        emit(
+            "render",
+            card="manager_detail",
+            manager=filing.manager_name,
+            changes_shown=min(10, len(m_changes)),
+            changes_total=len(m_changes),
+        )
 
     return messages
 
@@ -787,6 +801,15 @@ def format_portfolio_snapshot(filing, positions, top_n: int = 10) -> str:
         lines.append(
             f"<i>其余 {len(sorted_pos) - top_n} 个持仓省略</i>"
         )
+    emit(
+        "render",
+        card="portfolio_snapshot",
+        manager=filing.manager_name,
+        quarter=filing.quarter,
+        total_value_usd=filing.portfolio_value,
+        positions_shown=min(top_n, len(sorted_pos)),
+        positions_total=len(sorted_pos),
+    )
     return "\n".join(lines)
 
 
