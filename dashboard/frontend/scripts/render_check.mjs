@@ -415,15 +415,35 @@ const mapCases = [
   // New db_write fn names for state-table writes (bot_state.db).
   { ev: { type: 'db_write', db: 'bot_state.db', fn: 'alert_add' },        want: 'sqlite_write' },
   { ev: { type: 'db_write', db: 'bot_state.db', fn: 'watchlist_add' },    want: 'sqlite_write' },
+  // Intent-aware fallback: get_company_facts has different meaning per intent.
+  {
+    name: 'get_company_facts_in_explain_move_maps_to_news',
+    ev: { type: 'api_call', provider: 'fd', endpoint: 'CachedFDClient.get_company_facts' },
+    intent: 'explain_move',
+    want: 'news',
+  },
+  {
+    name: 'get_company_facts_in_summary_maps_to_fundamentals',
+    ev: { type: 'api_call', provider: 'fd', endpoint: 'CachedFDClient.get_company_facts' },
+    intent: 'summary',
+    want: 'fundamentals',
+  },
+  {
+    name: 'get_company_facts_no_intent_maps_to_fundamentals',
+    ev: { type: 'api_call', provider: 'fd', endpoint: 'CachedFDClient.get_company_facts' },
+    intent: undefined,
+    want: 'fundamentals',
+  },
 ]
 
-for (const { ev, want } of mapCases) {
-  const got = eventToStep(ev)
-  if (got === want) {
-    console.log(`✓ eventToStep: ${JSON.stringify(ev)} → ${want}`)
+for (const c of mapCases) {
+  const got = eventToStep(c.ev, c.intent)
+  const label = c.name ?? `eventToStep: ${JSON.stringify(c.ev)}${c.intent ? ` (intent=${c.intent})` : ''}`
+  if (got === c.want) {
+    console.log(`✓ ${label} → ${c.want}`)
   } else {
     failures++
-    console.log(`✗ eventToStep: ${JSON.stringify(ev)} → ${got} (expected ${want})`)
+    console.log(`✗ ${label} → ${got} (expected ${c.want})`)
   }
 }
 

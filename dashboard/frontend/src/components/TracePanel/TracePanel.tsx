@@ -136,7 +136,7 @@ export function TracePanel() {
             event={ev}
             forceExplanationOpen={forceOpen}
             explanationBump={bump}
-            highlighted={shouldHighlight(ev, highlightedStepId, sessionComplete)}
+            highlighted={shouldHighlight(ev, highlightedStepId, sessionComplete, intent ?? undefined)}
           />
         ))}
         {startEvent && !endEvent && (
