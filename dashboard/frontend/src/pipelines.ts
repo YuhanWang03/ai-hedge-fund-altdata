@@ -55,3 +55,30 @@ export function getPipeline(intent: string | null | undefined): string[] | null 
   if (!intent || intent === 'unknown') return null
   return PIPELINES[intent] ?? null
 }
+
+
+// Human-readable Chinese labels for each intent, surfaced in the trace
+// header so non-technical visitors aren't shown raw enum names.
+// The English intent stays available via tooltip for debugging.
+export const INTENT_LABELS: Record<string, string> = {
+  explain_move:     '异动归因',
+  thirteen_f:       '机构持仓',
+  summary:          '个股概览',
+  chain:            '产业链',
+  etf_view:         'ETF 持仓',
+  holders_view:     '反查持仓',
+  find_anomalies:   '最近异动',
+  watchlist_view:   '我的关注',
+  watchlist_add:    '加入关注',
+  watchlist_remove: '移出关注',
+  alert_set:        '创建提醒',
+  alert_list:       '我的提醒',
+  portfolio_view:   'Alpaca 持仓',
+  pnl_view:         '当日盈亏',
+  settings:         '系统设置',
+}
+
+export function intentLabel(intent: string | null | undefined): string | null {
+  if (!intent || intent === 'unknown') return null
+  return INTENT_LABELS[intent] ?? null
+}

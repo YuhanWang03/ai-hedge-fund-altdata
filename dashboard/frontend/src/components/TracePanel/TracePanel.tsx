@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { PipelineBar } from '../PipelineBar'
+import { intentLabel } from '../../pipelines'
 import { useSession } from '../../store/session'
 import { TraceEvent } from './TraceEvent'
 
@@ -62,14 +63,19 @@ export function TracePanel() {
                 Replay · cached
               </span>
             )}
-            {intentEvent && (
-              <span className="text-xs mono text-ink-500 shrink-0">
-                intent:{' '}
-                <span className="text-accent-intent">
-                  {String(intentEvent.intent ?? '?')}
+            {intentEvent && (() => {
+              const rawIntent = String(intentEvent.intent ?? '')
+              const label = intentLabel(rawIntent)
+              if (!label) return null
+              return (
+                <span
+                  className="text-xs px-2 py-0.5 rounded-full bg-rose-50 text-rose-700 border border-rose-200 shrink-0"
+                  title={`intent: ${rawIntent}`}
+                >
+                  🎯 {label}
                 </span>
-              </span>
-            )}
+              )
+            })()}
           </div>
           <div className="flex items-center gap-4 text-xs mono text-ink-500">
             {hasExplanations && (
