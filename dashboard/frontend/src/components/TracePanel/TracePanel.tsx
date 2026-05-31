@@ -110,6 +110,7 @@ export function TracePanel() {
             events={events}
             cached={cached}
             onPillActivate={setHighlightedStepId}
+            highlightedStepId={highlightedStepId}
           />
         </div>
       )}

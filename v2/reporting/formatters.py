@@ -468,6 +468,15 @@ def format_anomaly_alert(anomaly: Anomaly) -> str:
     # Telegram photo caption hard limit is 1024 chars — drop sources if needed
     if len(body) > 1024 and sources_block:
         body = "\n".join(lines) + "\n\n" + footer
+    emit(
+        "render",
+        card="anomaly_card",
+        ticker=anomaly.ticker,
+        date=anomaly.date,
+        num_reasons=len(anomaly.reasons or []),
+        num_sources=len(anomaly.sources or []),
+        filtered_news=anomaly.filtered_count or 0,
+    )
     return body
 
 

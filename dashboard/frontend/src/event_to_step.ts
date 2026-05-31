@@ -57,10 +57,14 @@ export function eventToStep(event: TraceEvent): string | null {
   if (type === 'llm_call' && role === 'verifier') return 'verify'
   if (type === 'llm_call' && role === 'generator') return 'generate'
 
-  if (type === 'db_write' && fn === 'anomaly_memory_remember') return 'memory'
+  // Memory writes: hook tags them with db="chroma" and the wrapped method's
+  // __name__ ("remember"). Match on db_label so adding more ChromaDB
+  // methods later (e.g., "add", "store") doesn't need a code change here.
+  const db = typeof event.db === 'string' ? event.db : ''
+  if (type === 'db_write' && (db === 'chroma' || fn === 'remember')) return 'memory'
 
   if (type === 'db_read' || type === 'db_query') return 'sqlite_read'
-  if (type === 'db_write' && fn !== 'anomaly_memory_remember') return 'sqlite_write'
+  if (type === 'db_write') return 'sqlite_write'
 
   if (type === 'validate') return 'validate'
 

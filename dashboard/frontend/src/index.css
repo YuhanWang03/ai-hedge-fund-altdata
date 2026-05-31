@@ -5,11 +5,12 @@
 html { font-family: 'Inter', ui-sans-serif, system-ui; font-feature-settings: 'cv11', 'ss01'; }
 code, pre, .mono { font-family: '"IBM Plex Mono"', ui-monospace, monospace; }
 
-/* Liquid-glass highlight applied to trace events when the user clicks a
-   pipeline pill after the session has completed. The ::before pseudo
-   element draws a cool-blue blurred ring around the row without affecting
-   layout. Tailwind utilities can't express backdrop-filter + keyframes
-   + ::before in one shot, so we drop down to plain CSS. */
+/* Liquid-glass highlight applied to trace events (and the clicked pill in
+   the pipeline bar) when the user clicks a pipeline pill after the session
+   has completed. The ::before pseudo element draws a cool-blue blurred
+   ring around the row without affecting layout. Tailwind utilities can't
+   express backdrop-filter + keyframes + ::before in one shot, so we drop
+   down to plain CSS. */
 .glass-highlight {
   position: relative;
   isolation: isolate;
@@ -23,14 +24,43 @@ code, pre, .mono { font-family: '"IBM Plex Mono"', ui-monospace, monospace; }
   backdrop-filter: blur(10px) saturate(180%);
   -webkit-backdrop-filter: blur(10px) saturate(180%);
   border: 1.5px solid rgba(59, 130, 246, 0.4);
-  box-shadow:
-    0 8px 28px rgba(59, 130, 246, 0.15),
-    inset 0 0 0 1px rgba(255, 255, 255, 0.55);
   z-index: -1;
-  animation: glass-breathe 3s ease-in-out infinite;
+  animation: glass-breathe 2s ease-in-out infinite;
   pointer-events: none;
 }
+
+/* Same effect, scaled down for the 32px pipeline pill. */
+.pill-glass-highlight {
+  position: relative;
+  isolation: isolate;
+}
+.pill-glass-highlight::before {
+  content: '';
+  position: absolute;
+  inset: -6px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.6);
+  backdrop-filter: blur(8px) saturate(180%);
+  -webkit-backdrop-filter: blur(8px) saturate(180%);
+  border: 1.5px solid rgba(59, 130, 246, 0.5);
+  z-index: -1;
+  animation: glass-breathe 2s ease-in-out infinite;
+  pointer-events: none;
+}
+
+/* Animate both opacity AND box-shadow so the ring feels like it's
+   physically breathing — the bloom expands and brightens together. */
 @keyframes glass-breathe {
-  0%, 100% { opacity: 0.75; }
-  50%       { opacity: 1; }
+  0%, 100% {
+    opacity: 0.65;
+    box-shadow:
+      0 4px 14px rgba(59, 130, 246, 0.12),
+      inset 0 0 0 1px rgba(255, 255, 255, 0.4);
+  }
+  50% {
+    opacity: 1;
+    box-shadow:
+      0 12px 32px rgba(59, 130, 246, 0.25),
+      inset 0 0 0 1px rgba(255, 255, 255, 0.65);
+  }
 }
