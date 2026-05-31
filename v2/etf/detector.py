@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from v2.etf.models import ETFChange, ETFHolding
+from v2.observability import emit
 
 # Filter out micro-moves: at least this much of yesterday's share count to flag
 _REBALANCE_THRESHOLD = 0.01  # 1% share change
@@ -89,5 +90,14 @@ def compute_daily_changes(
             not (c["is_new"] or c["is_exit"]),
             -abs(c.get("shares_diff_pct", 0.0)),
         ),
+    )
+    etf_symbol = today_holdings[0].etf if today_holdings else "?"
+    emit(
+        "transform",
+        op="etf_diff",
+        etf=etf_symbol,
+        today_positions=len(today_map),
+        yesterday_positions=len(yest_map),
+        significant_changes=len(changes),
     )
     return changes

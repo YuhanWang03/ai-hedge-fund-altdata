@@ -373,6 +373,47 @@ def _patch_edgar() -> int:
 
 
 # ---------------------------------------------------------------------------
+# Alpaca TradingClient (alpaca-py)
+# ---------------------------------------------------------------------------
+
+def _wrap_alpaca_method(method_name: str):
+    def make_wrapper(original):
+        @functools.wraps(original)
+        def wrapper(self, *args, **kwargs):
+            trace = current_trace()
+            if trace is None:
+                return original(self, *args, **kwargs)
+            t0 = time.perf_counter()
+            try:
+                return original(self, *args, **kwargs)
+            finally:
+                emit(
+                    "api_call",
+                    provider="alpaca",
+                    endpoint=method_name,
+                    elapsed_ms=int((time.perf_counter() - t0) * 1000),
+                )
+        return wrapper
+    return make_wrapper
+
+
+def _patch_alpaca() -> int:
+    try:
+        mod = importlib.import_module("alpaca.trading.client")
+    except Exception as exc:
+        logger.debug("alpaca-py not importable: %s", exc)
+        return 0
+    cls = getattr(mod, "TradingClient", None)
+    if cls is None:
+        return 0
+    count = 0
+    for attr in ("get_account", "get_all_positions", "get_open_position", "get_orders"):
+        if _patch_method(cls, attr, _wrap_alpaca_method(attr)):
+            count += 1
+    return count
+
+
+# ---------------------------------------------------------------------------
 # Archive store (v2.archive.store.log_*  write functions)
 # ---------------------------------------------------------------------------
 
@@ -467,6 +508,7 @@ def install_all() -> list[str]:
         ("deepseek", _patch_deepseek),
         ("tavily", _patch_tavily),
         ("edgar", _patch_edgar),
+        ("alpaca", _patch_alpaca),
         ("intent", _patch_intent_classifier),
         ("db_writes", _patch_archive_store),
     ]
