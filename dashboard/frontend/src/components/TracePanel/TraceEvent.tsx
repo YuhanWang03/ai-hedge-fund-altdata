@@ -65,6 +65,22 @@ function ChangesTable({ changes }: { changes: ChangeRow[] }) {
   )
 }
 
+// Event fields that are wire-level metadata or rendered by dedicated UI,
+// never as a generic chip. Used by the transform / render branches when
+// they iterate over the remaining payload.
+const RESERVED_FIELDS = new Set<string>([
+  // Wire envelope.
+  'type', 'session_id', 'seq', 'ts_ms',
+  // Replay annotations.
+  'replayed', 'cached_from', 'cached_at_ms',
+  // Rendered by the dedicated 📖 解析 disclosure below.
+  'explanation',
+  // Already used as the heading of transform / render bodies.
+  'op', 'card',
+  // detect_changes' rows are rendered by the ChangesTable, not as a chip.
+  'changes',
+])
+
 const MONEY_FIELD = /(?:_usd|value|cost|amount|spend|budget)/i
 
 function formatValue(v: unknown, key?: string): string {
@@ -215,9 +231,7 @@ export function TraceEvent({ event, forceExplanationOpen, explanationBump }: Pro
     const op = String(event.op ?? '?')
     // detect_changes carries a `changes` array we render as a compact table.
     const changes = Array.isArray(event.changes) ? (event.changes as ChangeRow[]) : null
-    // The flat scalar chips. Skip array-shaped payloads since we render them below.
-    const skip = new Set(['type', 'session_id', 'seq', 'ts_ms', 'op', 'replayed', 'cached_from', 'cached_at_ms', 'changes'])
-    const fields = Object.entries(event).filter(([k]) => !skip.has(k))
+    const fields = Object.entries(event).filter(([k]) => !RESERVED_FIELDS.has(k))
     body = (
       <div className="mono text-xs px-3 py-2 rounded border bg-violet-50 border-violet-200 text-violet-900">
         <div className="font-medium">{op}</div>
@@ -233,8 +247,7 @@ export function TraceEvent({ event, forceExplanationOpen, explanationBump }: Pro
     )
   } else if (event.type === 'render') {
     const card = String(event.card ?? '?')
-    const skip = new Set(['type', 'session_id', 'seq', 'ts_ms', 'card', 'replayed', 'cached_from', 'cached_at_ms'])
-    const fields = Object.entries(event).filter(([k]) => !skip.has(k))
+    const fields = Object.entries(event).filter(([k]) => !RESERVED_FIELDS.has(k))
     body = (
       <div className="mono text-xs px-3 py-2 rounded border bg-teal-50 border-teal-200 text-teal-900">
         <div className="font-medium">{card}</div>
