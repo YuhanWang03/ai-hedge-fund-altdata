@@ -232,6 +232,28 @@ const pipelineCases = [
     expectAbsent: ['animate-pulse', 'bg-blue-500'],
   },
   {
+    // Bug 3 regression: Replay chip must live OUTSIDE the inner pills
+    // container so ml-auto pushes it to the right edge — otherwise it
+    // looks like an 8th pill after 回复.
+    name: 'replay_chip_lives_outside_pills_container_with_ml_auto',
+    props: { intent: 'etf_view', events: [], cached: true },
+    expect: ['ml-auto', '⏯ Replay'],
+    customAssert: (html) => {
+      // Find the closing tag of the pills row (the inner flex container)
+      // and ensure the Replay chip appears AFTER it, not nested inside.
+      const pillsContainerOpen = html.indexOf('class="flex items-center gap-1"')
+      const replayIdx = html.indexOf('⏯ Replay')
+      if (pillsContainerOpen < 0 || replayIdx < 0) return 'markers missing'
+      // The pills container's first child opens after pillsContainerOpen.
+      // Replay must come after the container closes — i.e., after some
+      // </div>. Simple heuristic: there's a </div> sequence between
+      // pillsContainerOpen and replayIdx.
+      const between = html.slice(pillsContainerOpen, replayIdx)
+      if (!between.includes('</div>')) return 'Replay chip appears inside pills container'
+      return null
+    },
+  },
+  {
     // etf_view: 6-pill pipeline. ark_csv api_call lights ARK, etf_diff
     // transform lights 对比, then render lights 卡片, chat_message lights
     // 回复. After session_end every pill should be emerald.

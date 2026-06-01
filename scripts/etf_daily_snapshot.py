@@ -1,12 +1,11 @@
 """Daily ARK ETF holdings snapshot — runs after US market close.
 
-For each ARK fund, fetches the latest CSV and saves to data/etf.db.
-Builds a cumulative time series that the bot's /etf command uses to
-compute 24h rebalances.
+For each ARK fund, fetches the latest CSV, diffs against yesterday,
+saves to data/etf.db, and renders the dashboard-feed card. One archive
+push per fund so each card shows a focused trace.
 
-Telegram-quiet by design: pure data ingestion. The dashboard auto-push
-feed picks it up via a direct archive write (no Telegram message),
-so the trace still appears in the dashboard.
+Telegram-quiet by design: no notifier.send_* call. The dashboard feed
+picks it up via direct Archive.save_text.
 
 Triggered by the scheduler Mon-Fri 17:00 ET — ARK posts daily files
 around 16:00 ET, giving us an hour of buffer.
@@ -22,9 +21,15 @@ from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
 from v2.archive import Archive
-from v2.etf import SUPPORTED_FUNDS, fetch_holdings, save_snapshot
+from v2.etf import (
+    SUPPORTED_FUNDS,
+    compute_daily_changes,
+    fetch_holdings,
+    get_latest_snapshot_before,
+    save_snapshot,
+)
 from v2.observability import capture_trace_with_framing, install_all
-from v2.reporting import notify_on_error
+from v2.reporting import format_etf_snapshot, notify_on_error
 
 logging.basicConfig(
     level=logging.INFO,
@@ -38,23 +43,21 @@ def main() -> int:
     load_dotenv()
     install_all()
 
+    archive = Archive(agent="etf")
     total_funds = 0
     total_rows = 0
-    fetched: list[str] = []
-    last_snap_date = ""
 
-    # Capture the full 4-fund pipeline as one trace so the dashboard feed
-    # can replay every fetch + save snapshot. capture_trace_with_framing
-    # auto-emits session_start / intent_classified / module_enter on entry
-    # and module_exit / session_end on exit, matching the dashboard
-    # executor's frame so PipelineBar lights up.
-    with capture_trace_with_framing(
-        agent="etf", intent="etf_view",
-        text="(自动推送) ARK 每日持仓",
-        responder_name="_r_etf_snapshot",
-    ) as trace:
-        for symbol in SUPPORTED_FUNDS:
-            logger.info("Fetching %s ...", symbol)
+    for symbol in SUPPORTED_FUNDS:
+        logger.info("Processing %s ...", symbol)
+        # One push per fund. capture_trace_with_framing emits
+        # session_start / intent_classified / module_enter on entry and
+        # module_exit / session_end on exit, so each card's saved trace
+        # renders identically to a dashboard query.
+        with capture_trace_with_framing(
+            agent="etf", intent="etf_view",
+            text=f"(自动推送) {symbol} 每日持仓",
+            responder_name="_r_etf_snapshot",
+        ) as trace:
             try:
                 holdings, snap_date = fetch_holdings(symbol)
             except Exception as exc:
@@ -65,45 +68,47 @@ def main() -> int:
                 logger.warning("  %s returned no holdings", symbol)
                 continue
 
+            # Diff against yesterday's snapshot (if any). The
+            # compute_daily_changes() emit on the v2 side fires
+            # transform/etf_diff inside the trace context.
+            daily_changes = None
+            try:
+                prev = get_latest_snapshot_before(symbol, snap_date)
+                if prev:
+                    daily_changes = compute_daily_changes(prev, holdings)
+            except Exception as exc:
+                logger.warning("  %s diff failed: %s", symbol, exc)
+
+            # Persist today's snapshot. save_snapshot's emit fires
+            # db_write inside the trace context.
             try:
                 n = save_snapshot(symbol, snap_date, holdings)
                 logger.info("  %s · %s · %d rows saved", symbol, snap_date, n)
                 total_funds += 1
                 total_rows += n
-                fetched.append(symbol)
-                last_snap_date = snap_date
             except Exception as exc:
                 logger.warning("  %s save failed: %s", symbol, exc)
                 continue
 
-    # Telegram-quiet archive write so the dashboard feed sees this run.
-    if fetched:
-        body = (
-            f"<b>📈 ARK 每日持仓 · {last_snap_date}</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            f"{' · '.join(fetched)} 当日 snapshot 已入库 · "
-            f"{total_rows:,} position-rows"
-        )
-        # Emit chat_message inside the trace so the saved trace_json has
-        # a complete reply event. (We do this AFTER the with-block above
-        # already exited — but trace.events is captured by closure and
-        # we want the rendering "reply" recorded.) Easiest: append the
-        # event directly to trace.events; emit() is a no-op now that
-        # TRACE_CTX is unbound.
-        import time as _time
-        trace.events.append({
-            "type": "chat_message",
-            "session_id": trace.session_id,
-            "seq": len(trace.events) + 1,
-            "ts_ms": int(_time.time() * 1000),
-            "role": "bot",
-            "text": body[:500],
-        })
-        Archive(agent="etf").save_text(
-            body,
-            tickers=fetched,
+            # Render the card. format_etf_snapshot's emit fires
+            # render/etf_snapshot inside the trace context.
+            text = format_etf_snapshot(
+                symbol, holdings, snap_date,
+                top_n=15, daily_changes=daily_changes,
+            )
+
+            # Explicit chat_message so the saved trace has a complete
+            # reply event. capture_trace_with_framing will then emit
+            # module_exit + session_end on context exit.
+            trace.emit("chat_message", role="bot", text=text[:500])
+
+        # `with` block has exited — module_exit + session_end are now
+        # in trace.events. Persist a dashboard-only card (no Telegram).
+        archive.save_text(
+            text,
+            tickers=[symbol],
             trace_json=json.dumps(trace.events, ensure_ascii=False) if trace.events else None,
-            title="ARK 每日持仓",
+            title=f"ARK {symbol} 每日持仓",
             expires_at=(datetime.now(timezone.utc) + timedelta(days=2)).isoformat(),
         )
 

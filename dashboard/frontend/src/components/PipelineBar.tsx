@@ -91,17 +91,22 @@ export function PipelineBar({ intent, events, cached, onPillActivate, highlighte
 
   return (
     <div className="flex items-center gap-1 px-4 py-3 overflow-x-auto">
-      {pipeline.map((stepId, idx) => (
-        <span key={stepId} className="flex items-center gap-1 shrink-0">
-          <StepPill
-            stepId={stepId}
-            state={states[stepId] ?? 'pending'}
-            highlighted={highlightedStepId === stepId}
-            onClick={() => onClickStep(stepId)}
-          />
-          {idx < pipeline.length - 1 && <Arrow />}
-        </span>
-      ))}
+      {/* Pills row — kept in its own flex container so trailing chips can
+          live on the right via ml-auto without becoming pseudo-children
+          of the last pill. */}
+      <div className="flex items-center gap-1">
+        {pipeline.map((stepId, idx) => (
+          <span key={stepId} className="flex items-center gap-1 shrink-0">
+            <StepPill
+              stepId={stepId}
+              state={states[stepId] ?? 'pending'}
+              highlighted={highlightedStepId === stepId}
+              onClick={() => onClickStep(stepId)}
+            />
+            {idx < pipeline.length - 1 && <Arrow />}
+          </span>
+        ))}
+      </div>
       {cached && <ReplayChip />}
     </div>
   )
@@ -149,9 +154,12 @@ function Arrow() {
 }
 
 function ReplayChip() {
+  // ml-auto pushes the chip to the right edge of the PipelineBar so it
+  // sits visually separate from the pill row instead of looking like
+  // an extra step after "回复".
   return (
-    <span className="ml-3 text-[10px] mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-200">
-      Replay
+    <span className="ml-auto shrink-0 text-[11px] mono px-2 py-1 rounded-full bg-yellow-100 text-yellow-800 border border-yellow-200">
+      ⏯ Replay
     </span>
   )
 }

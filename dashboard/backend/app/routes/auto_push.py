@@ -29,6 +29,7 @@ from fastapi.responses import StreamingResponse
 
 from app.auth import Caller, resolve_caller
 from app.config import SETTINGS
+from app.runner.event_explanations import lookup as lookup_explanation
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +135,16 @@ async def push_trace(
             events = json.loads(raw)
         except json.JSONDecodeError as exc:
             logger.warning("malformed trace_json on push %d: %s", push_id, exc)
+
+    # Cron scripts emit events directly into trace.events without going
+    # through the dashboard executor's sink(), so the explanation field
+    # never gets attached up front. Inject it here so every event in
+    # cron-captured trace also surfaces the 📖 解析 disclosure.
+    for ev in events:
+        if isinstance(ev, dict) and "explanation" not in ev:
+            expl = lookup_explanation(ev)
+            if expl:
+                ev["explanation"] = expl
 
     return {
         "push": {
