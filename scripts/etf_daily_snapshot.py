@@ -70,12 +70,23 @@ def main() -> int:
 
             # Diff against yesterday's snapshot (if any). The
             # compute_daily_changes() emit on the v2 side fires
-            # transform/etf_diff inside the trace context.
+            # transform/etf_diff inside the trace context. When there's
+            # NO baseline (first run, or yesterday's row got cleaned up)
+            # we emit an explicit skipped event so the "对比" pipeline
+            # pill still has something to highlight.
+            from v2.observability import emit as _emit
             daily_changes = None
             try:
                 prev = get_latest_snapshot_before(symbol, snap_date)
                 if prev:
                     daily_changes = compute_daily_changes(prev, holdings)
+                else:
+                    _emit(
+                        "transform", op="etf_diff",
+                        etf=symbol, skipped=True,
+                        reason="no_baseline_snapshot",
+                        note=f"{symbol} 首次入库或昨日数据缺失，跳过 diff",
+                    )
             except Exception as exc:
                 logger.warning("  %s diff failed: %s", symbol, exc)
 

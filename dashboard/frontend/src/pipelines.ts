@@ -64,7 +64,9 @@ export const PIPELINES: Record<string, string[]> = {
   explain_move:     ['input', 'classify', 'price', 'news', 'generate', 'verify', 'memory', 'render', 'reply'],
   summary:          ['input', 'classify', 'price', 'fundamentals', 'insider', 'news', 'llm_interpret', 'render', 'reply'],
   chain:            ['input', 'classify', 'price', 'llm_propose', 'news', 'filter', 'render', 'reply'],
-  etf_view:         ['input', 'classify', 'ark', 'detect', 'render', 'reply'],
+  // sqlite_write captures save_snapshot, which fires on both the cron
+  // path (Mon-Fri 17:00 ET ingest) and the on-demand /etf bot path.
+  etf_view:         ['input', 'classify', 'ark', 'detect', 'sqlite_write', 'render', 'reply'],
   holders_view:     ['input', 'classify', 'sqlite_read', 'render', 'reply'],
   find_anomalies:   ['input', 'classify', 'sqlite_read', 'render', 'reply'],
   watchlist_view:   ['input', 'classify', 'sqlite_read', 'render', 'reply'],

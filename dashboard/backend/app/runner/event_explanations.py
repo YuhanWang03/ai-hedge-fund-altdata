@@ -542,6 +542,44 @@ _MODULE: dict[str, Explanation] = {
         "store":  "不持久化（read-only）",
         "next":   "执行 2 步流程，最终通过 chat_message 推送异动列表",
     },
+
+    # Cron responder names — emitted by capture_trace_with_framing in the
+    # scheduler scripts. Same fields as the on-demand _r_* entries above.
+    "_r_etf_snapshot": {
+        "source": "scheduler 触发，无用户输入",
+        "how":    "调用 v2.etf 的完整流程（fetch CSV → 算变动 → 写入 → 渲染）",
+        "what":   "整体流程：拉 ARK 4 只基金的最新持仓 → 对比昨日 → 写 SQLite snapshot → 渲染推送卡",
+        "store":  "持久化到 data/etf.db（每日累积时间序列）",
+        "next":   "通过 chat_message emit 推送到 Telegram + archive.db",
+    },
+    "_r_anomaly_monitor": {
+        "source": "scheduler 触发（17:35 ET），扫描 TECH_30 universe",
+        "how":    "调用 v2.monitoring 检测异动并对每个 ticker 跑 attribute()",
+        "what":   "整体流程：检测器找异动 → 对每个异动拉新闻 → Generator 写归因 → Verifier 评级 → 写 ChromaDB",
+        "store":  "归因结果持久化到 chroma/；推送日志写 archive.db",
+        "next":   "对每个异动通过 chat_message emit 推送一张卡片",
+    },
+    "_r_daily_screen": {
+        "source": "scheduler 触发（17:30 ET），全 TECH_30 universe",
+        "how":    "调用 v2.screening 的硬规则筛选 + DeepSeek narrator",
+        "what":   "整体流程：拉 30 个 ticker 基本面 → 硬规则过滤 → 通过的让 LLM 写一句话 bull/bear → 拼综合卡",
+        "store":  "不持久化（每日重新筛选）",
+        "next":   "通过 chat_message emit 推送给用户",
+    },
+    "_r_lateral_expansion": {
+        "source": "scheduler 触发（周一 18:00 ET），用前一天异动 ticker 当种子",
+        "how":    "调用 v2.lateral：DeepSeek proposer 提议邻居 → Tavily 共现验证 → 阈值过滤",
+        "what":   "整体流程：每个种子识别 4 类邻居（供应商/客户/同业小盘/受益方）→ Tavily 验证 → 过滤 → 拼卡",
+        "store":  "不持久化",
+        "next":   "通过 chat_message emit 推送产业链卡",
+    },
+    "_r_institutional": {
+        "source": "scheduler 触发（周二/周五 18:00 ET），10 位明星 manager",
+        "how":    "调用 v2.institutional 完整 pipeline（EDGAR → CUSIP → diff → LLM interpret）",
+        "what":   "整体流程：每个 manager 拉最新 13F-HR → CUSIP 聚合 → 跟前季度对比 → top 20 变动让 DeepSeek 解读 → 拼 N 张卡（summary + 每 manager 一张）",
+        "store":  "持久化到 data/edgar.db",
+        "next":   "通过多次 chat_message emit 推送 1 张总览 + 每 manager 一张详情",
+    },
 }
 
 
