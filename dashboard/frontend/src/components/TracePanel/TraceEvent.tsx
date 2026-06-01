@@ -132,6 +132,8 @@ export function TraceEvent({ event, forceExplanationOpen, explanationBump, highl
       edgar: 'bg-slate-50 border-slate-300 text-slate-800',
     }
     const css = colorByProvider[provider] ?? 'bg-ink-100 border-ink-200 text-ink-800'
+    const isEmptyResult =
+      typeof event.num_results === 'number' && event.num_results === 0
     body = (
       <div className={`mono text-xs px-3 py-2 rounded border ${css}`}>
         <div className="flex items-center justify-between">
@@ -147,6 +149,19 @@ export function TraceEvent({ event, forceExplanationOpen, explanationBump, highl
           {event.query ? `  ·  "${event.query}"` : ''}
           {typeof event.num_results === 'number' ? `  ·  ${event.num_results} results` : ''}
         </div>
+        {/* Surface empty-result and error states so silent FD failures
+            ("3ms / 0 results") are visible at a glance instead of the
+            user having to chase the resulting "No data" reply downstream. */}
+        {isEmptyResult && !event.error && (
+          <div className="text-amber-700 mt-1 text-[11px]">
+            ⚠️ 接口返回 0 条结果 —— 可能是 API key 缺失、日期超出可用范围，或 ticker 不在 FD 覆盖里
+          </div>
+        )}
+        {typeof event.error === 'string' && event.error && (
+          <div className="text-red-700 mt-1 text-[11px] break-all">
+            ✗ {event.error}
+          </div>
+        )}
         {typeof event.cost_usd === 'number' && event.cost_usd > 0 && (
           <div className="text-ink-400 text-[10px] mt-0.5">${event.cost_usd.toFixed(5)}</div>
         )}
