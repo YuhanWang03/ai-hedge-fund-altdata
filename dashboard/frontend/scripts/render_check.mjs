@@ -192,9 +192,7 @@ const pipelineCases = [
       'bg-blue-500',      // the next-to-fire (aggregate) is active
       'animate-pulse',    // active pulses
     ],
-    expectAbsent: [
-      'Replay',           // not a cached run
-    ],
+    expectAbsent: [],
   },
   {
     // Order verified against v2/monitoring/attributor.py:attribute():
@@ -226,32 +224,12 @@ const pipelineCases = [
     expectAbsent: ['animate-pulse', 'bg-blue-500', 'text-slate-400'],
   },
   {
-    name: 'pipeline_bar_cached_replay',
+    // Cached sessions still light every pill emerald — but the Replay
+    // chip was removed (redundant with the 自动推送 mode toggle).
+    name: 'pipeline_bar_cached_session_all_emerald_no_chip',
     props: { intent: 'etf_view', events: [], cached: true },
-    expect: ['输入', '意图', 'ARK', '对比', '卡片', '回复', 'bg-emerald-500', 'Replay'],
-    expectAbsent: ['animate-pulse', 'bg-blue-500'],
-  },
-  {
-    // Bug 3 regression: Replay chip must live OUTSIDE the inner pills
-    // container so ml-auto pushes it to the right edge — otherwise it
-    // looks like an 8th pill after 回复.
-    name: 'replay_chip_lives_outside_pills_container_with_ml_auto',
-    props: { intent: 'etf_view', events: [], cached: true },
-    expect: ['ml-auto', '⏯ Replay'],
-    customAssert: (html) => {
-      // Find the closing tag of the pills row (the inner flex container)
-      // and ensure the Replay chip appears AFTER it, not nested inside.
-      const pillsContainerOpen = html.indexOf('class="flex items-center gap-1"')
-      const replayIdx = html.indexOf('⏯ Replay')
-      if (pillsContainerOpen < 0 || replayIdx < 0) return 'markers missing'
-      // The pills container's first child opens after pillsContainerOpen.
-      // Replay must come after the container closes — i.e., after some
-      // </div>. Simple heuristic: there's a </div> sequence between
-      // pillsContainerOpen and replayIdx.
-      const between = html.slice(pillsContainerOpen, replayIdx)
-      if (!between.includes('</div>')) return 'Replay chip appears inside pills container'
-      return null
-    },
+    expect: ['输入', '意图', 'ARK', '对比', '卡片', '回复', 'bg-emerald-500'],
+    expectAbsent: ['animate-pulse', 'bg-blue-500', 'Replay', '⏯'],
   },
   {
     // etf_view: 6-pill pipeline. ark_csv api_call lights ARK, etf_diff

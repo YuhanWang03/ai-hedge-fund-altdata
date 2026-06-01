@@ -75,10 +75,26 @@ def _wrap_fd_method(endpoint_name: str):
 
             t0 = time.perf_counter()
             cache_state = "unknown"
+            num_results: int | None = None
+            error: str | None = None
             try:
                 result = original(self, *args, **kwargs)
                 cache_state = "hit" if getattr(self, "_last_was_cache_hit", False) else "miss"
+                # Best-effort row count — helps debug "empty return" cases
+                # like "FD returned [] in 3ms ⇒ responder says No price data".
+                try:
+                    if result is None:
+                        num_results = 0
+                    elif hasattr(result, "__len__"):
+                        num_results = len(result)
+                except Exception:
+                    pass
                 return result
+            except Exception as exc:
+                # Capture the exception type + message so the trace shows
+                # WHY the call returned nothing instead of swallowing it.
+                error = f"{type(exc).__name__}: {str(exc)[:200]}"
+                raise
             finally:
                 elapsed_ms = int((time.perf_counter() - t0) * 1000)
                 ticker = (
@@ -90,6 +106,8 @@ def _wrap_fd_method(endpoint_name: str):
                     endpoint=endpoint_name,
                     ticker=ticker,
                     cache=cache_state,
+                    num_results=num_results,
+                    error=error,
                     elapsed_ms=elapsed_ms,
                 )
         return wrapper
