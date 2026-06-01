@@ -62,8 +62,23 @@ export function TracePanel() {
     .map((e) => (typeof e.cost_usd === 'number' ? e.cost_usd : 0))
     .reduce((a, b) => a + b, 0)
 
+  // Clicking anywhere in the pane that is NOT a pipeline pill and NOT
+  // an individual trace event row clears the highlight. Pills handle
+  // their own onClick to set a new highlight; event rows preserve the
+  // current one. Everything else (header, gaps between events, the
+  // PipelineBar's blank background, scrollbar margins, etc.) cancels.
+  const clearOnOutsideClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    const target = e.target as HTMLElement
+    if (target.closest('[data-pipeline-pill]')) return
+    if (target.closest('[data-event-seq]')) return
+    setHighlightedStepId(null)
+  }
+
   return (
-    <div className="flex-1 flex flex-col bg-ink-50 border-r border-ink-200 min-w-0">
+    <div
+      className="flex-1 flex flex-col bg-ink-50 border-r border-ink-200 min-w-0"
+      onClick={clearOnOutsideClick}
+    >
       {/* Header */}
       <div className="px-5 py-3 border-b border-ink-200 bg-white">
         <div className="flex items-center justify-between">
@@ -131,13 +146,9 @@ export function TracePanel() {
         </div>
       )}
 
-      {/* Stream */}
+      {/* Stream — the outer pane's onClick handles clear-on-blank-click. */}
       <div
         ref={containerRef}
-        onClick={(e) => {
-          // Click anywhere outside an event row clears the highlight.
-          if (e.target === e.currentTarget) setHighlightedStepId(null)
-        }}
         className="flex-1 overflow-y-auto px-5 py-4 space-y-12"
       >
         {events.length === 0 && (

@@ -107,7 +107,7 @@ function MessageBubble({ message: m }: { message: ReturnType<typeof useSession.g
   }
   const isUser = m.role === 'user'
   return (
-    <div className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
+    <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'}`}>
       <div
         className={
           'max-w-[88%] rounded-2xl px-3 py-2 whitespace-pre-wrap text-sm break-words ' +
@@ -126,8 +126,30 @@ function MessageBubble({ message: m }: { message: ReturnType<typeof useSession.g
           </div>
         )}
       </div>
+      {/* Send time under each bubble (matches Telegram / Messages
+          conventions). Only render when we have a real ts_ms — system
+          messages may pass 0. */}
+      {m.ts_ms > 0 && (
+        <div className="text-[10px] text-ink-400 mt-1 px-1 mono">
+          {formatChatTime(m.ts_ms)}
+        </div>
+      )}
     </div>
   )
+}
+
+function formatChatTime(ts_ms: number): string {
+  const d = new Date(ts_ms)
+  if (isNaN(d.getTime())) return ''
+  const pad = (n: number) => String(n).padStart(2, '0')
+  const now = new Date()
+  const sameDay =
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate()
+  const hhmm = `${pad(d.getHours())}:${pad(d.getMinutes())}`
+  if (sameDay) return hhmm
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${hhmm}`
 }
 
 function friendlyError(e: QueryError): string {
