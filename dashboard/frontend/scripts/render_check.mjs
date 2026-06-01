@@ -265,12 +265,16 @@ const pipelineCases = [
         { type: 'intent_classified', session_id: 's', seq: 2,  ts_ms: 0, intent: 'etf_view' },
         { type: 'api_call',          session_id: 's', seq: 3,  ts_ms: 0, provider: 'ark_csv', endpoint: 'fetch_holdings' },
         { type: 'transform',         session_id: 's', seq: 4,  ts_ms: 0, op: 'etf_diff' },
-        { type: 'render',            session_id: 's', seq: 5,  ts_ms: 0, card: 'etf_snapshot' },
-        { type: 'chat_message',      session_id: 's', seq: 6,  ts_ms: 0, text: 'done' },
-        { type: 'session_end',       session_id: 's', seq: 7,  ts_ms: 0 },
+        { type: 'db_write',          session_id: 's', seq: 5,  ts_ms: 0, db: 'etf.db', fn: 'save_snapshot' },
+        { type: 'render',            session_id: 's', seq: 6,  ts_ms: 0, card: 'etf_snapshot' },
+        { type: 'chat_message',      session_id: 's', seq: 7,  ts_ms: 0, text: 'done' },
+        { type: 'session_end',       session_id: 's', seq: 8,  ts_ms: 0 },
       ],
     },
-    expect: ['输入', '意图', 'ARK', '对比', '卡片', '回复', 'bg-emerald-500'],
+    // 写入 = save_snapshot pill. After Phase-2 polish the etf_view
+    // pipeline grew a sqlite_write step so save_snapshot is no longer
+    // an orphan.
+    expect: ['输入', '意图', 'ARK', '对比', '写入', '卡片', '回复', 'bg-emerald-500'],
     expectAbsent: ['text-slate-400', 'animate-pulse', 'bg-blue-500'],
   },
   {
