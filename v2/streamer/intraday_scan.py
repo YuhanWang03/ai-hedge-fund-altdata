@@ -19,7 +19,9 @@ import os
 from datetime import date, datetime, time as dtime
 from zoneinfo import ZoneInfo
 
+from v2.archive.store import Archive
 from v2.bot import state
+from v2.observability import capture_trace_with_framing
 from v2.reporting import format_intraday_anomaly
 from v2.reporting.notifier import TelegramNotifier
 from v2.screening.universe import TECH_30
@@ -140,7 +142,22 @@ def scan_universe(notifier: TelegramNotifier) -> int:
             continue
 
         try:
-            notifier.send_text(format_intraday_anomaly(signal))
+            with capture_trace_with_framing(
+                agent="intraday_anomaly", intent="explain_move",
+                text=f"(盘中扫描) {ticker} 异动",
+                responder_name="_r_intraday_scan",
+            ) as trace:
+                text = format_intraday_anomaly(signal)
+                trace.emit("chat_message", role="bot", text=text[:500])
+            # Dedicated Archive agent so the dashboard's AGENT_TO_INTENT
+            # routes intraday cards to the intraday_anomaly pipeline.
+            intraday_notifier = TelegramNotifier(archive=Archive("intraday_anomaly"))
+            intraday_notifier.send_text(
+                text,
+                trace=trace,
+                title=f"盘中异动 · {ticker}",
+                tickers=[ticker],
+            )
             state.intraday_record_fire(ticker)
             fired_count += 1
             logger.info(

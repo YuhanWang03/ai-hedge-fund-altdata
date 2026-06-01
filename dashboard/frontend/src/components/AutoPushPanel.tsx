@@ -20,20 +20,25 @@ import type { TraceEvent } from '../types'
 // Agent → dashboard intent. Drives PipelineBar pill selection when the
 // user clicks a card.
 const AGENT_TO_INTENT: Record<string, string> = {
-  anomaly:       'explain_move',
-  institutional: 'thirteen_f',
-  lateral:       'chain',
-  etf:           'etf_view',
-  screen:        'summary',
+  anomaly:          'explain_move',
+  institutional:    'thirteen_f',
+  lateral:          'chain',
+  etf:              'etf_view',
+  screen:           'summary',
+  // Streamer-fired (minute-level intraday)
+  alert:            'alert_fire',
+  intraday_anomaly: 'intraday_anomaly',
 }
 
 const AGENT_ICON: Record<string, string> = {
-  anomaly:       '⚡',
-  institutional: '🏛',
-  lateral:       '🕸',
-  etf:           '📈',
-  screen:        '📋',
-  intraday:      '⚡',
+  anomaly:          '⚡',
+  institutional:    '🏛',
+  lateral:          '🕸',
+  etf:              '📈',
+  screen:           '📋',
+  intraday:         '⚡',
+  intraday_anomaly: '⚡',
+  alert:            '🔔',
 }
 
 
