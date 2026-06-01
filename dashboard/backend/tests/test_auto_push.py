@@ -178,3 +178,71 @@ async def test_push_trace_404(client):
 async def test_push_trace_requires_owner(client):
     r = await client.get("/api/push_trace/3")
     assert r.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_push_trace_injects_explanations_for_cron_events(synthetic_archive):
+    """Cron scripts emit events directly into trace.events without going
+    through the dashboard executor's sink, so the explanation field is
+    absent in the saved trace_json. The endpoint must inject it on read.
+    """
+    # Append a fresh row with 4 ark_csv api_call events that DON'T already
+    # carry an explanation field.
+    import sqlite3
+    cron_events = [
+        {"type": "session_start", "session_id": "c1", "seq": 1, "ts_ms": 0,
+         "text": "(自动推送) ARKK"},
+        {"type": "api_call", "session_id": "c1", "seq": 2, "ts_ms": 100,
+         "provider": "ark_csv", "endpoint": "fetch_holdings", "ticker": "ARKK"},
+        {"type": "api_call", "session_id": "c1", "seq": 3, "ts_ms": 200,
+         "provider": "ark_csv", "endpoint": "fetch_holdings", "ticker": "ARKW"},
+        {"type": "transform", "session_id": "c1", "seq": 4, "ts_ms": 300,
+         "op": "etf_diff", "etf": "ARKK"},
+        {"type": "db_write", "session_id": "c1", "seq": 5, "ts_ms": 400,
+         "db": "etf.db", "fn": "save_snapshot"},
+        {"type": "render", "session_id": "c1", "seq": 6, "ts_ms": 500,
+         "card": "etf_snapshot"},
+        {"type": "session_end", "session_id": "c1", "seq": 7, "ts_ms": 600},
+    ]
+    import json as _json
+    conn = sqlite3.connect(str(synthetic_archive["db"]))
+    conn.execute(
+        "INSERT INTO pushes (ts, agent, msg_type, text_html, tickers, "
+        "trace_json, title, expires_at) VALUES (?, ?, 'text', ?, ?, ?, ?, ?)",
+        (
+            synthetic_archive["now"].isoformat(),
+            "etf",
+            "<b>ARK 每日持仓</b>",
+            "ARKK,ARKW",
+            _json.dumps(cron_events),
+            "ARK 每日持仓",
+            (synthetic_archive["now"] + __import__("datetime").timedelta(days=2)).isoformat(),
+        ),
+    )
+    conn.commit()
+    new_id = conn.execute("SELECT MAX(id) FROM pushes").fetchone()[0]
+    conn.close()
+
+    from app.main import app
+    from httpx import ASGITransport, AsyncClient
+    async with app.router.lifespan_context(app):
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as ac:
+            r = await ac.get(
+                f"/api/push_trace/{new_id}",
+                headers={"X-Owner-Token": "test-owner-token"},
+            )
+    assert r.status_code == 200
+    events = r.json()["events"]
+    # Every event that has a catalogue entry must now carry .explanation.
+    api_evs = [e for e in events if e["type"] == "api_call"]
+    assert all("explanation" in e for e in api_evs), \
+        f"api_call events missing explanation: {api_evs}"
+    # The transform/etf_diff has an entry.
+    diff = next(e for e in events if e["type"] == "transform" and e["op"] == "etf_diff")
+    assert "explanation" in diff
+    assert "ARK" in diff["explanation"]["source"] or "持仓" in diff["explanation"]["source"]
+    # And the render card.
+    render = next(e for e in events if e["type"] == "render" and e["card"] == "etf_snapshot")
+    assert "explanation" in render
