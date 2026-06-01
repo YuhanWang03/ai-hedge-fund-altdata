@@ -23,7 +23,10 @@ def run_monitoring(
     config: MonitorConfig,
 ) -> list[Anomaly]:
     """Scan *tickers*, return all anomalies found on the latest trading day."""
-    end = date.today()
+    # fd_safe_today caps end at today - 3 days so the FD request stays
+    # inside the coverage window (no HTTP 400 → empty cascade).
+    from v2.data_safety import fd_safe_today
+    end = fd_safe_today()
     start = (end - timedelta(days=_HISTORY_CALENDAR_DAYS)).isoformat()
     end_str = end.isoformat()
 

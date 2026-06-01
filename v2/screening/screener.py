@@ -25,7 +25,9 @@ def run_screening(
     config: FilterConfig,
 ) -> ScreenResult:
     """Scan *tickers*, fetch metrics + prices, return candidates that pass."""
-    today = date.today()
+    # fd_safe_today: respect FD's 1-3 day coverage lag. See v2/data_safety.py.
+    from v2.data_safety import fd_safe_today
+    today = fd_safe_today()
     today_str = today.isoformat()
     # Pull ~400 calendar days to ensure we get >=252 trading days
     history_start = (today - timedelta(days=400)).isoformat()
