@@ -154,7 +154,9 @@ export function TraceEvent({ event, forceExplanationOpen, explanationBump, highl
             user having to chase the resulting "No data" reply downstream. */}
         {isEmptyResult && !event.error && (
           <div className="text-amber-700 mt-1 text-[11px]">
-            ⚠️ 接口返回 0 条结果 —— 可能是 API key 缺失、日期超出可用范围，或 ticker 不在 FD 覆盖里
+            ⚠️ {typeof event.hint === 'string' && event.hint
+              ? event.hint
+              : '接口返回 0 条结果 —— 可能是 API key 缺失、日期超出可用范围，或 ticker 不在 FD 覆盖里'}
           </div>
         )}
         {typeof event.error === 'string' && event.error && (

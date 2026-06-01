@@ -100,6 +100,17 @@ def _wrap_fd_method(endpoint_name: str):
                 ticker = (
                     args[0] if args else kwargs.get("ticker") or kwargs.get("symbol")
                 )
+                # Surface a human-readable hint when the call returned
+                # nothing — by far the most common cause is FD coverage
+                # lag (end_date past the coverage window → HTTP 400 →
+                # empty list). The dashboard's TraceEvent renders this
+                # as an amber warning row.
+                hint = None
+                if error is None and num_results == 0:
+                    hint = (
+                        "FD 返回空 —— 通常是 end_date 超出数据覆盖范围"
+                        "（FD 数据滞后真实日期 1-3 天，请用 v2.data_safety.fd_safe_today() 替换 date.today()）"
+                    )
                 emit(
                     "api_call",
                     provider="fd",
@@ -108,6 +119,7 @@ def _wrap_fd_method(endpoint_name: str):
                     cache=cache_state,
                     num_results=num_results,
                     error=error,
+                    hint=hint,
                     elapsed_ms=elapsed_ms,
                 )
         return wrapper

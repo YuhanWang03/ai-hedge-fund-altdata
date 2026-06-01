@@ -18,6 +18,7 @@ from datetime import date, timedelta
 import numpy as np
 
 from v2.data import CachedFDClient
+from v2.data_safety import fd_safe_today
 from v2.institutional import MANAGERS
 from v2.observability import emit
 from v2.institutional.client import fetch_recent_13f
@@ -80,7 +81,9 @@ def explain_move(ticker: str) -> str:
 
 def _build_query_anomaly(ticker: str, fd: CachedFDClient) -> Anomaly | None:
     """Construct an Anomaly representing 'user asked about this ticker today'."""
-    today = date.today()
+    # fd_safe_today caps end_date at today - 3 days so we don't request
+    # past FD's coverage window (which would return HTTP 400 → empty).
+    today = fd_safe_today()
     start = (today - timedelta(days=400)).isoformat()
     prices = fd.get_prices(ticker, start, today.isoformat())
     if not prices or len(prices) < 2:
@@ -114,7 +117,8 @@ def _build_query_anomaly(ticker: str, fd: CachedFDClient) -> Anomaly | None:
 
 def summary(ticker: str) -> str:
     ticker = ticker.upper()
-    today = date.today()
+    # fd_safe_today: stay inside FD's coverage window — see v2/data_safety.py.
+    today = fd_safe_today()
     history_start = (today - timedelta(days=400)).isoformat()
     today_str = today.isoformat()
 

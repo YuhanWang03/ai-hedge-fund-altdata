@@ -36,7 +36,9 @@ def run_lateral_expansion(
     filter_config: FilterConfig,
 ) -> LateralResult:
     """Run the full pipeline for one expansion pass."""
-    today = date.today()
+    # fd_safe_today: respect FD's 1-3 day coverage lag.
+    from v2.data_safety import fd_safe_today
+    today = fd_safe_today()
     today_str = today.isoformat()
     history_start = (today - timedelta(days=400)).isoformat()
 
