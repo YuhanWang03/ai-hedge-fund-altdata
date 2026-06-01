@@ -124,6 +124,7 @@ function StepPill({
       disabled={!interactive}
       title={state === 'error' ? `⚠️ ${def.label} 出错` : def.label}
       className="flex flex-col items-center group focus:outline-none"
+      data-pipeline-pill={stepId}
     >
       <div
         className={
