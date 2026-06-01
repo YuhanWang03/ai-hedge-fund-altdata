@@ -22,6 +22,8 @@ from dotenv import load_dotenv
 
 from v2.bot import state
 from v2.reporting import format_alert_fired
+from v2.archive.store import Archive
+from v2.observability import capture_trace_with_framing, install_all
 from v2.reporting.notifier import TelegramNotifier
 from v2.streamer.intraday_scan import scan_universe
 
@@ -47,7 +49,14 @@ def run_streamer(test_now: bool = False) -> None:
     immediately, then exit. Useful for verifying the pipeline off-hours.
     """
     load_dotenv()
+    # Arm the observability hooks so capture_trace_with_framing inside
+    # the alert / intraday push paths collects Alpaca / db events.
+    install_all()
 
+    # The runner-level notifier sends to Telegram. Archive writes happen
+    # via per-push-type notifier wrappers below (_push_alert /
+    # scan_universe), each pointing at a distinct Archive agent so the
+    # dashboard's AGENT_TO_INTENT lookup picks the correct pipeline.
     notifier = TelegramNotifier()
 
     if test_now:
@@ -139,10 +148,25 @@ def _check_user_alerts(notifier: TelegramNotifier) -> None:
 
 
 def _push_alert(notifier: TelegramNotifier, fired: dict) -> None:
-    """Send the triggered-alert card to Telegram."""
+    """Send the triggered-alert card to Telegram + dashboard archive."""
     try:
-        text = format_alert_fired(fired)
-        notifier.send_text(text)
+        ticker = str(fired.get("ticker") or "?")
+        with capture_trace_with_framing(
+            agent="alert", intent="alert_set",
+            text=f"(自动触发) {ticker} 价格提醒",
+            responder_name="_r_alert_fire",
+        ) as trace:
+            text = format_alert_fired(fired)
+            trace.emit("chat_message", role="bot", text=text[:500])
+        # Dedicated Archive agent "alert" so the dashboard's
+        # AGENT_TO_INTENT maps to the alert_fire pipeline.
+        alert_notifier = TelegramNotifier(archive=Archive("alert"))
+        alert_notifier.send_text(
+            text,
+            trace=trace,
+            title=f"价格提醒 · {ticker}",
+            tickers=[ticker],
+        )
         logger.info(
             "Alert fired: #%d %s %s $%.2f (current $%.2f)",
             fired["id"], fired["ticker"], fired["direction"],

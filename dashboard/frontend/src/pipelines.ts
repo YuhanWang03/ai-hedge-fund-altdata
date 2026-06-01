@@ -56,6 +56,10 @@ export const STEP_DEFS: Record<string, StepDef> = {
 }
 
 export const PIPELINES: Record<string, string[]> = {
+  // Streamer-fired alerts. Pipeline shape mirrors a short read-only flow:
+  // Alpaca price check → detect threshold cross → render card → reply.
+  intraday_anomaly: ['input', 'classify', 'price', 'detect', 'render', 'reply'],
+  alert_fire:       ['input', 'classify', 'price', 'detect', 'render', 'reply'],
   thirteen_f:       ['input', 'classify', 'edgar', 'aggregate', 'detect', 'llm_interpret', 'render', 'reply'],
   // Confirmed against v2/monitoring/attributor.py:attribute():
   // _search_news → _entity_filter → _synthesize (Generator) → _verify_reasons

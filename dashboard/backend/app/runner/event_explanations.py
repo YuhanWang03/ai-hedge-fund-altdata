@@ -580,6 +580,22 @@ _MODULE: dict[str, Explanation] = {
         "store":  "持久化到 data/edgar.db",
         "next":   "通过多次 chat_message emit 推送 1 张总览 + 每 manager 一张详情",
     },
+
+    # Streamer 触发的两类推送 —— 不是 cron，而是分钟级实时轮询。
+    "_r_alert_fire": {
+        "source": "Streamer 1 分钟轮询发现 alerts 表里某条 target_price 被跨越",
+        "how":    "Alpaca 实时价格 vs 用户设置目标价；SQL UPDATE WHERE fired_at IS NULL 保证只触发一次（原子性 one-shot）",
+        "what":   "触发的 alert 元数据：ticker / 方向 / 目标价 / 触发时实际价格",
+        "store":  "bot_state.db 的 alerts 表 fired_at 字段被原子置位",
+        "next":   "格式化为 📈 价格提醒触发卡，推送到 Telegram + dashboard 自动推送 feed",
+    },
+    "_r_intraday_scan": {
+        "source": "Streamer 1 分钟轮询的 TECH_30 universe 扫描（仅交易时段）",
+        "how":    "对每个 ticker 取 Alpaca 实时价 + day bar 算双门槛（≥3% 涨跌 AND ≥2.5× 成交量节奏）",
+        "what":   "通过双门槛的异动信号 + 板块 ETF 相对强度 chip（★ 逆势/同步）",
+        "store":  "bot_state.db 的 intraday_cooldown 表标记 30 分钟冷却期",
+        "next":   "渲染为 ⚡ 盘中异动卡（盘中刻意不调 LLM），推送到 Telegram + dashboard 自动推送 feed",
+    },
 }
 
 
