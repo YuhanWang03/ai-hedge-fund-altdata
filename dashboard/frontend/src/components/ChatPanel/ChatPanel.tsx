@@ -69,7 +69,7 @@ export function ChatPanel() {
       </div>
 
       <div className="border-t border-ink-200 px-3 py-3">
-        <div className="flex items-end gap-2">
+        <div className="flex items-center gap-2">
           <textarea
             value={text}
             onChange={(e) => setText(e.target.value)}
@@ -142,14 +142,17 @@ function formatChatTime(ts_ms: number): string {
   const d = new Date(ts_ms)
   if (isNaN(d.getTime())) return ''
   const pad = (n: number) => String(n).padStart(2, '0')
-  const now = new Date()
-  const sameDay =
-    d.getFullYear() === now.getFullYear() &&
-    d.getMonth() === now.getMonth() &&
-    d.getDate() === now.getDate()
-  const hhmm = `${pad(d.getHours())}:${pad(d.getMinutes())}`
-  if (sameDay) return hhmm
-  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${hhmm}`
+  // Local wall-clock time + the browser's UTC offset, so the same chat
+  // shared across timezones is unambiguous. Example: "2026-06-01 23:31 UTC+8".
+  const date = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+  const time = `${pad(d.getHours())}:${pad(d.getMinutes())}`
+  const offsetMin = -d.getTimezoneOffset()
+  const sign = offsetMin >= 0 ? '+' : '-'
+  const absMin = Math.abs(offsetMin)
+  const tzH = Math.floor(absMin / 60)
+  const tzM = absMin % 60
+  const tz = tzM === 0 ? `UTC${sign}${tzH}` : `UTC${sign}${tzH}:${pad(tzM)}`
+  return `${date} ${time} ${tz}`
 }
 
 function friendlyError(e: QueryError): string {
