@@ -530,11 +530,19 @@ const mapCases = [
   // New db_write fn names for state-table writes (bot_state.db).
   { ev: { type: 'db_write', db: 'bot_state.db', fn: 'alert_add' },        want: 'sqlite_write' },
   { ev: { type: 'db_write', db: 'bot_state.db', fn: 'watchlist_add' },    want: 'sqlite_write' },
-  // Intent-aware fallback: get_company_facts has different meaning per intent.
+  // Pipeline-driven get_company_facts mapping. The pipeline that's
+  // active for the current view decides which pill the endpoint maps
+  // to — no hard-coded intent enumeration.
   {
     name: 'get_company_facts_in_explain_move_maps_to_news',
     ev: { type: 'api_call', provider: 'fd', endpoint: 'CachedFDClient.get_company_facts' },
     intent: 'explain_move',
+    want: 'news',
+  },
+  {
+    name: 'get_company_facts_in_anomaly_cron_maps_to_news',
+    ev: { type: 'api_call', provider: 'fd', endpoint: 'CachedFDClient.get_company_facts' },
+    intent: 'anomaly_cron',
     want: 'news',
   },
   {
@@ -544,10 +552,27 @@ const mapCases = [
     want: 'fundamentals',
   },
   {
-    name: 'get_company_facts_no_intent_maps_to_fundamentals',
+    name: 'get_company_facts_in_screen_cron_maps_to_fundamentals',
+    ev: { type: 'api_call', provider: 'fd', endpoint: 'CachedFDClient.get_company_facts' },
+    intent: 'screen_cron',
+    want: 'fundamentals',
+  },
+  {
+    // Pipelines without either pill (chain etc.) return null —
+    // event stays an orphan rather than getting routed to an
+    // unrelated pill the user can't relate to.
+    name: 'get_company_facts_in_pipeline_without_fundamentals_or_news_returns_null',
+    ev: { type: 'api_call', provider: 'fd', endpoint: 'CachedFDClient.get_company_facts' },
+    intent: 'holders_view',
+    want: null,
+  },
+  {
+    // No intent context (e.g. inside a unit test) → null, not a
+    // mis-mapping to fundamentals.
+    name: 'get_company_facts_no_intent_returns_null',
     ev: { type: 'api_call', provider: 'fd', endpoint: 'CachedFDClient.get_company_facts' },
     intent: undefined,
-    want: 'fundamentals',
+    want: null,
   },
 ]
 
