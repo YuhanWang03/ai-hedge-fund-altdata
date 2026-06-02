@@ -26,7 +26,12 @@ from v2.observability.trace import (
     current_trace,
     emit,
 )
-from v2.observability.hooks import install_all, installed_hooks
+from v2.observability.hooks import (
+    LLM_ROLE_FINGERPRINTS,
+    detect_llm_role,
+    install_all,
+    installed_hooks,
+)
 from v2.observability.pricing import estimate_cost
 
 
@@ -132,4 +137,6 @@ __all__ = [
     "install_all",
     "installed_hooks",
     "estimate_cost",
+    "LLM_ROLE_FINGERPRINTS",
+    "detect_llm_role",
 ]

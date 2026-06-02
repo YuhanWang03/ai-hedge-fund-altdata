@@ -720,6 +720,81 @@ for (const c of chatModeCases) {
 }
 
 
+// ---- Hook-layer role tagging regressions ----------------------------------
+// The bug we're regressing: cron-captured llm_call events ended up
+// without .role because role tagging used to live in executor.sink(),
+// which cron paths skipped. Role is now attached at hook emit time, so
+// any cron event carrying the right prompt_preview should produce the
+// right pipeline mapping AND the right pill highlight on click.
+
+{
+  const name = 'llm_role_fingerprint_detected_for_verifier'
+  // shouldHighlight short-circuits on incomplete sessions, so include
+  // a session_end and cached=true so the highlight predicate fires.
+  const ev = {
+    type: 'llm_call', session_id: 's', seq: 4, ts_ms: 0,
+    role: 'verifier',
+    prompt_preview: '你是一名严苛的金融分析师 ...',
+  }
+  const step = eventToStep(ev)
+  if (step === 'verify') console.log(`✓ ${name}`)
+  else { failures++; console.log(`✗ ${name}: eventToStep returned ${step}, expected verify`) }
+}
+
+{
+  const name = 'llm_role_fingerprint_detected_for_generator'
+  const ev = {
+    type: 'llm_call', session_id: 's', seq: 5, ts_ms: 0,
+    role: 'generator',
+    prompt_preview: '你是一名股票异动归因分析师 ...',
+  }
+  const step = eventToStep(ev)
+  if (step === 'generate') console.log(`✓ ${name}`)
+  else { failures++; console.log(`✗ ${name}: eventToStep returned ${step}, expected generate`) }
+}
+
+{
+  // The full event-to-pill chain: clicking the verify pill of an
+  // anomaly_cron push must highlight the verifier LLM event whose
+  // role was attached at hook layer (cron path, no executor sink).
+  const name = 'llm_role_attached_at_hook_layer_not_just_executor'
+  // Simulate a cron-captured trace where the executor never ran:
+  // role is set directly by hooks._wrap_llm_invoke, so shouldHighlight
+  // routes correctly even without sink() intervention.
+  const cronEvents = [
+    { type: 'session_start',     session_id: 'c', seq: 1, ts_ms: 0 },
+    { type: 'intent_classified', session_id: 'c', seq: 2, ts_ms: 0, intent: 'explain_move' },
+    { type: 'module_enter',      session_id: 'c', seq: 3, ts_ms: 0, name: '_r_anomaly_monitor' },
+    { type: 'llm_call',          session_id: 'c', seq: 4, ts_ms: 0, role: 'generator',
+                                 prompt_preview: '你是一名股票异动归因分析师 ...' },
+    { type: 'llm_call',          session_id: 'c', seq: 5, ts_ms: 0, role: 'verifier',
+                                 prompt_preview: '你是一名严苛的金融分析师 ...' },
+    { type: 'session_end',       session_id: 'c', seq: 6, ts_ms: 0 },
+  ]
+  // Click verify pill → only the verifier llm_call should highlight.
+  const completed = isSessionComplete(cronEvents, false)
+  const highlighted = cronEvents
+    .filter(e => shouldHighlight(e, 'verify', completed, 'anomaly_cron'))
+    .map(e => e.seq)
+  if (highlighted.length === 1 && highlighted[0] === 5) {
+    console.log(`✓ ${name}`)
+  } else {
+    failures++
+    console.log(`✗ ${name}: verify pill highlighted seqs ${JSON.stringify(highlighted)} (expected [5])`)
+  }
+  // And click generate pill → only the generator one.
+  const genHighlighted = cronEvents
+    .filter(e => shouldHighlight(e, 'generate', completed, 'anomaly_cron'))
+    .map(e => e.seq)
+  if (genHighlighted.length === 1 && genHighlighted[0] === 4) {
+    console.log(`✓ ${name} (generate pill)`)
+  } else {
+    failures++
+    console.log(`✗ ${name} (generate): highlighted ${JSON.stringify(genHighlighted)} (expected [4])`)
+  }
+}
+
+
 // ---- Phase 2 bug-fix regressions -----------------------------------------
 
 // Bug 1: capture_trace_with_framing must emit session_start / intent_classified

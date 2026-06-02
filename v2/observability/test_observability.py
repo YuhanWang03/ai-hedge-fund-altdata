@@ -166,6 +166,52 @@ def test_pricing_table_covers_all_known_intents() -> None:
         assert estimate_cost(name) > 0
 
 
+def test_detect_llm_role_fingerprints() -> None:
+    from v2.observability import detect_llm_role
+    assert detect_llm_role("你是一个股票分析助手的【意图分类器】。") == "intent_classifier"
+    assert detect_llm_role("你是一名严苛的金融分析师") == "verifier"
+    assert detect_llm_role("你是一名股票异动归因分析师") == "generator"
+    assert detect_llm_role("你是一名机构持仓分析师") == "interpret_changes"
+    assert detect_llm_role("给定一组种子股票") == "proposer"
+    assert detect_llm_role("bull + bear 各一句") == "narrator"
+    assert detect_llm_role("") is None
+    assert detect_llm_role(None) is None
+    assert detect_llm_role("totally unrelated prompt") is None
+
+
+def test_llm_wrapper_attaches_role_via_fingerprint() -> None:
+    from v2.observability.hooks import _wrap_llm_invoke
+
+    class FakeMessage:
+        def __init__(self, content):
+            self.content = content
+            self.usage_metadata = {"input_tokens": 50, "output_tokens": 10}
+
+    class FakeChat:
+        model_name = "deepseek-chat"
+        def invoke(self, messages, **kw):
+            return FakeMessage("done")
+
+    FakeChat.invoke = _wrap_llm_invoke(FakeChat.invoke)
+
+    # Two prompts: one matching verifier, one with no fingerprint.
+    events, sink = _collect_sink()
+    trace = Trace(session_id="sess_role", sink=sink)
+    token = TRACE_CTX.set(trace)
+    try:
+        FakeChat().invoke("你是一名严苛的金融分析师，评估每条归因理由...")
+        FakeChat().invoke("plain question without fingerprint")
+    finally:
+        TRACE_CTX.reset(token)
+
+    llm_events = [e for e in events if e["type"] == "llm_call"]
+    assert len(llm_events) == 2
+    # Role is set at emit time — both events have a `role` key even when
+    # the detector returned None (it's just None vs missing).
+    assert llm_events[0]["role"] == "verifier"
+    assert llm_events[1]["role"] is None
+
+
 def test_pricing_math() -> None:
     # 1M input tokens at $0.14 per 1M = $0.14
     assert abs(deepseek_cost(1_000_000, 0) - 0.14) < 1e-6

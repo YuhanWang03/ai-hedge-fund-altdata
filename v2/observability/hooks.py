@@ -158,6 +158,42 @@ def _patch_fd_client() -> int:
 # DeepSeek LLM (langchain_deepseek.ChatDeepSeek.invoke / .ainvoke)
 # ---------------------------------------------------------------------------
 
+# Single source of truth for LLM-role fingerprints. Keyed by a unique
+# substring from each v2/ prompt; the matching role drives both the
+# dashboard's PipelineBar pill highlight (verifier / generator / etc.)
+# and the 📖 解析 disclosure lookup.
+#
+# Both fired-at-emit-time (this file) and fired-at-load-time (the
+# dashboard's auto_push push_trace endpoint, via event_explanations.py)
+# import from here so cron-captured trace_json carries .role too.
+LLM_ROLE_FINGERPRINTS: tuple[tuple[str, str], ...] = (
+    # Most distinctive substring first — earlier matches win.
+    ("意图分类器",         "intent_classifier"),
+    ("严苛的金融分析师",   "verifier"),
+    ("归因理由的因果链",   "verifier"),
+    ("股票异动归因分析师", "generator"),
+    ("机构持仓分析师",     "interpret_changes"),
+    # v2/lateral/discover.py — "...给定一组种子股票..."
+    ("种子股票",           "proposer"),
+    # v2/screening/narrator.py — "...给出 bull + bear 各一句..."
+    ("bull + bear",        "narrator"),
+)
+
+
+def detect_llm_role(prompt: str | None) -> str | None:
+    """Return the v2 role name (intent_classifier / verifier / ...) for
+    a prompt, or None if no fingerprint matches.
+
+    Exposed as a public function so event_explanations.py and any
+    future consumer can share the same fingerprint list.
+    """
+    if not prompt:
+        return None
+    for needle, role in LLM_ROLE_FINGERPRINTS:
+        if needle in prompt:
+            return role
+    return None
+
 # Prompts and responses are forwarded to the dashboard verbatim up to this
 # many characters. The hedge-fund agents' real prompts run 1.5–4 KB; the
 # largest (Generator with Tier-1/2 evidence) reaches ~10 KB. 16 KB leaves
@@ -224,6 +260,11 @@ def _wrap_llm_invoke(original):
         elapsed_ms = int((time.perf_counter() - t0) * 1000)
         response_preview, in_tok, out_tok = _llm_response_preview(result)
         cost = pricing.deepseek_cost(in_tok, out_tok)
+        # Attach role here (rather than in the dashboard executor's sink)
+        # so cron paths going through capture_trace_with_framing also get
+        # role-tagged llm_call events — the executor.sink no longer has
+        # a chance to enrich them in that flow.
+        role = detect_llm_role(prompt_preview)
         emit(
             "llm_call",
             provider="deepseek",
@@ -234,6 +275,7 @@ def _wrap_llm_invoke(original):
             output_tokens=out_tok,
             cost_usd=round(cost, 6),
             elapsed_ms=elapsed_ms,
+            role=role,
         )
         return result
     return wrapper
