@@ -577,8 +577,8 @@ def format_lateral_result(result: LateralResult) -> str:
     emit(
         "render",
         card="lateral_result",
-        seeds=len(result.seed_groups or []),
-        verified_neighbors=sum(len(g.neighbors or []) for g in result.seed_groups or []),
+        seeds=len(result.seeds or []),
+        verified_neighbors=len(result.neighbors or []),
     )
     return body
 
