@@ -96,6 +96,16 @@ def run_lateral_expansion(
 
     # Step 5: Narrate passers (reuse screening narrator)
     passers = [n for n in new_real if n.passed_filter and n.candidate is not None]
+    # Emit a single transform/filter summary so the dashboard's "筛选" pill
+    # has an event to highlight (the per-neighbor verify_relation + passes_filter
+    # checks themselves are Python-only loops with no individual emit).
+    from v2.observability import emit as _emit
+    _emit(
+        "transform", op="filter",
+        candidates=len(new_real),
+        passed=len(passers),
+        filtered_out=len(new_real) - len(passers),
+    )
     if passers:
         logger.info("Narrating %d passers with DeepSeek...", len(passers))
         narrations, narr_tokens = narrate([n.candidate for n in passers])

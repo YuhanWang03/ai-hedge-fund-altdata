@@ -19,12 +19,16 @@ import type { TraceEvent } from '../types'
 
 // Agent → dashboard intent. Drives PipelineBar pill selection when the
 // user clicks a card.
+// Maps the archive.db `agent` column → PipelineBar pipeline key. Cron
+// paths get dedicated *_cron pipelines because they fire a different
+// event subset than the bot's on-demand variant (e.g. cron anomaly
+// path skips the price-fetch step that the bot's explain_move does).
 const AGENT_TO_INTENT: Record<string, string> = {
-  anomaly:          'explain_move',
+  anomaly:          'anomaly_cron',      // cron ② anomaly monitor
   institutional:    'thirteen_f',
   lateral:          'chain',
   etf:              'etf_view',
-  screen:           'summary',
+  screen:           'screen_cron',       // cron ① daily screen
   // Streamer-fired (minute-level intraday)
   alert:            'alert_fire',
   intraday_anomaly: 'intraday_anomaly',
@@ -43,14 +47,27 @@ const AGENT_ICON: Record<string, string> = {
 
 
 function formatTs(ts: string): string {
+  // Pin to US Central time so the feed reads in the same zone as the
+  // scheduler's market-hours reasoning. Central is UTC-5 in DST (CDT)
+  // and UTC-6 outside it (CST); Intl handles the switch.
   try {
     const d = new Date(ts)
     if (isNaN(d.getTime())) return ts
-    const pad = (n: number) => String(n).padStart(2, '0')
-    return (
-      `${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ` +
-      `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())} UTC`
-    )
+    const fmt = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Chicago',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+      timeZoneName: 'shortOffset',  // "GMT-5" / "GMT-6"
+    })
+    const parts: Record<string, string> = {}
+    for (const p of fmt.formatToParts(d)) parts[p.type] = p.value
+    // Normalize offset: "GMT-5" → "UTC-5".
+    const offset = (parts.timeZoneName ?? 'GMT').replace('GMT', 'UTC')
+    return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute} ${offset}`
   } catch {
     return ts
   }

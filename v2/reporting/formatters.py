@@ -178,6 +178,14 @@ def format_screening_result(result: ScreenResult) -> str:
     lines.append(
         f"<i>🔧 DeepSeek {result.llm_tokens:,} tokens · {' · '.join(api_parts)}</i>"
     )
+    emit(
+        "render", card="screening_result",
+        universe_size=result.universe_size,
+        candidates=len(result.candidates),
+        llm_tokens=result.llm_tokens,
+        fd_calls=result.fd_calls,
+        tavily_calls=result.tavily_calls,
+    )
     return "\n".join(lines)
 
 
