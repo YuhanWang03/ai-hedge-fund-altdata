@@ -19,12 +19,16 @@ import type { TraceEvent } from '../types'
 
 // Agent → dashboard intent. Drives PipelineBar pill selection when the
 // user clicks a card.
+// Maps the archive.db `agent` column → PipelineBar pipeline key. Cron
+// paths get dedicated *_cron pipelines because they fire a different
+// event subset than the bot's on-demand variant (e.g. cron anomaly
+// path skips the price-fetch step that the bot's explain_move does).
 const AGENT_TO_INTENT: Record<string, string> = {
-  anomaly:          'explain_move',
+  anomaly:          'anomaly_cron',      // cron ② anomaly monitor
   institutional:    'thirteen_f',
   lateral:          'chain',
   etf:              'etf_view',
-  screen:           'summary',
+  screen:           'screen_cron',       // cron ① daily screen
   // Streamer-fired (minute-level intraday)
   alert:            'alert_fire',
   intraday_anomaly: 'intraday_anomaly',

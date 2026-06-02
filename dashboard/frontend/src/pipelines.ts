@@ -56,11 +56,24 @@ export const STEP_DEFS: Record<string, StepDef> = {
 }
 
 export const PIPELINES: Record<string, string[]> = {
-  // Streamer-fired alerts. Pipeline shape mirrors a short read-only flow:
-  // Alpaca price check → detect threshold cross → render card → reply.
-  intraday_anomaly: ['input', 'classify', 'price', 'detect', 'render', 'reply'],
-  alert_fire:       ['input', 'classify', 'price', 'detect', 'render', 'reply'],
-  thirteen_f:       ['input', 'classify', 'edgar', 'aggregate', 'detect', 'llm_interpret', 'render', 'reply'],
+  // ---- Streamer paths (lean — Alpaca trade-fetch isn't in the hook
+  // matrix yet, so the trace only has framing + chat_message). ----
+  intraday_anomaly: ['input', 'classify', 'reply'],
+  alert_fire:       ['input', 'classify', 'reply'],
+
+  // ---- Cron-only pipelines (separate from the bot on-demand variants
+  // because the cron paths skip steps that the bot does). ----
+
+  // anomaly_cron: attribute() only. The detector ran upstream of
+  // capture_trace_with_framing, so no price event fires here.
+  anomaly_cron:     ['input', 'classify', 'news', 'generate', 'verify', 'memory', 'render', 'reply'],
+
+  // screen_cron: per-ticker FD prices + financial metrics + news + LLM
+  // narration. No insider trade fetch on this path.
+  screen_cron:      ['input', 'classify', 'price', 'fundamentals', 'news', 'llm_interpret', 'render', 'reply'],
+  // thirteen_f: includes sqlite_write to cover the save_filing db_write
+  // that fires after each manager's CUSIP aggregation.
+  thirteen_f:       ['input', 'classify', 'edgar', 'aggregate', 'sqlite_write', 'detect', 'llm_interpret', 'render', 'reply'],
   // Confirmed against v2/monitoring/attributor.py:attribute():
   // _search_news → _entity_filter → _synthesize (Generator) → _verify_reasons
   // (Verifier) → memory.remember. Price is fetched upstream by the responder;
