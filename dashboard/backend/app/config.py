@@ -35,6 +35,11 @@ class Settings:
     port: int
     cors_origins: tuple[str, ...]
 
+    # DeepSeek API key used by /api/explain_event_llm (owner-only LLM
+    # explanations of individual trace events). Empty string disables
+    # the endpoint with a 503.
+    deepseek_api_key: str
+
 
 def _env(name: str, default: str | None = None, required: bool = False) -> str:
     value = os.environ.get(name, default)
@@ -88,6 +93,7 @@ def load_settings() -> Settings:
         cors_origins=tuple(
             o.strip() for o in _env("DASHBOARD_CORS_ORIGINS", "*").split(",") if o.strip()
         ),
+        deepseek_api_key=_env("DEEPSEEK_API_KEY", ""),
     )
 
 

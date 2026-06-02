@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { PipelineBar } from '../PipelineBar'
 import { intentLabel } from '../../pipelines'
 import { isSessionComplete, shouldHighlight } from '../../event_to_step'
+import { getOwnerToken } from '../../api/client'
 import { useSession } from '../../store/session'
 import { useUIStore } from '../../stores/uiStore'
 import { EmptyState } from './EmptyState'
@@ -30,6 +31,13 @@ export function TracePanel() {
   const containerRef = useRef<HTMLDivElement>(null)
 
   const sessionComplete = isSessionComplete(events, cached)
+
+  // LLM natural-language event explainer is owner-only + qa-mode-only.
+  // Compute the context once per render so each TraceEvent can decide
+  // whether to render the 💬 通俗解析 block. null = suppress.
+  const isOwner = !!getOwnerToken()
+  const naturalExplanation =
+    chatMode === 'qa' && isOwner ? { intent } : null
 
   // Global "expand all explanations" state. `forceOpen=null` means each
   // <details> uses its own toggle state. Clicking the button flips
@@ -164,6 +172,7 @@ export function TracePanel() {
             forceExplanationOpen={forceOpen}
             explanationBump={bump}
             highlighted={shouldHighlight(ev, highlightedStepId, sessionComplete, intent ?? undefined)}
+            naturalExplanation={naturalExplanation}
           />
         ))}
         {startEvent && !endEvent && (
