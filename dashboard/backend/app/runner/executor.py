@@ -58,10 +58,13 @@ async def run_query(
         explanation = lookup_explanation(ev)
         if explanation is not None:
             ev["explanation"] = explanation
-        # Attach a semantic role to LLM calls so the frontend pipeline bar
-        # can identify intent_classifier / verifier / generator etc. without
-        # re-implementing the prompt fingerprint heuristic.
-        if ev.get("type") == "llm_call":
+        # Belt-and-braces role tagging for llm_call events. The hook
+        # layer (v2/observability/hooks.py) now attaches .role at emit
+        # time, so this branch is a no-op for fresh events. We keep it
+        # so any event that arrives without .role (legacy archive
+        # rows replayed via SSE, future emitters that bypass the hook)
+        # still gets enriched before the frontend sees it.
+        if ev.get("type") == "llm_call" and not ev.get("role"):
             role = llm_role(ev)
             if role is not None:
                 ev["role"] = role

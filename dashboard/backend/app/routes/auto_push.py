@@ -137,14 +137,22 @@ async def push_trace(
             logger.warning("malformed trace_json on push %d: %s", push_id, exc)
 
     # Cron scripts emit events directly into trace.events without going
-    # through the dashboard executor's sink(), so the explanation field
-    # never gets attached up front. Inject it here so every event in
-    # cron-captured trace also surfaces the 📖 解析 disclosure.
+    # through the dashboard executor's sink(), so explanation + role
+    # may be missing in older rows. Inject both server-side. New rows
+    # (post role-at-hook refactor) already have .role; we only touch
+    # events that lack it.
+    from v2.observability import detect_llm_role
     for ev in events:
-        if isinstance(ev, dict) and "explanation" not in ev:
+        if not isinstance(ev, dict):
+            continue
+        if "explanation" not in ev:
             expl = lookup_explanation(ev)
             if expl:
                 ev["explanation"] = expl
+        if ev.get("type") == "llm_call" and not ev.get("role"):
+            role = detect_llm_role(str(ev.get("prompt_preview") or ""))
+            if role:
+                ev["role"] = role
 
     return {
         "push": {

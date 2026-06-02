@@ -632,34 +632,23 @@ def _normalize_fd_endpoint(endpoint: str) -> str:
     return endpoint
 
 
-_LLM_PROMPT_FINGERPRINTS: list[tuple[str, str]] = [
-    # (substring, role). Longest / most distinctive substrings first.
-    ("意图分类器", "intent_classifier"),
-    ("严苛的金融分析师", "verifier"),
-    ("归因理由的因果链", "verifier"),
-    ("股票异动归因分析师", "generator"),
-    ("机构持仓分析师", "interpret_changes"),
-    # v2/lateral/discover.py — "你是一名资深科技股研究分析师。给定一组种子股票..."
-    ("种子股票", "proposer"),
-    # v2/screening/narrator.py — "你是一名资深科技股分析师。对每只股票给出 bull + bear..."
-    ("bull + bear", "narrator"),
-]
+# Fingerprints + detector live in v2/observability/hooks.py — that's
+# the layer that fires llm_call events, so role tagging happens at
+# emit-time and cron-captured traces carry .role natively. We re-export
+# a dict-friendly wrapper here for backward-compat callers (executor
+# still imports llm_role from this module as a safety-net fallback).
+from v2.observability import detect_llm_role as _detect_llm_role_str
 
 
 def _llm_role(event: dict[str, Any]) -> Optional[str]:
-    """Identify which v2 prompt this LLM call came from by fingerprinting
-    the prompt text. Returns None if no match (e.g., a future prompt we
-    haven't seen).
+    """Look up the role for an event whose role wasn't attached at emit
+    time (e.g. older archive rows captured before this refactor). New
+    emissions already carry .role from the hook layer.
     """
-    prompt = str(event.get("prompt_preview") or "")
-    for needle, role in _LLM_PROMPT_FINGERPRINTS:
-        if needle in prompt:
-            return role
-    return None
+    return _detect_llm_role_str(str(event.get("prompt_preview") or ""))
 
 
-# Public alias — the executor attaches this to llm_call events so the
-# frontend's pipeline mapper can read `event.role` directly.
+# Public alias kept for the executor.sink fallback path.
 llm_role = _llm_role
 
 
