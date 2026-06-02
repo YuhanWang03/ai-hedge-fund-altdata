@@ -6,6 +6,7 @@
 // fingerprinter event_explanations.llm_role() uses, so the frontend
 // reads it directly without re-implementing prompt sniffing.
 
+import { getPipeline } from './pipelines'
 import type { TraceEvent } from './types'
 
 function stripFdClassPrefix(endpoint: string): string {
@@ -53,13 +54,21 @@ export function eventToStep(event: TraceEvent, intent?: string): string | null {
     if (m === 'get_prices') return 'price'
     if (m === 'get_financial_metrics' || m === 'get_earnings') return 'fundamentals'
     if (m === 'get_company_facts') {
-      // Intent-aware fallback. In summary / chain etc. the company-facts
-      // endpoint feeds the fundamentals/news mix. In explain_move it is
-      // ONLY used by attributor._lookup_company_name() to widen the
-      // entity filter on Tavily results, so it conceptually belongs to
-      // the news step there (where the pipeline actually has a pill).
-      if (intent === 'explain_move') return 'news'
-      return 'fundamentals'
+      // The endpoint is used for two different purposes across responders:
+      //   - summary / screen_cron pull it as part of the fundamentals
+      //     bundle (passed to format_screening_result + narrator)
+      //   - explain_move / anomaly_cron use it only via
+      //     attributor._lookup_company_name() to widen the entity filter
+      //     on Tavily news, so it conceptually belongs to the news step
+      // Drive the choice from the active pipeline rather than hard-coding
+      // intent names — that way new intents using either approach pick
+      // up the right pill automatically.
+      const pipeline = intent ? getPipeline(intent) ?? [] : []
+      if (pipeline.includes('fundamentals')) return 'fundamentals'
+      if (pipeline.includes('news')) return 'news'
+      // No matching pill in this pipeline; let it remain an orphan
+      // rather than mis-mapping to a step the user can't relate to.
+      return null
     }
     if (m === 'get_insider_trades') return 'insider'
   }
