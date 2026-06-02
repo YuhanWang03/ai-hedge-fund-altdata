@@ -1,4 +1,14 @@
 import type { TraceEvent as Ev } from '../../types'
+import { LLMNaturalExplanation } from './LLMNaturalExplanation'
+
+/**
+ * Context the LLM natural-language explainer needs. TracePanel computes
+ * this once per render based on chatMode + owner status — pass null to
+ * suppress the prose block entirely (auto-push mode, guests, etc.).
+ */
+export interface NaturalExplanationContext {
+  intent: string | null
+}
 
 interface Props {
   event: Ev
@@ -11,6 +21,9 @@ interface Props {
   // When true, wraps the row in a liquid-glass highlight ring. Driven
   // by TracePanel via the pipeline pill click after session completion.
   highlighted?: boolean
+  // Non-null → append the LLM 💬 通俗解析 block under the static 5
+  // fields. Owner-only + qa-mode-only — see TracePanel for the gate.
+  naturalExplanation?: NaturalExplanationContext | null
 }
 
 // Row shape inside transform/detect_changes events.
@@ -117,7 +130,13 @@ const TYPE_LABELS: Record<string, { label: string; color: string }> = {
   error:             { label: '✗ error',         color: 'text-red-600' },
 }
 
-export function TraceEvent({ event, forceExplanationOpen, explanationBump, highlighted }: Props) {
+export function TraceEvent({
+  event,
+  forceExplanationOpen,
+  explanationBump,
+  highlighted,
+  naturalExplanation,
+}: Props) {
   const meta = TYPE_LABELS[event.type] ?? { label: event.type, color: 'text-ink-500' }
 
   // Type-specific body renderers
@@ -335,6 +354,12 @@ export function TraceEvent({ event, forceExplanationOpen, explanationBump, highl
         <div>📦 <span className="text-slate-500">内容</span> {expl.what}</div>
         <div>💾 <span className="text-slate-500">存储</span> {expl.store}</div>
         <div>➡️ <span className="text-slate-500">下一步</span> {expl.next}</div>
+        {naturalExplanation && (
+          <LLMNaturalExplanation
+            event={event}
+            intent={naturalExplanation.intent}
+          />
+        )}
       </div>
     </details>
   ) : null

@@ -937,7 +937,62 @@ print(json.dumps(types))
 
 
 // Bug 1 + bug 2 (×2 paths) + bug 3.
-const totalChecks = cases.length + pipelineCases.length + highlightCases.length + mapCases.length + chatModeCases.length + 4
+// ---- LLM natural-language event explainer gating -------------------------
+
+const llmExplainerCases = [
+  {
+    name: 'natural_explanation_renders_in_qa_mode_for_owner',
+    event: {
+      type: 'api_call', session_id: 's', seq: 1, ts_ms: 0,
+      provider: 'fd', endpoint: 'CachedFDClient.get_prices', ticker: 'NVDA',
+      explanation: {
+        source: '...', how: '...', what: '...', store: '...', next: '...',
+      },
+    },
+    naturalExplanation: { intent: 'explain_move' },
+    expectPresent: true,
+  },
+  {
+    name: 'natural_explanation_suppressed_when_naturalExplanation_null',
+    event: {
+      type: 'api_call', session_id: 's', seq: 1, ts_ms: 0,
+      provider: 'fd', endpoint: 'CachedFDClient.get_prices', ticker: 'NVDA',
+      explanation: {
+        source: '...', how: '...', what: '...', store: '...', next: '...',
+      },
+    },
+    naturalExplanation: null,
+    expectPresent: false,
+  },
+  {
+    // No static explanation → the whole 📖 disclosure doesn't render,
+    // so the LLM block is also gone.
+    name: 'natural_explanation_skipped_when_event_has_no_static_explanation',
+    event: {
+      type: 'api_call', session_id: 's', seq: 1, ts_ms: 0,
+      provider: 'fd', endpoint: 'something_unknown',
+    },
+    naturalExplanation: { intent: 'explain_move' },
+    expectPresent: false,
+  },
+]
+
+for (const c of llmExplainerCases) {
+  const html = renderToString(React.createElement(TraceEvent, {
+    event: c.event,
+    naturalExplanation: c.naturalExplanation,
+  }))
+  const present = html.includes('💬 通俗解析')
+  if (present === c.expectPresent) {
+    console.log(`✓ ${c.name}`)
+  } else {
+    failures++
+    console.log(`✗ ${c.name}: present=${present}, expected=${c.expectPresent}`)
+  }
+}
+
+
+const totalChecks = cases.length + pipelineCases.length + highlightCases.length + mapCases.length + chatModeCases.length + 4 + llmExplainerCases.length
 if (failures > 0) {
   console.error(`\n${failures} render check(s) failed.`)
   process.exit(1)

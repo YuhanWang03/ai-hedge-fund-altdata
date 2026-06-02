@@ -17,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import SETTINGS
 from app.db.store import open_store_factory
-from app.routes import auto_push, history, meta, query, trace
+from app.routes import auto_push, explain_event, history, meta, query, trace
 from app.runner.session import SessionManager
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -77,3 +77,5 @@ app.include_router(meta.router, prefix="/api", tags=["meta"])
 # config's /sse/ block disables buffering so the stream isn't held).
 app.include_router(auto_push.router, prefix="/api", tags=["auto_push"])
 app.include_router(auto_push.sse_router, tags=["auto_push_sse"])
+# Owner-only natural-language event explainer (LLM-backed).
+app.include_router(explain_event.router, prefix="/api", tags=["explain_event"])
