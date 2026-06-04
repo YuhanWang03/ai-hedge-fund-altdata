@@ -177,6 +177,8 @@ LLM_ROLE_FINGERPRINTS: tuple[tuple[str, str], ...] = (
     ("种子股票",           "proposer"),
     # v2/screening/narrator.py — "...给出 bull + bear 各一句..."
     ("bull + bear",        "narrator"),
+    # v2/earnings/summarizer.py — post-release bull/bear/narrative
+    ("财报发布总结分析师", "earnings_summarizer"),
 )
 
 
