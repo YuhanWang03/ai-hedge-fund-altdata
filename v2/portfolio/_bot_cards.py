@@ -27,6 +27,7 @@ from __future__ import annotations
 import html
 
 from v2.portfolio.models import PnLMetrics, RiskReport
+from v2.universe import BROAD_BUCKET, BROAD_MARKET_ETFS
 
 
 # ---------------------------------------------------------------------------
@@ -44,6 +45,7 @@ _SECTOR_NAME = {
     "XLI":   "工业",
     "KWEB":  "中概",
     "SPY":   "大盘",
+    "BROAD": "大盘ETF",
     "OTHER": "其他",
 }
 
@@ -189,6 +191,11 @@ def format_risk_card(report: RiskReport) -> str:
     alerts = _build_alerts(report)
     if alerts:
         lines.append("⚠️ <i>" + " / ".join(alerts) + "</i>")
+    if _is_broad_concentration(report):
+        # Phase 2.5-mini clarifier: broad-market ETFs aren't single-name risk.
+        lines.append(
+            "<i>注：BROAD ETF 内部已分散，集中度风险不等同于单股</i>"
+        )
 
     # ---- Data-quality warnings ----
     if report.warnings:
@@ -209,6 +216,24 @@ def format_risk_view(report: RiskReport) -> str:
     notifier behavior.
     """
     return format_risk_card(report)
+
+
+def _is_broad_concentration(report: RiskReport) -> bool:
+    """True iff a concentration alert is driven by broad-market ETF exposure.
+
+    Used to print a Phase-2.5-mini clarifier ("IVV 内部已分散，集中度风险不
+    等同于单股") below the alert footer. The user still sees the raw alert
+    — we only qualify it, never suppress.
+    """
+    if report.positions:
+        top_ticker = report.positions[0].ticker.upper()
+        if (report.concentration.top_1_pct >= 0.20
+                and top_ticker in BROAD_MARKET_ETFS):
+            return True
+    if (report.exposure.largest_sector == BROAD_BUCKET
+            and report.exposure.largest_sector_pct >= 0.30):
+        return True
+    return False
 
 
 def _build_alerts(report: RiskReport) -> list[str]:

@@ -33,6 +33,23 @@ BENCHMARK_ETF: str = "SPY"
 # tell "I'm 12% in stuff outside the known sectors" at a glance.
 OTHER_BUCKET: str = "OTHER"
 
+# Phase-2.5-mini label for broad-market ETFs (S&P 500, total-market,
+# NASDAQ-100 style). These are *internally diversified* — concentrating
+# in IVV is not the same risk as concentrating in a single name. The
+# bucket lets the risk card surface that distinction in its alert
+# footer instead of mislabeling broad-market exposure as "未分类标的".
+BROAD_BUCKET: str = "BROAD"
+
+BROAD_MARKET_ETFS: frozenset[str] = frozenset({
+    "SPY",   # SPDR S&P 500
+    "IVV",   # iShares Core S&P 500
+    "VOO",   # Vanguard S&P 500
+    "VTI",   # Vanguard Total Stock Market
+    "QQQ",   # Invesco NASDAQ-100
+    "DIA",   # SPDR Dow Jones
+    "IWM",   # iShares Russell 2000
+})
+
 # Ticker → primary sector ETF. Extended in Phase 2 beyond the original
 # tech focus so non-tech holdings (financials / healthcare / energy /
 # staples / industrials / China ADRs) get sensible buckets in the
@@ -167,12 +184,25 @@ def sector_etf_for(ticker: str) -> str:
 
 
 def sector_bucket_for(ticker: str) -> str:
-    """Return the sector ETF for *ticker*, or :data:`OTHER_BUCKET` if unmapped.
+    """Return the sector ETF for *ticker*, or a special bucket if unmapped.
 
-    This is the Phase-2 exposure path: unmapped tickers should NOT bucket
-    into SPY (which would silently merge "your unknown holdings" with
-    "you're broad-market exposed") — they get the ``OTHER`` label so the
-    risk card can surface them explicitly.
+    Resolution order:
+
+    1. Broad-market ETFs (``SPY``, ``IVV``, ``VOO``, …) → :data:`BROAD_BUCKET`.
+       These are internally diversified, so the risk card can qualify
+       concentration alerts ("you have 86% in IVV, but IVV is itself
+       500 names").
+    2. Explicit single-sector mapping in :data:`TICKER_TO_SECTOR`.
+    3. Unmapped → :data:`OTHER_BUCKET`, so the user can see at a glance
+       how much of the book is outside the known sectors instead of it
+       being silently merged into SPY-fallback.
+
+    This is the *portfolio exposure* path. The *signal* path
+    (:func:`sector_etf_for`) keeps SPY as its single fallback so
+    relative-strength comparisons still have a benchmark.
     """
-    return TICKER_TO_SECTOR.get(ticker.upper(), OTHER_BUCKET)
+    t = ticker.upper()
+    if t in BROAD_MARKET_ETFS:
+        return BROAD_BUCKET
+    return TICKER_TO_SECTOR.get(t, OTHER_BUCKET)
 

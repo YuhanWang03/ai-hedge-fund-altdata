@@ -84,6 +84,49 @@ def _risk_report_full() -> RiskReport:
     return r
 
 
+def _risk_report_broad_etf() -> RiskReport:
+    """Phase 2.5-mini fixture: real-account shape from 2026-06-04.
+
+    IVV-heavy book (86%) with some SMH-class exposure. Exercises:
+    - sector_bucket_for(IVV) → "BROAD" (not "OTHER" anymore)
+    - _SECTOR_NAME["BROAD"] → "大盘ETF" label rendering
+    - _is_broad_concentration() → True (both Top 1 and largest sector
+      trip their BROAD branch)
+    - Clarifier note "注：BROAD ETF 内部已分散" appended after alerts.
+    """
+    r = RiskReport(
+        snapshot_date="2026-06-04",
+        portfolio_value=100_239.0,
+        cash=12_123.0,
+        cash_pct=12_123 / 100_239,
+        concentration=ConcentrationMetrics(
+            top_1_pct=0.863, top_3_pct=0.977, top_5_pct=0.977,
+            hhi=0.75, n_positions=2,
+        ),
+        exposure=ExposureMetrics(
+            by_sector={"BROAD": 0.866, "SMH": 0.134},
+            largest_sector="BROAD", largest_sector_pct=0.866,
+        ),
+        pnl=PnLMetrics(
+            daily_pnl=239.0, daily_pnl_pct=0.0024,
+            weekly_pnl_pct=None, monthly_pnl_pct=None,
+        ),
+        drawdown=DrawdownMetrics(
+            current_drawdown_pct=0.0,
+            max_drawdown_pct=0.0,
+            peak_value=100_000.0,
+            peak_date=date(2026, 5, 29),
+        ),
+        earnings_risk_next_7d=[],
+        warnings=[],
+    )
+    r.positions = [
+        PositionFlat("IVV",  76_117.0, 0.863, "BROAD"),
+        PositionFlat("NVDA", 11_815.0, 0.134, "SMH"),
+    ]
+    return r
+
+
 def _risk_report_weekly_clean() -> RiskReport:
     """The ⑩ clean-week case from Stage 2.5."""
     r = RiskReport(
@@ -153,6 +196,40 @@ def test_risk_card_byte_equal_snapshot():
         "  <code>2026-06-07</code> <b>AAPL</b> (D-3)\n"
         "  <code>2026-06-08</code> <b>NVDA</b> (D-4)\n"
         "⚠️ <i>单票 NVDA > 30% / SMH 行业 > 30% / 1M 回撤 > 10%</i>"
+    )
+
+    assert actual == expected, (
+        f"\n--- actual ---\n{actual}\n\n--- expected ---\n{expected}"
+    )
+
+
+def test_risk_card_broad_etf_byte_equal_snapshot():
+    """Phase 2.5-mini: BROAD ETF concentration renders the clarifier note.
+
+    Account is 86% IVV — concentration alerts fire as before, but the
+    card now (a) shows ``BROAD (大盘ETF)`` instead of ``OTHER (其他)``
+    in the exposure block, and (b) appends a single italic note line
+    after the alert footer.
+    """
+    actual = format_risk_card(_risk_report_broad_etf())
+
+    expected = (
+        "<b>💼 组合风险 · 2026-06-04</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "组合价值 <code>$100.2K</code> "
+        "(持仓 <code>$88.1K</code> · 现金 <code>$12.1K</code>, 12.1%)\n"
+        "今日 P/L 🟢 +0.24% (+<code>$239</code>)\n"
+        "<b>📊 集中度</b>\n"
+        "  Top 1: <b>IVV</b> 86.3% ⚠️\n"
+        "  Top 5: 97.7%\n"
+        "  HHI: 0.75 (高度集中)\n"
+        "<b>🏭 行业暴露</b>\n"
+        "  BROAD (大盘ETF): 86.6% ⚠️\n"
+        "  SMH (半导体): 13.4%\n"
+        "<b>📉 回撤 (1M)</b> 当前 0.00% · 最大 0.00% "
+        "(峰值 <code>$100.0K</code> @ 2026-05-29)\n"
+        "⚠️ <i>单票 IVV > 30% / BROAD 行业 > 30%</i>\n"
+        "<i>注：BROAD ETF 内部已分散，集中度风险不等同于单股</i>"
     )
 
     assert actual == expected, (
@@ -283,6 +360,8 @@ def _pnl_metrics_insufficient() -> PnLMetrics:
 @pytest.mark.parametrize("case_name, render", [
     ("risk_card_full",
      lambda: format_risk_card(_risk_report_full())),
+    ("risk_card_broad_etf",
+     lambda: format_risk_card(_risk_report_broad_etf())),
     ("risk_view_full",
      lambda: format_risk_view(_risk_report_full())),
     ("weekly_card_clean",
