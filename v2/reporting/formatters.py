@@ -1202,3 +1202,21 @@ def render_price_sparkline(
     fig.savefig(buf, format="png", dpi=120, bbox_inches="tight")
     plt.close(fig)
     return buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Earnings cards (Phase 1)
+# ---------------------------------------------------------------------------
+# Implementation lives in v2/reporting/_earnings_formatters.py — kept
+# separate so unit tests can import it without dragging in matplotlib /
+# v2.backtesting / v2.monitoring (this module's transitive deps include
+# v2.data through v2.lateral, which production has and sandbox does not).
+# Re-exported here so v2.reporting.formatters and v2.reporting both expose
+# the same surface as every other format_* function.
+from v2.reporting._earnings_formatters import (  # noqa: E402
+    format_earnings_calendar,
+    format_earnings_pending,
+    format_earnings_reminder,
+    format_earnings_summary,
+    format_earnings_view,
+)
