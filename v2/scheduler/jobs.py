@@ -68,6 +68,16 @@ def etf_daily_job() -> None:
     _run("etf_daily_snapshot.py")
 
 
+def earnings_reminders_job() -> None:
+    """⑦ Daily 08:00 ET — calendar reminders (D-3 / D-1 / D-0)."""
+    _run("earnings_reminders.py")
+
+
+def earnings_summaries_job() -> None:
+    """⑧ Daily 21:00 ET — post-release summaries with FD-pending retry."""
+    _run("earnings_summaries.py")
+
+
 def p2_digest_job() -> None:
     """Daily roll-up of P2-tier pushes — runs 16:45 ET before the
     17:00–18:30 ET cron block."""

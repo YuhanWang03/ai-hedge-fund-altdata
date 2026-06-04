@@ -581,6 +581,22 @@ _MODULE: dict[str, Explanation] = {
         "next":   "通过多次 chat_message emit 推送 1 张总览 + 每 manager 一张详情",
     },
 
+    # Earnings agent — Phase 1
+    "_r_earnings_reminders": {
+        "source": "scheduler 触发（08:00 ET Mon-Fri），watchlist + Alpaca 持仓 的合并 ticker 集合",
+        "how":    "yfinance 拿每只股票下次财报日，比对今天算 D-3/D-1/D-0",
+        "what":   "需要提醒的 EarningsEvent 列表 + 估算 EPS / 营收",
+        "store":  "不持久化（每天重算，自动吸收公司更改的发布日）",
+        "next":   "按距离 + 是否持仓打 priority，逐条推送 Telegram + archive.db",
+    },
+    "_r_earnings_summaries": {
+        "source": "scheduler 触发（21:00 ET Mon-Fri），今日发财报的 ticker + archive earnings_summarized 表去重",
+        "how":    "FD 拿 actual vs estimate，LLM 写定性总结（数字 Python 注入，Template Fill 模式）",
+        "what":   "EarningsSummary 卡（surprise / 4Q streak / bull-bear / 电话会链接）或 pending 占位",
+        "store":  "summary 推送后写 archive.earnings_summarized 防止重复；pending 也记一行",
+        "next":   "推 Telegram + dashboard 自动推送 feed；下一日 21:00 ET 再跑会自动 retry pending",
+    },
+
     # Streamer 触发的两类推送 —— 不是 cron，而是分钟级实时轮询。
     "_r_alert_fire": {
         "source": "Streamer 1 分钟轮询发现 alerts 表里某条 target_price 被跨越",

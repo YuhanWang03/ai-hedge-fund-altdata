@@ -17,6 +17,8 @@ from v2.scheduler.jobs import (
     anomaly_monitor_job,
     archive_cleanup_job,
     daily_screen_job,
+    earnings_reminders_job,
+    earnings_summaries_job,
     etf_daily_job,
     institutional_backfill_job,
     institutional_job,
@@ -84,6 +86,30 @@ def build_scheduler() -> BlockingScheduler:
         CronTrigger(hour=17, minute=0, day_of_week="mon-fri", timezone=_TZ),
         id="etf_daily",
         name="⑤ ETF Daily Snapshot (Mon-Fri)",
+        misfire_grace_time=3600,
+        coalesce=True,
+    )
+
+    # ⑦ Earnings reminders — 08:00 ET Mon-Fri. Pulls watchlist + Alpaca
+    # holdings, asks yfinance for the next release per ticker, and pushes
+    # one card for each that lands in D-3 / D-1 / D-0.
+    scheduler.add_job(
+        earnings_reminders_job,
+        CronTrigger(hour=8, minute=0, day_of_week="mon-fri", timezone=_TZ),
+        id="earnings_reminders",
+        name="⑦ Earnings Reminders (Mon-Fri 08:00 ET)",
+        misfire_grace_time=3600,
+        coalesce=True,
+    )
+
+    # ⑧ Earnings summaries — 21:00 ET Mon-Fri. Tickers whose calendar said
+    # "release today" get the post-release card if FD has the actuals; a
+    # short pending placeholder otherwise (retried by the next 21:00 ET run).
+    scheduler.add_job(
+        earnings_summaries_job,
+        CronTrigger(hour=21, minute=0, day_of_week="mon-fri", timezone=_TZ),
+        id="earnings_summaries",
+        name="⑧ Earnings Summaries (Mon-Fri 21:00 ET)",
         misfire_grace_time=3600,
         coalesce=True,
     )
