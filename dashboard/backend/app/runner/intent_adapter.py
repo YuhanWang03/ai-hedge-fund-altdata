@@ -61,6 +61,15 @@ def classify(text: str) -> tuple[str, dict[str, Any]]:
 
 
 _KEYWORD_MAP: list[tuple[str, str]] = [
+    # Earnings — checked first so "财报" doesn't get swallowed by "持仓".
+    ("财报日历", "earnings_calendar"),
+    ("earnings calendar", "earnings_calendar"),
+    ("谁要发财报", "earnings_calendar"),
+    ("哪些要发财报", "earnings_calendar"),
+    ("财报安排", "earnings_calendar"),
+    ("财报", "earnings_view"),
+    ("earnings", "earnings_view"),
+    # Existing
     ("为什么", "explain_move"),
     ("why", "explain_move"),
     ("怎么样", "summary"),
@@ -103,10 +112,15 @@ def _stub_classify(text: str) -> tuple[str, dict[str, Any]]:
             break
 
     args: dict[str, Any] = {}
-    if intent_name in {"explain_move", "summary", "chain", "holders_view"}:
+    if intent_name in {"explain_move", "summary", "chain", "holders_view",
+                       "earnings_view"}:
         ticker = _extract_ticker(text)
         if ticker:
             args["ticker"] = ticker
+    if intent_name == "earnings_calendar":
+        days = _extract_days_horizon(text)
+        if days:
+            args["days_horizon"] = days
     return intent_name, args
 
 
@@ -115,6 +129,28 @@ def _extract_ticker(text: str) -> Optional[str]:
         cleaned = token.strip().upper()
         if 2 <= len(cleaned) <= 5 and cleaned.isascii() and cleaned.isalpha():
             return cleaned
+    return None
+
+
+_DAYS_HORIZON_PHRASES = [
+    ("下两周", 14),
+    ("未来两周", 14),
+    ("未来 14 天", 14),
+    ("未来14天", 14),
+    ("下周", 7),
+    ("这周", 5),
+    ("本周", 5),
+    ("下个月", 30),
+    ("未来一个月", 30),
+]
+
+
+def _extract_days_horizon(text: str) -> Optional[int]:
+    """Heuristic — map common Chinese horizon phrases to day counts."""
+    lower = text.lower()
+    for phrase, days in _DAYS_HORIZON_PHRASES:
+        if phrase in lower:
+            return days
     return None
 
 
@@ -178,6 +214,22 @@ def _stub_responder(args: dict[str, Any]) -> str:
     )
 
 
+def _earnings_view_real(args: dict[str, Any]) -> str:
+    """Bridge dict-args to v2.bot.responders.earnings_view.
+
+    Same dict-in / str-out contract — direct passthrough. Imported lazily
+    so the dashboard module-load doesn't require v2.data (only the actual
+    request does).
+    """
+    from v2.bot import responders as bot_responders
+    return bot_responders.earnings_view(args)
+
+
+def _earnings_calendar_real(args: dict[str, Any]) -> str:
+    from v2.bot import responders as bot_responders
+    return bot_responders.earnings_calendar(args)
+
+
 # Real responders should replace these entries on the production VPS.
 # Each must accept a dict and return a str.
 DISPATCH: dict[str, ResponderFn] = {
@@ -195,5 +247,7 @@ DISPATCH: dict[str, ResponderFn] = {
     "portfolio_view": _stub_responder,
     "pnl_view": _stub_responder,
     "watchlist_view": _stub_responder,
+    "earnings_view": _earnings_view_real,
+    "earnings_calendar": _earnings_calendar_real,
     "unknown": _stub_responder,
 }

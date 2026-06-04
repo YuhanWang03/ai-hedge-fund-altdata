@@ -39,6 +39,8 @@ IntentName = Literal[
     "alert_list",
     "portfolio_view",
     "pnl_view",
+    "earnings_view",
+    "earnings_calendar",
     "unknown",
 ]
 
@@ -58,13 +60,15 @@ _VALID_INTENTS = {
     "alert_list",
     "portfolio_view",
     "pnl_view",
+    "earnings_view",
+    "earnings_calendar",
     "unknown",
 }
 
 
 _SYSTEM_PROMPT = (
     "你是一个股票分析助手的【意图分类器】。\n"
-    "把用户的话归类到下列**固定 15 个 intent 之一**，并提取参数。"
+    "把用户的话归类到下列**固定 17 个 intent 之一**，并提取参数。"
     "你不要回答问题，只做分类。\n"
     "\n"
     "【支持的 intents】\n"
@@ -83,6 +87,10 @@ _SYSTEM_PROMPT = (
     "- alert_list: 用户想查看已设的价格提醒\n"
     "- portfolio_view: 用户想看自己的 Alpaca 账户当前持仓\n"
     "- pnl_view: 用户想看自己的账户盈亏 / 资产总额 / 当日 P&L\n"
+    "- earnings_view: 用户问某只股票的财报情况（下次日期 / 上次结果 / surprise 等）。"
+    "例：「AAPL 什么时候发财报」「苹果上次财报怎么样」「NVDA Q3 财报多少」「TSLA 财报日期」\n"
+    "- earnings_calendar: 用户问 watchlist / 持仓 / 未来 N 天的财报日历。"
+    "例：「下周谁要发财报」「我的持仓哪些要发财报」「未来 14 天财报」「这周财报安排」\n"
     "- unknown: 都不匹配 / 含糊不清 / 与股票无关\n"
     "\n"
     "【参数提取规则】\n"
@@ -99,16 +107,19 @@ _SYSTEM_PROMPT = (
     "- target_price: 当 intent=alert_set 时，提取目标价（数字，不带美元符号）\n"
     "- direction: 当 intent=alert_set 时，提取方向（仅 'above' 或 'below'）。"
     "「突破」「涨到」「站上」→ above；「跌破」「跌到」「跌穿」→ below\n"
+    "- days_horizon: 当 intent=earnings_calendar 时，提取用户问的天数窗口（整数）。"
+    "「下周」→ 7，「未来两周」/「下两周」→ 14，「这周」→ 5，「下个月」→ 30。"
+    "用户没指定时输出 0（responder 默认 14）。\n"
     "\n"
     "【约束】\n"
     "1. **只输出 JSON，不要 markdown，不要解释**\n"
     "2. 不确定时输出 unknown\n"
     "3. ticker / manager / etf / direction 字段没有时输出空字符串\n"
-    "4. target_price 没有时输出 0\n"
+    "4. target_price / days_horizon 没有时输出 0\n"
     "\n"
     "【JSON 格式】\n"
     '{"intent": "explain_move", "ticker": "NVDA", "manager": "", "etf": "", '
-    '"target_price": 0, "direction": "", "raw": "..."}'
+    '"target_price": 0, "direction": "", "days_horizon": 0, "raw": "..."}'
 )
 
 
@@ -156,6 +167,10 @@ def classify(text: str) -> dict:
         target_price = float(parsed.get("target_price", 0) or 0)
     except (TypeError, ValueError):
         target_price = 0.0
+    try:
+        days_horizon = int(parsed.get("days_horizon", 0) or 0)
+    except (TypeError, ValueError):
+        days_horizon = 0
 
     return {
         "intent": intent,
@@ -164,6 +179,7 @@ def classify(text: str) -> dict:
         "etf": str(parsed.get("etf", "")).strip().upper(),
         "target_price": target_price,
         "direction": str(parsed.get("direction", "")).strip().lower(),
+        "days_horizon": days_horizon,
         "raw": str(parsed.get("raw", text))[:80],
     }
 
@@ -176,5 +192,6 @@ def _unknown(text: str) -> dict:
         "etf": "",
         "target_price": 0.0,
         "direction": "",
+        "days_horizon": 0,
         "raw": text[:80],
     }

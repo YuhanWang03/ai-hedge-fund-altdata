@@ -620,6 +620,139 @@ def settings_view() -> str:
 
 
 # ---------------------------------------------------------------------------
+# /earnings — single-ticker card + N-day calendar (Phase 1 Stage 4)
+# ---------------------------------------------------------------------------
+
+
+_DEFAULT_HORIZON_DAYS = 14
+
+
+def earnings_view(args: dict) -> str:
+    """Single-ticker earnings card.
+
+    args: ``{"ticker": "AAPL"}``
+
+    Composes the next yfinance calendar entry + last FD filing into one
+    HTML card. Read-only — no archive write, no priority scoring.
+    Failures degrade to a friendly message; never raises.
+    """
+    from v2.earnings import (
+        get_latest_actual,
+        get_upcoming,
+        is_supported_ticker,
+    )
+    from v2.earnings._bot_cards import format_earnings_view
+
+    ticker = str(args.get("ticker") or "").strip().upper()
+    if not ticker or not is_supported_ticker(ticker):
+        return (
+            f"<b>🚫 无效 ticker: {html.escape(ticker or '(empty)')}</b>\n"
+            "请使用美股 ticker（如 <code>AAPL</code>、<code>BRK.B</code>）"
+        )
+
+    next_event = None
+    try:
+        next_event = get_upcoming(ticker)
+    except Exception as exc:
+        logger.warning("earnings_view: get_upcoming(%s) failed: %s", ticker, exc)
+
+    last_event = None
+    try:
+        with CachedFDClient() as fd:
+            last_event = get_latest_actual(fd, ticker)
+    except Exception as exc:
+        logger.warning("earnings_view: get_latest_actual(%s) failed: %s", ticker, exc)
+
+    if next_event is None and last_event is None:
+        return f"<i>暂未取到 {html.escape(ticker)} 财报数据</i>"
+
+    is_held, is_watchlist = _ticker_membership(ticker)
+    return format_earnings_view(
+        ticker,
+        next_event=next_event,
+        last_event=last_event,
+        is_held=is_held,
+        is_watchlist=is_watchlist,
+    )
+
+
+def earnings_calendar(args: dict) -> str:
+    """N-day forward calendar across (watchlist ∪ Alpaca holdings).
+
+    args: ``{"days_horizon": 14}`` (default 14)
+
+    Returns one card listing every release within the horizon, sorted by
+    date, with ⭐ chips. Empty universe / empty horizon both produce a
+    polite "no upcoming" message.
+    """
+    from v2.earnings import get_upcoming_batch
+    from v2.earnings._bot_cards import format_earnings_calendar
+
+    horizon = args.get("days_horizon")
+    try:
+        horizon = int(horizon) if horizon else _DEFAULT_HORIZON_DAYS
+    except (TypeError, ValueError):
+        horizon = _DEFAULT_HORIZON_DAYS
+    horizon = max(1, min(horizon, 90))  # bound to a sane range
+
+    held, watchlist = _user_universe()
+    universe = sorted(held | watchlist)
+    if not universe:
+        return (
+            f"<b>📅 未来 {horizon} 天财报日历</b>\n"
+            "<i>watchlist 和持仓 都为空，先 /add TICKER 添加几只</i>"
+        )
+
+    try:
+        batch = get_upcoming_batch(universe)
+    except Exception as exc:
+        logger.warning("earnings_calendar: get_upcoming_batch failed: %s", exc)
+        return f"❌ 日历查询失败: <code>{html.escape(str(exc))}</code>"
+
+    return format_earnings_calendar(
+        batch.events.values(),
+        horizon_days=horizon,
+        held=held,
+        watchlist=watchlist,
+    )
+
+
+# ---------------------------------------------------------------------------
+# /earnings helpers — read user universe (held + watchlist)
+# ---------------------------------------------------------------------------
+
+
+def _user_universe() -> tuple[set[str], set[str]]:
+    """Return ``(held, watchlist)`` ticker sets.
+
+    Alpaca unavailable → empty held set, not a crash. Watchlist comes from
+    the bot's own SQLite (no network).
+    """
+    from v2.bot import state as bot_state
+
+    watchlist = {row["ticker"].upper() for row in bot_state.watchlist_list()}
+
+    held: set[str] = set()
+    try:
+        from v2.broker import AlpacaUnavailable, get_portfolio
+        snap = get_portfolio()
+        held = {p["symbol"].upper() for p in snap.get("positions", [])}
+    except Exception as exc:
+        # Includes AlpacaUnavailable. Held stays empty; not a failure.
+        logger.info("earnings: alpaca unavailable, watchlist-only: %s", exc)
+
+    return held, watchlist
+
+
+def _ticker_membership(ticker: str) -> tuple[bool, bool]:
+    """Return ``(is_held, is_watchlist)``. Held trumps watchlist for badges."""
+    held, watchlist = _user_universe()
+    is_held = ticker in held
+    is_watchlist = (ticker in watchlist) and not is_held
+    return is_held, is_watchlist
+
+
+# ---------------------------------------------------------------------------
 # Internal formatting helpers (duplicate the formatter helpers locally so
 # responders don't reach into v2/reporting internals)
 # ---------------------------------------------------------------------------
