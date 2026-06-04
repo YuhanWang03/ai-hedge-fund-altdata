@@ -10,6 +10,7 @@ from v2.broker.alpaca_client import (
     AlpacaConfig,
     AlpacaUnavailable,
     get_portfolio,
+    get_portfolio_history,
     get_pnl,
 )
 
@@ -17,5 +18,6 @@ __all__ = [
     "AlpacaConfig",
     "AlpacaUnavailable",
     "get_portfolio",
+    "get_portfolio_history",
     "get_pnl",
 ]
