@@ -1,0 +1,286 @@
+"""Earnings post-release summaries cron — daily 21:00 ET.
+
+For each ticker in (watchlist ∪ Alpaca holdings) whose yfinance calendar
+says "release today", asks FD whether actuals have landed. If yes, builds
+an :class:`EarningsSummary` (LLM-narrated bull/bear/narrative) and pushes
+a Telegram card; priority is P0 when |EPS surprise| ≥ 10% with held/watchlist
+adjustments. If FD hasn't ingested yet, pushes a short "数据待落地" P2
+reminder and marks the row pending — the next morning's reminder cron will
+already have moved on, but the next 21:00 ET cron picks it up because the
+dedup table only counts ``outcome="summarized"``.
+
+Triggered by the scheduler Mon-Fri 21:00 ET.
+"""
+
+from __future__ import annotations
+
+import logging
+import sys
+from datetime import date
+
+from dotenv import load_dotenv
+
+from v2.archive import Archive
+from v2.bot import state as bot_state
+from v2.data import CachedFDClient
+from v2.earnings import (
+    EarningsSummary,
+    SummaryOutcome,
+    get_upcoming_batch,
+    run_summaries,
+)
+from v2.observability import capture_trace_with_framing, install_all
+from v2.reporting import TelegramNotifier, notify_on_error
+from v2.reporting.priority import compute_importance
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+
+_SURPRISE_EMOJI = {
+    "BEAT": "🟢",
+    "MISS": "🔴",
+    "MEET": "🟡",
+    "UNKNOWN": "❔",
+}
+
+
+def _resolve_universe() -> tuple[list[str], set[str], set[str]]:
+    """Mirror of earnings_reminders._resolve_universe — kept inline to avoid
+    a shared helper module for two callers."""
+    watchlist = {row["ticker"].upper() for row in bot_state.watchlist_list()}
+
+    held: set[str] = set()
+    try:
+        from v2.broker import AlpacaUnavailable, get_portfolio
+        portfolio = get_portfolio()
+        held = {p["symbol"].upper() for p in portfolio.get("positions", [])}
+    except AlpacaUnavailable as exc:
+        logger.info("Alpaca unavailable, proceeding watchlist-only: %s", exc)
+    except Exception as exc:
+        logger.warning("Alpaca portfolio fetch crashed: %s", exc)
+
+    return sorted(watchlist | held), held, watchlist
+
+
+def _eps_surprise_pct(s: EarningsSummary) -> float | None:
+    if s.eps_actual is None or s.eps_estimate is None or s.eps_estimate == 0:
+        return None
+    return (s.eps_actual - s.eps_estimate) / abs(s.eps_estimate)
+
+
+def _revenue_surprise_pct(s: EarningsSummary) -> float | None:
+    if s.revenue_actual is None or s.revenue_estimate is None or s.revenue_estimate <= 0:
+        return None
+    return (s.revenue_actual - s.revenue_estimate) / s.revenue_estimate
+
+
+def _format_summary(s: EarningsSummary, *, badge: str) -> str:
+    """Minimal Stage-2 summary card. Stage 5 polishes."""
+    emoji = _SURPRISE_EMOJI.get(s.eps_surprise, "•")
+
+    lines: list[str] = [
+        f"<b>{emoji} 财报发布 · {s.ticker} · {s.eps_surprise}</b>",
+        f"报告期：<code>{s.report_period}</code> · 申报：<code>{s.filing_date}</code>",
+    ]
+    if badge:
+        lines.append(badge)
+    lines.append("")
+
+    eps_pct = _eps_surprise_pct(s)
+    if s.eps_actual is not None and s.eps_estimate is not None:
+        delta = f" ({eps_pct:+.1%})" if eps_pct is not None else ""
+        lines.append(
+            f"EPS：<code>{s.eps_actual:.2f}</code> vs 预期 "
+            f"<code>{s.eps_estimate:.2f}</code>{delta}"
+        )
+    rev_pct = _revenue_surprise_pct(s)
+    if s.revenue_actual is not None and s.revenue_estimate is not None:
+        delta = f" ({rev_pct:+.1%})" if rev_pct is not None else ""
+        lines.append(
+            f"营收：<code>${s.revenue_actual / 1e9:.2f}B</code> vs 预期 "
+            f"<code>${s.revenue_estimate / 1e9:.2f}B</code>{delta}"
+        )
+
+    if s.last_4q_surprises:
+        streak = " → ".join(s.last_4q_surprises)
+        lines.append(f"最近 4 季：<code>{streak}</code>")
+
+    if s.bull or s.bear:
+        lines.append("")
+        if s.bull:
+            lines.append(f"👍 {s.bull}")
+        if s.bear:
+            lines.append(f"👎 {s.bear}")
+    if s.narrative:
+        lines.append("")
+        lines.append(f"<i>{s.narrative}</i>")
+    if s.transcript_url:
+        lines.append("")
+        lines.append(f'📜 <a href="{s.transcript_url}">电话会记录</a>')
+
+    return "\n".join(lines)
+
+
+def _format_pending(ticker: str, today_iso: str, badge: str) -> str:
+    lines = [
+        f"<b>⏳ 财报数据待落地 · {ticker}</b>",
+        f"发布日：<code>{today_iso}</code>",
+    ]
+    if badge:
+        lines.append(badge)
+    lines.append("")
+    lines.append("<i>FD 实际数据尚未入库，明天 21:00 ET 自动重试。</i>")
+    return "\n".join(lines)
+
+
+def _badge(is_held: bool, is_watchlist: bool) -> str:
+    if is_held:
+        return "🟢 持仓股"
+    if is_watchlist:
+        return "👁 关注列表"
+    return ""
+
+
+def _push_summarized(
+    notifier: TelegramNotifier,
+    trace,
+    archive: Archive,
+    outcome: SummaryOutcome,
+    *,
+    is_held: bool,
+    is_watchlist: bool,
+) -> None:
+    summary = outcome.summary
+    assert summary is not None
+    eps_pct = _eps_surprise_pct(summary) or 0.0
+    md = {
+        "surprise_pct": eps_pct,
+        "is_held_position": is_held,
+        "is_watchlist": is_watchlist,
+        # Hook left wired — when Stage 5's transcript parser detects
+        # "guidance lowered" we'll set this. Stays False for now.
+        "guidance_lowered": False,
+    }
+    priority = compute_importance("earnings_summary", md)
+
+    text = _format_summary(summary, badge=_badge(is_held, is_watchlist))
+    notifier.send_text(
+        text,
+        trace=trace,
+        title=f"财报 · {summary.ticker} · {summary.eps_surprise}",
+        tickers=[summary.ticker],
+        priority=priority,
+    )
+    archive.mark_earnings_summarized(
+        summary.ticker, summary.report_period, outcome="summarized",
+    )
+
+
+def _push_pending(
+    notifier: TelegramNotifier,
+    trace,
+    archive: Archive,
+    outcome: SummaryOutcome,
+    *,
+    today_iso: str,
+    is_held: bool,
+    is_watchlist: bool,
+) -> None:
+    priority = compute_importance(
+        "earnings_pending",
+        {"is_held_position": is_held, "is_watchlist": is_watchlist},
+    )
+    text = _format_pending(outcome.ticker, today_iso, _badge(is_held, is_watchlist))
+    notifier.send_text(
+        text,
+        trace=trace,
+        title=f"财报待落地 · {outcome.ticker}",
+        tickers=[outcome.ticker],
+        priority=priority,
+    )
+    # Pending key uses today's date as a placeholder so it doesn't collide
+    # with the eventual real (ticker, report_period) row.
+    archive.mark_earnings_summarized(
+        outcome.ticker, f"pending_{today_iso}", outcome="pending",
+    )
+
+
+@notify_on_error("Earnings Summaries")
+def main() -> int:
+    load_dotenv()
+    install_all()
+
+    universe, held, watchlist = _resolve_universe()
+    if not universe:
+        logger.info("Empty watchlist + holdings — nothing to summarize.")
+        return 0
+
+    today_iso = date.today().isoformat()
+    archive = Archive("earnings")
+
+    # Filter universe to tickers whose yfinance calendar says today.
+    cal_batch = get_upcoming_batch(universe)
+    releasing_today = [
+        t for t, ev in cal_batch.events.items()
+        if ev.d_minus(today_iso) == 0
+    ]
+
+    if not releasing_today:
+        logger.info(
+            "No releases today across %d tickers — staying silent.",
+            len(universe),
+        )
+        return 0
+
+    logger.info(
+        "Tickers releasing today: %s",
+        ", ".join(releasing_today),
+    )
+
+    already = archive.get_summarized_set()
+
+    with CachedFDClient() as fd:
+        with capture_trace_with_framing(
+            agent="earnings", intent="earnings_view",
+            text=f"(自动推送) 财报总结 · {len(releasing_today)} 只",
+            responder_name="_r_earnings_summaries",
+        ) as trace:
+            run = run_summaries(
+                releasing_today, fd,
+                today=today_iso,
+                already_summarized=already,
+            )
+
+            notifier = TelegramNotifier(archive=archive)
+            for outcome in run.outcomes:
+                ticker = outcome.ticker
+                is_held = ticker in held
+                is_watchlist = (ticker in watchlist) and not is_held
+                try:
+                    if outcome.status == "summarized":
+                        _push_summarized(
+                            notifier, trace, archive, outcome,
+                            is_held=is_held, is_watchlist=is_watchlist,
+                        )
+                    elif outcome.status == "pending":
+                        _push_pending(
+                            notifier, trace, archive, outcome,
+                            today_iso=today_iso,
+                            is_held=is_held, is_watchlist=is_watchlist,
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "summary push failed for %s (%s): %s",
+                        ticker, outcome.status, exc,
+                    )
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

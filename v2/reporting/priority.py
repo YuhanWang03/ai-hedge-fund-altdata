@@ -39,7 +39,11 @@ BASE_SCORES: dict[str, int] = {
     "etf_significant":     75,  # ARK significant rebalance — P1
     "institutional_13f":   65,  # 13F push — P1
     "earnings_summary":    70,  # earnings recap — P1
-    "earnings_reminder":   45,  # earnings reminder — P2
+    "earnings_reminder":   45,  # generic earnings reminder — P2 (legacy)
+    "earnings_reminder_d3":45,  # D-3 reminder — P2
+    "earnings_reminder_d1":60,  # D-1 reminder — P1 (upgraded urgency)
+    "earnings_reminder_d0":60,  # D-0 release day — P1
+    "earnings_pending":    45,  # FD hasn't ingested yet — P2 placeholder
     "portfolio_risk":      55,  # portfolio risk daily — P2 base
     "portfolio_alert":     85,  # portfolio drawdown / concentration — P0
     "macro_event":         70,  # macro data print — P1
@@ -103,7 +107,12 @@ def compute_importance(
     if event_kind == "earnings_summary":
         surprise = abs(float(md.get("surprise_pct") or 0.0))
         if surprise >= 0.10:
-            adjustments.append((+15, f"big_surprise_{surprise:.1%}"))
+            # +30 puts even a no-holdings BEAT/MISS firmly into P0
+            # (70 base → 100 capped). Big surprises are the whole reason
+            # to wake the user at 21:00 ET.
+            adjustments.append((+30, f"big_surprise_{surprise:.1%}"))
+        if md.get("guidance_lowered"):
+            adjustments.append((+10, "guidance_lowered"))
 
     # ---- portfolio ----
     if event_kind == "portfolio_risk":

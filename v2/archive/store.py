@@ -96,6 +96,18 @@ CREATE TABLE IF NOT EXISTS p2_digest_pending (
     tier       TEXT,
     FOREIGN KEY (push_id) REFERENCES pushes(id)
 );
+
+-- Earnings Agent dedup table (Phase 1). Tracks which (ticker, quarter)
+-- pairs have already been shipped so the 21:00 ET cron can be retried
+-- without spamming duplicate cards. outcome ∈ {"summarized","pending",
+-- "skipped"} — only "summarized" rows count for dedup.
+CREATE TABLE IF NOT EXISTS earnings_summarized (
+    ticker        TEXT NOT NULL,
+    report_period TEXT NOT NULL,
+    summarized_at TEXT NOT NULL,
+    outcome       TEXT,
+    PRIMARY KEY (ticker, report_period)
+);
 """
 
 
@@ -329,6 +341,68 @@ class Archive:
         except sqlite3.Error as exc:
             logger.warning("get_pending_p2_digest failed: %s", exc)
             return []
+
+    # ---- Earnings dedup helpers -----------------------------------------
+
+    def mark_earnings_summarized(
+        self,
+        ticker: str,
+        report_period: str,
+        outcome: str = "summarized",
+    ) -> None:
+        """Record that ``ticker``'s ``report_period`` filing has been
+        processed by the 21:00 ET cron.
+
+        ``outcome`` is one of ``"summarized"`` / ``"pending"`` / ``"skipped"``.
+        Only ``"summarized"`` rows count toward the dedup set — pending
+        markers stay in the table as historical evidence but don't block
+        a later real summary from being pushed.
+        """
+        try:
+            with self._conn() as conn:
+                conn.execute(
+                    """INSERT OR REPLACE INTO earnings_summarized
+                       (ticker, report_period, summarized_at, outcome)
+                       VALUES (?, ?, ?, ?)""",
+                    (ticker.upper(), report_period, _now_iso(), outcome),
+                )
+        except sqlite3.Error as exc:
+            logger.warning("mark_earnings_summarized(%s, %s) failed: %s",
+                           ticker, report_period, exc)
+
+    def is_earnings_summarized(self, ticker: str, report_period: str) -> bool:
+        """True iff ``(ticker, report_period)`` already shipped a real summary."""
+        try:
+            with self._conn() as conn:
+                row = conn.execute(
+                    """SELECT 1 FROM earnings_summarized
+                       WHERE ticker = ? AND report_period = ?
+                         AND outcome = 'summarized'""",
+                    (ticker.upper(), report_period),
+                ).fetchone()
+            return row is not None
+        except sqlite3.Error as exc:
+            logger.warning("is_earnings_summarized(%s, %s) failed: %s",
+                           ticker, report_period, exc)
+            return False
+
+    def get_summarized_set(self) -> set[tuple[str, str]]:
+        """Return all ``(ticker, report_period)`` pairs with outcome=summarized.
+
+        Cron passes this as ``already_summarized`` into
+        :func:`v2.earnings.pipeline.run_summaries` so retried runs don't
+        re-push the same card.
+        """
+        try:
+            with self._conn() as conn:
+                rows = conn.execute(
+                    """SELECT ticker, report_period FROM earnings_summarized
+                       WHERE outcome = 'summarized'"""
+                ).fetchall()
+            return {(r[0], r[1]) for r in rows}
+        except sqlite3.Error as exc:
+            logger.warning("get_summarized_set failed: %s", exc)
+            return set()
 
     def clear_p2_digest(self, push_ids: Iterable[int]) -> int:
         """Drop the listed push ids from the digest queue.

@@ -182,6 +182,57 @@ def test_concurrent_init_does_not_corrupt_migration(fresh_archive):
     assert required <= after, f"missing after race: {required - after}"
 
 
+def test_earnings_summarized_table_created(fresh_archive):
+    """Phase 1 Stage 2 — booting Archive must create the dedup table for
+    the earnings agent on a fresh DB."""
+    store, db = fresh_archive
+    store.Archive("test")
+
+    conn = sqlite3.connect(str(db))
+    try:
+        tables = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )}
+        assert "earnings_summarized" in tables, tables
+        cols = {r[1] for r in conn.execute(
+            "PRAGMA table_info(earnings_summarized)"
+        )}
+    finally:
+        conn.close()
+
+    assert {"ticker", "report_period", "summarized_at", "outcome"} <= cols, cols
+
+
+def test_earnings_dedup_round_trip(fresh_archive):
+    """End-to-end: mark, query, set, and pending isolation."""
+    store, _ = fresh_archive
+    archive = store.Archive("earnings")
+
+    archive.mark_earnings_summarized("AAPL", "2025-06-28", outcome="summarized")
+    archive.mark_earnings_summarized("NVDA", "pending_2025-08-27", outcome="pending")
+    archive.mark_earnings_summarized("MSFT", "2025-06-30", outcome="summarized")
+
+    assert archive.is_earnings_summarized("AAPL", "2025-06-28") is True
+    # Pending must NOT count as summarized — that's the whole point of
+    # the outcome filter.
+    assert archive.is_earnings_summarized("NVDA", "pending_2025-08-27") is False
+    assert archive.is_earnings_summarized("TSLA", "2025-06-28") is False
+
+    summarized = archive.get_summarized_set()
+    assert summarized == {("AAPL", "2025-06-28"), ("MSFT", "2025-06-30")}, summarized
+
+
+def test_earnings_dedup_idempotent_mark(fresh_archive):
+    """Marking the same (ticker, period) twice must not raise (PRIMARY
+    KEY collision is handled by INSERT OR REPLACE)."""
+    store, _ = fresh_archive
+    archive = store.Archive("earnings")
+    archive.mark_earnings_summarized("AAPL", "2025-06-28", outcome="pending")
+    archive.mark_earnings_summarized("AAPL", "2025-06-28", outcome="summarized")
+    # The later mark wins.
+    assert archive.is_earnings_summarized("AAPL", "2025-06-28") is True
+
+
 def test_save_text_after_migration_uses_new_columns(fresh_archive):
     """End-to-end: after migration, save_text with priority kwargs must
     successfully write all priority fields."""
