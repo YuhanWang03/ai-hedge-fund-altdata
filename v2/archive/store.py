@@ -100,11 +100,55 @@ CREATE TABLE IF NOT EXISTS p2_digest_pending (
 
 
 def _ensure_phase2_columns(conn: sqlite3.Connection) -> None:
-    """Add the trace/title/expires_at + priority columns if missing."""
-    cols = {row[1] for row in conn.execute("PRAGMA table_info(pushes)")}
+    """Add the trace/title/expires_at + priority columns if missing.
+
+    Robustness notes:
+
+    - The cols snapshot is re-read AFTER every successful or failed
+      ALTER. A naive "compute once, then loop" approach is vulnerable
+      to TOCTOU: when two processes init Archive at the same moment,
+      one wins the race and ALTERs trace_json, the other's snapshot
+      still says trace_json is missing and its ALTER raises
+      "duplicate column name", which would abort the loop and leave
+      later columns (e.g. priority_tier) unmigrated. Re-reading + a
+      per-column try/except converges to the right end state from
+      any starting point.
+
+    - "duplicate column name" specifically is swallowed: it means
+      the column already exists (we raced), so the migration goal
+      for this name is already satisfied. Any other OperationalError
+      propagates so the operator sees it.
+    """
+    def _live_cols() -> set[str]:
+        return {row[1] for row in conn.execute("PRAGMA table_info(pushes)")}
+
+    cols = _live_cols()
     for name, ddl in (*_PHASE2_COLUMNS, *_PRIORITY_COLUMNS):
-        if name not in cols:
+        if name in cols:
+            continue
+        try:
             conn.execute(f"ALTER TABLE pushes ADD COLUMN {name} {ddl}")
+            cols.add(name)
+        except sqlite3.OperationalError as exc:
+            if "duplicate column" in str(exc).lower():
+                # Lost the race — column already exists. Refresh and
+                # keep going so subsequent iterations see reality.
+                cols = _live_cols()
+                continue
+            raise
+
+    # Final sanity check — if any required column is STILL missing
+    # after the loop (e.g. a partial migration somewhere upstream
+    # left the table in an inconsistent state), surface it loudly
+    # rather than letting the next save fail with a cryptic
+    # "no such column" error.
+    final_cols = _live_cols()
+    required = {n for n, _ in (*_PHASE2_COLUMNS, *_PRIORITY_COLUMNS)}
+    missing = required - final_cols
+    if missing:
+        raise sqlite3.OperationalError(
+            f"archive.db migration incomplete — still missing: {sorted(missing)}"
+        )
 
 
 class Archive:
