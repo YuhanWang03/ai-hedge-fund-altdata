@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 
+from telegram import Update
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -15,6 +16,36 @@ from telegram.ext import (
 from v2.bot import commands
 
 logger = logging.getLogger(__name__)
+
+
+async def _error_handler(update: object, context) -> None:
+    """Surface unhandled bot errors to the user instead of silent fail.
+
+    Without this, an exception inside a handler (e.g.
+    ``telegram.error.BadRequest`` from malformed card HTML) leaves the
+    placeholder message stuck forever and the bot appears frozen.
+    With this, the user gets a short message naming the error class,
+    and the full traceback lands in ``bot.err`` for diagnosis.
+
+    Added 2026-06-04 after the ``/pnl week`` HTML escape silent-fail
+    incident (hot patch 5f61795).
+    """
+    logger.exception("Unhandled bot error", exc_info=context.error)
+
+    if not isinstance(update, Update):
+        return
+    chat = update.effective_chat
+    if chat is None:
+        return
+
+    err_type = type(context.error).__name__ if context.error else "Unknown"
+    try:
+        await chat.send_message(
+            f"⚠️ 命令执行失败：{err_type}\n"
+            f"详情已记录到 bot.err 日志，请联系开发者。"
+        )
+    except Exception:
+        logger.exception("Error handler itself failed — giving up")
 
 
 def build_application() -> Application:
@@ -50,6 +81,8 @@ def build_application() -> Application:
     app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, commands.cmd_nl)
     )
+
+    app.add_error_handler(_error_handler)
 
     return app
 
