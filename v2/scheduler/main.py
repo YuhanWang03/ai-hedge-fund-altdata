@@ -145,7 +145,7 @@ def build_scheduler() -> BlockingScheduler:
     # the previous day's P2 archive rows into one Telegram message.
     scheduler.add_job(
         p2_digest_job,
-        CronTrigger(hour=16, minute=45, day_of_week="mon-fri"),
+        CronTrigger(hour=16, minute=45, day_of_week="mon-fri", timezone=_TZ),
         id="p2_digest",
         name="📋 P2 Digest (Mon-Fri 16:45 ET)",
         misfire_grace_time=1800,
