@@ -127,7 +127,15 @@ def main() -> int:
         trace.emit("chat_message", role="bot",
                    text=f"组合周报 · {len(report.positions)} 持仓")
 
-    # Weekly recap is always P1 — operator visibility.
+    # Weekly recap is always P1 — operator visibility. The cron passes
+    # EMPTY metadata to compute_importance by design: a clean week
+    # (top_1 < 20%, daily_pnl > -2%, max_dd < 10%) would otherwise land
+    # P2 and skip the operator's Telegram. The floor below lifts that
+    # natural P2 to P1 with an explicit '+10_weekly_recap_floor' reason
+    # in the trace so the elevation is auditable. If a future redesign
+    # wants the floor to be inert on signal-rich weeks, pass the report
+    # metadata here AND keep the floor branch — it'll only fire when
+    # truly empty.
     priority = compute_importance("portfolio_risk", {})
     if priority.tier == "P2":
         from v2.reporting.priority import PriorityResult
