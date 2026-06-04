@@ -242,7 +242,7 @@ def test_pnl_period_week_data_insufficient():
     expected = (
         "<b>📊 本周 P&amp;L 摘要</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "<i>数据不足（账户历史 < 5 个交易日）</i>\n"
+        "<i>数据不足（账户历史少于 5 个交易日）</i>\n"
         "<i>(参考 · 今日 🟢 +0.50%)</i>"
     )
     assert actual == expected

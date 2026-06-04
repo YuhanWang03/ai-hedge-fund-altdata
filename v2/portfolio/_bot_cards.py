@@ -354,7 +354,7 @@ def format_pnl_period(period: str, metrics: PnLMetrics) -> str:
 
     if value is None:
         lines.append(
-            f"<i>数据不足（账户历史 < {_PNL_PERIOD_MIN_DAYS[period]}）</i>"
+            f"<i>数据不足（账户历史少于 {_PNL_PERIOD_MIN_DAYS[period]}）</i>"
         )
     else:
         sign = "🟢" if value >= 0 else "🔴"
