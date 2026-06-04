@@ -35,7 +35,7 @@ def build_scheduler() -> BlockingScheduler:
 
     scheduler.add_job(
         daily_screen_job,
-        CronTrigger(hour=17, minute=30, day_of_week="mon-fri"),
+        CronTrigger(hour=17, minute=30, day_of_week="mon-fri", timezone=_TZ),
         id="daily_screen",
         name="① Daily Screen",
         misfire_grace_time=3600,
@@ -44,7 +44,7 @@ def build_scheduler() -> BlockingScheduler:
 
     scheduler.add_job(
         anomaly_monitor_job,
-        CronTrigger(hour=17, minute=35, day_of_week="mon-fri"),
+        CronTrigger(hour=17, minute=35, day_of_week="mon-fri", timezone=_TZ),
         id="anomaly_monitor",
         name="② Anomaly Monitor",
         misfire_grace_time=3600,
@@ -53,7 +53,7 @@ def build_scheduler() -> BlockingScheduler:
 
     scheduler.add_job(
         lateral_expansion_job,
-        CronTrigger(hour=18, minute=0, day_of_week="mon"),
+        CronTrigger(hour=18, minute=0, day_of_week="mon", timezone=_TZ),
         id="lateral_expansion",
         name="③ Lateral Expansion (weekly)",
         misfire_grace_time=7200,
@@ -62,7 +62,7 @@ def build_scheduler() -> BlockingScheduler:
 
     scheduler.add_job(
         institutional_job,
-        CronTrigger(hour=18, minute=0, day_of_week="tue,fri"),
+        CronTrigger(hour=18, minute=0, day_of_week="tue,fri", timezone=_TZ),
         id="institutional",
         name="④ Institutional 13F (Tue/Fri)",
         misfire_grace_time=7200,
@@ -71,7 +71,7 @@ def build_scheduler() -> BlockingScheduler:
 
     scheduler.add_job(
         institutional_backfill_job,
-        CronTrigger(hour=18, minute=30, day_of_week="sun"),
+        CronTrigger(hour=18, minute=30, day_of_week="sun", timezone=_TZ),
         id="institutional_backfill",
         name="④b 13F Backfill (Sun)",
         misfire_grace_time=7200,
@@ -80,7 +80,7 @@ def build_scheduler() -> BlockingScheduler:
 
     scheduler.add_job(
         etf_daily_job,
-        CronTrigger(hour=17, minute=0, day_of_week="mon-fri"),
+        CronTrigger(hour=17, minute=0, day_of_week="mon-fri", timezone=_TZ),
         id="etf_daily",
         name="⑤ ETF Daily Snapshot (Mon-Fri)",
         misfire_grace_time=3600,
@@ -91,7 +91,7 @@ def build_scheduler() -> BlockingScheduler:
     # 02:00 UTC chosen to avoid the 17:00–18:30 ET push window.
     scheduler.add_job(
         archive_cleanup_job,
-        CronTrigger(hour=2, minute=0),
+        CronTrigger(hour=2, minute=0, timezone=_TZ),
         id="archive_cleanup",
         name="⑥ Archive Cleanup",
         misfire_grace_time=3600,
