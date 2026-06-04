@@ -9,6 +9,8 @@ export interface PushSummary {
   tickers: string | null
   preview: string
   has_trace: 0 | 1
+  importance_score?: number | null
+  priority_tier?: 'P0' | 'P1' | 'P2' | 'P3' | null
 }
 
 export interface PushDetail {
@@ -30,8 +32,13 @@ function ownerHeaders(): Record<string, string> {
   return t ? { 'X-Owner-Token': t } : {}
 }
 
-export async function fetchRecentPushes(days = 2): Promise<PushSummary[]> {
-  const r = await fetch(`/api/recent_pushes?days=${days}`, {
+export async function fetchRecentPushes(
+  days = 2,
+  options: { includeP3?: boolean } = {},
+): Promise<PushSummary[]> {
+  const params = new URLSearchParams({ days: String(days) })
+  if (options.includeP3) params.set('include_p3', 'true')
+  const r = await fetch(`/api/recent_pushes?${params}`, {
     headers: ownerHeaders(),
   })
   if (!r.ok) throw new Error(`recent_pushes failed: ${r.status}`)

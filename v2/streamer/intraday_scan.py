@@ -24,6 +24,7 @@ from v2.bot import state
 from v2.observability import capture_trace_with_framing
 from v2.reporting import format_intraday_anomaly
 from v2.reporting.notifier import TelegramNotifier
+from v2.reporting.priority import compute_importance
 from v2.screening.universe import TECH_30
 from v2.universe import SECTOR_ETFS, sector_etf_for
 
@@ -152,11 +153,19 @@ def scan_universe(notifier: TelegramNotifier) -> int:
             # Dedicated Archive agent so the dashboard's AGENT_TO_INTENT
             # routes intraday cards to the intraday_anomaly pipeline.
             intraday_notifier = TelegramNotifier(archive=Archive("intraday_anomaly"))
+            # Surface contrarian / sector-relative flags so the scorer
+            # can promote noteworthy moves vs market-beta noise.
+            flags = list(signal.get("flags") or [])
+            priority = compute_importance("intraday_anomaly", {
+                "flags": flags,
+                "price_change_pct": signal.get("price_change_pct"),
+            })
             intraday_notifier.send_text(
                 text,
                 trace=trace,
                 title=f"盘中异动 · {ticker}",
                 tickers=[ticker],
+                priority=priority,
             )
             state.intraday_record_fire(ticker)
             fired_count += 1

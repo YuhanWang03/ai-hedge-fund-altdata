@@ -67,28 +67,46 @@ def _row_to_dict(row: aiosqlite.Row) -> dict[str, Any]:
 async def recent_pushes(
     caller: Caller = Depends(resolve_caller),
     days: int = 2,
+    include_p3: bool = False,
 ) -> dict:
-    """List recent push records from archive.db."""
+    """List recent push records from archive.db.
+
+    P3 rows are hidden by default — they're low-importance archive
+    entries (scheduler heartbeats etc.) that would crowd the feed.
+    Pass include_p3=true to surface them.
+
+    Rows are ordered by priority_tier (P0 first), then ts DESC, so the
+    feed always has the most important recent items at the top. Rows
+    with no priority_tier (pre-Phase-0 archive entries) are treated
+    as P1 for ordering — see the CASE expression below.
+    """
     _require_owner(caller)
 
     if not _archive_db_path().exists():
         return {"pushes": [], "warning": "archive.db not found"}
 
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    # P3 filter goes into the WHERE; the ORDER BY uses a CASE to map
+    # tier strings to a sortable rank with NULL falling through to P1.
+    p3_clause = "" if include_p3 else (
+        "AND (priority_tier IS NULL OR priority_tier != 'P3') "
+    )
+    sql = (
+        "SELECT id, ts, agent, msg_type, title, tickers, "
+        "       substr(text_html, 1, 800) AS preview, "
+        "       (trace_json IS NOT NULL AND length(trace_json) > 2) AS has_trace, "
+        "       importance_score, priority_tier "
+        "FROM pushes "
+        f"WHERE ts >= ? {p3_clause}"
+        "ORDER BY CASE COALESCE(priority_tier, 'P1') "
+        "             WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 "
+        "             WHEN 'P2' THEN 2 WHEN 'P3' THEN 3 ELSE 1 END, "
+        "         ts DESC "
+        "LIMIT 200"
+    )
     conn = await _open_archive()
     try:
-        async with conn.execute(
-            """
-            SELECT id, ts, agent, msg_type, title, tickers,
-                   substr(text_html, 1, 800) AS preview,
-                   (trace_json IS NOT NULL AND length(trace_json) > 2) AS has_trace
-            FROM pushes
-            WHERE ts >= ?
-            ORDER BY id DESC
-            LIMIT 200
-            """,
-            (cutoff,),
-        ) as cur:
+        async with conn.execute(sql, (cutoff,)) as cur:
             rows = await cur.fetchall()
     finally:
         await conn.close()
@@ -211,11 +229,16 @@ async def sse_auto_push(
             try:
                 conn = await _open_archive()
                 try:
+                    # Stream all new rows (including P3) — the frontend
+                    # filters with the same toggle the REST endpoint
+                    # honors, so the user can flip include_p3 without a
+                    # page reload and still see catch-up rows.
                     async with conn.execute(
                         """
                         SELECT id, ts, agent, msg_type, title, tickers,
                                substr(text_html, 1, 800) AS preview,
-                               (trace_json IS NOT NULL AND length(trace_json) > 2) AS has_trace
+                               (trace_json IS NOT NULL AND length(trace_json) > 2) AS has_trace,
+                               importance_score, priority_tier
                         FROM pushes
                         WHERE id > ?
                         ORDER BY id ASC

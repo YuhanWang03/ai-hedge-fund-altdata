@@ -12,6 +12,7 @@ from v2.archive import Archive
 from v2.data import CachedFDClient
 from v2.observability import capture_trace_with_framing, install_all
 from v2.reporting import TelegramNotifier, format_screening_result, notify_on_error
+from v2.reporting.priority import compute_importance
 from v2.screening import DEFAULT_FILTERS, TECH_30, narrate, run_screening
 
 load_dotenv()
@@ -44,11 +45,13 @@ def main() -> None:
         text = format_screening_result(result)
         trace.emit("chat_message", role="bot", text=text[:500])
 
+    priority = compute_importance("screen_result", {})  # P2 by default
     notifier = TelegramNotifier(archive=Archive(agent="screen"))
     notifier.send_text(
         text,
         trace=trace,
         title=f"科技股筛选 · {len(result.candidates)} candidates",
+        priority=priority,
     )
     print("Done.")
 

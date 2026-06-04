@@ -937,6 +937,22 @@ print(json.dumps(types))
 
 
 // Bug 1 + bug 2 (×2 paths) + bug 3.
+// ---- Phase 0 priority chips in AutoPushPanel ------------------------------
+// SSR-renders AutoPushPanel and confirms the toggle row text appears.
+// Full card rendering happens after useEffect (fetch) which doesn't run
+// in SSR — testing the toggle is the SSR-visible piece.
+{
+  const name = 'autopush_includes_p3_toggle_label'
+  const html = renderToString(React.createElement(AutoPushPanel))
+  if (html.includes('显示低优先级 (P3)')) {
+    console.log(`✓ ${name}`)
+  } else {
+    failures++
+    console.log(`✗ ${name}: toggle label missing`)
+  }
+}
+
+
 // ---- LLM natural-language event explainer gating -------------------------
 
 const llmExplainerCases = [

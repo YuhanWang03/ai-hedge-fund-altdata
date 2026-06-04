@@ -39,7 +39,16 @@ def synthetic_archive(tmp_path, monkeypatch):
             tickers TEXT,
             trace_json TEXT,
             title TEXT,
-            expires_at TEXT
+            expires_at TEXT,
+            importance_score INTEGER,
+            priority_tier TEXT,
+            priority_reasons TEXT
+        );
+        CREATE TABLE p2_digest_pending (
+            push_id INTEGER PRIMARY KEY,
+            queued_at TEXT NOT NULL,
+            title TEXT,
+            tier TEXT
         );
         """
     )

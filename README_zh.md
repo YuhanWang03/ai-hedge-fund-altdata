@@ -218,6 +218,70 @@
 
 ---
 
+## 推送优先级系统 P0/P1/P2/P3
+
+每个推送在 emit 时由 `v2/reporting/priority.py` 计算 `importance_score`
+（0–100），映射为 4 个 tier：
+
+| Tier | Score | 行为 | 示例 |
+|---|---|---|---|
+| **P0** | ≥ 80 | 立即推 + 🚨🚨🚨 前缀 + Dashboard 红框 | 价格 alert 触发、组合大额亏损、FOMC 决议、ARK 清仓持仓股、重大 8-K |
+| **P1** | 60–79 | 立即推（无前缀） | 异动归因、watchlist 财报、13F 变动 |
+| **P2** | 40–59 | 入 archive，16:45 ET 汇总一条 | 日筛选、产业链候选、ETF 静态快照 |
+| **P3** | < 40 | 仅 archive，Dashboard 默认隐藏 | 弱归因异动、scheduler 心跳 |
+
+### 打分规则
+
+每类事件有一个**基础分**（见 `BASE_SCORES`），然后由 metadata 调整：
+
+| 场景 | 调整 |
+|---|---|
+| 异动归因没有 Tavily reasons | **-25**（降到 P3） |
+| 异动归因有 ≥ 3 条 reasons | +10 |
+| 含 `contrarian_move` flag | +15 |
+| 价格变动 ≥ 5% | +10 |
+| 该 ticker 在用户持仓 | **+15** |
+| 该 ticker 在 watchlist（且非持仓） | +10 |
+| 财报 surprise ≥ 10% | +15 |
+| 当日组合亏损 ≥ 5% | **+30**（升 P0） |
+| 当日组合亏损 2–5% | +10 |
+| ARK 清仓 + 触及持仓股 | +10 + 15 |
+| 8-K Item 2.x（业绩） | +5 |
+| 8-K Item 5.x（高管变动） | +5 |
+
+最终 score 在 0–100 之间 clamp，并按 80/60/40 阈值映射到 P0–P3。
+
+### 工作流
+
+```
+agent 调 notifier.send_text(text, priority=...)
+        ↓
+TelegramNotifier 根据 tier 选行为：
+  ├─ P0/P1: 立即推 Telegram（P0 加 🚨🚨🚨）+ archive 写入
+  ├─ P2:    仅 archive；入 p2_digest_pending 表
+  └─ P3:    仅 archive
+        ↓
+Dashboard 自动推送 feed：
+  ├─ P0 顶置 + 红色 left border + 红色 P0 chip
+  ├─ P1 蓝色 chip
+  ├─ P2 黄色 chip
+  └─ P3 默认隐藏；header toggle「📋 显示低优先级 (P3)」开启后才显示
+        ↓
+P2 汇总 cron（周一-周五 16:45 ET）：
+  扫 p2_digest_pending → 拼一条「📋 今日 P2 汇总 · N 条」消息（P1 推送）→ 清队列
+```
+
+### 工程注释
+
+- **向后兼容**：notifier.send_text 若不传 priority，默认走 P1 路径，所有
+  老代码继续工作
+- **不参与 LLM**：纯 Python 规则，本地即时算出
+- **archive 表结构**：新增三列 `importance_score / priority_tier /
+  priority_reasons` 通过 PRAGMA table_info 幂等迁移
+- **老记录处理**：priority_tier IS NULL 的旧推送在 Dashboard 端按 P1 显示
+
+---
+
 ## 板块相对强度对比
 
 每条信号（筛选 / 盘后异动 / 盘中异动）在被推送之前都和板块 ETF 做相对强度对比。`NVDA +5% 量爆`这条信号在 `SMH +4.5%` 时几乎是 beta，在 `SMH -1%` 时才是真正的 ticker-specific catalyst。

@@ -19,6 +19,7 @@ from v2.reporting import (
     format_institutional_messages,
     notify_on_error,
 )
+from v2.reporting.priority import compute_importance
 from v2.screening import TECH_30
 
 logging.basicConfig(level=logging.INFO, format="  [%(levelname)s] %(message)s")
@@ -77,7 +78,8 @@ def main() -> None:
             title = f"13F · {manager}"
             attached_trace = None  # avoid duplicating ~30KB per manager
 
-        notifier.send_text(msg, trace=attached_trace, title=title)
+        priority = compute_importance("institutional_13f", {})  # P1
+        notifier.send_text(msg, trace=attached_trace, title=title, priority=priority)
         print(f"  [{i}/{len(messages)}] sent")
         if i < len(messages):
             time.sleep(0.3)   # gentle pacing to avoid rate limit spikes
