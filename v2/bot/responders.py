@@ -599,11 +599,13 @@ def risk_view(args: dict) -> str:
     """Real-time portfolio risk card.
 
     args: ``{}`` — no parameters. Calls :func:`build_risk_report` and
-    renders via the same inline formatter the cron uses. Read-only —
-    nothing written to archive, no priority computed (priority is a
-    cron-push concept).
+    renders via :func:`v2.reporting.format_portfolio_risk_view` (Stage 5
+    lift — byte-equal alias of ``format_portfolio_risk_card`` so the bot
+    card matches what ⑨ pushes). Read-only — no archive write, no
+    priority computed (priority is a cron-push concept).
     """
     from v2.portfolio import build_risk_report
+    from v2.reporting import format_portfolio_risk_view
 
     try:
         report = build_risk_report()
@@ -611,15 +613,12 @@ def risk_view(args: dict) -> str:
         logger.exception("risk_view failed")
         return f"❌ Error: <code>{html.escape(str(exc))}</code>"
 
-    # Render via the cron's inline formatter — single source of truth
-    # until Stage 5 lifts it into v2/reporting/formatters.py.
-    text = _render_risk_card_via_cron(report)
     emit(
         "render", card="risk_card",
         positions=len(report.positions),
         warnings=len(report.warnings),
     )
-    return text
+    return format_portfolio_risk_view(report)
 
 
 def pnl_period(args: dict) -> str:
@@ -629,6 +628,10 @@ def pnl_period(args: dict) -> str:
     Invalid period strings return a friendly error rather than silently
     defaulting — the user typed something specific, they should see it
     was rejected.
+
+    day path reuses ``format_pnl`` (the pre-existing daily formatter,
+    matches /pnl no-arg byte-equal). week/month use the Stage-5 lift
+    ``format_portfolio_pnl_period``.
     """
     period = str(args.get("period") or "day").strip().lower()
     if period not in _VALID_PNL_PERIODS:
@@ -639,8 +642,8 @@ def pnl_period(args: dict) -> str:
 
     from v2.broker import AlpacaUnavailable, get_pnl
     from v2.portfolio.pnl import compute_pnl
+    from v2.reporting import format_portfolio_pnl_period
 
-    # Day → reuse the existing /pnl path (matches current behaviour byte-equal).
     if period == "day":
         try:
             snap = get_pnl()
@@ -653,77 +656,14 @@ def pnl_period(args: dict) -> str:
              positions=len(snap.get("positions") or []))
         return format_pnl(snap)
 
-    # Week / month → use compute_pnl which already fans out daily +
-    # portfolio_history under the hood.
     try:
-        metrics, warnings = compute_pnl()
+        metrics, _warnings = compute_pnl()
     except Exception as exc:
         logger.exception("pnl_period(%s) failed", period)
         return f"❌ Error: <code>{html.escape(str(exc))}</code>"
 
-    emit("render", card="pnl_period_card", period=period,
-         warnings=len(warnings))
-    return _render_pnl_period_card(period, metrics, warnings)
-
-
-def _render_pnl_period_card(period: str, metrics, warnings: list[str]) -> str:
-    """Single-period P&L line — minimal Stage-4 inline render.
-
-    Stage 5 will lift this into v2/reporting/formatters.py alongside
-    ``format_pnl`` and the risk-card helpers.
-    """
-    pct_field = {
-        "week":  ("本周", metrics.weekly_pnl_pct),
-        "month": ("本月", metrics.monthly_pnl_pct),
-    }[period]
-    label, value = pct_field
-
-    lines: list[str] = [
-        f"<b>📊 {label} P&amp;L 摘要</b>",
-        "━━━━━━━━━━━━━━━━━━━━",
-    ]
-    if value is None:
-        lines.append("<i>数据不足（账户历史 < " +
-                     ("5 个交易日" if period == "week" else "21 个交易日") + "）</i>")
-    else:
-        sign = "🟢" if value >= 0 else "🔴"
-        lines.append(f"{label}回报：{sign} <code>{value:+.2%}</code>")
-
-    # Daily context is always useful even when querying week/month.
-    if metrics.daily_pnl_pct is not None:
-        sign_d = "🟢" if metrics.daily_pnl_pct >= 0 else "🔴"
-        lines.append(
-            f"<i>(参考 · 今日 {sign_d} {metrics.daily_pnl_pct:+.2%})</i>"
-        )
-
-    if warnings:
-        lines.append("")
-        lines.append("<i>⚠ 数据不全：</i>")
-        for w in warnings[:2]:
-            lines.append(f"<i>  • {w[:80]}</i>")
-
-    return "\n".join(lines)
-
-
-def _render_risk_card_via_cron(report) -> str:
-    """Lazy-load the cron's ``_format_risk_card`` to render the bot card.
-
-    The risk-card formatter currently lives inline in
-    ``scripts/portfolio_risk_to_telegram.py`` (Stage 5 will lift it).
-    Loading it via importlib avoids a circular import: the cron imports
-    ``TelegramNotifier`` from ``v2.reporting`` at module level, but we
-    only need its rendering function — not its push side effects.
-    """
-    import importlib.util
-    from pathlib import Path
-
-    script_path = Path(__file__).resolve().parents[2] / "scripts" / "portfolio_risk_to_telegram.py"
-    spec = importlib.util.spec_from_file_location(
-        "_portfolio_risk_cron_renderer", str(script_path),
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod._format_risk_card(report)
+    emit("render", card="pnl_period_card", period=period)
+    return format_portfolio_pnl_period(period, metrics)
 
 
 def settings_view() -> str:

@@ -1220,3 +1220,16 @@ from v2.reporting._earnings_formatters import (  # noqa: E402
     format_earnings_summary,
     format_earnings_view,
 )
+
+
+# ---------------------------------------------------------------------------
+# Portfolio cards (Phase 2)
+# ---------------------------------------------------------------------------
+# Same pattern as the earnings re-export above. Implementation lives in
+# v2/portfolio/_bot_cards.py to keep byte-equal tests sandbox-runnable.
+from v2.reporting._portfolio_formatters import (  # noqa: E402
+    format_portfolio_pnl_period,
+    format_portfolio_risk_card,
+    format_portfolio_risk_view,
+    format_portfolio_weekly_card,
+)

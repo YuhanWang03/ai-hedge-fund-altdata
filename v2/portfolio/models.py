@@ -126,13 +126,18 @@ class PnLMetrics:
 class DrawdownMetrics:
     """Peak-trough drawdown over the 1-month window.
 
-    ``current_drawdown_pct`` measures distance from the most recent peak
-    (always ≤ 0). ``max_drawdown_pct`` is the worst peak-to-trough drop
-    in the window (also ≤ 0).
+    Both fields are **non-negative magnitudes** (Stage 5 convention).
+    Renderers prepend ``-`` always; this contract removes a class of
+    sign-flip bugs that bit Stage 2.5's dry-run output.
+
+    ``current_drawdown_pct`` measures distance from the most recent
+    peak as a positive fraction (``0.034`` = "3.4% below peak").
+    ``max_drawdown_pct`` is the worst peak-to-trough drop in the
+    window, also a positive magnitude.
     """
 
-    current_drawdown_pct: float | None    # fraction (negative or 0)
-    max_drawdown_pct: float | None        # fraction (negative or 0)
+    current_drawdown_pct: float | None    # ≥ 0 fraction, or None if unavailable
+    max_drawdown_pct: float | None        # ≥ 0 fraction, or None if unavailable
     peak_value: float | None              # USD at the peak point
     peak_date: date | None                # date of that peak
 

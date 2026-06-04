@@ -263,9 +263,12 @@ def smoke_drawdown_normal():
     metrics, warnings = compute_drawdown(broker=FakeBroker())
     print(f"  ok   current_dd={metrics.current_drawdown_pct:.4f} "
           f"max_dd={metrics.max_drawdown_pct:.4f} peak={metrics.peak_value}")
-    assert abs(metrics.max_drawdown_pct - ((95 - 112) / 112)) < 1e-6
+    # Stage 5: drawdowns are non-negative magnitudes. (95-112)/112 = -0.152,
+    # magnitude 0.152.
+    assert abs(metrics.max_drawdown_pct - abs((95 - 112) / 112)) < 1e-6
     assert metrics.peak_value == 112_000
-    assert metrics.current_drawdown_pct < 0   # not back to peak
+    # Not at the peak → some positive drawdown magnitude
+    assert metrics.current_drawdown_pct > 0
     assert metrics.peak_date is not None
 
 
@@ -424,7 +427,8 @@ def smoke_pipeline_full():
     assert abs(report.concentration.top_1_pct - (30000 / 65000)) < 1e-9
     assert report.exposure.largest_sector == "SMH"
     assert report.pnl.daily_pnl_pct == -0.018
-    assert report.drawdown.max_drawdown_pct < 0
+    # Stage 5: drawdown magnitude is non-negative
+    assert report.drawdown.max_drawdown_pct > 0
     assert len(report.earnings_risk_next_7d) == 1
     assert report.warnings == []
 

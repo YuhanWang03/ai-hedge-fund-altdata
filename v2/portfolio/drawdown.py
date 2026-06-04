@@ -1,16 +1,26 @@
 """Peak-trough drawdown over the 1-month window.
 
-Two scalars:
+Two scalars, both **non-negative magnitudes** (Stage 5 convention):
 
-- ``current_drawdown_pct`` = (current - running_max_so_far) / running_max_so_far.
-  Always ≤ 0. If we're at a new high, drawdown is 0.
-- ``max_drawdown_pct`` = worst (trough - peak) / peak observed across the
-  window. The classic "peak-trough" measure.
+- ``current_drawdown_pct`` ≥ 0 — distance from the running peak as a
+  positive fraction. ``0.034`` = "3.4% below the recent peak". At a
+  fresh all-time high, ``current_drawdown_pct == 0``.
+- ``max_drawdown_pct`` ≥ 0 — worst peak-to-trough drop observed in the
+  window, also a positive magnitude.
 
-Edge cases:
-- Single-point history → both fields = 0.0 (not None) so the card can
-  still render "回撤 0.0%" instead of dropping the row. Peak == current,
-  no trough yet.
+This contract change happened in Stage 5 because:
+
+1. Renderers want to always prepend ``-`` (drawdown is always a loss);
+   storing a signed value just to flip it back was redundant.
+2. Synthetic test data was easy to get wrong (Stage 2.5 dry-run accidentally
+   produced ``+12.00%`` for max drawdown). With a non-negative invariant
+   asserted at compute time, that class of bug is impossible.
+3. ``compute_importance`` already used ``abs()`` defensively, so it
+   doesn't care which convention we use.
+
+Edge cases (unchanged):
+
+- Single-point history → both fields = 0.0 (peak == current, no trough yet).
 - Empty equity series → ``DrawdownMetrics.unavailable()`` (all None).
 - Alpaca down → warnings collected, unavailable() returned.
 """
@@ -29,8 +39,8 @@ logger = logging.getLogger(__name__)
 def compute_drawdown(broker: Any | None = None) -> tuple[DrawdownMetrics, list[str]]:
     """Compute current + max drawdown over 1M of daily equity history.
 
-    Returns ``(metrics, warnings)``. On any Alpaca failure → unavailable()
-    metric + a warning string explaining why.
+    Returns ``(metrics, warnings)``. ``current_drawdown_pct`` and
+    ``max_drawdown_pct`` are non-negative magnitudes (see module docstring).
     """
     if broker is None:
         from v2 import broker as _broker
@@ -50,10 +60,8 @@ def compute_drawdown(broker: Any | None = None) -> tuple[DrawdownMetrics, list[s
     timestamps = hist.get("timestamp") or []
 
     if not equity:
-        # Empty series. Caller renders "暂无回撤数据".
         return DrawdownMetrics.unavailable(), warnings
 
-    # Single point: peak == current, no drawdown observable yet.
     if len(equity) == 1:
         peak_value = equity[0]
         peak_date = _ts_to_date(timestamps[0]) if timestamps else None
@@ -64,35 +72,45 @@ def compute_drawdown(broker: Any | None = None) -> tuple[DrawdownMetrics, list[s
             peak_date=peak_date,
         ), warnings
 
-    # Walk the series tracking running peak + worst drawdown ever seen.
+    # Walk the series tracking running peak + worst drawdown seen.
+    # Internally we compute signed drops (trough - peak)/peak; flip to
+    # magnitude at the end so the contract holds.
     running_peak = equity[0]
     running_peak_idx = 0
-    max_dd = 0.0
-    max_dd_peak_idx = 0   # the peak that produced max_dd
+    worst_signed_dd = 0.0       # ≤ 0 internally
+    worst_signed_peak_idx = 0
 
     for i, val in enumerate(equity):
         if val > running_peak:
             running_peak = val
             running_peak_idx = i
             continue
-        dd = (val - running_peak) / running_peak if running_peak > 0 else 0.0
-        if dd < max_dd:
-            max_dd = dd
-            max_dd_peak_idx = running_peak_idx
+        signed = (val - running_peak) / running_peak if running_peak > 0 else 0.0
+        if signed < worst_signed_dd:
+            worst_signed_dd = signed
+            worst_signed_peak_idx = running_peak_idx
 
     current = equity[-1]
-    current_dd = (current - running_peak) / running_peak if running_peak > 0 else 0.0
+    current_signed = (current - running_peak) / running_peak if running_peak > 0 else 0.0
+
+    # Magnitude convention: drawdown ≥ 0 always.
+    max_dd_mag = abs(worst_signed_dd)
+    current_dd_mag = abs(current_signed)
+
+    # Sanity — internal invariant. ``worst_signed_dd`` was monotonically
+    # non-increasing and starts at 0, so after abs() the result is ≥ 0.
+    assert max_dd_mag >= 0.0, f"max drawdown magnitude must be ≥ 0, got {max_dd_mag}"
+    assert current_dd_mag >= 0.0, f"current drawdown magnitude must be ≥ 0, got {current_dd_mag}"
 
     # The peak attributed to the user is the one that produced max_dd —
-    # that's the "from this peak, you fell N%" story the card tells.
-    # If max_dd == 0 (still at all-time highs), report the latest peak.
-    peak_idx = max_dd_peak_idx if max_dd < 0 else running_peak_idx
+    # that's the "from this peak you fell N%" story.
+    peak_idx = worst_signed_peak_idx if max_dd_mag > 0 else running_peak_idx
     peak_value = equity[peak_idx]
     peak_date = _ts_to_date(timestamps[peak_idx]) if peak_idx < len(timestamps) else None
 
     return DrawdownMetrics(
-        current_drawdown_pct=current_dd,
-        max_drawdown_pct=max_dd,
+        current_drawdown_pct=current_dd_mag,
+        max_drawdown_pct=max_dd_mag,
         peak_value=peak_value,
         peak_date=peak_date,
     ), warnings

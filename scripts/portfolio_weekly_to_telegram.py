@@ -14,6 +14,10 @@ a daily ``positions_snapshot`` table — deferred to Phase 2.5 if asked.
 Always P1 — weekly recap is operator-visible regardless of whether any
 single number trips a P0 alert. (For mid-week P0 risks, the daily
 ⑨ Portfolio Risk cron at 18:30 ET fires.)
+
+Card formatter lives in :func:`v2.reporting.format_portfolio_weekly_card`
+(Stage 5 lift). The equity-curve chart rendering stays here — it's a
+photo-side concern with matplotlib, not a text formatter.
 """
 
 from __future__ import annotations
@@ -21,7 +25,7 @@ from __future__ import annotations
 import io
 import logging
 import sys
-from datetime import date, datetime, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
@@ -29,8 +33,12 @@ from dotenv import load_dotenv
 from v2.archive import Archive
 from v2.broker import AlpacaUnavailable, get_portfolio_history
 from v2.observability import capture_trace_with_framing, install_all
-from v2.portfolio import RiskReport, build_risk_report
-from v2.reporting import TelegramNotifier, notify_on_error
+from v2.portfolio import build_risk_report
+from v2.reporting import (
+    TelegramNotifier,
+    format_portfolio_weekly_card,
+    notify_on_error,
+)
 from v2.reporting.priority import compute_importance
 
 
@@ -44,115 +52,8 @@ logger = logging.getLogger(__name__)
 _TZ_ET = ZoneInfo("US/Eastern")
 
 
-def _fmt_money(v: float | None) -> str:
-    if v is None:
-        return "—"
-    if abs(v) >= 1_000_000:
-        return f"${v/1_000_000:.1f}M"
-    if abs(v) >= 1_000:
-        return f"${v/1_000:.1f}K"
-    return f"${v:,.0f}"
-
-
-def _fmt_signed_pct(v: float | None) -> str:
-    if v is None:
-        return "数据不足"
-    if v > 0:
-        return f"🟢 +{v:.2%}"
-    if v < 0:
-        return f"🔴 {v:.2%}"
-    return f"🟡 {v:.2%}"
-
-
 # ---------------------------------------------------------------------------
-# Inline weekly card formatter
-# ---------------------------------------------------------------------------
-
-def _format_weekly_card(report: RiskReport) -> str:
-    """Render the weekly recap message. Per-position attribution
-    intentionally omitted — Alpaca lacks the data."""
-    today = report.snapshot_date
-    pnl = report.pnl
-    dd = report.drawdown
-
-    lines: list[str] = [
-        f"<b>📊 周 P&amp;L 复盘 · {today}</b>",
-        "<i>(截至昨日收盘的口径)</i>",
-        "━━━━━━━━━━━━━━━━━━━━",
-    ]
-
-    # ----- Portfolio total -----
-    # Same layout as ⑨ for consistency — TOTAL (invested + cash) header.
-    if report.portfolio_value > 0:
-        lines.append(
-            f"组合价值 <code>{_fmt_money(report.portfolio_value)}</code> "
-            f"(持仓 <code>{_fmt_money(report.invested_value)}</code> · "
-            f"现金 <code>{_fmt_money(report.cash)}</code>, "
-            f"{report.cash_pct:.1%})"
-        )
-
-    # ----- Weekly + monthly returns -----
-    lines.append("")
-    lines.append(f"<b>本周回报</b> {_fmt_signed_pct(pnl.weekly_pnl_pct)}")
-    lines.append(f"<b>本月回报</b> {_fmt_signed_pct(pnl.monthly_pnl_pct)}")
-
-    # ----- Drawdown -----
-    if dd.max_drawdown_pct is not None:
-        lines.append("")
-        lines.append(
-            f"<b>📉 1M 最大回撤</b> {dd.max_drawdown_pct:+.2%}"
-        )
-        if dd.peak_value is not None and dd.peak_date is not None:
-            lines.append(
-                f"  峰值 <code>{_fmt_money(dd.peak_value)}</code> @ "
-                f"<code>{dd.peak_date}</code>"
-            )
-        if dd.current_drawdown_pct is not None:
-            lines.append(
-                f"  当前距峰 {dd.current_drawdown_pct:+.2%}"
-            )
-
-    # ----- Sector exposure (Top 3) -----
-    if report.exposure.by_sector:
-        lines.append("")
-        lines.append("<b>🏭 主要行业暴露</b>")
-        sorted_buckets = sorted(
-            report.exposure.by_sector.items(),
-            key=lambda kv: kv[1], reverse=True,
-        )
-        for etf, w in sorted_buckets[:3]:
-            lines.append(f"  {etf}: {w:.1%}")
-
-    # ----- Earnings ahead -----
-    if report.earnings_risk_next_7d:
-        lines.append("")
-        lines.append(
-            f"<b>📅 下周财报：</b>{len(report.earnings_risk_next_7d)} 只"
-        )
-        for item in report.earnings_risk_next_7d[:5]:
-            lines.append(
-                f"  <code>{item.release_date}</code> <b>{item.ticker}</b>"
-            )
-
-    # ----- Caveat about per-position attribution -----
-    lines.append("")
-    lines.append(
-        "<i>（per-position 周表现归因待开发——Alpaca 不提供每个持仓的历史曲线，"
-        "需自建每日快照表 → Phase 2.5）</i>"
-    )
-
-    # ----- Data warnings -----
-    if report.warnings:
-        lines.append("")
-        lines.append("<i>⚠ 数据不全：</i>")
-        for w in report.warnings[:3]:
-            lines.append(f"<i>  • {w[:80]}</i>")
-
-    return "\n".join(lines)
-
-
-# ---------------------------------------------------------------------------
-# Equity curve chart
+# Equity curve chart (photo-side, stays in the cron script)
 # ---------------------------------------------------------------------------
 
 def _render_equity_chart(title: str) -> bytes | None:
@@ -171,9 +72,6 @@ def _render_equity_chart(title: str) -> bytes | None:
     if len(equity) < 2:
         return None
 
-    # Local import — matplotlib is already loaded by v2.reporting.formatters
-    # in production; keeping it function-local lets the cron's --test
-    # mode still inspect main() without the matplotlib backend bootstrapping.
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -187,7 +85,6 @@ def _render_equity_chart(title: str) -> bytes | None:
     ax.plot(dates, equity, color="#1f77b4", linewidth=2)
     ax.fill_between(dates, equity, min(equity), alpha=0.15, color="#1f77b4")
 
-    # Mark the peak
     ax.scatter([dates[peak_idx]], [equity[peak_idx]],
                color="#d62728", s=60, zorder=5)
     ax.annotate(
@@ -232,18 +129,14 @@ def main() -> int:
 
     # Weekly recap is always P1 — operator visibility.
     priority = compute_importance("portfolio_risk", {})
-    # Force P1 floor: weekly recap shouldn't get demoted to P2 even on
-    # a clean week. Re-tag explicitly.
     if priority.tier == "P2":
-        # Synthesize P1 with a "weekly_recap" reason so the trace shows
-        # why the floor was applied.
         from v2.reporting.priority import PriorityResult
         priority = PriorityResult(
             score=65, tier="P1",
             reasons=list(priority.reasons) + ["+10_weekly_recap_floor"],
         )
 
-    text = _format_weekly_card(report)
+    text = format_portfolio_weekly_card(report)
     chart = _render_equity_chart(f"组合权益曲线 · 1M · {today_iso}")
 
     notifier = TelegramNotifier(archive=archive)
