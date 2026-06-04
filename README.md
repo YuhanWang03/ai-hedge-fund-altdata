@@ -1,6 +1,6 @@
 # AI Hedge Fund · Alternative Data Agent System
 
-A production-grade alternative-data intelligence platform delivered through a Telegram bot. Six post-market batch agents continuously monitor US equity markets, one intraday streamer scans for live anomalies and price-alert triggers, fifteen natural-language intents handle interactive queries, and five distinct hallucination-defense mechanisms keep every claim grounded in primary sources.
+A production-grade alternative-data intelligence platform delivered through a Telegram bot. Six post-market batch agents continuously monitor US equity markets, two earnings crons track watchlist + holdings for D-3/D-1/D-0 reminders and post-release summaries, one intraday streamer scans for live anomalies and price-alert triggers, seventeen natural-language intents handle interactive queries, and five distinct hallucination-defense mechanisms keep every claim grounded in primary sources.
 
 Built as a portfolio project to demonstrate end-to-end ownership of a multi-source data pipeline, dual-LLM verification architecture, and 24/7 deployed system.
 
@@ -12,11 +12,11 @@ Built as a portfolio project to demonstrate end-to-end ownership of a multi-sour
 
 The system runs three concurrent services on a single $6/month VPS:
 
-**Scheduler** — six cron jobs covering screening, anomaly detection, supply-chain expansion, institutional 13F tracking, weekly backfills, and daily ETF holdings ingestion. Each job is process-isolated; one crashing cannot poison the others.
+**Scheduler** — ten cron jobs covering screening, anomaly detection, supply-chain expansion, institutional 13F tracking, weekly backfills, daily ETF holdings ingestion, earnings reminders, post-release earnings summaries, P2 daily digest, and archive sweep. Each job is process-isolated; one crashing cannot poison the others.
 
 **Streamer** — minute-level intraday scanner. Polls Alpaca's real-time feed during US market hours (9:30 - 16:00 ET) and does two things: checks user-set price alerts for crossings, and scans the TECH_30 universe for dual-threshold anomalies (≥3% price move AND ≥2.5× volume pace). Deliberately runs no LLM/Tavily during market hours — deep attribution happens at 17:35 ET.
 
-**Telegram Bot** — always-on long-polling bot supporting seventeen slash commands, three watchlist commands, and a natural-language intent classifier with fifteen canonical intents. Authorized to a single user (chat ID filter).
+**Telegram Bot** — always-on long-polling bot supporting eighteen slash commands, three watchlist commands, and a natural-language intent classifier with seventeen canonical intents. Authorized to a single user (chat ID filter).
 
 All three services share seven SQLite databases via WAL mode and a ChromaDB vector store for RAG memory.
 
@@ -28,12 +28,14 @@ All three services share seven SQLite databases via WAL mode and a ChromaDB vect
 ┌──────────────────────────────────────────────────────────────────┐
 │                     hedge-fund-scheduler.service                 │
 ├──────────────────────────────────────────────────────────────────┤
+│  08:00 ET Mon-Fri  ⑦ Earnings Reminders        → Telegram push   │
 │  17:00 ET Mon-Fri  ⑤ ETF Daily Snapshot       (silent ingest)    │
 │  17:30 ET Mon-Fri  ① Daily Screen              → Telegram push   │
 │  17:35 ET Mon-Fri  ② Anomaly Monitor           → Telegram push   │
 │  18:00 ET Mon      ③ Lateral Expansion         → Telegram push   │
 │  18:00 ET Tue/Fri  ④ Institutional 13F         → Telegram push   │
 │  18:30 ET Sun      ④b 13F Backfill             (silent refresh)  │
+│  21:00 ET Mon-Fri  ⑧ Earnings Summaries        → Telegram push   │
 └──────────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────────┐
@@ -153,7 +155,7 @@ A typical fire looks like:
 
 ## Telegram interface
 
-The bot's natural-language layer classifies free-form Chinese or English text into fifteen canonical intents using DeepSeek at temperature=0. Outputs are validated against a closed enum whitelist — unrecognized intents fall back to `unknown`, guaranteeing bounded behavior.
+The bot's natural-language layer classifies free-form Chinese or English text into seventeen canonical intents using DeepSeek at temperature=0. Outputs are validated against a closed enum whitelist — unrecognized intents fall back to `unknown`, guaranteeing bounded behavior.
 
 ### Slash commands
 
@@ -166,6 +168,8 @@ The bot's natural-language layer classifies free-form Chinese or English text in
 | | `/13f MANAGER` | Full portfolio snapshot + QoQ changes |
 | | `/holders TICKER` | Reverse query: which tracked managers hold this ticker |
 | | `/etf SYMBOL` | ARK fund daily holdings + 24h rebalance |
+| | `/earnings AAPL` | Single-ticker earnings card (next release + last filing + ⭐ chips) |
+| | `/earnings` | 14-day forward calendar across watchlist ∪ holdings |
 | Alerts | `/alert NVDA 130 above` | Create a price-threshold alert |
 | | `/alerts` | List unfired alerts |
 | | `/alert_remove ID` | Delete an alert |
@@ -481,10 +485,20 @@ Intraday streamer adds ~30 Alpaca API calls/minute during market hours (one batc
 
 ## Roadmap
 
-- Web dashboard (Streamlit or Next.js) over `archive.db`, `etf.db`, and the intraday signal log
+### Shipped ✅
+
+- **Web dashboard** — FastAPI + React + Tailwind over `archive.db` auto-push feed with trace replay and a user QA mode
+- **Observability SDK** — `v2/observability/` monkey-patches FD / DeepSeek / Tavily / intent classifier so every agent produces a trace automatically
+- **Push-priority system P0/P1/P2/P3** — `v2/reporting/priority.py` plus a 16:45 ET P2 daily-digest cron
+- **Earnings Agent (⑦⑧)** — yfinance forward calendar + FD actual/estimate + LLM template-fill summary + Tavily transcript URL + cross-quarter dedup with `pending_<today>` retry
+- **94 sandbox unit tests** — 21 byte-equal card renders + 10 cron integration + 9 pipeline edges + 17 priority ladder + 6 archive migration + 11 intent classify + 18 priority + 13 observability + the rest across other modules
+
+### In progress / TODO
+
+- **Portfolio Risk Agent** (Phase 2, planning) — daily P&L, concentration, correlation risk
 - Significant-rebalance alerts on the ETF daily snapshot
-- Unit tests + GitHub Actions CI
-- Multi-user support with per-chat watchlists
+- GitHub Actions CI (pytest on main)
+- Multi-user support with per-chat watchlists + holdings
 - Backtesting integration with the existing v2 event-study framework
 - Switch Alpaca from paper to live (one config flag) after extended paper validation
 
@@ -492,7 +506,7 @@ Intraday streamer adds ~30 Alpaca API calls/minute during market hours (one batc
 
 ## Credits
 
-The repository's outer layout and the original educational `app/` directory come from [virattt/ai-hedge-fund](https://github.com/virattt/ai-hedge-fund), an open-source AI hedge fund concept project. The `v2/` directory — the entire alternative-data agent system described in this README (six post-market agents, intraday streamer, Telegram bot with 15 NL intents, 5 hallucination-defense mechanisms, all SQLite + ChromaDB stores, all systemd deployment scaffolding) — was built from scratch as a separate project on top of that foundation.
+The repository's outer layout and the original educational `app/` directory come from [virattt/ai-hedge-fund](https://github.com/virattt/ai-hedge-fund), an open-source AI hedge fund concept project. The `v2/` directory — the entire alternative-data agent system described in this README (six post-market agents + two earnings crons, intraday streamer, Telegram bot with 17 NL intents, 5 hallucination-defense mechanisms, push-priority system, all SQLite + ChromaDB stores, all systemd deployment scaffolding) — was built from scratch as a separate project on top of that foundation.
 
 ## License
 
