@@ -78,6 +78,17 @@ def earnings_summaries_job() -> None:
     _run("earnings_summaries.py")
 
 
+def portfolio_risk_job() -> None:
+    """⑨ Daily 18:30 ET — portfolio risk snapshot (concentration / P&L /
+    drawdown / earnings density)."""
+    _run("portfolio_risk_to_telegram.py")
+
+
+def portfolio_weekly_job() -> None:
+    """⑩ Fri 19:00 ET — weekly recap with equity-curve chart."""
+    _run("portfolio_weekly_to_telegram.py")
+
+
 def p2_digest_job() -> None:
     """Daily roll-up of P2-tier pushes — runs 16:45 ET before the
     17:00–18:30 ET cron block."""

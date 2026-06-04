@@ -87,7 +87,8 @@ _HELP_TEXT = (
     "\n"
     "<b>Alpaca 账户（paper）</b>\n"
     "  /portfolio          — 当前持仓 + 现金\n"
-    "  /pnl                — 当日盈亏 + 多空敞口\n"
+    "  /pnl [day|week|month] — 盈亏（默认 day）\n"
+    "  /risk               — 组合风险快照（集中度 / 暴露 / 回撤 / 7d 财报）\n"
     "\n"
     "<b>自然语言（Stage 3 即将上线）</b>\n"
     "  直接发问，bot 会自动路由到对应工具\n"
@@ -354,8 +355,47 @@ async def cmd_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 @authorized_only
 async def cmd_pnl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    placeholder = await update.message.reply_html("📊 计算盈亏...")
-    result = await _run_blocking(responders.pnl_view)
+    """``/pnl [day | week | month]`` — default ``day`` matches the
+    pre-Phase-2 behavior exactly. ``week`` / ``month`` route to the
+    period responder which reads portfolio_history.
+    """
+    args = context.args or []
+    period = (args[0].strip().lower() if args else "day")
+
+    if period == "day":
+        placeholder = await update.message.reply_html("📊 计算盈亏...")
+        result = await _run_blocking(responders.pnl_view)
+    elif period in ("week", "month"):
+        label = "本周" if period == "week" else "本月"
+        placeholder = await update.message.reply_html(
+            f"📊 计算{label}盈亏..."
+        )
+        result = await _run_blocking(
+            responders.pnl_period, {"period": period},
+        )
+    else:
+        await update.message.reply_html(
+            f"<b>🚫 未知周期：</b> <code>{html.escape(period)}</code>\n"
+            "用法：<code>/pnl</code> · <code>/pnl day</code> · "
+            "<code>/pnl week</code> · <code>/pnl month</code>"
+        )
+        return
+
+    await placeholder.edit_text(result, parse_mode="HTML",
+                                 disable_web_page_preview=True)
+
+
+@authorized_only
+async def cmd_risk(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """``/risk`` — real-time portfolio risk card.
+
+    Builds a fresh RiskReport via Alpaca (positions + portfolio_history)
+    and yfinance (held-position earnings ≤ 7d). Read-only: no archive
+    write, no priority computed."""
+    placeholder = await update.message.reply_html(
+        "💼 拉取组合风险快照...\n<i>预计 5-10 秒</i>"
+    )
+    result = await _run_blocking(responders.risk_view, {})
     await placeholder.edit_text(result, parse_mode="HTML",
                                  disable_web_page_preview=True)
 
@@ -415,6 +455,8 @@ _INTENT_DISPLAY = {
     "pnl_view":         "📊 当日盈亏",
     "earnings_view":    "📞 财报详情",
     "earnings_calendar":"📅 财报日历",
+    "risk_view":        "💼 组合风险",
+    "pnl_period":       "📊 周期盈亏",
     "unknown":          "❓ 未识别",
 }
 
@@ -436,6 +478,7 @@ async def cmd_nl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     target_price = parsed.get("target_price", 0.0) or 0.0
     direction = parsed.get("direction", "") or "above"
     days_horizon = parsed.get("days_horizon", 0) or 0
+    period = parsed.get("period", "") or ""
 
     # Tell the user how we routed — transparency builds trust
     routing_chip = (
@@ -616,6 +659,18 @@ async def cmd_nl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         elif name == "earnings_calendar":
             args = {"days_horizon": days_horizon} if days_horizon else {}
             result = await _run_blocking(responders.earnings_calendar, args)
+            await placeholder.edit_text(routing_chip + result, parse_mode="HTML",
+                                         disable_web_page_preview=True)
+
+        elif name == "risk_view":
+            result = await _run_blocking(responders.risk_view, {})
+            await placeholder.edit_text(routing_chip + result, parse_mode="HTML",
+                                         disable_web_page_preview=True)
+
+        elif name == "pnl_period":
+            # Empty string from intent classifier → responder default (day)
+            args = {"period": period} if period else {}
+            result = await _run_blocking(responders.pnl_period, args)
             await placeholder.edit_text(routing_chip + result, parse_mode="HTML",
                                          disable_web_page_preview=True)
 

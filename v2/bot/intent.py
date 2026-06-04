@@ -41,6 +41,8 @@ IntentName = Literal[
     "pnl_view",
     "earnings_view",
     "earnings_calendar",
+    "risk_view",
+    "pnl_period",
     "unknown",
 ]
 
@@ -62,13 +64,19 @@ _VALID_INTENTS = {
     "pnl_view",
     "earnings_view",
     "earnings_calendar",
+    "risk_view",
+    "pnl_period",
     "unknown",
 }
+
+# Closed enum for pnl_period.period. LLM outputs outside this set are
+# silently coerced to "day" (the default behavior, matches /pnl no-arg).
+_VALID_PNL_PERIODS = frozenset({"day", "week", "month"})
 
 
 _SYSTEM_PROMPT = (
     "你是一个股票分析助手的【意图分类器】。\n"
-    "把用户的话归类到下列**固定 17 个 intent 之一**，并提取参数。"
+    "把用户的话归类到下列**固定 19 个 intent 之一**，并提取参数。"
     "你不要回答问题，只做分类。\n"
     "\n"
     "【支持的 intents】\n"
@@ -91,6 +99,11 @@ _SYSTEM_PROMPT = (
     "例：「AAPL 什么时候发财报」「苹果上次财报怎么样」「NVDA Q3 财报多少」「TSLA 财报日期」\n"
     "- earnings_calendar: 用户问 watchlist / 持仓 / 未来 N 天的财报日历。"
     "例：「下周谁要发财报」「我的持仓哪些要发财报」「未来 14 天财报」「这周财报安排」\n"
+    "- risk_view: 用户想看组合的风险全景：集中度 / 行业暴露 / 回撤 / 近期财报风险。"
+    "例：「我的组合风险」「组合集中度怎么样」「我对哪个 sector 暴露最多」"
+    "「组合 drawdown」「我持仓里有几只快出财报」\n"
+    "- pnl_period: 用户问指定周期的 P&L。例：「这周亏了多少」「本月赚了多少」"
+    "「上周 pnl」「月度收益」「过去一个月赚了多少」\n"
     "- unknown: 都不匹配 / 含糊不清 / 与股票无关\n"
     "\n"
     "【参数提取规则】\n"
@@ -110,16 +123,21 @@ _SYSTEM_PROMPT = (
     "- days_horizon: 当 intent=earnings_calendar 时，提取用户问的天数窗口（整数）。"
     "「下周」→ 7，「未来两周」/「下两周」→ 14，「这周」→ 5，「下个月」→ 30。"
     "用户没指定时输出 0（responder 默认 14）。\n"
+    "- period: 当 intent=pnl_period 时，**仅** 'day'、'week'、'month' 三选一。"
+    "「今天」「日内」「当日」→ day；「本周」「这周」「上周」「周度」→ week；"
+    "「本月」「这个月」「月度」「过去一个月」→ month。"
+    "其他任何值（包括 quarter / ytd / all 等）一律输出空字符串。"
+    "用户没指定时也输出空字符串（responder 默认 day）。\n"
     "\n"
     "【约束】\n"
     "1. **只输出 JSON，不要 markdown，不要解释**\n"
     "2. 不确定时输出 unknown\n"
-    "3. ticker / manager / etf / direction 字段没有时输出空字符串\n"
+    "3. ticker / manager / etf / direction / period 字段没有时输出空字符串\n"
     "4. target_price / days_horizon 没有时输出 0\n"
     "\n"
     "【JSON 格式】\n"
     '{"intent": "explain_move", "ticker": "NVDA", "manager": "", "etf": "", '
-    '"target_price": 0, "direction": "", "days_horizon": 0, "raw": "..."}'
+    '"target_price": 0, "direction": "", "days_horizon": 0, "period": "", "raw": "..."}'
 )
 
 
@@ -172,6 +190,13 @@ def classify(text: str) -> dict:
     except (TypeError, ValueError):
         days_horizon = 0
 
+    # Strict enum for period — values outside the whitelist degrade to
+    # empty string. The responder applies its own default ("day") on
+    # empty. We DO NOT silently coerce e.g. "quarter" → "day" here so
+    # the responder can surface the rejection to the user.
+    period_raw = str(parsed.get("period", "")).strip().lower()
+    period = period_raw if period_raw in _VALID_PNL_PERIODS else ""
+
     return {
         "intent": intent,
         "ticker": str(parsed.get("ticker", "")).strip().upper(),
@@ -180,6 +205,7 @@ def classify(text: str) -> dict:
         "target_price": target_price,
         "direction": str(parsed.get("direction", "")).strip().lower(),
         "days_horizon": days_horizon,
+        "period": period,
         "raw": str(parsed.get("raw", text))[:80],
     }
 
@@ -193,5 +219,6 @@ def _unknown(text: str) -> dict:
         "target_price": 0.0,
         "direction": "",
         "days_horizon": 0,
+        "period": "",
         "raw": text[:80],
     }

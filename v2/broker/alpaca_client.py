@@ -171,3 +171,85 @@ def get_pnl() -> dict:
         "long_value":       long_value,
         "short_value":      short_value,
     }
+
+
+def get_portfolio_history(
+    period: str = "1M",
+    timeframe: str = "1D",
+) -> dict:
+    """Return historical equity / P&L series for the Phase-2 risk reports.
+
+    Wraps alpaca-py's :class:`TradingClient.get_portfolio_history`. Used
+    by ``v2/portfolio/pnl.py`` (1W / 1M / 1Y returns) and
+    ``v2/portfolio/drawdown.py`` (peak-trough max DD).
+
+    Args:
+        period: ``1D`` / ``7D`` / ``1M`` / ``3M`` / ``1A`` / ``all``.
+            Default ``1M`` covers daily / weekly / monthly P&L + drawdown
+            from a single API call.
+        timeframe: ``1Min`` / ``5Min`` / ``15Min`` / ``1H`` / ``1D``.
+            ``1D`` is the right granularity for cron use.
+
+    Returns a plain dict so callers stay decoupled from the SDK model::
+
+        {
+            "period":          "1M",
+            "timeframe":       "1D",
+            "timestamp":       [unix_seconds, ...],
+            "equity":          [float, ...],
+            "profit_loss":     [float, ...],
+            "profit_loss_pct": [float, ...],   # daily fraction (0.012 = +1.2%)
+            "base_value":      float | None,
+        }
+
+    Empty arrays are returned for accounts too new to have history (rather
+    than raising) — the risk pipeline's caller is expected to fall back
+    to "数据不足" rendering on `equity == []`.
+    """
+    try:
+        from alpaca.trading.requests import GetPortfolioHistoryRequest
+        tc = _client()
+        hist = tc.get_portfolio_history(
+            GetPortfolioHistoryRequest(period=period, timeframe=timeframe)
+        )
+    except AlpacaUnavailable:
+        raise
+    except Exception as exc:
+        logger.exception("Alpaca portfolio_history fetch failed")
+        raise AlpacaUnavailable(f"Alpaca API error: {exc}") from exc
+
+    def _series(name: str) -> list[float]:
+        raw = getattr(hist, name, None) or []
+        out: list[float] = []
+        for v in raw:
+            if v is None:
+                continue
+            try:
+                out.append(float(v))
+            except (TypeError, ValueError):
+                continue
+        return out
+
+    timestamps_raw = getattr(hist, "timestamp", None) or []
+    timestamps: list[int] = []
+    for t in timestamps_raw:
+        try:
+            timestamps.append(int(t))
+        except (TypeError, ValueError):
+            continue
+
+    base_value = getattr(hist, "base_value", None)
+    try:
+        base_value = float(base_value) if base_value is not None else None
+    except (TypeError, ValueError):
+        base_value = None
+
+    return {
+        "period":          period,
+        "timeframe":       timeframe,
+        "timestamp":       timestamps,
+        "equity":          _series("equity"),
+        "profit_loss":     _series("profit_loss"),
+        "profit_loss_pct": _series("profit_loss_pct"),
+        "base_value":      base_value,
+    }

@@ -7,14 +7,18 @@ benchmark for relative-strength comparison?"
 
 from v2.universe.etfs import (
     BENCHMARK_ETF,
+    OTHER_BUCKET,
     SECTOR_ETFS,
     TICKER_TO_SECTOR,
+    sector_bucket_for,
     sector_etf_for,
 )
 
 __all__ = [
     "BENCHMARK_ETF",
+    "OTHER_BUCKET",
     "SECTOR_ETFS",
     "TICKER_TO_SECTOR",
+    "sector_bucket_for",
     "sector_etf_for",
 ]

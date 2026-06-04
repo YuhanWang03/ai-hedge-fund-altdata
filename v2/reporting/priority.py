@@ -77,6 +77,9 @@ def compute_importance(
       - price_change_pct: float       — fraction, abs value matters
       - surprise_pct: float           — earnings surprise fraction
       - daily_pnl_pct: float          — portfolio daily PnL fraction (negative = loss)
+      - top_1_pct: float              — share of largest single position [0, 1]
+      - max_drawdown_pct: float       — 1M peak-trough drawdown (signed; abs used)
+      - n_earnings_next_7d: int       — held-position earnings in next 7 days
       - is_held_position: bool        — ticker is in the user's broker account
       - is_watchlist: bool            — ticker is on the user's watchlist
       - action: str                   — ETF rebalance action ("exit", "buy", ...)
@@ -116,11 +119,33 @@ def compute_importance(
 
     # ---- portfolio ----
     if event_kind == "portfolio_risk":
+        # daily_pnl_pct — single-day loss is the only factor that on its
+        # own pushes to P0. Everything else (concentration / drawdown /
+        # earnings density) is "concerning, not urgent" and sits in P1.
         pnl_pct = float(md.get("daily_pnl_pct") or 0.0)
         if pnl_pct <= -0.05:
-            adjustments.append((+30, f"daily_loss_{pnl_pct:.1%}"))  # → P0
+            adjustments.append((+30, f"daily_loss_{pnl_pct:.1%}"))   # → P0
         elif pnl_pct <= -0.02:
             adjustments.append((+10, "moderate_loss"))
+
+        # Single-ticker concentration — graduated ladder.
+        top_1 = float(md.get("top_1_pct") or 0.0)
+        if top_1 >= 0.30:
+            adjustments.append((+20, f"top1_{top_1:.0%}"))
+        elif top_1 >= 0.20:
+            adjustments.append((+10, f"top1_{top_1:.0%}"))
+
+        # 1-month drawdown — a single significant DD bumps to P1.
+        # (abs so callers can pass either signed or unsigned values.)
+        max_dd = abs(float(md.get("max_drawdown_pct") or 0.0))
+        if max_dd >= 0.10:
+            adjustments.append((+15, f"drawdown_{max_dd:.0%}"))
+
+        # Event density — multiple earnings in a week = elevated
+        # cluster risk (a single bad print whipsaws the whole book).
+        n_earnings = int(md.get("n_earnings_next_7d") or 0)
+        if n_earnings >= 3:
+            adjustments.append((+10, f"earnings_density_{n_earnings}"))
 
     # ---- universal: holdings / watchlist matter for everything ----
     if md.get("is_held_position"):

@@ -587,6 +587,85 @@ def pnl_view() -> str:
     return format_pnl(snap)
 
 
+# ---------------------------------------------------------------------------
+# /risk — portfolio risk snapshot (Phase 2 Stage 4, read-only)
+# ---------------------------------------------------------------------------
+
+
+_VALID_PNL_PERIODS = frozenset({"day", "week", "month"})
+
+
+def risk_view(args: dict) -> str:
+    """Real-time portfolio risk card.
+
+    args: ``{}`` — no parameters. Calls :func:`build_risk_report` and
+    renders via :func:`v2.reporting.format_portfolio_risk_view` (Stage 5
+    lift — byte-equal alias of ``format_portfolio_risk_card`` so the bot
+    card matches what ⑨ pushes). Read-only — no archive write, no
+    priority computed (priority is a cron-push concept).
+    """
+    from v2.portfolio import build_risk_report
+    from v2.reporting import format_portfolio_risk_view
+
+    try:
+        report = build_risk_report()
+    except Exception as exc:
+        logger.exception("risk_view failed")
+        return f"❌ Error: <code>{html.escape(str(exc))}</code>"
+
+    emit(
+        "render", card="risk_card",
+        positions=len(report.positions),
+        warnings=len(report.warnings),
+    )
+    return format_portfolio_risk_view(report)
+
+
+def pnl_period(args: dict) -> str:
+    """Period-specific P&L card.
+
+    args: ``{"period": "day" | "week" | "month"}`` (default ``"day"``).
+    Invalid period strings return a friendly error rather than silently
+    defaulting — the user typed something specific, they should see it
+    was rejected.
+
+    day path reuses ``format_pnl`` (the pre-existing daily formatter,
+    matches /pnl no-arg byte-equal). week/month use the Stage-5 lift
+    ``format_portfolio_pnl_period``.
+    """
+    period = str(args.get("period") or "day").strip().lower()
+    if period not in _VALID_PNL_PERIODS:
+        return (
+            f"<b>🚫 未知周期：</b> <code>{html.escape(period)}</code>\n"
+            "可选：<code>day</code> / <code>week</code> / <code>month</code>"
+        )
+
+    from v2.broker import AlpacaUnavailable, get_pnl
+    from v2.portfolio.pnl import compute_pnl
+    from v2.reporting import format_portfolio_pnl_period
+
+    if period == "day":
+        try:
+            snap = get_pnl()
+        except AlpacaUnavailable as exc:
+            return f"<b>⚠️ Alpaca 不可用</b>\n<i>{html.escape(str(exc))}</i>"
+        except Exception as exc:
+            logger.exception("/pnl day failed")
+            return f"❌ Error: <code>{html.escape(str(exc))}</code>"
+        emit("render", card="pnl_card",
+             positions=len(snap.get("positions") or []))
+        return format_pnl(snap)
+
+    try:
+        metrics, _warnings = compute_pnl()
+    except Exception as exc:
+        logger.exception("pnl_period(%s) failed", period)
+        return f"❌ Error: <code>{html.escape(str(exc))}</code>"
+
+    emit("render", card="pnl_period_card", period=period)
+    return format_portfolio_pnl_period(period, metrics)
+
+
 def settings_view() -> str:
     monitor = MonitorConfig()
     screen = DEFAULT_FILTERS
