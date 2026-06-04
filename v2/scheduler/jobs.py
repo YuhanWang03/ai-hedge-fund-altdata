@@ -68,6 +68,12 @@ def etf_daily_job() -> None:
     _run("etf_daily_snapshot.py")
 
 
+def p2_digest_job() -> None:
+    """Daily roll-up of P2-tier pushes — runs 16:45 ET before the
+    17:00–18:30 ET cron block."""
+    _run("p2_digest_to_telegram.py")
+
+
 def archive_cleanup_job() -> None:
     """Daily sweep — remove archive rows past their expires_at watermark.
 

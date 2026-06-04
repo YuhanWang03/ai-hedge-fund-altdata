@@ -20,9 +20,31 @@ from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from typing import Iterable, Protocol, runtime_checkable
 
+from v2.reporting.priority import (
+    PriorityResult,
+    compute_importance,
+    tier_emoji_prefix,
+)
+
 # Pushes are retained in archive.db for two calendar days. The cleanup job
 # (v2.scheduler.jobs.archive_cleanup_job) sweeps expired rows once a day.
 _RETENTION_DAYS = 2
+
+
+def _default_p1() -> PriorityResult:
+    """Fallback priority for callers that don't pass one explicitly.
+
+    Scored "default" so we land in the P2 band by score, but constructed
+    with tier="P1" so behavior matches the historical default (immediate
+    Telegram + archive). Existing code paths that haven't been migrated
+    to the new priority system still work.
+    """
+    base = compute_importance("default", {})
+    # Force tier to P1 even if base score is P2 — backward-compat default.
+    return PriorityResult(
+        score=base.score, tier="P1",
+        reasons=base.reasons + ["forced_p1_backward_compat"],
+    )
 
 
 @runtime_checkable
@@ -74,24 +96,30 @@ class TelegramNotifier:
         trace=None,
         title: str | None = None,
         tickers: Iterable[str] = (),
+        priority=None,
     ) -> None:
-        """Push to Telegram + archive a row.
+        """Push to Telegram + archive a row, with tier-aware behavior.
 
-        New Phase-2 kwargs are optional:
-        - trace: a v2.observability.Trace (with .events). Persisted to the
-          archive row's trace_json column for dashboard replay.
-        - title: short human label for the dashboard feed card.
-        - tickers: optional ticker list to record alongside the row.
+        priority: a v2.reporting.priority.PriorityResult. If omitted,
+        the call defaults to P1 (immediate Telegram + archive) for
+        backward compatibility with callers from before this change.
+
+        Tier behavior:
+          P0 → Telegram with 🚨🚨🚨 prefix + archive
+          P1 → Telegram (no prefix) + archive
+          P2 → archive only; daily digest cron rolls these up
+          P3 → archive only; dashboard hides by default
         """
-        if self._archive is not None:
-            self._archive.save_text(
-                text,
-                tickers=tickers,
-                trace_json=_trace_to_json(trace),
-                title=title,
-                expires_at=_expires_at(),
-            )
-        asyncio.run(self._send_text(text))
+        priority = priority or _default_p1()
+        decorated = tier_emoji_prefix(priority.tier) + text
+        self._archive_with_priority(
+            kind="text",
+            text=text, image=None, caption=None,
+            trace=trace, title=title, tickers=tickers, priority=priority,
+        )
+        if priority.tier in ("P2", "P3"):
+            return    # archive-only; no Telegram
+        asyncio.run(self._send_text(decorated))
 
     def send_photo(
         self,
@@ -101,17 +129,40 @@ class TelegramNotifier:
         trace=None,
         title: str | None = None,
         tickers: Iterable[str] = (),
+        priority=None,
     ) -> None:
-        if self._archive is not None:
-            self._archive.save_photo(
-                image,
-                caption,
-                tickers=tickers,
-                trace_json=_trace_to_json(trace),
-                title=title,
-                expires_at=_expires_at(),
-            )
-        asyncio.run(self._send_photo(image, caption))
+        priority = priority or _default_p1()
+        decorated = tier_emoji_prefix(priority.tier) + caption
+        self._archive_with_priority(
+            kind="photo",
+            text=None, image=image, caption=caption,
+            trace=trace, title=title, tickers=tickers, priority=priority,
+        )
+        if priority.tier in ("P2", "P3"):
+            return
+        asyncio.run(self._send_photo(image, decorated))
+
+    def _archive_with_priority(
+        self, *, kind: str, text, image, caption,
+        trace, title, tickers, priority,
+    ) -> None:
+        """One archive write that carries the priority fields. Centralized
+        so the text / photo paths can't drift apart."""
+        if self._archive is None:
+            return
+        common = dict(
+            tickers=tickers,
+            trace_json=_trace_to_json(trace),
+            title=title,
+            expires_at=_expires_at(),
+            importance_score=priority.score,
+            priority_tier=priority.tier,
+            priority_reasons=",".join(priority.reasons),
+        )
+        if kind == "text":
+            self._archive.save_text(text, **common)
+        else:
+            self._archive.save_photo(image, caption or "", **common)
 
     async def _send_text(self, text: str) -> None:
         from telegram import Bot

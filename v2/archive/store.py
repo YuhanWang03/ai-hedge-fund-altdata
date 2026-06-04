@@ -74,16 +74,35 @@ _PHASE2_COLUMNS = (
     ("expires_at",  "TEXT"),  # ISO ts after which the row may be cleaned up
 )
 
-# Indexes that depend on Phase 2 columns; created AFTER the columns exist.
+# Phase 0 priority system (P0/P1/P2/P3). Same idempotent ALTER pattern.
+_PRIORITY_COLUMNS = (
+    ("importance_score", "INTEGER"),  # 0-100
+    ("priority_tier",    "TEXT"),     # "P0" / "P1" / "P2" / "P3"
+    ("priority_reasons", "TEXT"),     # comma-joined adjustment trail (debug)
+)
+
+# Indexes that depend on Phase 2 + priority columns. Created AFTER the
+# columns exist.
 _PHASE2_INDEXES = """
-CREATE INDEX IF NOT EXISTS idx_pushes_expires ON pushes(expires_at);
+CREATE INDEX IF NOT EXISTS idx_pushes_expires  ON pushes(expires_at);
+CREATE INDEX IF NOT EXISTS idx_pushes_priority ON pushes(priority_tier, ts DESC);
+
+-- P2 digest queue: lightweight row pointing at pushes(id). The cron
+-- p2_digest_to_telegram.py drains this table once per day.
+CREATE TABLE IF NOT EXISTS p2_digest_pending (
+    push_id    INTEGER PRIMARY KEY,
+    queued_at  TEXT NOT NULL,
+    title      TEXT,
+    tier       TEXT,
+    FOREIGN KEY (push_id) REFERENCES pushes(id)
+);
 """
 
 
 def _ensure_phase2_columns(conn: sqlite3.Connection) -> None:
-    """Add the trace/title/expires_at columns if they're not already there."""
+    """Add the trace/title/expires_at + priority columns if missing."""
     cols = {row[1] for row in conn.execute("PRAGMA table_info(pushes)")}
-    for name, ddl in _PHASE2_COLUMNS:
+    for name, ddl in (*_PHASE2_COLUMNS, *_PRIORITY_COLUMNS):
         if name not in cols:
             conn.execute(f"ALTER TABLE pushes ADD COLUMN {name} {ddl}")
 
@@ -126,11 +145,14 @@ class Archive:
         trace_json: str | None = None,
         title: str | None = None,
         expires_at: str | None = None,
+        importance_score: int | None = None,
+        priority_tier: str | None = None,
+        priority_reasons: str | None = None,
     ) -> int:
         """Archive a text push. Returns the row id (also useful as a handle).
 
-        Phase 2 fields are all optional — callers that don't pass them get
-        the same behavior as before.
+        Phase 2 + priority fields are all optional — callers that don't
+        pass them get the same behavior as before.
         """
         return self._insert(
             msg_type="text",
@@ -140,6 +162,9 @@ class Archive:
             trace_json=trace_json,
             title=title,
             expires_at=expires_at,
+            importance_score=importance_score,
+            priority_tier=priority_tier,
+            priority_reasons=priority_reasons,
         )
 
     def save_photo(
@@ -151,6 +176,9 @@ class Archive:
         trace_json: str | None = None,
         title: str | None = None,
         expires_at: str | None = None,
+        importance_score: int | None = None,
+        priority_tier: str | None = None,
+        priority_reasons: str | None = None,
     ) -> int:
         """Archive a photo push (image written to disk + caption to DB)."""
         ts_iso = _now_iso()
@@ -185,6 +213,9 @@ class Archive:
             trace_json=trace_json,
             title=title,
             expires_at=expires_at,
+            importance_score=importance_score,
+            priority_tier=priority_tier,
+            priority_reasons=priority_reasons,
         )
 
     # ------------------------------------------------------------------
@@ -202,6 +233,9 @@ class Archive:
         trace_json: str | None = None,
         title: str | None = None,
         expires_at: str | None = None,
+        importance_score: int | None = None,
+        priority_tier: str | None = None,
+        priority_reasons: str | None = None,
     ) -> int:
         ts = ts_override or _now_iso()
         try:
@@ -209,14 +243,68 @@ class Archive:
                 cur = conn.execute(
                     """INSERT INTO pushes
                        (ts, agent, msg_type, text_html, image_path,
-                        tickers, trace_json, title, expires_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        tickers, trace_json, title, expires_at,
+                        importance_score, priority_tier, priority_reasons)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (ts, self._agent, msg_type, text_html, image_path,
-                     tickers, trace_json, title, expires_at),
+                     tickers, trace_json, title, expires_at,
+                     importance_score, priority_tier, priority_reasons),
                 )
-                return cur.lastrowid or 0
+                row_id = cur.lastrowid or 0
+                # Enqueue P2 rows for the daily digest cron.
+                if priority_tier == "P2" and row_id:
+                    conn.execute(
+                        """INSERT OR REPLACE INTO p2_digest_pending
+                           (push_id, queued_at, title, tier)
+                           VALUES (?, ?, ?, ?)""",
+                        (row_id, ts, title, priority_tier),
+                    )
+                return row_id
         except sqlite3.Error as exc:
             logger.warning("Archive insert failed (%s): %s", self._agent, exc)
+            return 0
+
+    # ---- P2 digest helpers ---------------------------------------------
+
+    def get_pending_p2_digest(self) -> list[dict]:
+        """Return P2 pushes still waiting to be summarized + sent.
+
+        Joined against pushes so the digest cron has the title + agent +
+        timestamp without two round-trips.
+        """
+        try:
+            with self._conn() as conn:
+                rows = conn.execute(
+                    """SELECT p.id, p.ts, p.agent, p.title, p.priority_tier,
+                              p.tickers, p.importance_score
+                       FROM p2_digest_pending q
+                       JOIN pushes p ON p.id = q.push_id
+                       ORDER BY p.ts ASC"""
+                ).fetchall()
+            return [dict(r) for r in rows]
+        except sqlite3.Error as exc:
+            logger.warning("get_pending_p2_digest failed: %s", exc)
+            return []
+
+    def clear_p2_digest(self, push_ids: Iterable[int]) -> int:
+        """Drop the listed push ids from the digest queue.
+
+        The pushes(id) row itself stays — only its digest-pending marker
+        is removed. Returns number of rows deleted.
+        """
+        ids = [int(i) for i in push_ids if i]
+        if not ids:
+            return 0
+        placeholders = ",".join("?" for _ in ids)
+        try:
+            with self._conn() as conn:
+                cur = conn.execute(
+                    f"DELETE FROM p2_digest_pending WHERE push_id IN ({placeholders})",
+                    ids,
+                )
+                return cur.rowcount
+        except sqlite3.Error as exc:
+            logger.warning("clear_p2_digest failed: %s", exc)
             return 0
 
     def _resolve_tickers(

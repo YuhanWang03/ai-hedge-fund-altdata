@@ -26,6 +26,7 @@ from v2.reporting import (
     notify_on_error,
     render_price_sparkline,
 )
+from v2.reporting.priority import compute_importance
 from v2.screening import TECH_30
 
 load_dotenv()
@@ -72,11 +73,27 @@ def main() -> None:
                 )
                 caption = format_anomaly_alert(anomaly)
                 trace.emit("chat_message", role="bot", text=caption[:500])
+            priority = compute_importance(
+                "anomaly_attribution",
+                {
+                    "reasons_count": len(anomaly.reasons or []),
+                    "flags": list(anomaly.flags or []),
+                    "price_change_pct": anomaly.price_change_pct,
+                    # Held-position / watchlist booleans aren't trivial
+                    # to compute here (would need to crack open the bot
+                    # state DB and Alpaca creds at agent runtime). Leave
+                    # them off for now — base score is still differentiated
+                    # via reasons_count + flags. Future: wire bot.state +
+                    # broker.get_portfolio look-ups so the scorer sees the
+                    # full picture.
+                },
+            )
             notifier.send_photo(
                 chart, caption=caption,
                 trace=trace,
                 title=f"异动 · {anomaly.ticker}",
                 tickers=[anomaly.ticker],
+                priority=priority,
             )
             print(
                 f"    pushed ({len(anomaly.reasons)} reasons, "

@@ -30,6 +30,7 @@ from v2.etf import (
 )
 from v2.observability import capture_trace_with_framing, install_all
 from v2.reporting import format_etf_snapshot, notify_on_error
+from v2.reporting.priority import compute_importance
 
 logging.basicConfig(
     level=logging.INFO,
@@ -115,12 +116,17 @@ def main() -> int:
 
         # `with` block has exited — module_exit + session_end are now
         # in trace.events. Persist a dashboard-only card (no Telegram).
+        # Priority P2 by default; the daily digest cron rolls these up.
+        priority = compute_importance("etf_daily", {})
         archive.save_text(
             text,
             tickers=[symbol],
             trace_json=json.dumps(trace.events, ensure_ascii=False) if trace.events else None,
             title=f"ARK {symbol} 每日持仓",
             expires_at=(datetime.now(timezone.utc) + timedelta(days=2)).isoformat(),
+            importance_score=priority.score,
+            priority_tier=priority.tier,
+            priority_reasons=",".join(priority.reasons),
         )
 
     logger.info(

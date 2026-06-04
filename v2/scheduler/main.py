@@ -21,6 +21,7 @@ from v2.scheduler.jobs import (
     institutional_backfill_job,
     institutional_job,
     lateral_expansion_job,
+    p2_digest_job,
 )
 
 logger = logging.getLogger(__name__)
@@ -84,6 +85,17 @@ def build_scheduler() -> BlockingScheduler:
         id="etf_daily",
         name="⑤ ETF Daily Snapshot (Mon-Fri)",
         misfire_grace_time=3600,
+        coalesce=True,
+    )
+
+    # P2 digest — 16:45 ET, just before the 17:00 cron block. Sweeps
+    # the previous day's P2 archive rows into one Telegram message.
+    scheduler.add_job(
+        p2_digest_job,
+        CronTrigger(hour=16, minute=45, day_of_week="mon-fri"),
+        id="p2_digest",
+        name="📋 P2 Digest (Mon-Fri 16:45 ET)",
+        misfire_grace_time=1800,
         coalesce=True,
     )
 

@@ -25,6 +25,7 @@ from v2.reporting import format_alert_fired
 from v2.archive.store import Archive
 from v2.observability import capture_trace_with_framing, install_all
 from v2.reporting.notifier import TelegramNotifier
+from v2.reporting.priority import compute_importance
 from v2.streamer.intraday_scan import scan_universe
 
 logger = logging.getLogger(__name__)
@@ -161,11 +162,13 @@ def _push_alert(notifier: TelegramNotifier, fired: dict) -> None:
         # Dedicated Archive agent "alert" so the dashboard's
         # AGENT_TO_INTENT maps to the alert_fire pipeline.
         alert_notifier = TelegramNotifier(archive=Archive("alert"))
+        priority = compute_importance("alert_fire", {})  # always P0
         alert_notifier.send_text(
             text,
             trace=trace,
             title=f"价格提醒 · {ticker}",
             tickers=[ticker],
+            priority=priority,
         )
         logger.info(
             "Alert fired: #%d %s %s $%.2f (current $%.2f)",

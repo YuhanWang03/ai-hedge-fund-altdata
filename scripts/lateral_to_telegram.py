@@ -15,6 +15,7 @@ from v2.data import CachedFDClient
 from v2.lateral import DEFAULT_SEEDS, LATERAL_FILTERS, run_lateral_expansion
 from v2.observability import capture_trace_with_framing, install_all
 from v2.reporting import TelegramNotifier, format_lateral_result, notify_on_error
+from v2.reporting.priority import compute_importance
 from v2.screening import TECH_30
 
 # Show INFO from the orchestrator so we can watch progress.
@@ -57,12 +58,14 @@ def main() -> None:
         trace.emit("chat_message", role="bot", text=text[:500])
 
     print("Pushing to Telegram...")
+    priority = compute_importance("lateral_expansion", {})  # P2
     notifier = TelegramNotifier(archive=Archive(agent="lateral"))
     notifier.send_text(
         text,
         trace=trace,
         title=f"产业链 · {', '.join(seeds[:3])}{' …' if len(seeds) > 3 else ''}",
         tickers=seeds,
+        priority=priority,
     )
     print("Pushed.")
 

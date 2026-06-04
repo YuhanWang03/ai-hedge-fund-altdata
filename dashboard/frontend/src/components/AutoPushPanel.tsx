@@ -34,6 +34,25 @@ const AGENT_TO_INTENT: Record<string, string> = {
   intraday_anomaly: 'intraday_anomaly',
 }
 
+type PriorityTier = 'P0' | 'P1' | 'P2' | 'P3'
+
+const TIER_CHIP_COLOR: Record<PriorityTier, string> = {
+  P0: 'bg-rose-500 text-white',
+  P1: 'bg-blue-500 text-white',
+  P2: 'bg-amber-400 text-amber-900',
+  P3: 'bg-slate-300 text-slate-600',
+}
+
+const TIER_RANK: Record<PriorityTier, number> = { P0: 0, P1: 1, P2: 2, P3: 3 }
+
+function tierOf(p: { priority_tier?: string | null }): PriorityTier {
+  // Pre-Phase-0 archive rows have no tier — treat as P1 for ordering
+  // and chip display so the feed still looks consistent.
+  const t = p.priority_tier
+  if (t === 'P0' || t === 'P1' || t === 'P2' || t === 'P3') return t
+  return 'P1'
+}
+
 const AGENT_ICON: Record<string, string> = {
   anomaly:          '⚡',
   institutional:    '🏛',
@@ -78,6 +97,8 @@ export function AutoPushPanel() {
   const [pushes, setPushes] = useState<PushSummary[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  // Hidden by default — operator opts in via the header toggle.
+  const [includeP3, setIncludeP3] = useState(false)
   // Per-card expansion state: id → full PushDetail (or 'loading').
   const [expanded, setExpanded] = useState<Record<number, PushDetail | 'loading'>>({})
   const [selectedId, setSelectedId] = useState<number | null>(null)
@@ -87,7 +108,7 @@ export function AutoPushPanel() {
   // Initial backfill + live SSE subscription.
   useEffect(() => {
     let cancelled = false
-    fetchRecentPushes(2)
+    fetchRecentPushes(2, { includeP3 })
       .then((rows) => {
         if (!cancelled) {
           setPushes(rows)
@@ -113,7 +134,7 @@ export function AutoPushPanel() {
       cancelled = true
       close()
     }
-  }, [])
+  }, [includeP3])
 
   const onCardClick = async (p: PushSummary) => {
     setSelectedId(p.id)
@@ -161,10 +182,32 @@ export function AutoPushPanel() {
     ? '📡 加载中…'
     : `📡 最近 ${pushes.length} 条推送（过去 2 天） · 每日 02:00 UTC 清理`
 
+  // Sort by tier ascending (P0 first), then ts DESC within each tier.
+  // SSE may have prepended rows out of priority order; this re-sort
+  // keeps the display consistent without round-tripping to the server.
+  const sortedPushes = [...pushes].sort((a, b) => {
+    const rankDiff = TIER_RANK[tierOf(a)] - TIER_RANK[tierOf(b)]
+    if (rankDiff !== 0) return rankDiff
+    return b.ts.localeCompare(a.ts)
+  })
+  // The frontend P3-hide filter is layered on top of the backend's
+  // filter. With includeP3=true the backend ships P3 rows too; we
+  // keep them all. With includeP3=false the backend already strips P3.
+  const visiblePushes = sortedPushes
+
   return (
     <div className="flex-1 flex flex-col bg-white min-h-0">
-      <div className="px-4 py-2 border-b border-slate-100 bg-slate-50">
+      <div className="px-4 py-2 border-b border-slate-100 bg-slate-50 flex items-center justify-between gap-2">
         <div className="text-[11px] text-slate-500">{headerText}</div>
+        <label className="text-[11px] text-slate-600 select-none cursor-pointer flex items-center gap-1">
+          <input
+            type="checkbox"
+            className="h-3 w-3"
+            checked={includeP3}
+            onChange={(e) => setIncludeP3(e.target.checked)}
+          />
+          📋 显示低优先级 (P3)
+        </label>
       </div>
 
       <div ref={containerRef} className="flex-1 overflow-y-auto px-3 py-3 space-y-3">
@@ -178,13 +221,19 @@ export function AutoPushPanel() {
             暂无推送（开盘后 17:00 ET 起会逐步入账）
           </div>
         )}
-        {pushes.map((p) => {
+        {visiblePushes.map((p) => {
           const isSelected = selectedId === p.id
           const expansion = expanded[p.id]
           const isExpanded = expansion && expansion !== 'loading'
           const isLoadingThis = expansion === 'loading'
           const icon = AGENT_ICON[p.agent] ?? '🔔'
           const title = p.title ?? `${p.agent} push`
+          const tier = tierOf(p)
+          // P0 gets a thick rose border on the left so it stands out
+          // in a scrolling feed.
+          const tierBorder = tier === 'P0'
+            ? ' border-l-4 border-l-rose-500'
+            : ''
           return (
             <article
               key={p.id}
@@ -192,16 +241,23 @@ export function AutoPushPanel() {
                 'border rounded-lg p-4 space-y-3 cursor-pointer transition-all ' +
                 (isSelected
                   ? 'bg-blue-50 border-blue-300 shadow-md'
-                  : 'bg-white border-slate-200 shadow-sm hover:border-slate-300 hover:shadow-md')
+                  : 'bg-white border-slate-200 shadow-sm hover:border-slate-300 hover:shadow-md') +
+                tierBorder
               }
               onClick={() => onCardClick(p)}
               data-push-id={p.id}
               data-agent={p.agent}
+              data-tier={tier}
             >
               <header className="flex items-baseline justify-between gap-2">
-                <h3 className="text-sm font-medium text-ink-800 truncate">
+                <h3 className="text-sm font-medium text-ink-800 truncate flex items-baseline gap-2">
+                  <span
+                    className={`px-1.5 py-0.5 rounded text-[10px] font-semibold mono shrink-0 ${TIER_CHIP_COLOR[tier]}`}
+                  >
+                    {tier}
+                  </span>
                   <span className="mr-1.5">{icon}</span>
-                  {title}
+                  <span className="truncate">{title}</span>
                 </h3>
                 <span className="text-[11px] text-slate-500 mono shrink-0">
                   {formatTs(p.ts)}
