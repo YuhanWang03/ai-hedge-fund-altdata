@@ -581,6 +581,22 @@ _MODULE: dict[str, Explanation] = {
         "next":   "通过多次 chat_message emit 推送 1 张总览 + 每 manager 一张详情",
     },
 
+    # On-demand portfolio queries (bot / dashboard QA, NOT cron)
+    "_r_risk_view": {
+        "source": "用户实时请求（/risk 或 NL「我的组合风险」），同步走 v2.portfolio.build_risk_report",
+        "how":    "同 ⑨ cron 一样 fan out 到 6 个子模块（positions / concentration / exposure / pnl / drawdown / earnings_risk），失败 fall back 到 None 字段 + warning",
+        "what":   "RiskReport 全量字段渲染为单卡（组合价值 / 集中度 / 暴露 / 1M 回撤 / 7d 财报）",
+        "store":  "read-only — 不写 archive，不算 priority（priority 只跟 cron-pushed 卡片相关）",
+        "next":   "用 ⑨ 同款 inline _format_risk_card 渲染，Telegram / dashboard 单条回复",
+    },
+    "_r_pnl_period": {
+        "source": "用户实时请求（/pnl week|month 或 NL「这周亏了多少」），调 v2.portfolio.compute_pnl",
+        "how":    "compute_pnl 内部 fan out: get_pnl() 拿当日, get_portfolio_history(1M, 1D) 拿历史 1W / 1M 回报",
+        "what":   "单期 P&L 摘要：本周 / 本月 fraction + 当日参考；账户史不足时显示 '数据不足'",
+        "store":  "不持久化",
+        "next":   "渲染为单卡，read-only 回复",
+    },
+
     # Portfolio risk agent — Phase 2
     "_r_portfolio_risk": {
         "source": "scheduler 触发（18:30 ET Mon-Fri），Alpaca 当前持仓 + portfolio_history(1M, 1D) + yfinance 7d 财报日历",

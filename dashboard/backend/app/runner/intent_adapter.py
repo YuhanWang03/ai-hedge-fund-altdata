@@ -69,6 +69,28 @@ _KEYWORD_MAP: list[tuple[str, str]] = [
     ("财报安排", "earnings_calendar"),
     ("财报", "earnings_view"),
     ("earnings", "earnings_view"),
+    # Portfolio risk + period P&L — checked before "持仓"/"pnl" generics
+    # so the more specific phrasing wins.
+    ("组合风险", "risk_view"),
+    ("组合集中度", "risk_view"),
+    ("组合 drawdown", "risk_view"),
+    ("sector 暴露", "risk_view"),
+    ("行业暴露", "risk_view"),
+    ("portfolio risk", "risk_view"),
+    ("这周亏", "pnl_period"),
+    ("这周赚", "pnl_period"),
+    ("本周亏", "pnl_period"),
+    ("本周赚", "pnl_period"),
+    ("本月亏", "pnl_period"),
+    ("本月赚", "pnl_period"),
+    ("月度收益", "pnl_period"),
+    ("周度收益", "pnl_period"),
+    ("月度 pnl", "pnl_period"),
+    ("周度 pnl", "pnl_period"),
+    # "上周/上月 X" — period marker is unambiguous; pair with anything
+    # else and it's the user asking about a past-period number.
+    ("上周", "pnl_period"),
+    ("上月", "pnl_period"),
     # Existing
     ("为什么", "explain_move"),
     ("why", "explain_move"),
@@ -121,6 +143,10 @@ def _stub_classify(text: str) -> tuple[str, dict[str, Any]]:
         days = _extract_days_horizon(text)
         if days:
             args["days_horizon"] = days
+    if intent_name == "pnl_period":
+        period = _extract_period(text)
+        if period:
+            args["period"] = period
     return intent_name, args
 
 
@@ -151,6 +177,41 @@ def _extract_days_horizon(text: str) -> Optional[int]:
     for phrase, days in _DAYS_HORIZON_PHRASES:
         if phrase in lower:
             return days
+    return None
+
+
+_PERIOD_PHRASES = [
+    ("本月", "month"),
+    ("这个月", "month"),
+    ("月度", "month"),
+    ("过去一个月", "month"),
+    ("monthly", "month"),
+    ("month", "month"),
+    ("上月", "month"),
+    ("本周", "week"),
+    ("这周", "week"),
+    ("上周", "week"),
+    ("周度", "week"),
+    ("weekly", "week"),
+    ("week", "week"),
+    ("今日", "day"),
+    ("当日", "day"),
+    ("日内", "day"),
+    ("daily", "day"),
+    ("intraday", "day"),
+]
+
+
+def _extract_period(text: str) -> Optional[str]:
+    """Heuristic — map common Chinese period phrases to day/week/month.
+
+    Ordered checks: longer / more specific phrases first so '本月' beats
+    'month' if both happen to match a substring.
+    """
+    lower = text.lower()
+    for phrase, period in _PERIOD_PHRASES:
+        if phrase in lower:
+            return period
     return None
 
 
@@ -230,6 +291,18 @@ def _earnings_calendar_real(args: dict[str, Any]) -> str:
     return bot_responders.earnings_calendar(args)
 
 
+def _risk_view_real(args: dict[str, Any]) -> str:
+    """Real-time portfolio risk card (Phase 2 Stage 4)."""
+    from v2.bot import responders as bot_responders
+    return bot_responders.risk_view(args)
+
+
+def _pnl_period_real(args: dict[str, Any]) -> str:
+    """Period-specific P&L card (Phase 2 Stage 4)."""
+    from v2.bot import responders as bot_responders
+    return bot_responders.pnl_period(args)
+
+
 # Real responders should replace these entries on the production VPS.
 # Each must accept a dict and return a str.
 DISPATCH: dict[str, ResponderFn] = {
@@ -249,5 +322,7 @@ DISPATCH: dict[str, ResponderFn] = {
     "watchlist_view": _stub_responder,
     "earnings_view": _earnings_view_real,
     "earnings_calendar": _earnings_calendar_real,
+    "risk_view": _risk_view_real,
+    "pnl_period": _pnl_period_real,
     "unknown": _stub_responder,
 }

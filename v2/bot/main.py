@@ -44,6 +44,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("pnl", commands.cmd_pnl))
     app.add_handler(CommandHandler("settings", commands.cmd_settings))
     app.add_handler(CommandHandler("earnings", commands.cmd_earnings))
+    app.add_handler(CommandHandler("risk", commands.cmd_risk))
 
     # Stage 3 — NL intent classifier + dispatch
     app.add_handler(
