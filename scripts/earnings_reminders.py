@@ -30,7 +30,7 @@ from v2.archive import Archive
 from v2.bot import state as bot_state
 from v2.earnings import Reminder, run_reminders
 from v2.observability import capture_trace_with_framing, install_all
-from v2.reporting import TelegramNotifier, notify_on_error
+from v2.reporting import TelegramNotifier, format_earnings_reminder, notify_on_error
 from v2.reporting.priority import compute_importance
 
 
@@ -45,18 +45,6 @@ _EVENT_KIND_BY_TAG = {
     "D-3": "earnings_reminder_d3",
     "D-1": "earnings_reminder_d1",
     "D-0": "earnings_reminder_d0",
-}
-
-_TAG_EMOJI = {
-    "D-3": "📅",
-    "D-1": "⏰",
-    "D-0": "🎯",
-}
-
-_WHEN_LABEL = {
-    "bmo": "盘前",
-    "amc": "盘后",
-    "unknown": "时间未公布",
 }
 
 
@@ -83,37 +71,6 @@ def _resolve_universe() -> tuple[list[str], set[str], set[str]]:
     return universe, held, watchlist
 
 
-def _format_reminder(r: Reminder, *, is_held: bool, is_watchlist: bool) -> str:
-    """Minimal Stage-2 card. Stage 5 will refactor into v2/reporting/formatters."""
-    ev = r.event
-    emoji = _TAG_EMOJI[r.tag]
-    when = _WHEN_LABEL.get(ev.when, ev.when)
-
-    badge = (
-        "🟢 持仓股" if is_held
-        else "👁 关注列表" if is_watchlist
-        else ""
-    )
-
-    lines: list[str] = [
-        f"<b>{emoji} 财报提醒 · {ev.ticker} · {r.tag}</b>",
-        f"发布日：<code>{ev.release_date}</code>（{when}）",
-    ]
-    if badge:
-        lines.append(badge)
-
-    extras: list[str] = []
-    if ev.eps_estimate is not None:
-        extras.append(f"EPS 预期：<code>{ev.eps_estimate:.2f}</code>")
-    if ev.revenue_estimate is not None:
-        extras.append(f"营收预期：<code>${ev.revenue_estimate / 1e9:.2f}B</code>")
-    if extras:
-        lines.append("")
-        lines.extend(extras)
-
-    return "\n".join(lines)
-
-
 def _emit_one(
     notifier: TelegramNotifier,
     trace,
@@ -127,7 +84,10 @@ def _emit_one(
         event_kind,
         {"is_held_position": is_held, "is_watchlist": is_watchlist},
     )
-    text = _format_reminder(reminder, is_held=is_held, is_watchlist=is_watchlist)
+    text = format_earnings_reminder(
+        reminder.event, tag=reminder.tag,
+        is_held=is_held, is_watchlist=is_watchlist,
+    )
     notifier.send_text(
         text,
         trace=trace,

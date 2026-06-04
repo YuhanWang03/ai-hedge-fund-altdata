@@ -30,7 +30,12 @@ from v2.earnings import (
     run_summaries,
 )
 from v2.observability import capture_trace_with_framing, install_all
-from v2.reporting import TelegramNotifier, notify_on_error
+from v2.reporting import (
+    TelegramNotifier,
+    format_earnings_pending,
+    format_earnings_summary,
+    notify_on_error,
+)
 from v2.reporting.priority import compute_importance
 
 
@@ -39,14 +44,6 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 logger = logging.getLogger(__name__)
-
-
-_SURPRISE_EMOJI = {
-    "BEAT": "🟢",
-    "MISS": "🔴",
-    "MEET": "🟡",
-    "UNKNOWN": "❔",
-}
 
 
 def _resolve_universe() -> tuple[list[str], set[str], set[str]]:
@@ -68,82 +65,14 @@ def _resolve_universe() -> tuple[list[str], set[str], set[str]]:
 
 
 def _eps_surprise_pct(s: EarningsSummary) -> float | None:
+    """Kept as a script-local helper purely for the priority metadata.
+
+    The card itself computes the same number internally — but we need it
+    here before constructing the card to feed into compute_importance.
+    """
     if s.eps_actual is None or s.eps_estimate is None or s.eps_estimate == 0:
         return None
     return (s.eps_actual - s.eps_estimate) / abs(s.eps_estimate)
-
-
-def _revenue_surprise_pct(s: EarningsSummary) -> float | None:
-    if s.revenue_actual is None or s.revenue_estimate is None or s.revenue_estimate <= 0:
-        return None
-    return (s.revenue_actual - s.revenue_estimate) / s.revenue_estimate
-
-
-def _format_summary(s: EarningsSummary, *, badge: str) -> str:
-    """Minimal Stage-2 summary card. Stage 5 polishes."""
-    emoji = _SURPRISE_EMOJI.get(s.eps_surprise, "•")
-
-    lines: list[str] = [
-        f"<b>{emoji} 财报发布 · {s.ticker} · {s.eps_surprise}</b>",
-        f"报告期：<code>{s.report_period}</code> · 申报：<code>{s.filing_date}</code>",
-    ]
-    if badge:
-        lines.append(badge)
-    lines.append("")
-
-    eps_pct = _eps_surprise_pct(s)
-    if s.eps_actual is not None and s.eps_estimate is not None:
-        delta = f" ({eps_pct:+.1%})" if eps_pct is not None else ""
-        lines.append(
-            f"EPS：<code>{s.eps_actual:.2f}</code> vs 预期 "
-            f"<code>{s.eps_estimate:.2f}</code>{delta}"
-        )
-    rev_pct = _revenue_surprise_pct(s)
-    if s.revenue_actual is not None and s.revenue_estimate is not None:
-        delta = f" ({rev_pct:+.1%})" if rev_pct is not None else ""
-        lines.append(
-            f"营收：<code>${s.revenue_actual / 1e9:.2f}B</code> vs 预期 "
-            f"<code>${s.revenue_estimate / 1e9:.2f}B</code>{delta}"
-        )
-
-    if s.last_4q_surprises:
-        streak = " → ".join(s.last_4q_surprises)
-        lines.append(f"最近 4 季：<code>{streak}</code>")
-
-    if s.bull or s.bear:
-        lines.append("")
-        if s.bull:
-            lines.append(f"👍 {s.bull}")
-        if s.bear:
-            lines.append(f"👎 {s.bear}")
-    if s.narrative:
-        lines.append("")
-        lines.append(f"<i>{s.narrative}</i>")
-    if s.transcript_url:
-        lines.append("")
-        lines.append(f'📜 <a href="{s.transcript_url}">电话会记录</a>')
-
-    return "\n".join(lines)
-
-
-def _format_pending(ticker: str, today_iso: str, badge: str) -> str:
-    lines = [
-        f"<b>⏳ 财报数据待落地 · {ticker}</b>",
-        f"发布日：<code>{today_iso}</code>",
-    ]
-    if badge:
-        lines.append(badge)
-    lines.append("")
-    lines.append("<i>FD 实际数据尚未入库，明天 21:00 ET 自动重试。</i>")
-    return "\n".join(lines)
-
-
-def _badge(is_held: bool, is_watchlist: bool) -> str:
-    if is_held:
-        return "🟢 持仓股"
-    if is_watchlist:
-        return "👁 关注列表"
-    return ""
 
 
 def _push_summarized(
@@ -168,7 +97,9 @@ def _push_summarized(
     }
     priority = compute_importance("earnings_summary", md)
 
-    text = _format_summary(summary, badge=_badge(is_held, is_watchlist))
+    text = format_earnings_summary(
+        summary, is_held=is_held, is_watchlist=is_watchlist,
+    )
     notifier.send_text(
         text,
         trace=trace,
@@ -195,7 +126,10 @@ def _push_pending(
         "earnings_pending",
         {"is_held_position": is_held, "is_watchlist": is_watchlist},
     )
-    text = _format_pending(outcome.ticker, today_iso, _badge(is_held, is_watchlist))
+    text = format_earnings_pending(
+        outcome.ticker, today_iso=today_iso,
+        is_held=is_held, is_watchlist=is_watchlist,
+    )
     notifier.send_text(
         text,
         trace=trace,
