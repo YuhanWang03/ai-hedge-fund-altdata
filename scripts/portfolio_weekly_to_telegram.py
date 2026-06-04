@@ -82,12 +82,13 @@ def _format_weekly_card(report: RiskReport) -> str:
     ]
 
     # ----- Portfolio total -----
-    total = report.portfolio_value + report.cash
-    if total > 0:
+    # Same layout as ⑨ for consistency — TOTAL (invested + cash) header.
+    if report.portfolio_value > 0:
         lines.append(
-            f"组合价值 <code>{_fmt_money(total)}</code> · "
-            f"现金 <code>{_fmt_money(report.cash)}</code> "
-            f"({report.cash_pct:.1%})"
+            f"组合价值 <code>{_fmt_money(report.portfolio_value)}</code> "
+            f"(持仓 <code>{_fmt_money(report.invested_value)}</code> · "
+            f"现金 <code>{_fmt_money(report.cash)}</code>, "
+            f"{report.cash_pct:.1%})"
         )
 
     # ----- Weekly + monthly returns -----

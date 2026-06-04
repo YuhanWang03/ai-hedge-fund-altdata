@@ -168,12 +168,22 @@ class RiskReport:
     All sub-metrics are populated independently; a single failure (e.g.
     portfolio_history unavailable → ``PnLMetrics.unavailable()``) does
     not block the others. The cron renders whatever fields it has.
+
+    Field semantics (Stage 2.5 clarification — Alpaca's
+    ``account.portfolio_value`` is the TOTAL equity, not invested-only):
+
+    - ``portfolio_value`` = Alpaca account.portfolio_value =
+      invested equity + cash.
+    - ``cash`` = uninvested cash (Alpaca account.cash).
+    - ``cash_pct`` = cash / portfolio_value (cash as share of TOTAL).
+    - ``invested_value`` = portfolio_value - cash (derived @property,
+      cannot drift from the source fields).
     """
 
     snapshot_date: str             # ISO date YYYY-MM-DD
-    portfolio_value: float
+    portfolio_value: float         # TOTAL equity (invested + cash)
     cash: float
-    cash_pct: float                # fraction of (portfolio_value + cash)
+    cash_pct: float                # cash / portfolio_value
 
     positions: list[PositionFlat] = field(default_factory=list)
     concentration: ConcentrationMetrics = field(default_factory=ConcentrationMetrics.empty)
@@ -186,3 +196,14 @@ class RiskReport:
     # user knows WHY a section is empty rather than wondering if their
     # cron broke.
     warnings: list[str] = field(default_factory=list)
+
+    @property
+    def invested_value(self) -> float:
+        """Invested equity = portfolio_value - cash.
+
+        Derived rather than stored so it can't drift from the source
+        fields if a caller mutates ``cash`` or ``portfolio_value`` later.
+        Clamps to 0 to absorb Alpaca rounding (cash > portfolio_value
+        is theoretically impossible but can show up at $0.01 scale).
+        """
+        return max(0.0, self.portfolio_value - self.cash)

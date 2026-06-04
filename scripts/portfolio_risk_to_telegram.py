@@ -107,12 +107,15 @@ def _format_risk_card(report: RiskReport) -> str:
         "━━━━━━━━━━━━━━━━━━━━",
     ]
 
-    total = report.portfolio_value + report.cash
-    if total > 0:
+    # Layout A — split TOTAL into (invested + cash) so concentration /
+    # sector exposure numbers (denominated in invested) line up visually
+    # with their underlying base. Cash % is share of TOTAL.
+    if report.portfolio_value > 0:
         lines.append(
-            f"组合价值 <code>{_fmt_money(total)}</code> · "
-            f"现金 <code>{_fmt_money(report.cash)}</code> "
-            f"({report.cash_pct:.1%})"
+            f"组合价值 <code>{_fmt_money(report.portfolio_value)}</code> "
+            f"(持仓 <code>{_fmt_money(report.invested_value)}</code> · "
+            f"现金 <code>{_fmt_money(report.cash)}</code>, "
+            f"{report.cash_pct:.1%})"
         )
     else:
         lines.append("<i>账户暂无数据</i>")

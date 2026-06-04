@@ -150,7 +150,14 @@ def smoke_positions():
     # Largest first; malformed BAD silently dropped
     assert tickers == ["NVDA", "AAPL", "MSFT"]
     assert "BAD" not in tickers
-    assert flats[0].weight == 0.30
+    # Stage 2.5: weight denominator is sum of invested market_values
+    # (30k + 20k + 15k = 65k), NOT Alpaca's portfolio_value (which is
+    # TOTAL = invested + cash). NVDA = 30/65 ≈ 0.4615.
+    assert abs(flats[0].weight - (30000 / 65000)) < 1e-9
+    assert abs(flats[1].weight - (20000 / 65000)) < 1e-9
+    assert abs(flats[2].weight - (15000 / 65000)) < 1e-9
+    # Weights sum to 1.0 (share-of-invested semantics)
+    assert abs(sum(p.weight for p in flats) - 1.0) < 1e-9
     assert flats[0].sector_etf == "SMH"
 
     # Sector mapping uppercases the lowercased input
@@ -407,8 +414,14 @@ def smoke_pipeline_full():
     # Structure assertions
     assert report.snapshot_date == _today_iso()
     assert report.portfolio_value == 100_000.0
-    assert report.cash_pct == 0.2   # 25k / 125k
-    assert report.concentration.top_1_pct == 0.30
+    # Stage 2.5: cash_pct = cash / portfolio_value (TOTAL), not /(pv+cash).
+    # 25k / 100k = 0.25.
+    assert report.cash_pct == 0.25
+    # invested_value derived from portfolio_value - cash.
+    assert report.invested_value == 75_000.0
+    # Stage 2.5: weights are share-of-invested. Positions sum to 65k,
+    # NVDA = 30/65 ≈ 0.4615. (Old buggy behavior would have been 0.30.)
+    assert abs(report.concentration.top_1_pct - (30000 / 65000)) < 1e-9
     assert report.exposure.largest_sector == "SMH"
     assert report.pnl.daily_pnl_pct == -0.018
     assert report.drawdown.max_drawdown_pct < 0
@@ -446,6 +459,129 @@ def smoke_pipeline_alpaca_down_partial():
 
 
 # ---------------------------------------------------------------------------
+# Stage 2.5 — portfolio_value semantics (TOTAL = invested + cash)
+# ---------------------------------------------------------------------------
+
+def _calendar_empty(tickers):
+    from v2.earnings.calendar import CalendarBatchResult
+    return CalendarBatchResult(events={}, skipped_unsupported=[],
+                               skipped_empty=[], errors=[])
+
+
+def smoke_pipeline_cash_zero():
+    """All-invested account (cash=0): cash_pct = 0, invested_value
+    equals portfolio_value, and concentration weights still sum to 1.0."""
+    from v2.portfolio.pipeline import build_risk_report
+
+    class FakeBroker:
+        def get_portfolio(self):
+            return {
+                "account": {"portfolio_value": 100_000.0, "cash": 0.0},
+                "positions": [
+                    {"symbol": "NVDA", "market_value": "60000"},
+                    {"symbol": "AAPL", "market_value": "40000"},
+                ],
+            }
+        def get_pnl(self):
+            return {"intraday_pl": 0.0, "intraday_pl_pct": 0.0}
+        def get_portfolio_history(self, period, timeframe):
+            return {"equity": [100_000, 100_000], "timestamp": [1, 2]}
+
+    r = build_risk_report(today_iso=_today_iso(), broker=FakeBroker(),
+                          calendar_fetcher=_calendar_empty)
+    print(f"  ok   pv={r.portfolio_value} cash={r.cash} "
+          f"cash_pct={r.cash_pct:.4f} invested={r.invested_value}")
+    assert r.portfolio_value == 100_000.0
+    assert r.cash == 0.0
+    assert r.cash_pct == 0.0
+    assert r.invested_value == 100_000.0
+    # Weights sum to 1.0 — denominator is invested_total (sum of mv)
+    total_weight = sum(p.weight for p in r.positions)
+    assert abs(total_weight - 1.0) < 1e-9
+    # Top 1 NVDA is 60/100 = 60% of invested
+    assert abs(r.concentration.top_1_pct - 0.60) < 1e-9
+
+
+def smoke_pipeline_all_cash_no_positions():
+    """All-cash account: cash_pct = 1.0, invested_value = 0,
+    concentration/exposure are empty but don't crash."""
+    from v2.portfolio.pipeline import build_risk_report
+
+    class FakeBroker:
+        def get_portfolio(self):
+            return {
+                "account": {"portfolio_value": 50_000.0, "cash": 50_000.0},
+                "positions": [],
+            }
+        def get_pnl(self):
+            return {"intraday_pl": 0.0, "intraday_pl_pct": 0.0}
+        def get_portfolio_history(self, period, timeframe):
+            return {"equity": [50_000], "timestamp": [1]}
+
+    r = build_risk_report(today_iso=_today_iso(), broker=FakeBroker(),
+                          calendar_fetcher=_calendar_empty)
+    print(f"  ok   all-cash: pv={r.portfolio_value} cash_pct={r.cash_pct:.4f} "
+          f"invested={r.invested_value} n_positions={len(r.positions)}")
+    assert r.portfolio_value == 50_000.0
+    assert r.cash == 50_000.0
+    assert r.cash_pct == 1.0
+    assert r.invested_value == 0.0
+    assert r.positions == []
+    # Concentration / exposure empty but well-formed
+    assert r.concentration.n_positions == 0
+    assert r.concentration.top_1_pct == 0.0
+    assert r.concentration.hhi == 0.0
+    assert r.exposure.by_sector == {}
+    assert r.exposure.largest_sector == ""
+    # No earnings call attempted (positions empty short-circuits)
+    assert r.earnings_risk_next_7d == []
+
+
+def smoke_pipeline_normal_split():
+    """Stage 2 dry-run case: $128.6K total / $25.4K cash → 19.7% cash,
+    $103.2K invested. The exact numbers from the spec."""
+    from v2.portfolio.pipeline import build_risk_report
+
+    class FakeBroker:
+        def get_portfolio(self):
+            return {
+                "account": {"portfolio_value": 128_600.0, "cash": 25_400.0},
+                "positions": [
+                    {"symbol": "NVDA", "market_value": "36120"},  # 35% of invested
+                    {"symbol": "AAPL", "market_value": "20640"},  # 20%
+                    {"symbol": "JPM",  "market_value": "15480"},  # 15%
+                    {"symbol": "CRM",  "market_value": "10320"},  # 10%
+                    {"symbol": "BAC",  "market_value":  "5160"},  # 5%
+                    {"symbol": "MSFT", "market_value": "15480"},  # 15%
+                ],
+            }
+        def get_pnl(self):
+            return {"intraday_pl": -1856.0, "intraday_pl_pct": -0.0178}
+        def get_portfolio_history(self, period, timeframe):
+            return {"equity": [120_000, 125_000, 128_600], "timestamp": [1, 2, 3]}
+
+    r = build_risk_report(today_iso=_today_iso(), broker=FakeBroker(),
+                          calendar_fetcher=_calendar_empty)
+    print(f"  ok   normal split: pv={r.portfolio_value} cash={r.cash} "
+          f"cash_pct={r.cash_pct:.3%} invested={r.invested_value}")
+
+    assert r.portfolio_value == 128_600.0
+    assert r.cash == 25_400.0
+    # 25400 / 128600 = 0.19751166...  spec said "≈ 19.7%"
+    assert abs(r.cash_pct - 0.197511) < 1e-5
+    assert r.invested_value == 103_200.0
+
+    # Weights are share of invested, NOT share of TOTAL.
+    # 36120 / 103200 = 0.35 (intuitive: NVDA is 35% of invested book)
+    assert abs(r.concentration.top_1_pct - 0.35) < 1e-9
+    # vs the old wrong denominator (128600), top_1 would be 0.281
+
+    # Sum of weights == 1.0 (since denominator = sum-of-parts)
+    total_weight = sum(p.weight for p in r.positions)
+    assert abs(total_weight - 1.0) < 1e-9
+
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 
@@ -469,6 +605,9 @@ def main() -> int:
         ("earnings_risk_empty",   smoke_earnings_risk_no_positions),
         ("pipeline_full",         smoke_pipeline_full),
         ("pipeline_alpaca_down",  smoke_pipeline_alpaca_down_partial),
+        ("pipeline_cash_zero",    smoke_pipeline_cash_zero),
+        ("pipeline_all_cash",     smoke_pipeline_all_cash_no_positions),
+        ("pipeline_normal_split", smoke_pipeline_normal_split),
     ]:
         _section(name)
         try:

@@ -56,6 +56,9 @@ def get_flat_positions(broker: Any | None = None) -> tuple[list[PositionFlat], f
     account = snap.get("account") or {}
     positions_raw = snap.get("positions") or []
 
+    # Alpaca's ``account.portfolio_value`` is the TOTAL equity (invested
+    # + cash). The pipeline carries it forward verbatim and computes
+    # ``invested_value`` as the derived (portfolio_value - cash).
     portfolio_value = float(account.get("portfolio_value") or 0.0)
     cash = float(account.get("cash") or 0.0)
 
@@ -63,7 +66,8 @@ def get_flat_positions(broker: Any | None = None) -> tuple[list[PositionFlat], f
         # Brand-new account, no positions yet.
         return [], portfolio_value, cash, warnings
 
-    flats: list[PositionFlat] = []
+    # First pass — parse + compute invested total (denominator for weight).
+    parsed: list[tuple[str, float]] = []
     for raw in positions_raw:
         try:
             ticker = str(raw.get("symbol") or "").upper().strip()
@@ -73,7 +77,19 @@ def get_flat_positions(broker: Any | None = None) -> tuple[list[PositionFlat], f
             continue
         if not ticker:
             continue
-        weight = (mv / portfolio_value) if portfolio_value > 0 else 0.0
+        parsed.append((ticker, mv))
+
+    # Weight denominator is the sum of position market values — i.e. the
+    # invested portion only. This makes "Top 1 NVDA 35%" intuitive
+    # ("inside your invested book, NVDA is 35%") rather than diluted
+    # by the cash bucket. Sum-of-parts == invested_value modulo Alpaca
+    # rounding; if it ever drifts, the position sum is the
+    # internally-consistent denominator.
+    invested_total = sum(mv for _, mv in parsed)
+
+    flats: list[PositionFlat] = []
+    for ticker, mv in parsed:
+        weight = (mv / invested_total) if invested_total > 0 else 0.0
         flats.append(PositionFlat(
             ticker=ticker,
             market_value=mv,

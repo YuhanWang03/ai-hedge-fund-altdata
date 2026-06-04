@@ -53,9 +53,12 @@ def build_risk_report(
     today_iso = today_iso or date.today().isoformat()
 
     # ----- 1. positions + dollar totals -----
+    # Alpaca's ``portfolio_value`` IS the TOTAL equity already — adding
+    # ``cash`` again would double-count it. ``cash_pct`` is cash as a
+    # fraction of TOTAL. ``invested_value`` is exposed on RiskReport
+    # as a derived @property (portfolio_value - cash).
     positions, portfolio_value, cash, position_warnings = get_flat_positions(broker=broker)
-    total_equity = portfolio_value + cash
-    cash_pct = (cash / total_equity) if total_equity > 0 else 0.0
+    cash_pct = (cash / portfolio_value) if portfolio_value > 0 else 0.0
 
     report = RiskReport(
         snapshot_date=today_iso,
