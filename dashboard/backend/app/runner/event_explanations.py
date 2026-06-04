@@ -581,6 +581,22 @@ _MODULE: dict[str, Explanation] = {
         "next":   "通过多次 chat_message emit 推送 1 张总览 + 每 manager 一张详情",
     },
 
+    # Portfolio risk agent — Phase 2
+    "_r_portfolio_risk": {
+        "source": "scheduler 触发（18:30 ET Mon-Fri），Alpaca 当前持仓 + portfolio_history(1M, 1D) + yfinance 7d 财报日历",
+        "how":    "build_risk_report 串联 6 个独立子模块（positions / concentration / exposure / pnl / drawdown / earnings_risk），任何一个失败都 fall back 到 None 字段 + warning 字串",
+        "what":   "RiskReport 含组合价值/现金、Top-1/3/5 + HHI、行业 ETF 暴露、日/周/月 P&L、1M 回撤、7d 财报风险",
+        "store":  "推送本身写入 archive.db pushes 表（无新表）",
+        "next":   "compute_importance 按 6 个 metadata 算 priority（daily_pnl ≤ -5% 升 P0），推 Telegram + dashboard auto-push",
+    },
+    "_r_portfolio_weekly": {
+        "source": "scheduler 触发（Fri 19:00 ET），同 ⑨ 的 RiskReport + 额外 portfolio_history(1M, 1D) 渲图",
+        "how":    "复用 build_risk_report 拿数字，再用 matplotlib 渲染 1M equity curve PNG（标峰值位置）",
+        "what":   "周/月回报 + 1M 最大回撤 + 主要行业暴露 + 下周财报清单 + 权益曲线图",
+        "store":  "image 写到 data/images/，元数据 + caption 入 archive.db",
+        "next":   "推 Telegram photo + dashboard auto-push；priority 强制 P1 底线（周报性质，operator 需看见）",
+    },
+
     # Earnings agent — Phase 1
     "_r_earnings_reminders": {
         "source": "scheduler 触发（08:00 ET Mon-Fri），watchlist + Alpaca 持仓 的合并 ticker 集合",

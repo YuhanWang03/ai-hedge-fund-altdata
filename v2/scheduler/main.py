@@ -24,6 +24,8 @@ from v2.scheduler.jobs import (
     institutional_job,
     lateral_expansion_job,
     p2_digest_job,
+    portfolio_risk_job,
+    portfolio_weekly_job,
 )
 
 logger = logging.getLogger(__name__)
@@ -111,6 +113,31 @@ def build_scheduler() -> BlockingScheduler:
         id="earnings_summaries",
         name="⑧ Earnings Summaries (Mon-Fri 21:00 ET)",
         misfire_grace_time=3600,
+        coalesce=True,
+    )
+
+    # ⑨ Portfolio risk — 18:30 ET Mon-Fri. Daily snapshot:
+    # positions / concentration / sector exposure / P&L / drawdown /
+    # 7-day held-position earnings risk. Computes priority from the
+    # report itself; daily loss ≥ 5% bumps to P0.
+    scheduler.add_job(
+        portfolio_risk_job,
+        CronTrigger(hour=18, minute=30, day_of_week="mon-fri", timezone=_TZ),
+        id="portfolio_risk",
+        name="⑨ Portfolio Risk (Mon-Fri 18:30 ET)",
+        misfire_grace_time=3600,
+        coalesce=True,
+    )
+
+    # ⑩ Portfolio weekly recap — 19:00 ET Fri. Weekly + monthly returns,
+    # 1M drawdown, equity-curve PNG. Always P1 (operator-visibility) —
+    # mid-week P0 risks come from ⑨ instead.
+    scheduler.add_job(
+        portfolio_weekly_job,
+        CronTrigger(hour=19, minute=0, day_of_week="fri", timezone=_TZ),
+        id="portfolio_weekly",
+        name="⑩ Portfolio Weekly (Fri 19:00 ET)",
+        misfire_grace_time=7200,
         coalesce=True,
     )
 
