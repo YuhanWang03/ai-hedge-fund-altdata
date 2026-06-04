@@ -76,6 +76,8 @@ _HELP_TEXT = (
     "  /13f BRK            — Manager 完整组合 + 持仓变动\n"
     "  /holders NVDA       — 哪些机构持有该股票\n"
     "  /etf ARKK           — ARK 基金每日持仓 + 24h 调仓\n"
+    "  /earnings AAPL      — 单股财报（下次日期 + 上次结果）\n"
+    "  /earnings           — 未来 14 天财报日历（watchlist + 持仓）\n"
     "  /settings           — 查看推送阈值\n"
     "\n"
     "<b>盘中提醒</b>\n"
@@ -364,6 +366,32 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_html(text)
 
 
+@authorized_only
+async def cmd_earnings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """``/earnings [TICKER]`` — single-ticker card, or 14-day calendar.
+
+    With no args: returns the calendar across watchlist ∪ Alpaca holdings.
+    With a ticker: returns the next-release + last-filing card.
+    """
+    args = context.args or []
+    if not args:
+        placeholder = await update.message.reply_html("📅 拉取财报日历...")
+        result = await _run_blocking(
+            responders.earnings_calendar, {"days_horizon": 14},
+        )
+    else:
+        ticker = args[0].upper()
+        placeholder = await update.message.reply_html(
+            f"📞 查询 <b>{html.escape(ticker)}</b> 财报..."
+        )
+        result = await _run_blocking(
+            responders.earnings_view, {"ticker": ticker},
+        )
+    await placeholder.edit_text(
+        result, parse_mode="HTML", disable_web_page_preview=True,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Stage 3 — NL → Intent classifier and router
 # ---------------------------------------------------------------------------
@@ -385,6 +413,8 @@ _INTENT_DISPLAY = {
     "alert_list":       "🔔 查看价格提醒",
     "portfolio_view":   "💼 Alpaca 持仓",
     "pnl_view":         "📊 当日盈亏",
+    "earnings_view":    "📞 财报详情",
+    "earnings_calendar":"📅 财报日历",
     "unknown":          "❓ 未识别",
 }
 
@@ -405,6 +435,7 @@ async def cmd_nl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     etf = parsed.get("etf", "")
     target_price = parsed.get("target_price", 0.0) or 0.0
     direction = parsed.get("direction", "") or "above"
+    days_horizon = parsed.get("days_horizon", 0) or 0
 
     # Tell the user how we routed — transparency builds trust
     routing_chip = (
@@ -566,6 +597,25 @@ async def cmd_nl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         elif name == "pnl_view":
             result = await _run_blocking(responders.pnl_view)
+            await placeholder.edit_text(routing_chip + result, parse_mode="HTML",
+                                         disable_web_page_preview=True)
+
+        elif name == "earnings_view":
+            if not ticker:
+                await placeholder.edit_text(
+                    routing_chip + "❓ 无法识别 ticker，请明确股票代码或公司名。",
+                    parse_mode="HTML",
+                )
+                return
+            result = await _run_blocking(
+                responders.earnings_view, {"ticker": ticker},
+            )
+            await placeholder.edit_text(routing_chip + result, parse_mode="HTML",
+                                         disable_web_page_preview=True)
+
+        elif name == "earnings_calendar":
+            args = {"days_horizon": days_horizon} if days_horizon else {}
+            result = await _run_blocking(responders.earnings_calendar, args)
             await placeholder.edit_text(routing_chip + result, parse_mode="HTML",
                                          disable_web_page_preview=True)
 
