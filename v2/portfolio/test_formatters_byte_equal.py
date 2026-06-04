@@ -11,6 +11,7 @@ function (verified via identity assertion at the bottom).
 
 from __future__ import annotations
 
+import re
 import sys
 from datetime import date
 from pathlib import Path
@@ -255,6 +256,65 @@ def test_pnl_period_day_raises_value_error():
                          weekly_pnl_pct=None, monthly_pnl_pct=None)
     with pytest.raises(ValueError, match="format_pnl"):
         format_pnl_period("day", metrics)
+
+
+# ---------------------------------------------------------------------------
+# HTML safety lint — all formatter outputs must be Telegram-parseable
+# ---------------------------------------------------------------------------
+
+_UNESCAPED_LT = re.compile(r"<[^a-zA-Z/!]")
+
+
+def _pnl_metrics_week_full() -> PnLMetrics:
+    return PnLMetrics(daily_pnl=320.0, daily_pnl_pct=0.0031,
+                      weekly_pnl_pct=0.015, monthly_pnl_pct=0.028)
+
+
+def _pnl_metrics_month_full() -> PnLMetrics:
+    return PnLMetrics(daily_pnl=-1856.0, daily_pnl_pct=-0.0178,
+                      weekly_pnl_pct=-0.023, monthly_pnl_pct=-0.034)
+
+
+def _pnl_metrics_insufficient() -> PnLMetrics:
+    return PnLMetrics(daily_pnl=50.0, daily_pnl_pct=0.005,
+                      weekly_pnl_pct=None, monthly_pnl_pct=None)
+
+
+@pytest.mark.parametrize("case_name, render", [
+    ("risk_card_full",
+     lambda: format_risk_card(_risk_report_full())),
+    ("risk_view_full",
+     lambda: format_risk_view(_risk_report_full())),
+    ("weekly_card_clean",
+     lambda: format_weekly_card(_risk_report_weekly_clean())),
+    ("pnl_period_week_full",
+     lambda: format_pnl_period("week", _pnl_metrics_week_full())),
+    ("pnl_period_month_full",
+     lambda: format_pnl_period("month", _pnl_metrics_month_full())),
+    ("pnl_period_week_insufficient",
+     lambda: format_pnl_period("week", _pnl_metrics_insufficient())),
+    ("pnl_period_month_insufficient",
+     lambda: format_pnl_period("month", _pnl_metrics_insufficient())),
+])
+def test_formatter_output_html_safe(case_name, render):
+    """No formatter output may contain ``<`` followed by a non-tag char.
+
+    Telegram's HTML parser rejects such input with ``BadRequest: Can't parse
+    entities``. With no error handler registered the placeholder message hangs
+    forever and the bot appears frozen.
+
+    Regression for the 2026-06-04 hot patch ``5f61795`` (``账户历史 < N 个交易日``).
+    Any new formatter that ships a literal ``<`` next to whitespace, digits,
+    or punctuation will fail this lint — fix by using ``&lt;`` or a Chinese
+    word like ``少于``.
+    """
+    rendered = render()
+    bad = _UNESCAPED_LT.findall(rendered)
+    assert not bad, (
+        f"{case_name}: unescaped '<' found: {bad}\n"
+        f"Fix: replace literal '<' with '&lt;' or a Chinese alternative.\n"
+        f"--- rendered ---\n{rendered}"
+    )
 
 
 # ---------------------------------------------------------------------------
