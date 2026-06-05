@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(poetry add *)",
+      "Bash(poetry remove *)",
+      "Bash(poetry env *)",
+      "Bash(python *)",
+      "Bash(poetry run *)"
+    ]
+  }
+}
