@@ -10,6 +10,7 @@ import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from apscheduler.executors.pool import ThreadPoolExecutor
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
@@ -26,6 +27,8 @@ from v2.scheduler.jobs import (
     p2_digest_job,
     portfolio_risk_job,
     portfolio_weekly_job,
+    sec_8k_job,
+    sec_form4_job,
 )
 
 logger = logging.getLogger(__name__)
@@ -35,8 +38,17 @@ _TZ = ZoneInfo("US/Eastern")
 
 
 def build_scheduler() -> BlockingScheduler:
-    """Configure jobs without starting. Returns the scheduler ready to .start()."""
-    scheduler = BlockingScheduler(timezone=_TZ)
+    """Configure jobs without starting. Returns the scheduler ready to .start().
+
+    Default APScheduler ``ThreadPoolExecutor`` uses ``max_workers=10``.
+    With 14 jobs (Phase 3 added ⑪ + ⑫) and Mon-Fri 17:00-21:00 ET burst
+    window, a server restart catching up multiple misfires could saturate
+    10 workers. Bumped to 20 — costs near zero, comfortable headroom.
+    """
+    scheduler = BlockingScheduler(
+        timezone=_TZ,
+        executors={"default": ThreadPoolExecutor(max_workers=20)},
+    )
 
     scheduler.add_job(
         daily_screen_job,
@@ -138,6 +150,33 @@ def build_scheduler() -> BlockingScheduler:
         id="portfolio_weekly",
         name="⑩ Portfolio Weekly (Fri 19:00 ET)",
         misfire_grace_time=7200,
+        coalesce=True,
+    )
+
+    # ⑪ SEC 8-K scanner — 17:05 ET Mon-Fri. 5 min after ⑤ ETF Daily so
+    # the two HTTP-heavy jobs don't fight for connection pool. Items
+    # classified P0-P3 by Stage-0 priority table; 2.02-only earnings
+    # filings skipped (⑧ Earnings Summaries handles them at 21:00 ET).
+    scheduler.add_job(
+        sec_8k_job,
+        CronTrigger(hour=17, minute=5, day_of_week="mon-fri", timezone=_TZ),
+        id="sec_8k",
+        name="⑪ SEC 8-K Scanner (Mon-Fri 17:05 ET)",
+        misfire_grace_time=3600,
+        coalesce=True,
+    )
+
+    # ⑫ SEC Form 4 scanner — 17:45 ET Mon-Fri. Slotted between
+    # ② Anomaly Monitor (17:35) and ③/④ at 18:00 to avoid collision
+    # with ① Daily Screen (17:30) which the Stage-2 prompt didn't
+    # account for. P/S individual cards + same-day cluster cards;
+    # A/M/F/G/C noise codes archived for Phase 3.5 weekly digest.
+    scheduler.add_job(
+        sec_form4_job,
+        CronTrigger(hour=17, minute=45, day_of_week="mon-fri", timezone=_TZ),
+        id="sec_form4",
+        name="⑫ SEC Form 4 Scanner (Mon-Fri 17:45 ET)",
+        misfire_grace_time=3600,
         coalesce=True,
     )
 

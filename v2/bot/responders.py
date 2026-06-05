@@ -39,6 +39,8 @@ from v2.reporting import (
     format_pnl,
     format_portfolio,
     format_portfolio_snapshot,
+    format_sec_8k_view,
+    format_sec_form4_view,
 )
 from v2.screening import (
     DEFAULT_FILTERS,
@@ -794,6 +796,249 @@ def earnings_calendar(args: dict) -> str:
         held=held,
         watchlist=watchlist,
     )
+
+
+# ---------------------------------------------------------------------------
+# /8k + /insiders — SEC monitoring on-demand queries (Phase 3 Stage 4)
+# ---------------------------------------------------------------------------
+# Read-only contract — no archive write, no priority computed.
+# Same as Phase 1 earnings_view and Phase 2 risk_view, mirrors that
+# semantic.
+
+_DEFAULT_8K_DAYS = 30
+_DEFAULT_INSIDER_DAYS_BACK = 90
+_INSIDER_MIN_DAYS = 7
+_INSIDER_MAX_DAYS = 365
+
+
+def _is_valid_ticker(s: str) -> bool:
+    """US ticker shape: 1-5 uppercase letters (Berkshire-style BRK.A
+    not supported by this view but rare in queryable universe)."""
+    return bool(s) and 1 <= len(s) <= 5 and s.isascii() and s.isalpha()
+
+
+def eight_k_view(args: dict) -> str:
+    """Single-ticker 8-K history card (last 30 days).
+
+    args: ``{"ticker": "AAPL"}``
+
+    For each filing in the window, parses items + runs 5.02 LLM
+    extraction (reuses the cron path). On any LLM failure shows
+    "(姓名待解析)" placeholder instead of crashing the card.
+
+    Read-only — never writes archive, never computes priority. Bot
+    surface, not push surface.
+    """
+    from datetime import date, timedelta
+
+    from v2.sec import client as sec_client
+    from v2.sec import eight_k_parser, ner_5_02
+    from v2.sec.models import SecFiling
+
+    ticker = str(args.get("ticker") or "").strip().upper()
+    if not _is_valid_ticker(ticker):
+        return (
+            f"<b>🚫 无效 ticker: {html.escape(ticker or '(empty)')}</b>\n"
+            "请使用美股 ticker（1-5 大写字母，如 <code>AAPL</code>）"
+        )
+
+    today = date.today()
+    since = (today - timedelta(days=_DEFAULT_8K_DAYS)).isoformat()
+    until = today.isoformat()
+
+    try:
+        filings = sec_client.get_recent_filings(ticker, "8-K", since, until)
+    except Exception as exc:
+        logger.exception("eight_k_view: SEC fetch failed for %s", ticker)
+        return f"❌ SEC 查询失败: <code>{html.escape(str(exc))}</code>"
+
+    membership_note = _build_membership_note(ticker)
+
+    if not filings:
+        return format_sec_8k_view(
+            [], ticker, _DEFAULT_8K_DAYS,
+            membership_note=membership_note,
+        )
+
+    # Parse each filing's items + run 5.02 LLM extraction
+    events: list = []
+    for f in filings:
+        sec_filing = _build_sec_filing_for_view(f, ticker)
+        if sec_filing is None:
+            continue
+        event = eight_k_parser.parse_eight_k_filing(f, sec_filing)
+        if event is None:
+            continue
+
+        # Run 5.02 LLM extraction if 5.02 present + escalate tier when
+        # senior_exec confirmed (mirrors cron pipeline behavior so the
+        # bot card's tier chip shows P0 for CEO/CFO departures). The
+        # extracted meta is written back into the EightKItem so the
+        # public formatter (which reads it.extracted_meta) renders it.
+        for idx, it in enumerate(event.items):
+            if it.code != "5.02":
+                continue
+            try:
+                obj = f.obj()
+                text = eight_k_parser.get_item_text(obj, "5.02")
+                extracted_5_02 = ner_5_02.extract_5_02(text)
+            except Exception as exc:
+                logger.warning("5.02 extraction failed in /8k %s: %s", ticker, exc)
+                extracted_5_02 = {}     # → "(姓名待解析)" placeholder
+            new_tier = "P0" if extracted_5_02.get("has_senior_exec") else it.priority_tier
+            event.items[idx] = it.__class__(
+                code=it.code, priority_tier=new_tier,
+                description=it.description,
+                extracted_meta=extracted_5_02,
+            )
+            break
+
+        events.append(event)
+
+    total_items = sum(len(ev.items) for ev in events)
+    emit("render", card="sec_8k_view_card",
+         ticker=ticker, n_filings=len(events), n_items=total_items)
+
+    return format_sec_8k_view(
+        events, ticker, _DEFAULT_8K_DAYS,
+        membership_note=membership_note,
+    )
+
+
+def insider_view(args: dict) -> str:
+    """Single-ticker Form 4 summary card (last N days, default 90).
+
+    args: ``{"ticker": "NVDA", "days_back": 90}`` (days_back optional)
+
+    Splits transactions into:
+    - P (Purchase) — listed with name + role + USD
+    - S (Sale) — same, marked 10b5-1 plan if applicable
+    - A/M/F/G/C/D — aggregated counts only (noise codes per Stage 0)
+    - Same-period clusters (≥3 distinct insiders same-day same-direction)
+
+    No LLM calls — pure Python aggregation.
+    """
+    from datetime import date, timedelta
+
+    from v2.sec import client as sec_client, cluster, form4_parser
+    from v2.sec.models import (
+        NOISE_TRANSACTION_CODES, SIGNAL_TRANSACTION_CODES,
+    )
+
+    ticker = str(args.get("ticker") or "").strip().upper()
+    if not _is_valid_ticker(ticker):
+        return (
+            f"<b>🚫 无效 ticker: {html.escape(ticker or '(empty)')}</b>\n"
+            "请使用美股 ticker（1-5 大写字母，如 <code>NVDA</code>）"
+        )
+
+    # days_back: int, bounded
+    try:
+        days_back = int(args.get("days_back") or _DEFAULT_INSIDER_DAYS_BACK)
+    except (TypeError, ValueError):
+        days_back = _DEFAULT_INSIDER_DAYS_BACK
+    days_back = max(_INSIDER_MIN_DAYS, min(_INSIDER_MAX_DAYS, days_back))
+
+    today = date.today()
+    since = (today - timedelta(days=days_back)).isoformat()
+    until = today.isoformat()
+
+    try:
+        filings = sec_client.get_recent_filings(ticker, "4", since, until)
+    except Exception as exc:
+        logger.exception("insider_view: SEC fetch failed for %s", ticker)
+        return f"❌ SEC 查询失败: <code>{html.escape(str(exc))}</code>"
+
+    membership_note = _build_membership_note(ticker)
+
+    if not filings:
+        return format_sec_form4_view(
+            ticker, [], [], {}, days_back,
+            membership_note=membership_note,
+        )
+
+    # Parse every Form 4 to a flat transactions list
+    all_txs: list = []
+    for f in filings:
+        sec_filing = _build_sec_filing_for_view(f, ticker, form="4")
+        if sec_filing is None:
+            continue
+        try:
+            txs = form4_parser.parse_form4_filing(f, sec_filing)
+        except Exception as exc:
+            logger.warning("form4 parse failed for %s acc=%s: %s",
+                           ticker, sec_filing.accession_number, exc)
+            continue
+        all_txs.extend(txs)
+
+    # Signal vs noise split — formatter does its own P/S bucketing.
+    signals = [t for t in all_txs if t.transaction_code in SIGNAL_TRANSACTION_CODES]
+    noise_counts: dict[str, int] = {}
+    for t in all_txs:
+        if t.transaction_code in NOISE_TRANSACTION_CODES:
+            noise_counts[t.transaction_code] = noise_counts.get(t.transaction_code, 0) + 1
+
+    # Same-day clusters across the whole window
+    cluster_list = cluster.find_clusters(signals)
+
+    emit("render", card="sec_insider_view_card",
+         ticker=ticker, days_back=days_back,
+         n_signals=len(signals),
+         n_noise_codes=sum(noise_counts.values()),
+         n_clusters=len(cluster_list))
+
+    return format_sec_form4_view(
+        ticker, signals, cluster_list, noise_counts, days_back,
+        membership_note=membership_note,
+    )
+
+
+# ---- /8k + /insiders helpers ----------------------------------------------
+
+
+def _build_sec_filing_for_view(edgar_filing, ticker: str, *, form: str = "8-K"):
+    """Mirror of pipeline._build_sec_filing but used for bot view path.
+
+    Bot view doesn't need to track is_amendment for priority (no
+    priority computed) but the SecFiling dataclass requires it.
+    """
+    from v2.sec.models import SecFiling
+    try:
+        accession = str(
+            getattr(edgar_filing, "accession_number", None)
+            or getattr(edgar_filing, "accession_no", None)
+            or ""
+        ).strip()
+        filing_date = str(getattr(edgar_filing, "filing_date", "") or "").strip()
+        cik = str(getattr(edgar_filing, "cik", "") or "").strip()
+        actual_form = str(getattr(edgar_filing, "form", form) or form).strip()
+    except Exception:
+        return None
+
+    if not accession:
+        return None
+
+    return SecFiling(
+        ticker=ticker, cik=cik, form=actual_form,
+        filing_date=filing_date, accession_number=accession,
+        is_amendment=actual_form.endswith("/A"),
+    )
+
+
+def _build_membership_note(ticker: str) -> str:
+    """Return small ℹ️ note if ticker is outside the user's universe.
+
+    Read-only path lets the user query ANY ticker — even ones not in
+    watchlist or holdings. The note helps the user understand context
+    without blocking the query.
+    """
+    try:
+        held, watchlist = _user_universe()
+    except Exception:
+        return ""
+    if ticker in held or ticker in watchlist:
+        return ""
+    return f"<i>ℹ️ {html.escape(ticker)} 不在你的 universe (持仓 + 关注)</i>"
 
 
 # ---------------------------------------------------------------------------

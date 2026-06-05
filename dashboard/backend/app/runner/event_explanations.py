@@ -597,6 +597,37 @@ _MODULE: dict[str, Explanation] = {
         "next":   "渲染为单卡，read-only 回复",
     },
 
+    # SEC monitoring agent — Phase 3
+    "_r_sec_8k": {
+        "source": "scheduler 触发（17:05 ET Mon-Fri），watchlist + Alpaca 持仓 的合并 ticker 集合 + SEC EDGAR",
+        "how":    "edgartools Company(ticker).get_filings(form='8-K', filing_date=today) → 解析 .items 拿 item codes → 按 Stage-0 优先级表分级",
+        "what":   "EightKEvent 含全部 items 及各自评级（P0-P3）。5.02 调 LLM template-fill 抽取 CEO/CFO 姓名 confirm senior exec",
+        "store":  "推送写 archive.db pushes 表",
+        "next":   "max(items) 决定卡片 tier，2.02-only filings skip（⑧ Earnings Summaries 处理）",
+    },
+    "_r_sec_form4": {
+        "source": "scheduler 触发（17:45 ET Mon-Fri），watchlist + Alpaca 持仓 + SEC EDGAR Form 4",
+        "how":    "edgartools Form4.to_dataframe()['Code'] 拿 transaction code → P/S 个人卡片 / A/M/F/G/C 进 noise_summary / 同日同向 ≥3 distinct insiders 算 cluster",
+        "what":   "Form4Transaction (P/S signal) + Form4Cluster + noise_summary。priority 按 USD magnitude + insider role (CEO/CFO +10) + 10b5-1 plan (-10) 算",
+        "store":  "推送写 archive，A/M/F/G/C noise 暂存等 Phase 3.5 weekly digest 消费",
+        "next":   "cluster 卡先推（更重要），再推单笔 signal 卡。同 cluster 内的单笔不重复推送",
+    },
+    # On-demand SEC bot queries (Phase 3 Stage 4) — read-only, not cron
+    "_r_eight_k_view": {
+        "source": "用户实时请求（/8k AAPL 或 NL「AAPL 最近 8-K」），单 ticker SEC EDGAR 拉过去 30 天 8-K",
+        "how":    "edgartools.Company(ticker).get_filings(form='8-K', filing_date=(today-30d, today)) → 解析 items → 5.02 调 LLM template-fill",
+        "what":   "多 filing 单卡：每个 filing 列出所有 items 及评级 + 5.02 抽取的 CEO/CFO 姓名（LLM 失败显示 '(姓名待解析)' 占位）",
+        "store":  "read-only — 不写 archive，不算 priority（priority 只跟 cron-pushed 卡片相关）",
+        "next":   "渲染为单一回复卡，Telegram / dashboard 单条返回",
+    },
+    "_r_insider_view": {
+        "source": "用户实时请求（/insiders NVDA 或 NL「NVDA 内部人交易」），单 ticker SEC EDGAR 拉过去 N 天 Form 4（默认 90 天）",
+        "how":    "edgartools Form4.to_dataframe()['Code'] 全量解析 → 按 P/S/A/M/F/G/C 分桶 → cluster.find_clusters 滚动窗口 ≥3 distinct insiders",
+        "what":   "P/S 列具体笔（含 USD + 申报人 + 10b5-1 标记），A/M/F/G/C 仅显示 count，cluster 单独列出",
+        "store":  "read-only — 不写 archive，不算 priority，不调 LLM",
+        "next":   "单一汇总卡返回",
+    },
+
     # Portfolio risk agent — Phase 2
     "_r_portfolio_risk": {
         "source": "scheduler 触发（18:30 ET Mon-Fri），Alpaca 当前持仓 + portfolio_history(1M, 1D) + yfinance 7d 财报日历",

@@ -90,6 +90,10 @@ _HELP_TEXT = (
     "  /pnl [day|week|month] — 盈亏（默认 day）\n"
     "  /risk               — 组合风险快照（集中度 / 暴露 / 回撤 / 7d 财报）\n"
     "\n"
+    "<b>SEC 监控</b>\n"
+    "  /8k TICKER          — 最近 30 天 8-K 申报（含 5.02 LLM 抽取）\n"
+    "  /insiders TICKER [DAYS] — 内部人交易摘要（默认 90 天）\n"
+    "\n"
     "<b>自然语言（Stage 3 即将上线）</b>\n"
     "  直接发问，bot 会自动路由到对应工具\n"
     "  例：「NVDA 为什么涨」「找一下 AMD 的产业链」\n"
@@ -432,6 +436,69 @@ async def cmd_earnings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
 
 
+@authorized_only
+async def cmd_8k(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """``/8k TICKER`` — last-30-days 8-K summary for one ticker.
+
+    Reuses the cron's 5.02 LLM extractor. May take 5-10s when 5.02 is
+    present (LLM call); empty/no-5.02 results return in <2s.
+    """
+    if not context.args:
+        await update.message.reply_html(
+            "用法：<code>/8k TICKER</code>\n例：<code>/8k AAPL</code>"
+        )
+        return
+    ticker = context.args[0].upper()
+    placeholder = await update.message.reply_html(
+        f"📋 拉取 <b>{html.escape(ticker)}</b> 最近 30 天 8-K...\n"
+        "<i>预计 5-10 秒（含 5.02 LLM 抽取）</i>"
+    )
+    result = await _run_blocking(
+        responders.eight_k_view, {"ticker": ticker},
+    )
+    await placeholder.edit_text(
+        result, parse_mode="HTML", disable_web_page_preview=True,
+    )
+
+
+@authorized_only
+async def cmd_insiders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """``/insiders TICKER [DAYS]`` — Form 4 summary for one ticker.
+
+    Optional days arg: 7-365, default 90. Pure-Python aggregation
+    (no LLM), typically returns in <2s.
+
+    Examples:
+        /insiders NVDA
+        /insiders NVDA 30
+    """
+    if not context.args:
+        await update.message.reply_html(
+            "用法：<code>/insiders TICKER [DAYS]</code>\n"
+            "例：<code>/insiders NVDA</code> · <code>/insiders NVDA 30</code>"
+        )
+        return
+    ticker = context.args[0].upper()
+    args_dict: dict = {"ticker": ticker}
+    if len(context.args) >= 2:
+        try:
+            days = int(context.args[1])
+            args_dict["days_back"] = days
+        except ValueError:
+            await update.message.reply_html(
+                f"<b>🚫 DAYS 必须是数字：</b> "
+                f"<code>{html.escape(context.args[1])}</code>"
+            )
+            return
+    placeholder = await update.message.reply_html(
+        f"📥 拉取 <b>{html.escape(ticker)}</b> 内部人交易..."
+    )
+    result = await _run_blocking(responders.insider_view, args_dict)
+    await placeholder.edit_text(
+        result, parse_mode="HTML", disable_web_page_preview=True,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Stage 3 — NL → Intent classifier and router
 # ---------------------------------------------------------------------------
@@ -457,6 +524,8 @@ _INTENT_DISPLAY = {
     "earnings_calendar":"📅 财报日历",
     "risk_view":        "💼 组合风险",
     "pnl_period":       "📊 周期盈亏",
+    "eight_k_view":     "📋 SEC 8-K",
+    "insider_view":     "📥 内部人交易",
     "unknown":          "❓ 未识别",
 }
 
@@ -479,6 +548,7 @@ async def cmd_nl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     direction = parsed.get("direction", "") or "above"
     days_horizon = parsed.get("days_horizon", 0) or 0
     period = parsed.get("period", "") or ""
+    days_back = parsed.get("days_back", 0) or 0
 
     # Tell the user how we routed — transparency builds trust
     routing_chip = (
@@ -671,6 +741,33 @@ async def cmd_nl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             # Empty string from intent classifier → responder default (day)
             args = {"period": period} if period else {}
             result = await _run_blocking(responders.pnl_period, args)
+            await placeholder.edit_text(routing_chip + result, parse_mode="HTML",
+                                         disable_web_page_preview=True)
+
+        elif name == "eight_k_view":
+            if not ticker:
+                await placeholder.edit_text(
+                    routing_chip + "❓ 没说要查哪只股票的 8-K。",
+                    parse_mode="HTML",
+                )
+                return
+            result = await _run_blocking(
+                responders.eight_k_view, {"ticker": ticker},
+            )
+            await placeholder.edit_text(routing_chip + result, parse_mode="HTML",
+                                         disable_web_page_preview=True)
+
+        elif name == "insider_view":
+            if not ticker:
+                await placeholder.edit_text(
+                    routing_chip + "❓ 没说要查哪只股票的内部人交易。",
+                    parse_mode="HTML",
+                )
+                return
+            args_d: dict = {"ticker": ticker}
+            if days_back:
+                args_d["days_back"] = days_back
+            result = await _run_blocking(responders.insider_view, args_d)
             await placeholder.edit_text(routing_chip + result, parse_mode="HTML",
                                          disable_web_page_preview=True)
 

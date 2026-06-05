@@ -49,8 +49,16 @@ BASE_SCORES: dict[str, int] = {
     "macro_event":         70,  # macro data print — P1
     "macro_critical":      90,  # FOMC / CPI — P0
     "regime_change":       80,  # market regime shift — P0
-    "sec_filing":          50,  # routine filing — P2
-    "sec_critical":        85,  # 8-K material event — P0
+    "sec_filing":          50,  # routine filing — P2 (legacy, kept for compat)
+    "sec_critical":        85,  # 8-K material event — P0 (legacy)
+    # Phase 3 SEC monitoring — graduated per-tier 8-K + Form 4 kinds
+    "sec_8k_p0":           85,  # 1.03/1.05/2.04/3.01/4.02/5.01/5.02(senior)
+    "sec_8k_p1":           65,  # 1.01/1.02/2.01/2.03/2.05/2.06/4.01/5.02(other)
+    "sec_8k_p2":           55,  # 3.02/3.03/5.08/7.01/8.01 (2.02 routed to ⑧)
+    "sec_8k_p3":           35,  # 1.04/5.03/5.04/5.05/5.07/9.01
+    "sec_form4_purchase":  75,  # insider P-code base P1
+    "sec_form4_sale":      50,  # insider S-code base P2 (default noise)
+    "sec_form4_cluster":   75,  # ≥3 distinct insiders same-day same-direction
     "scheduler_status":    30,  # scheduler startup message — P3
     "error_alert":         75,  # error reported by @notify_on_error — P1
     "p2_digest":           65,  # the digest itself is P1
@@ -159,6 +167,47 @@ def compute_importance(
             adjustments.append((+10, "etf_exit"))
         if md.get("ticker_held_by_user"):
             adjustments.append((+15, "etf_touches_holding"))
+
+    # ---- Phase 3 SEC 8-K (graduated kinds) ----
+    if event_kind.startswith("sec_8k"):
+        if md.get("is_amendment"):
+            adjustments.append((-5, "amendment"))
+        if event_kind == "sec_8k_p0" and md.get("has_senior_exec"):
+            # 5.02 + LLM-confirmed senior exec → small extra nudge
+            adjustments.append((+5, "ceo_cfo_5_02_confirmed"))
+
+    # ---- Phase 3 Form 4 individual purchase ----
+    if event_kind == "sec_form4_purchase":
+        usd = float(md.get("transaction_usd") or 0)
+        if usd >= 1_000_000:
+            adjustments.append((+25, f"big_purchase_${usd/1e6:.1f}M"))
+        elif usd >= 100_000:
+            adjustments.append((+10, "moderate_purchase"))
+        role = md.get("insider_role")
+        if role in {"CEO", "CFO"}:
+            adjustments.append((+10, f"{role}_purchase"))
+        if md.get("is_10b5_1"):
+            # Pre-planned purchases mute the signal (rare — most P-code
+            # purchases are discretionary)
+            adjustments.append((-10, "10b5_1_plan_purchase"))
+
+    # ---- Phase 3 Form 4 individual sale ----
+    if event_kind == "sec_form4_sale":
+        usd = abs(float(md.get("transaction_usd") or 0))
+        if usd >= 10_000_000 and not md.get("is_10b5_1"):
+            adjustments.append((+15, f"big_discretionary_sale_${usd/1e6:.1f}M"))
+        elif usd >= 1_000_000 and md.get("is_10b5_1"):
+            adjustments.append((-5, "10b5_1_plan_sale"))
+
+    # ---- Phase 3 Form 4 cluster (≥3 distinct insiders same day) ----
+    if event_kind == "sec_form4_cluster":
+        n = int(md.get("transaction_count") or 0)
+        if n >= 5:
+            adjustments.append((+15, f"large_cluster_{n}"))
+        elif n >= 3:
+            adjustments.append((+5, f"cluster_{n}"))
+        if md.get("direction") == "purchase":
+            adjustments.append((+10, "cluster_buy"))
 
     # ---- SEC 8-K item codes ----
     if event_kind == "sec_critical":

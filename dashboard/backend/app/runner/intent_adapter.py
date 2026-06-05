@@ -91,6 +91,22 @@ _KEYWORD_MAP: list[tuple[str, str]] = [
     # else and it's the user asking about a past-period number.
     ("上周", "pnl_period"),
     ("上月", "pnl_period"),
+    # SEC monitoring — checked BEFORE "公告"/"申报"/"高管" generics so
+    # phrasings like "苹果 8-K" route to eight_k_view not a generic intent.
+    # insider_view first because "内部人交易" is a clean phrase, and we
+    # don't want "苹果高管" → fall-through to a wrong intent.
+    ("insider trading", "insider_view"),
+    ("内部人交易", "insider_view"),
+    ("内部人", "insider_view"),
+    ("高管买卖", "insider_view"),
+    ("高管最近", "insider_view"),
+    ("form 4", "insider_view"),
+    ("form4", "insider_view"),
+    ("insider", "insider_view"),
+    ("8-k", "eight_k_view"),
+    ("8k", "eight_k_view"),
+    ("sec 公告", "eight_k_view"),
+    ("sec 申报", "eight_k_view"),
     # Existing
     ("为什么", "explain_move"),
     ("why", "explain_move"),
@@ -135,7 +151,7 @@ def _stub_classify(text: str) -> tuple[str, dict[str, Any]]:
 
     args: dict[str, Any] = {}
     if intent_name in {"explain_move", "summary", "chain", "holders_view",
-                       "earnings_view"}:
+                       "earnings_view", "eight_k_view", "insider_view"}:
         ticker = _extract_ticker(text)
         if ticker:
             args["ticker"] = ticker
@@ -147,6 +163,10 @@ def _stub_classify(text: str) -> tuple[str, dict[str, Any]]:
         period = _extract_period(text)
         if period:
             args["period"] = period
+    if intent_name == "insider_view":
+        days_back = _extract_days_back(text)
+        if days_back:
+            args["days_back"] = days_back
     return intent_name, args
 
 
@@ -212,6 +232,60 @@ def _extract_period(text: str) -> Optional[str]:
     for phrase, period in _PERIOD_PHRASES:
         if phrase in lower:
             return period
+    return None
+
+
+# Days_back phrases for insider_view. Number-bearing patterns are tried
+# first via regex; named-ranges below as fallback. Bounded 7-365 (the
+# bot responder bounds anything outside these limits).
+import re as _re
+
+_DAYS_BACK_REGEX = _re.compile(
+    r"(?:过去|最近|过往|往前)\s*(\d{1,3})\s*(?:天|d|day|days)?",
+    _re.IGNORECASE,
+)
+
+_DAYS_BACK_NAMED = [
+    ("过去一年", 365),
+    ("过去一年", 365),
+    ("过去半年", 180),
+    ("过去六个月", 180),
+    ("半年", 180),
+    ("过去三个月", 90),
+    ("过去 90 天", 90),
+    ("过去90天", 90),
+    ("最近 90 天", 90),
+    ("最近90天", 90),
+    ("过去 60 天", 60),
+    ("过去60天", 60),
+    ("过去 30 天", 30),
+    ("过去30天", 30),
+    ("最近 30 天", 30),
+    ("最近30天", 30),
+    ("最近 7 天", 7),
+    ("过去 7 天", 7),
+    ("最近一周", 7),
+]
+
+
+def _extract_days_back(text: str) -> Optional[int]:
+    """Heuristic — map insider-view period phrases to day counts.
+
+    Returns the explicit day count if a phrase matches; None means
+    "use responder default (90)". Numeric matches are bounded to 7-365
+    in the responder.
+    """
+    lower = text.lower()
+    for phrase, days in _DAYS_BACK_NAMED:
+        if phrase in lower:
+            return max(7, min(365, days))
+    m = _DAYS_BACK_REGEX.search(lower)
+    if m:
+        try:
+            n = int(m.group(1))
+            return max(7, min(365, n))
+        except ValueError:
+            pass
     return None
 
 
@@ -303,6 +377,20 @@ def _pnl_period_real(args: dict[str, Any]) -> str:
     return bot_responders.pnl_period(args)
 
 
+def _eight_k_view_real(args: dict[str, Any]) -> str:
+    """SEC 8-K single-ticker view (Phase 3 Stage 4). May call DeepSeek
+    once for 5.02 NER extraction."""
+    from v2.bot import responders as bot_responders
+    return bot_responders.eight_k_view(args)
+
+
+def _insider_view_real(args: dict[str, Any]) -> str:
+    """SEC Form 4 single-ticker view (Phase 3 Stage 4). Pure Python,
+    no LLM."""
+    from v2.bot import responders as bot_responders
+    return bot_responders.insider_view(args)
+
+
 # Real responders should replace these entries on the production VPS.
 # Each must accept a dict and return a str.
 DISPATCH: dict[str, ResponderFn] = {
@@ -324,5 +412,7 @@ DISPATCH: dict[str, ResponderFn] = {
     "earnings_calendar": _earnings_calendar_real,
     "risk_view": _risk_view_real,
     "pnl_period": _pnl_period_real,
+    "eight_k_view": _eight_k_view_real,
+    "insider_view": _insider_view_real,
     "unknown": _stub_responder,
 }

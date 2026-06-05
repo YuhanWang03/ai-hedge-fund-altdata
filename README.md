@@ -1,6 +1,6 @@
 # AI Hedge Fund · Alternative Data Agent System
 
-A production-grade alternative-data intelligence platform delivered through a Telegram bot. Six post-market batch agents continuously monitor US equity markets, two earnings crons track watchlist + holdings for D-3/D-1/D-0 reminders and post-release summaries, two portfolio risk crons push daily concentration / P&L / drawdown snapshots plus a Friday weekly recap, one intraday streamer scans for live anomalies and price-alert triggers, nineteen natural-language intents handle interactive queries, and five distinct hallucination-defense mechanisms keep every claim grounded in primary sources.
+A production-grade alternative-data intelligence platform delivered through a Telegram bot. Six post-market batch agents continuously monitor US equity markets, two earnings crons track watchlist + holdings for D-3/D-1/D-0 reminders and post-release summaries, two portfolio risk crons push daily concentration / P&L / drawdown snapshots plus a Friday weekly recap, two SEC monitoring crons scan daily 8-K material events and Form 4 insider transactions (with same-day ≥3 distinct-insider cluster detection), one intraday streamer scans for live anomalies and price-alert triggers, twenty-one natural-language intents handle interactive queries, and five distinct hallucination-defense mechanisms keep every claim grounded in primary sources.
 
 Built as a portfolio project to demonstrate end-to-end ownership of a multi-source data pipeline, dual-LLM verification architecture, and 24/7 deployed system.
 
@@ -12,11 +12,11 @@ Built as a portfolio project to demonstrate end-to-end ownership of a multi-sour
 
 The system runs three concurrent services on a single $6/month VPS:
 
-**Scheduler** — twelve cron jobs covering screening, anomaly detection, supply-chain expansion, institutional 13F tracking, weekly backfills, daily ETF holdings ingestion, earnings reminders, post-release earnings summaries, portfolio risk snapshot, portfolio weekly recap, P2 daily digest, and archive sweep. Each job is process-isolated; one crashing cannot poison the others.
+**Scheduler** — fourteen cron jobs covering screening, anomaly detection, supply-chain expansion, institutional 13F tracking, weekly backfills, daily ETF holdings ingestion, earnings reminders, post-release earnings summaries, portfolio risk snapshot, portfolio weekly recap, SEC 8-K scanner, SEC Form 4 scanner, P2 daily digest, and archive sweep. Each job is process-isolated; one crashing cannot poison the others.
 
 **Streamer** — minute-level intraday scanner. Polls Alpaca's real-time feed during US market hours (9:30 - 16:00 ET) and does two things: checks user-set price alerts for crossings, and scans the TECH_30 universe for dual-threshold anomalies (≥3% price move AND ≥2.5× volume pace). Deliberately runs no LLM/Tavily during market hours — deep attribution happens at 17:35 ET.
 
-**Telegram Bot** — always-on long-polling bot supporting nineteen slash commands, three watchlist commands, and a natural-language intent classifier with nineteen canonical intents. Authorized to a single user (chat ID filter).
+**Telegram Bot** — always-on long-polling bot supporting twenty-one slash commands, three watchlist commands, and a natural-language intent classifier with twenty-one canonical intents. Authorized to a single user (chat ID filter).
 
 All three services share seven SQLite databases via WAL mode and a ChromaDB vector store for RAG memory.
 
@@ -34,6 +34,8 @@ All three services share seven SQLite databases via WAL mode and a ChromaDB vect
 │  17:35 ET Mon-Fri  ② Anomaly Monitor           → Telegram push   │
 │  18:00 ET Mon      ③ Lateral Expansion         → Telegram push   │
 │  18:00 ET Tue/Fri  ④ Institutional 13F         → Telegram push   │
+│  17:05 ET Mon-Fri  ⑪ SEC 8-K Scanner           → Telegram push   │
+│  17:45 ET Mon-Fri  ⑫ SEC Form 4 Scanner        → Telegram push   │
 │  18:30 ET Mon-Fri  ⑨ Portfolio Risk Snapshot   → Telegram push   │
 │  18:30 ET Sun      ④b 13F Backfill             (silent refresh)  │
 │  19:00 ET Fri      ⑩ Portfolio Weekly Recap    → Telegram push   │
@@ -61,9 +63,10 @@ All three services share seven SQLite databases via WAL mode and a ChromaDB vect
 ├──────────────────────────────────────────────────────────────────┤
 │  Slash commands · /why /summary /chain /13f /holders /etf        │
 │                   /alert /alerts /alert_remove                   │
-│                   /portfolio /pnl /settings                      │
+│                   /portfolio /pnl /risk /settings                │
 │                   /watchlist /add /remove                        │
-│  NL classifier  · 15 intents · DeepSeek T=0 · strict-enum        │
+│                   /earnings /8k /insiders                        │
+│  NL classifier  · 21 intents · DeepSeek T=0 · strict-enum        │
 └──────────────────────────────────────────────────────────────────┘
 
 External: financialdatasets.ai · yfinance · SEC EDGAR · ARK CSV CDN
@@ -157,7 +160,7 @@ A typical fire looks like:
 
 ## Telegram interface
 
-The bot's natural-language layer classifies free-form Chinese or English text into nineteen canonical intents using DeepSeek at temperature=0. Outputs are validated against a closed enum whitelist — unrecognized intents fall back to `unknown`, guaranteeing bounded behavior.
+The bot's natural-language layer classifies free-form Chinese or English text into twenty-one canonical intents using DeepSeek at temperature=0. Outputs are validated against a closed enum whitelist — unrecognized intents fall back to `unknown`, guaranteeing bounded behavior.
 
 ### Slash commands
 
@@ -274,6 +277,9 @@ v2/
 ├── lateral/          # ③ LLM expansion + Tavily relation verification
 ├── institutional/    # ④ EDGAR client + CUSIP aggregation + changes
 ├── etf/              # ⑤ ARK CSV client + daily snapshot store + diff
+├── earnings/         # ⑦⑧ yfinance calendar + FD history + LLM summary + cards
+├── portfolio/        # ⑨⑩ Alpaca positions → RiskReport (concentration / exposure / P&L / drawdown)
+├── sec/              # ⑪⑫ edgartools wrapper + 8-K item parser + Form 4 + cluster + 5.02 NER
 ├── streamer/         # intraday runner + universe scanner
 ├── broker/           # Alpaca paper-account adapter (read-only)
 ├── universe/         # TECH_30 list + sector ETF mapping
@@ -292,7 +298,13 @@ scripts/
 ├── lateral_to_telegram.py       # ③
 ├── institutional_to_telegram.py # ④
 ├── backfill_13f.py              # ④b
-└── etf_daily_snapshot.py        # ⑤
+├── etf_daily_snapshot.py        # ⑤
+├── earnings_reminders.py        # ⑦
+├── earnings_summaries.py        # ⑧
+├── portfolio_risk_to_telegram.py    # ⑨
+├── portfolio_weekly_to_telegram.py  # ⑩
+├── sec_8k_to_telegram.py            # ⑪
+└── sec_form4_to_telegram.py         # ⑫
 ```
 
 ---
@@ -434,7 +446,7 @@ Berkshire reports AAPL across three subsidiaries (BHRG, GEICO, National Indemnit
 
 ### Strict-enum intent classification
 
-The NL classifier outputs one of nineteen intents plus arguments. Output is JSON, parsed, validated against a whitelist set. Anything else becomes `unknown`. The LLM never decides what to *say* — only which tool to *call*. If users wanted DeepSeek to write financial analysis from its imagination, they could ask DeepSeek directly. The point of this system is grounded, multi-source, verified output.
+The NL classifier outputs one of twenty-one intents plus arguments. Output is JSON, parsed, validated against a whitelist set. Anything else becomes `unknown`. The LLM never decides what to *say* — only which tool to *call*. If users wanted DeepSeek to write financial analysis from its imagination, they could ask DeepSeek directly. The point of this system is grounded, multi-source, verified output.
 
 ### Atomic alert firing
 
@@ -493,15 +505,16 @@ Intraday streamer adds ~30 Alpaca API calls/minute during market hours (one batc
 - **Phase 0 · Push priority system** — `v2/reporting/priority.py` (P0/P1/P2/P3 + importance_score) plus 16:45 ET P2 digest cron
 - **Phase 1 · Earnings Agent (⑦⑧ + /earnings)** — yfinance forward calendar + FD actual/estimate + LLM template-fill summary + Tavily transcript + cross-quarter dedup
 - **Phase 2 · Portfolio Risk Agent (⑨⑩ + /risk + /pnl extension)** — daily concentration / P&L / drawdown / 7-day earnings risk, Friday weekly recap, 4 public formatters with byte-equal pins, drawdown 5-layer sign-convention defense
+- **Phase 2.5-mini · BROAD-market ETF bucket** — IVV/SPY/VOO/QQQ classification
+- **Phase 3 · SEC Monitoring Agent (⑪⑫ + /8k + /insiders)** — daily 8-K material-event scanner across 24 priority-graded item codes + Form 4 insider-transaction scanner with noise/signal split (83% A/M/F/G/C → digest, 17% P/S → individual cards) + same-day ≥3 distinct-insider cluster detection + 5.02 LLM NER for executive departures/appointments + 10b5-1 plan vs discretionary distinction, 5 public formatters with byte-equal pins, HTML safety lint
 - **Web dashboard** — FastAPI + React + Tailwind over `archive.db` auto-push feed with trace replay and a user QA mode
 - **Observability SDK** — `v2/observability/` monkey-patches FD / DeepSeek / Tavily / intent classifier so every agent produces a trace automatically
-- **163 sandbox unit tests** across all three phases — 21 earnings byte-equal + 9 portfolio byte-equal + 17 earnings priority + 19 portfolio priority + 5 priority floor + 10 portfolio pipeline edges + 13 portfolio cron integration + 10 earnings cron integration + 9 earnings pipeline + 9 archive migration + 14 intent classify + 18 base priority + 13 observability + the rest across other modules
+- **272 sandbox unit tests** across all four phases — Phase 1 (21 earnings byte-equal + 17 earnings priority + 10 earnings cron integration + 9 earnings pipeline) + Phase 2 (9 portfolio byte-equal + 19 portfolio priority + 5 priority floor + 10 portfolio pipeline edges + 13 portfolio cron integration + 20 portfolio smoke) + Phase 3 (21 SEC smoke + 21 SEC priority + 15 SEC byte-equal + 8 HTML safety + 20 cron integration + 11 bot responder) + general (9 archive migration + 23 intent classify + 18 base priority + 13 observability + the rest distributed across modules)
 
 ### In progress / TODO
 
-- **Phase 2.5 (optional)** — per-position weekly attribution (daily `positions_snapshot` table + AM snapshot sub-cron)
-- **Phase 3 · SEC monitoring** — 8-K / Form 4 / 10-Q real-time tracking (extends existing `edgartools` usage)
-- **Phase 4 · Macro Agent** — FOMC / CPI / PCE / NFP via FRED + Tavily
+- **Phase 3.5 (optional)** — 10-Q parser + MD&A material-change diff / weekly insider digest cron (aggregates A/M/F/G/C noise_summary) / per-position weekly attribution (Phase 2 Stage 7 deferral)
+- **Phase 4 · Macro Agent (Stage 0 ack'd, awaiting `FRED_API_KEY` on VPS)** — FOMC / CPI / PCE / NFP via FRED + Tavily with dynamic macro calendar generation
 - **Phase 5 · Market Regime + ARK significant-rebalance alerts**
 - **Phase 6 · News pipeline refactor + 3-tier Universe**
 - Ongoing: Migration system audit
@@ -514,7 +527,7 @@ Intraday streamer adds ~30 Alpaca API calls/minute during market hours (one batc
 
 ## Credits
 
-The repository's outer layout and the original educational `app/` directory come from [virattt/ai-hedge-fund](https://github.com/virattt/ai-hedge-fund), an open-source AI hedge fund concept project. The `v2/` directory — the entire alternative-data agent system described in this README (six post-market agents + two earnings crons + two portfolio risk crons, intraday streamer, Telegram bot with 19 NL intents, 5 hallucination-defense mechanisms, push-priority system, all SQLite + ChromaDB stores, all systemd deployment scaffolding) — was built from scratch as a separate project on top of that foundation.
+The repository's outer layout and the original educational `app/` directory come from [virattt/ai-hedge-fund](https://github.com/virattt/ai-hedge-fund), an open-source AI hedge fund concept project. The `v2/` directory — the entire alternative-data agent system described in this README (six post-market agents + two earnings crons + two portfolio risk crons + two SEC monitoring crons, intraday streamer, Telegram bot with 21 NL intents, 5 hallucination-defense mechanisms, push-priority system, all SQLite + ChromaDB stores, all systemd deployment scaffolding) — was built from scratch as a separate project on top of that foundation.
 
 ## License
 
