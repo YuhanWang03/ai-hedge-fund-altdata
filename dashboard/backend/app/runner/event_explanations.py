@@ -620,6 +620,21 @@ _MODULE: dict[str, Explanation] = {
         "store":  "read-only — 不写 archive，不算 priority（priority 只跟 cron-pushed 卡片相关）",
         "next":   "渲染为单一回复卡，Telegram / dashboard 单条返回",
     },
+    # On-demand macro bot queries (Phase 4 Stage 4) — read-only, not cron
+    "_r_macro_view": {
+        "source": "用户实时请求（/macro 或 NL「宏观怎么样 / market 状态」），调 build_macro_snapshot + release_calendar 窗口",
+        "how":    "yfinance VIX/DXY/WTI/Gold + FRED canonical rates (DGS2/DGS10/T10Y2Y/Fed Funds) → 与 ⑭ cron 同源；同时 get_releases_in_window 拉过去 14 天 + 未来 30 天 release schedule",
+        "what":   "多段卡片：市场状态 + 收益率 + 最近 release + 下次 release。warnings list 在数据源失败时显示「数据待入库」",
+        "store":  "read-only — 不写 archive，不算 priority（priority 只跟 cron-pushed 卡片相关）",
+        "next":   "渲染为单一回复卡，Telegram / dashboard 单条返回",
+    },
+    "_r_release_check": {
+        "source": "用户实时请求（/cpi / /fomc / NL「最近 CPI」「上次 FOMC」），按 release_type 枚举（cpi/pce/nfp/gdp/ppi/claims/fomc）",
+        "how":    "release_calendar 找到最近一个该 release_type 的 release date → build_release_event(that_date) 拉 FRED + summarizer LLM（Layer 1+2 defense）。FOMC 单独走 fomc_parser + tavily_consensus（Layer 3：Python diff + sell-side majority vote，绝不让 LLM 判鹰鸽）",
+        "what":   "单条 release 卡：数据点（Python 算）+ LLM 定性标签（bull/bear/narrative/tone，≤40 字，禁止数字泄漏）+ 下次发布提示。FOMC 卡含 statement diff（新增/移除 phrases）+ SEP dot plot + Tavily 来源",
+        "store":  "read-only",
+        "next":   "渲染为单一回复卡",
+    },
     "_r_insider_view": {
         "source": "用户实时请求（/insiders NVDA 或 NL「NVDA 内部人交易」），单 ticker SEC EDGAR 拉过去 N 天 Form 4（默认 90 天）",
         "how":    "edgartools Form4.to_dataframe()['Code'] 全量解析 → 按 P/S/A/M/F/G/C 分桶 → cluster.find_clusters 滚动窗口 ≥3 distinct insiders",

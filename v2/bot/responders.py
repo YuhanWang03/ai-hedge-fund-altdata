@@ -993,6 +993,401 @@ def insider_view(args: dict) -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+# /macro + /cpi + /pce + /nfp + /fomc + /yields — Phase 4 Stage 4
+# ---------------------------------------------------------------------------
+# Read-only contract: no archive write, no priority computed, no LLM
+# for FOMC hawkish/dovish (Layer 3 defense — defer to fomc_parser +
+# tavily_consensus). Format is inline; Stage 5 will lift it to
+# v2.reporting.format_macro_*.
+
+_VALID_RELEASE_TYPES = ("CPI", "PCE", "NFP", "GDP", "PPI", "Claims", "FOMC")
+_DEFAULT_RELEASE_TYPE = "CPI"
+
+
+def _normalize_release_type(raw: str | None) -> str:
+    """Coerce the user-supplied release_type to the closed enum.
+    Unknown / empty → default CPI."""
+    if not raw:
+        return _DEFAULT_RELEASE_TYPE
+    norm = raw.strip().upper()
+    aliases = {
+        "CLAIMS": "Claims",
+        "JOBS": "NFP", "NFP": "NFP", "PAYROLLS": "NFP",
+        "CPI": "CPI", "PCE": "PCE", "GDP": "GDP", "PPI": "PPI",
+        "FOMC": "FOMC", "FED": "FOMC",
+    }
+    return aliases.get(norm, _DEFAULT_RELEASE_TYPE)
+
+
+def macro_view(args: dict | None = None) -> str:
+    """Real-time macro dashboard.
+
+    args: ``{}`` (no inputs — fully derived from live data).
+
+    Composition:
+    - ``build_macro_snapshot`` for the market + rates panels
+    - ``release_calendar.get_releases_in_window`` for the next 5 events
+      (±30 days)
+    - The fixed list of FOMC dates within the window
+
+    No archive read (Stage 4 keeps it simple — Stage 5 may add an
+    archive-last-3-pushes overlay; ack'd in the Stage 4 spec).
+    """
+    from datetime import date, timedelta
+
+    today = date.today()
+    today_iso = today.isoformat()
+
+    try:
+        from v2.macro import build_macro_snapshot
+        snap = build_macro_snapshot(today_iso)
+    except Exception as exc:
+        logger.exception("macro_view: snapshot build failed")
+        return f"❌ 宏观快照失败: <code>{html.escape(str(exc))}</code>"
+
+    try:
+        from v2.macro.release_calendar import get_releases_in_window
+        window_start = (today - timedelta(days=14)).isoformat()
+        window_end = (today + timedelta(days=30)).isoformat()
+        window = get_releases_in_window(window_start, window_end)
+    except Exception as exc:
+        logger.warning("macro_view: calendar lookup failed: %s", exc)
+        window = {}
+
+    emit("render", card="macro_view_card", date=today_iso,
+         snapshot_warnings=len(snap.warnings),
+         window_dates=len(window))
+
+    return _format_macro_view_card(snap, window, today_iso)
+
+
+def release_check(args: dict | None = None) -> str:
+    """Single-release deep-dive.
+
+    args: ``{"release_type": "cpi" | "pce" | "nfp" | "gdp" | "ppi" |
+              "claims" | "fomc"}``.
+
+    Walks the release_calendar backwards from today for the latest
+    past date matching ``release_type``, then calls
+    ``build_release_event`` for that date and renders the matching
+    release. FOMC routes through the FOMC card with statement diff +
+    SEP shift + Tavily aggregate (Layer 3 path).
+    """
+    args = args or {}
+    rel_type = _normalize_release_type(args.get("release_type"))
+
+    from datetime import date
+    today = date.today()
+
+    target_date = _most_recent_release_date(rel_type, today)
+    if target_date is None:
+        return (
+            f"<b>📅 {rel_type}</b>\n"
+            f"<i>未找到 {rel_type} 在已知 release 日历内 (window 截至 2026)</i>"
+        )
+
+    try:
+        from v2.macro import build_release_event
+        report = build_release_event(target_date)
+    except Exception as exc:
+        logger.exception("release_check: build_release_event failed for %s", target_date)
+        return (
+            f"<b>📅 {rel_type}</b>\n"
+            f"❌ FRED / 数据获取失败: <code>{html.escape(str(exc))}</code>"
+        )
+
+    # FOMC has its own card via the FOMCEvent path
+    if rel_type == "FOMC":
+        if report.fomc_event is None:
+            return (
+                f"<b>🏛 FOMC · {target_date}</b>\n"
+                "<i>该日 FOMC 数据暂不可用 (statement / SEP / Tavily 全部 fetch 失败)</i>"
+            )
+        next_fomc = _next_release_date("FOMC", today)
+        return _format_fomc_check_card(report.fomc_event, next_fomc)
+
+    matching = [r for r in report.today_releases if r.release_type == rel_type]
+    if not matching:
+        return (
+            f"<b>📅 {rel_type} · {target_date}</b>\n"
+            f"<i>该日 {rel_type} release 数据暂不可用</i>"
+        )
+
+    next_date = _next_release_date(rel_type, today)
+    emit("render", card="release_check_card",
+         release_type=rel_type, target_date=target_date)
+    return _format_release_check_card(matching[0], next_date)
+
+
+# ---- Helpers --------------------------------------------------------------
+
+def _most_recent_release_date(rel_type: str, today) -> str | None:
+    """Walk the release_calendar backwards from ``today`` for the
+    latest entry matching ``rel_type``. Returns ISO string or None."""
+    from v2.macro.release_calendar import _2026_RELEASES
+
+    today_iso = today.isoformat()
+    candidates = []
+    for iso, entries in _2026_RELEASES.items():
+        if iso > today_iso:
+            continue
+        for entry_type, _label, _src in entries:
+            if entry_type == rel_type:
+                candidates.append(iso)
+                break
+    if not candidates:
+        return None
+    return max(candidates)
+
+
+def _next_release_date(rel_type: str, today) -> str | None:
+    """Next scheduled release date for ``rel_type`` after ``today``."""
+    from v2.macro.release_calendar import _2026_RELEASES
+
+    today_iso = today.isoformat()
+    candidates = []
+    for iso, entries in _2026_RELEASES.items():
+        if iso <= today_iso:
+            continue
+        for entry_type, _label, _src in entries:
+            if entry_type == rel_type:
+                candidates.append(iso)
+                break
+    if not candidates:
+        return None
+    return min(candidates)
+
+
+# ---- Inline formatters (Stage 5 lift) -------------------------------------
+
+def _fmt_pct(p, *, signed: bool = True) -> str:
+    if p is None:
+        return "—"
+    sign = "+" if signed and p >= 0 else ""
+    return f"{sign}{p:.2%}"
+
+
+def _fmt_num(v, *, places: int = 2) -> str:
+    if v is None:
+        return "—"
+    return f"{v:,.{places}f}"
+
+
+def _fmt_bps(v) -> str:
+    """Render a yield differential in basis points (e.g. -45bp)."""
+    if v is None:
+        return "—"
+    return f"{int(round(v * 100)):+d}bp"
+
+
+def _format_macro_view_card(snap, window: dict, today_iso: str) -> str:
+    """Multi-section macro dashboard card. Read-only."""
+    lines: list[str] = [
+        f"<b>🌐 宏观 dashboard · {html.escape(today_iso)}</b>",
+        "━━━━━━━━━━━━━━━━━━━━",
+    ]
+
+    # Market block
+    lines.append("<b>📊 市场状态</b>")
+    vix_pct = _fmt_pct(snap.vix_pct_change_1d)
+    vix_tag = ""
+    if snap.vix_spike:
+        vix_tag = " <b>🚨 +20%</b>"
+    elif snap.vix_elevated:
+        vix_tag = " ⚠️"
+    lines.append(
+        f"  VIX: <code>{_fmt_num(snap.vix)}</code> ({vix_pct}){vix_tag}"
+    )
+    lines.append(
+        f"  DXY: <code>{_fmt_num(snap.dxy)}</code> · "
+        f"WTI: <code>{_fmt_num(snap.wti_crude)}</code> · "
+        f"Gold: <code>{_fmt_num(snap.gold, places=1)}</code>"
+    )
+
+    # Yields block
+    lines.append("")
+    lines.append("<b>🏛 收益率</b>")
+    ff_band = "—"
+    if snap.fed_funds_upper is not None and snap.fed_funds_lower is not None:
+        ff_band = f"{snap.fed_funds_lower:.2f}% – {snap.fed_funds_upper:.2f}%"
+    lines.append(f"  Fed Funds: <code>{ff_band}</code>")
+    lines.append(
+        f"  2Y: <code>{_fmt_num(snap.dgs2)}%</code> · "
+        f"10Y: <code>{_fmt_num(snap.dgs10)}%</code>"
+    )
+    curve_tag = ""
+    if snap.curve_flip:
+        curve_tag = " <b>📉 今日翻转</b>"
+    elif snap.t10y2y is not None and snap.t10y2y < 0:
+        curve_tag = " <i>(倒挂)</i>"
+    lines.append(
+        f"  10-2 spread: <code>{_fmt_bps(snap.t10y2y)}</code>{curve_tag}"
+    )
+
+    # Release calendar block
+    sorted_dates = sorted(window.keys())
+    past = [d for d in sorted_dates if d < today_iso]
+    upcoming = [d for d in sorted_dates if d >= today_iso]
+
+    if past:
+        lines.append("")
+        lines.append("<b>📅 最近 release</b>")
+        for d in past[-3:]:
+            for rel_type, _label, _src in window[d][:1]:
+                lines.append(f"  <code>{html.escape(d)}</code> · {html.escape(rel_type)}")
+
+    if upcoming:
+        lines.append("")
+        lines.append("<b>📅 下次 release</b>")
+        for d in upcoming[:5]:
+            entries = window[d]
+            type_str = " / ".join(html.escape(rt) for rt, _, _ in entries)
+            days_out = _days_between(today_iso, d)
+            days_str = "今天" if days_out == 0 else f"{days_out} 天后"
+            lines.append(f"  <code>{html.escape(d)}</code> ({days_str}) · {type_str}")
+
+    if snap.warnings:
+        lines.append("")
+        lines.append("<i>⚠️ 数据不全:</i>")
+        for w in snap.warnings[:4]:
+            lines.append(f"  • <i>{html.escape(w)}</i>")
+
+    return "\n".join(lines)
+
+
+def _days_between(iso_a: str, iso_b: str) -> int:
+    from datetime import date
+    try:
+        return (date.fromisoformat(iso_b) - date.fromisoformat(iso_a)).days
+    except ValueError:
+        return 0
+
+
+_TONE_EMOJI = {"hawkish": "🟥", "dovish": "🟩", "neutral": "⚪"}
+
+
+def _format_release_check_card(release, next_date: str | None) -> str:
+    """Single-release card for CPI / PCE / NFP / GDP / PPI / Claims.
+
+    Mirrors the cron card's layout — Stage 5 byte-equal pin will
+    reconcile any drift.
+    """
+    tone_emoji = _TONE_EMOJI.get(release.tone or "neutral", "⚪")
+    lines: list[str] = [
+        f"<b>📈 {html.escape(release.release_type)} · "
+        f"最新 release</b>",
+        f"发布日：<code>{html.escape(release.release_date)}</code> · "
+        f"<i>{html.escape(release.period)}</i>",
+        "━━━━━━━━━━━━━━━━━━━━",
+    ]
+
+    if release.mom_pct is not None:
+        lines.append(f"  MoM: <code>{_fmt_pct(release.mom_pct)}</code>")
+    if release.yoy_pct is not None:
+        lines.append(f"  YoY: <code>{_fmt_pct(release.yoy_pct)}</code>")
+    if release.headline is not None:
+        lines.append(f"  Headline: <code>{_fmt_num(release.headline)}</code>")
+    if release.core is not None:
+        lines.append(f"  Core: <code>{_fmt_num(release.core)}</code>")
+
+    if release.consensus is not None:
+        sigma_str = ""
+        if release.surprise_sigma is not None:
+            sigma_str = (
+                f" ({release.surprise_sigma:+.1f}σ, "
+                f"{html.escape(release.surprise_label)})"
+            )
+        lines.append(
+            f"  Consensus: <code>{_fmt_num(release.consensus)}</code>{sigma_str}"
+        )
+
+    lines.append(f"  3M 趋势: <i>{html.escape(release.trailing_3mo_trend)}</i>")
+
+    if release.narrative:
+        lines.append("")
+        lines.append(
+            f"<b>{tone_emoji} 解读</b> "
+            f"<i>({html.escape(release.tone or 'neutral')})</i>"
+        )
+        lines.append(f"  {html.escape(release.narrative)}")
+    if release.bull_takeaway:
+        lines.append(f"  🟢 {html.escape(release.bull_takeaway)}")
+    if release.bear_takeaway:
+        lines.append(f"  🔴 {html.escape(release.bear_takeaway)}")
+
+    if next_date:
+        from datetime import date
+        days_out = _days_between(date.today().isoformat(), next_date)
+        suffix = "今天" if days_out == 0 else f"{days_out} 天后"
+        lines.append("")
+        lines.append(
+            f"📅 下次发布: <code>{html.escape(next_date)}</code> ({suffix})"
+        )
+    return "\n".join(lines)
+
+
+def _format_fomc_check_card(event, next_date: str | None) -> str:
+    """FOMC-specific card. Layer 3 defense path: Python statement diff
+    + Tavily majority vote; no LLM hawkish/dovish verdict."""
+    lines: list[str] = [
+        f"<b>🏛 FOMC · 最近决议</b>",
+        f"会议日：<code>{html.escape(event.meeting_date)}</code>",
+        "━━━━━━━━━━━━━━━━━━━━",
+    ]
+
+    diff = event.statement_diff or {}
+    added = diff.get("added_phrases") or []
+    removed = diff.get("removed_phrases") or []
+
+    if added:
+        lines.append("<b>📌 Statement 新增措辞</b>")
+        for p in added[:4]:
+            lines.append(f"  ➕ <i>{html.escape(p)}</i>")
+    if removed:
+        lines.append("<b>📌 Statement 移除措辞</b>")
+        for p in removed[:4]:
+            lines.append(f"  ➖ <i>{html.escape(p)}</i>")
+    if not added and not removed:
+        lines.append("<i>📌 Statement 关键措辞无变动</i>")
+
+    if event.has_sep:
+        lines.append("")
+        lines.append(
+            f"<b>📊 SEP Dot Plot</b> "
+            f"<i>({html.escape(event.sep_dot_plot_change)})</i>"
+        )
+        if event.sep_median_dots:
+            for k, v in event.sep_median_dots.items():
+                lines.append(f"  {html.escape(str(k))}: <code>{v:.2f}%</code>")
+        else:
+            lines.append("  <i>(数据待解析)</i>")
+    else:
+        lines.append("<i>SEP: 本次会议不含 dot plot</i>")
+
+    if event.sell_side_sentiment:
+        lines.append("")
+        lines.append(
+            f"<b>📰 卖方共识</b>: <i>{html.escape(event.sell_side_sentiment)}</i> "
+            f"<i>(Tavily majority vote)</i>"
+        )
+        if event.sell_side_sources:
+            sources_short = ", ".join(
+                html.escape(s) for s in event.sell_side_sources[:4]
+            )
+            lines.append(f"  来源: {sources_short}")
+
+    if next_date:
+        from datetime import date
+        days_out = _days_between(date.today().isoformat(), next_date)
+        suffix = "今天" if days_out == 0 else f"{days_out} 天后"
+        lines.append("")
+        lines.append(
+            f"📅 下次 FOMC: <code>{html.escape(next_date)}</code> ({suffix})"
+        )
+    return "\n".join(lines)
+
+
 # ---- /8k + /insiders helpers ----------------------------------------------
 
 

@@ -45,6 +45,8 @@ IntentName = Literal[
     "pnl_period",
     "eight_k_view",
     "insider_view",
+    "macro_view",
+    "release_check",
     "unknown",
 ]
 
@@ -70,12 +72,18 @@ _VALID_INTENTS = {
     "pnl_period",
     "eight_k_view",
     "insider_view",
+    "macro_view",
+    "release_check",
     "unknown",
 }
 
 # Closed enum for pnl_period.period. LLM outputs outside this set are
 # silently coerced to "day" (the default behavior, matches /pnl no-arg).
 _VALID_PNL_PERIODS = frozenset({"day", "week", "month"})
+
+# Closed enum for release_check.release_type (Phase 4 Stage 4). Values
+# outside this whitelist coerce to "cpi" — same posture as period.
+_VALID_RELEASE_TYPES = frozenset({"cpi", "pce", "nfp", "gdp", "ppi", "claims", "fomc"})
 
 # Bounds for insider_view.days_back. Default 90; user can override 7-365.
 _INSIDER_DAYS_BACK_MIN = 7
@@ -85,7 +93,7 @@ _INSIDER_DAYS_BACK_DEFAULT = 90
 
 _SYSTEM_PROMPT = (
     "你是一个股票分析助手的【意图分类器】。\n"
-    "把用户的话归类到下列**固定 21 个 intent 之一**，并提取参数。"
+    "把用户的话归类到下列**固定 23 个 intent 之一**，并提取参数。"
     "你不要回答问题，只做分类。\n"
     "\n"
     "【支持的 intents】\n"
@@ -119,6 +127,11 @@ _SYSTEM_PROMPT = (
     "- insider_view: 用户想看某只股票的内部人交易（Form 4）。"
     "例：「NVDA 内部人交易」「苹果高管买卖」「TSLA insider trading」"
     "「META 过去 30 天 Form 4」「AMZN 高管最近有没有买入」「ARM insider」\n"
+    "- macro_view: 用户想看宏观 dashboard 综合状态（VIX / 收益率 / 最近 release）。"
+    "例：「宏观怎么样」「macro」「市场环境」「今天 macro 状态」「what's the macro picture」\n"
+    "- release_check: 用户想看某类宏观 release 的最新数据（CPI / PCE / NFP / GDP / PPI / Claims / FOMC）。"
+    "例：「最近 CPI」「上次 FOMC」「NFP 数据」「PCE 通胀」「GDP 怎么样」"
+    "「claims 失业」「最近的 Fed 决议」\n"
     "- unknown: 都不匹配 / 含糊不清 / 与股票无关\n"
     "\n"
     "【参数提取规则】\n"
@@ -146,17 +159,24 @@ _SYSTEM_PROMPT = (
     "- days_back: 当 intent=insider_view 时，提取用户问的回溯天数（整数）。"
     "「过去 30 天」/「最近 30 天」→ 30；「过去三个月」→ 90；「半年」→ 180；"
     "「过去一年」→ 365。范围 7-365；用户没指定时输出 0（responder 默认 90）。\n"
+    "- release_type: 当 intent=release_check 时，**仅** 'cpi'、'pce'、'nfp'、"
+    "'gdp'、'ppi'、'claims'、'fomc' 七选一（全小写）。"
+    "「CPI」「通胀数据」「物价指数」→ cpi；「PCE」「核心 PCE」→ pce；"
+    "「NFP」「就业」「非农」「payrolls」→ nfp；「GDP」「经济增长」→ gdp；"
+    "「PPI」「生产者物价」→ ppi；「初请」「失业金」「claims」→ claims；"
+    "「FOMC」「Fed 决议」「美联储会议」→ fomc。"
+    "用户没指定或不在枚举内时输出空字符串（responder 默认 cpi）。\n"
     "\n"
     "【约束】\n"
     "1. **只输出 JSON，不要 markdown，不要解释**\n"
     "2. 不确定时输出 unknown\n"
-    "3. ticker / manager / etf / direction / period 字段没有时输出空字符串\n"
+    "3. ticker / manager / etf / direction / period / release_type 字段没有时输出空字符串\n"
     "4. target_price / days_horizon / days_back 没有时输出 0\n"
     "\n"
     "【JSON 格式】\n"
     '{"intent": "explain_move", "ticker": "NVDA", "manager": "", "etf": "", '
     '"target_price": 0, "direction": "", "days_horizon": 0, "period": "", '
-    '"days_back": 0, "raw": "..."}'
+    '"days_back": 0, "release_type": "", "raw": "..."}'
 )
 
 
@@ -230,6 +250,13 @@ def classify(text: str) -> dict:
     else:
         days_back = days_back_raw
 
+    # release_type: closed enum, empty → responder default "cpi"
+    release_type_raw = str(parsed.get("release_type", "")).strip().lower()
+    if release_type_raw in _VALID_RELEASE_TYPES:
+        release_type = release_type_raw
+    else:
+        release_type = ""
+
     return {
         "intent": intent,
         "ticker": str(parsed.get("ticker", "")).strip().upper(),
@@ -240,6 +267,7 @@ def classify(text: str) -> dict:
         "days_horizon": days_horizon,
         "period": period,
         "days_back": days_back,
+        "release_type": release_type,
         "raw": str(parsed.get("raw", text))[:80],
     }
 
@@ -255,5 +283,6 @@ def _unknown(text: str) -> dict:
         "days_horizon": 0,
         "period": "",
         "days_back": 0,
+        "release_type": "",
         "raw": text[:80],
     }

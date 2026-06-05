@@ -48,6 +48,12 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("8k", commands.cmd_8k))
     app.add_handler(CommandHandler("insiders", commands.cmd_insiders))
 
+    # Phase 4 macro commands
+    app.add_handler(CommandHandler("macro", commands.cmd_macro))
+    app.add_handler(CommandHandler("cpi", commands.cmd_cpi))
+    app.add_handler(CommandHandler("fomc", commands.cmd_fomc))
+    app.add_handler(CommandHandler("yields", commands.cmd_yields))
+
     # Stage 3 — NL intent classifier + dispatch
     app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, commands.cmd_nl)

@@ -107,6 +107,30 @@ _KEYWORD_MAP: list[tuple[str, str]] = [
     ("8k", "eight_k_view"),
     ("sec 公告", "eight_k_view"),
     ("sec 申报", "eight_k_view"),
+    # Phase 4 macro — release_check BEFORE macro_view so specific
+    # release-type keywords (CPI / FOMC / NFP) win over the broader
+    # "宏观" / "macro" catch-all.
+    ("cpi", "release_check"),
+    ("pce", "release_check"),
+    ("nfp", "release_check"),
+    ("ppi", "release_check"),
+    ("gdp", "release_check"),
+    ("fomc", "release_check"),
+    ("非农", "release_check"),
+    ("初请", "release_check"),
+    ("失业金", "release_check"),
+    ("通胀数据", "release_check"),
+    ("fed 决议", "release_check"),
+    ("利率决议", "release_check"),
+    ("美联储会议", "release_check"),
+    ("claims", "release_check"),
+    ("payrolls", "release_check"),
+    ("宏观", "macro_view"),
+    ("macro", "macro_view"),
+    ("市场环境", "macro_view"),
+    ("市场状态", "macro_view"),
+    ("yield", "macro_view"),
+    ("收益率", "macro_view"),
     # Existing
     ("为什么", "explain_move"),
     ("why", "explain_move"),
@@ -167,6 +191,10 @@ def _stub_classify(text: str) -> tuple[str, dict[str, Any]]:
         days_back = _extract_days_back(text)
         if days_back:
             args["days_back"] = days_back
+    if intent_name == "release_check":
+        rel_type = _extract_release_type(text)
+        if rel_type:
+            args["release_type"] = rel_type
     return intent_name, args
 
 
@@ -289,6 +317,40 @@ def _extract_days_back(text: str) -> Optional[int]:
     return None
 
 
+# Release-type keyword → lowercase enum value used by responder.
+# Phase 4 closed enum: cpi / pce / nfp / gdp / ppi / claims / fomc.
+_RELEASE_TYPE_KEYWORDS: list[tuple[str, str]] = [
+    ("cpi", "cpi"),
+    ("pce", "pce"),
+    ("nfp", "nfp"),
+    ("ppi", "ppi"),
+    ("gdp", "gdp"),
+    ("fomc", "fomc"),
+    ("claims", "claims"),
+    ("非农", "nfp"),
+    ("初请", "claims"),
+    ("失业金", "claims"),
+    ("通胀数据", "cpi"),
+    ("物价指数", "cpi"),
+    ("fed 决议", "fomc"),
+    ("利率决议", "fomc"),
+    ("美联储会议", "fomc"),
+    ("payrolls", "nfp"),
+    ("inflation", "cpi"),
+]
+
+
+def _extract_release_type(text: str) -> Optional[str]:
+    """Pull the first release_type keyword out of text. Returns the
+    lowercase enum value, or None if no keyword matches (responder
+    will fall back to 'cpi' default)."""
+    lower = text.lower()
+    for kw, rel_type in _RELEASE_TYPE_KEYWORDS:
+        if kw in lower:
+            return rel_type
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Responder dispatch
 # ---------------------------------------------------------------------------
@@ -391,6 +453,21 @@ def _insider_view_real(args: dict[str, Any]) -> str:
     return bot_responders.insider_view(args)
 
 
+def _macro_view_real(args: dict[str, Any]) -> str:
+    """Macro dashboard (Phase 4 Stage 4). Read-only — calls live
+    build_macro_snapshot + release_calendar; no LLM."""
+    from v2.bot import responders as bot_responders
+    return bot_responders.macro_view(args)
+
+
+def _release_check_real(args: dict[str, Any]) -> str:
+    """Single-release deep-dive (Phase 4 Stage 4). FRED + summarizer
+    LLM (Layer 1+2) for CPI/PCE/NFP/GDP/PPI/Claims; fomc_parser +
+    tavily_consensus for FOMC (Layer 3, no LLM verdict)."""
+    from v2.bot import responders as bot_responders
+    return bot_responders.release_check(args)
+
+
 # Real responders should replace these entries on the production VPS.
 # Each must accept a dict and return a str.
 DISPATCH: dict[str, ResponderFn] = {
@@ -414,5 +491,7 @@ DISPATCH: dict[str, ResponderFn] = {
     "pnl_period": _pnl_period_real,
     "eight_k_view": _eight_k_view_real,
     "insider_view": _insider_view_real,
+    "macro_view": _macro_view_real,
+    "release_check": _release_check_real,
     "unknown": _stub_responder,
 }
