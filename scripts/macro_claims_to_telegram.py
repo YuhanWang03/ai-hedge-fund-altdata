@@ -17,9 +17,8 @@ no headline → cron logs and exits silently.
 Default priority is ``macro_release_p2`` (P2). Surprises ≥ 2σ bump
 to P1 via the standard ``macro_release_p1`` path.
 
-Card formatter shares ``_format_release_card`` with the ⑮ scanner
-(re-imported here for Stage 2; Stage 5 lifts both crons to the same
-public formatter).
+Card formatter is :func:`v2.reporting.format_macro_claims_card`
+(Phase 4 Stage 5 lift; source-of-truth in ``v2/macro/_bot_cards.py``).
 """
 
 from __future__ import annotations
@@ -34,7 +33,11 @@ from dotenv import load_dotenv
 from v2.archive import Archive
 from v2.macro import build_claims_event
 from v2.observability import capture_trace_with_framing, install_all
-from v2.reporting import TelegramNotifier, notify_on_error
+from v2.reporting import (
+    TelegramNotifier,
+    format_macro_claims_card,
+    notify_on_error,
+)
 from v2.reporting.priority import compute_importance
 
 logging.basicConfig(
@@ -45,44 +48,6 @@ logger = logging.getLogger(__name__)
 
 
 _TZ_ET = ZoneInfo("US/Eastern")
-
-
-# Inline card formatter — shared shape with ⑮ release. Stage 5 will
-# lift to v2.reporting.format_macro_release.
-def _fmt_num(v: float | None) -> str:
-    if v is None:
-        return "—"
-    return f"{v:,.0f}"
-
-
-_TONE_EMOJI = {
-    "hawkish": "🟥",
-    "dovish":  "🟩",
-    "neutral": "⚪",
-}
-
-
-def _format_claims_card(release, tier: str) -> str:
-    tone_emoji = _TONE_EMOJI.get(release.tone or "neutral", "⚪")
-    lines: list[str] = [
-        f"<b>📅 Initial Claims · {release.period}</b>",
-        f"发布日：<code>{release.release_date}</code> · 评级：<b>{tier}</b>",
-        "━━━━━━━━━━━━━━━━━━━━",
-        f"  本周: <code>{_fmt_num(release.headline)}</code>",
-        f"  4W MA: <code>{_fmt_num(release.core)}</code> "
-        f"<i>(smoothed)</i>",
-        f"  上周值: <code>{_fmt_num(release.prior_value)}</code>",
-        f"  3M 趋势: <i>{release.trailing_3mo_trend}</i>",
-    ]
-    if release.narrative:
-        lines.append("")
-        lines.append(f"<b>{tone_emoji} 解读</b> <i>({release.tone})</i>")
-        lines.append(f"  {release.narrative}")
-    if release.bull_takeaway:
-        lines.append(f"  🟢 {release.bull_takeaway}")
-    if release.bear_takeaway:
-        lines.append(f"  🔴 {release.bear_takeaway}")
-    return "\n".join(lines)
 
 
 def _kind_and_meta(release) -> tuple[str, dict]:
@@ -125,7 +90,7 @@ def main() -> int:
         kind, md = _kind_and_meta(release)
         priority = compute_importance(kind, md)
 
-        text = _format_claims_card(release, tier=priority.tier)
+        text = format_macro_claims_card(release, tier=priority.tier)
         notifier = TelegramNotifier(archive=archive)
         try:
             notifier.send_text(

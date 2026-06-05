@@ -329,8 +329,8 @@ class TestReleaseCheck:
         assert "elevated" in out
         assert "移除措辞" in out
         assert "modest" in out
-        # Tavily aggregate visible
-        assert "卖方共识" in out
+        # Tavily aggregate visible (canonical formatter uses "卖方读数")
+        assert "卖方读数" in out
         assert "hawkish" in out
         assert "reuters.com" in out
 

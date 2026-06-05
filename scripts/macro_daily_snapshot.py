@@ -30,7 +30,11 @@ from dotenv import load_dotenv
 from v2.archive import Archive
 from v2.macro import build_macro_snapshot
 from v2.observability import capture_trace_with_framing, install_all
-from v2.reporting import TelegramNotifier, notify_on_error
+from v2.reporting import (
+    TelegramNotifier,
+    format_macro_daily_snapshot,
+    notify_on_error,
+)
 from v2.reporting.priority import compute_importance
 
 logging.basicConfig(
@@ -72,83 +76,6 @@ def _classify(snap) -> tuple[str, dict]:
 
 
 # ---------------------------------------------------------------------------
-# Inline card formatter (Stage 5 lift target)
-# ---------------------------------------------------------------------------
-
-def _fmt_pct(p: float | None, *, signed: bool = True) -> str:
-    if p is None:
-        return "—"
-    sign = "+" if signed and p >= 0 else ""
-    return f"{sign}{p:.2%}"
-
-
-def _fmt_level(v: float | None, *, places: int = 2) -> str:
-    if v is None:
-        return "—"
-    return f"{v:.{places}f}"
-
-
-def _format_snapshot_card(snap, *, tier: str, kind: str) -> str:
-    """Render the daily snapshot as a single Telegram-ready HTML body."""
-    icon = {
-        "macro_vix_spike":   "🚨 宏观警报",
-        "macro_curve_flip":  "📉 宏观警报",
-        "macro_snapshot_p3": "📊 宏观日终",
-    }.get(kind, "📊 宏观日终")
-
-    lines: list[str] = [
-        f"<b>{icon} · {snap.snapshot_date}</b>",
-        "━━━━━━━━━━━━━━━━━━━━",
-    ]
-
-    # Markets
-    lines.append("<b>市场</b>")
-    vix_str = _fmt_level(snap.vix)
-    vix_d = _fmt_pct(snap.vix_pct_change_1d)
-    spike_tag = " <b>🚨 +20%</b>" if snap.vix_spike else (
-        " ⚠️ 偏高" if snap.vix_elevated else ""
-    )
-    lines.append(f"  VIX: <code>{vix_str}</code> ({vix_d}){spike_tag}")
-    lines.append(
-        f"  DXY: <code>{_fmt_level(snap.dxy)}</code> · "
-        f"WTI: <code>{_fmt_level(snap.wti_crude)}</code> · "
-        f"Gold: <code>{_fmt_level(snap.gold, places=1)}</code>"
-    )
-
-    # Rates
-    lines.append("<b>利率 (FRED EOD)</b>")
-    ff_band = "—"
-    if snap.fed_funds_upper is not None and snap.fed_funds_lower is not None:
-        ff_band = f"{snap.fed_funds_lower:.2f}% – {snap.fed_funds_upper:.2f}%"
-    lines.append(f"  Fed Funds: <code>{ff_band}</code>")
-    lines.append(
-        f"  2Y: <code>{_fmt_level(snap.dgs2)}%</code> · "
-        f"10Y: <code>{_fmt_level(snap.dgs10)}%</code>"
-    )
-
-    curve_tag = ""
-    if snap.curve_flip:
-        curve_tag = " <b>📉 今日翻转</b>"
-    elif snap.t10y2y is not None and snap.t10y2y < 0:
-        curve_tag = " <i>(倒挂)</i>"
-    lines.append(
-        f"  10Y-2Y: <code>{_fmt_level(snap.t10y2y)}%</code>{curve_tag}"
-    )
-
-    if snap.rates_shocked:
-        lines.append("  <b>⚠️ 10Y 单日 ≥ 20bps 异动</b>")
-
-    # Warnings (data-source failures)
-    if snap.warnings:
-        lines.append("")
-        lines.append("<i>⚠️ 数据不全:</i>")
-        for w in snap.warnings[:6]:
-            lines.append(f"  • <i>{w}</i>")
-
-    return "\n".join(lines)
-
-
-# ---------------------------------------------------------------------------
 # Push helper
 # ---------------------------------------------------------------------------
 
@@ -156,7 +83,7 @@ def _emit(notifier, trace, snap) -> None:
     kind, md = _classify(snap)
     priority = compute_importance(kind, md)
 
-    text = _format_snapshot_card(snap, tier=priority.tier, kind=kind)
+    text = format_macro_daily_snapshot(snap)
     notifier.send_text(
         text,
         trace=trace,

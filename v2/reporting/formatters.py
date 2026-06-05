@@ -1246,3 +1246,17 @@ from v2.reporting._sec_formatters import (  # noqa: E402
     format_sec_form4_individual_card,
     format_sec_form4_view,
 )
+
+
+# ---------------------------------------------------------------------------
+# Macro cards (Phase 4)
+# ---------------------------------------------------------------------------
+# Same pattern. Implementation lives in v2/macro/_bot_cards.py.
+from v2.reporting._macro_formatters import (  # noqa: E402
+    format_macro_claims_card,
+    format_macro_daily_snapshot,
+    format_macro_dashboard,
+    format_macro_fomc_card,
+    format_macro_release_card,
+    format_macro_weekly_recap,
+)

@@ -44,7 +44,12 @@ from v2.archive import Archive
 from v2.macro import build_release_event
 from v2.macro.release_calendar import get_release_today
 from v2.observability import capture_trace_with_framing, install_all
-from v2.reporting import TelegramNotifier, notify_on_error
+from v2.reporting import (
+    TelegramNotifier,
+    format_macro_fomc_card,
+    format_macro_release_card,
+    notify_on_error,
+)
 from v2.reporting.priority import compute_importance
 
 logging.basicConfig(
@@ -93,121 +98,6 @@ def _fomc_kind_and_meta(event) -> tuple[str, dict]:
 
 
 # ---------------------------------------------------------------------------
-# Inline card formatters (Stage 5 lift target)
-# ---------------------------------------------------------------------------
-
-def _fmt_pct(p: float | None, *, signed: bool = True) -> str:
-    if p is None:
-        return "—"
-    sign = "+" if signed and p >= 0 else ""
-    return f"{sign}{p:.2%}"
-
-
-def _fmt_num(v: float | None) -> str:
-    if v is None:
-        return "—"
-    return f"{v:,.2f}"
-
-
-_TONE_EMOJI = {
-    "hawkish": "🟥",
-    "dovish":  "🟩",
-    "neutral": "⚪",
-}
-
-
-def _format_release_card(release, tier: str) -> str:
-    """Card body for a non-FOMC release (CPI / PCE / NFP / GDP / PPI / Claims)."""
-    tone_emoji = _TONE_EMOJI.get(release.tone or "neutral", "⚪")
-
-    lines: list[str] = [
-        f"<b>📅 {release.release_type} · {release.period}</b>",
-        f"发布日：<code>{release.release_date}</code> · 评级：<b>{tier}</b>",
-        "━━━━━━━━━━━━━━━━━━━━",
-    ]
-
-    # Numeric panel (Python-computed)
-    if release.mom_pct is not None:
-        lines.append(f"  MoM: <code>{_fmt_pct(release.mom_pct)}</code>")
-    if release.yoy_pct is not None:
-        lines.append(f"  YoY: <code>{_fmt_pct(release.yoy_pct)}</code>")
-    if release.headline is not None:
-        lines.append(f"  Headline: <code>{_fmt_num(release.headline)}</code>")
-    if release.core is not None:
-        lines.append(f"  Core: <code>{_fmt_num(release.core)}</code>")
-
-    if release.consensus is not None:
-        sigma_str = (
-            f" ({release.surprise_sigma:+.1f}σ, {release.surprise_label})"
-            if release.surprise_sigma is not None else ""
-        )
-        lines.append(
-            f"  Consensus: <code>{_fmt_num(release.consensus)}</code>{sigma_str}"
-        )
-    lines.append(f"  3M 趋势: <i>{release.trailing_3mo_trend}</i>")
-
-    # LLM qualitative panel (Layer 1+2 sanitized)
-    if release.narrative:
-        lines.append("")
-        lines.append(f"<b>{tone_emoji} 解读</b> <i>({release.tone})</i>")
-        lines.append(f"  {release.narrative}")
-    if release.bull_takeaway:
-        lines.append(f"  🟢 {release.bull_takeaway}")
-    if release.bear_takeaway:
-        lines.append(f"  🔴 {release.bear_takeaway}")
-
-    return "\n".join(lines)
-
-
-def _format_fomc_card(event, tier: str) -> str:
-    """Card body for a FOMC event (Python diff + Tavily aggregate)."""
-    lines: list[str] = [
-        f"<b>🏛️ FOMC · {event.meeting_date}</b>",
-        f"评级：<b>{tier}</b>",
-        "━━━━━━━━━━━━━━━━━━━━",
-    ]
-
-    # Statement diff
-    diff = event.statement_diff or {}
-    added = diff.get("added_phrases") or []
-    removed = diff.get("removed_phrases") or []
-
-    if added:
-        lines.append("<b>📌 Statement 新增措辞</b>")
-        for p in added[:6]:
-            lines.append(f"  ➕ <i>{p}</i>")
-    if removed:
-        lines.append("<b>📌 Statement 移除措辞</b>")
-        for p in removed[:6]:
-            lines.append(f"  ➖ <i>{p}</i>")
-    if not added and not removed:
-        lines.append("<b>📌 Statement</b> <i>(关键措辞无变动)</i>")
-
-    # SEP dots
-    if event.has_sep:
-        lines.append("")
-        lines.append(f"<b>📊 SEP Dot Plot</b> <i>({event.sep_dot_plot_change})</i>")
-        if event.sep_median_dots:
-            for k, v in event.sep_median_dots.items():
-                lines.append(f"  {k}: <code>{v:.2f}%</code>")
-        else:
-            lines.append("  <i>(数据待解析)</i>")
-
-    # Sell-side aggregate
-    if event.sell_side_sentiment:
-        lines.append("")
-        lines.append(
-            f"<b>📰 卖方读数</b>: <i>{event.sell_side_sentiment}</i> "
-            f"<i>(Tavily majority vote)</i>"
-        )
-        if event.sell_side_sources:
-            sources_short = ", ".join(event.sell_side_sources[:4])
-            lines.append(f"  来源: {sources_short}")
-
-    return "\n".join(lines)
-
-
-# ---------------------------------------------------------------------------
 # Push helpers
 # ---------------------------------------------------------------------------
 
@@ -215,7 +105,7 @@ def _push_release(notifier, trace, release) -> None:
     kind, md = _release_kind_and_meta(release)
     priority = compute_importance(kind, md)
 
-    text = _format_release_card(release, tier=priority.tier)
+    text = format_macro_release_card(release, tier=priority.tier)
     notifier.send_text(
         text,
         trace=trace,
@@ -229,7 +119,7 @@ def _push_fomc(notifier, trace, fomc) -> None:
     kind, md = _fomc_kind_and_meta(fomc)
     priority = compute_importance(kind, md)
 
-    text = _format_fomc_card(fomc, tier=priority.tier)
+    text = format_macro_fomc_card(fomc, tier=priority.tier)
     notifier.send_text(
         text,
         trace=trace,
