@@ -1233,3 +1233,16 @@ from v2.reporting._portfolio_formatters import (  # noqa: E402
     format_portfolio_risk_view,
     format_portfolio_weekly_card,
 )
+
+
+# ---------------------------------------------------------------------------
+# SEC cards (Phase 3)
+# ---------------------------------------------------------------------------
+# Same pattern. Implementation lives in v2/sec/_bot_cards.py.
+from v2.reporting._sec_formatters import (  # noqa: E402
+    format_sec_8k_card,
+    format_sec_8k_view,
+    format_sec_form4_cluster_card,
+    format_sec_form4_individual_card,
+    format_sec_form4_view,
+)

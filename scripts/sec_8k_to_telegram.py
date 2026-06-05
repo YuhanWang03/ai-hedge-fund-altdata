@@ -11,8 +11,8 @@ Calibration recap (Stage 0 task 4 real-data):
 - HPE-style multi-item filings get one card with priority = max(items)
 - 5.02 LLM extractor escalates to P0 when senior exec confirmed
 
-Card formatting is inline here for Stage 2 (Stage 5 will lift it into
-``v2.reporting.format_sec_*`` mirroring the Phase 1/2 pattern).
+Card formatter (``format_sec_8k_card``) lives in ``v2.sec._bot_cards``
+and is re-exported through ``v2.reporting`` (Phase 1/2 pattern).
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from dotenv import load_dotenv
 from v2.archive import Archive
 from v2.bot import state as bot_state
 from v2.observability import capture_trace_with_framing, install_all
-from v2.reporting import TelegramNotifier, notify_on_error
+from v2.reporting import TelegramNotifier, format_sec_8k_card, notify_on_error
 from v2.reporting.priority import compute_importance
 from v2.sec import run_sec_scan
 from v2.sec.models import EightKEvent
@@ -70,76 +70,6 @@ def _resolve_universe() -> tuple[list[str], set[str], set[str]]:
     return sorted(watchlist | held), held, watchlist
 
 
-# ---------------------------------------------------------------------------
-# Inline card formatter (Stage 5 will lift to v2/reporting)
-# ---------------------------------------------------------------------------
-
-def _tier_emoji(tier: str) -> str:
-    return {"P0": "🚨", "P1": "📋", "P2": "📎", "P3": "📌"}.get(tier, "📌")
-
-
-def _format_8k_card(
-    event: EightKEvent,
-    *,
-    is_held: bool,
-    is_watchlist: bool,
-) -> str:
-    """Render one 8-K filing as a single card.
-
-    Items listed in document order with per-item tier badge. The 2.02
-    item, if present alongside other material items, gets a "(⑧ 处理)"
-    annotation so the reader knows the earnings data is covered by
-    the 21:00 ET earnings cron — not missed.
-    """
-    filing = event.filing
-    tier_top = event.max_priority_tier
-    emoji = _tier_emoji(tier_top)
-
-    badge = "🟢 持仓股" if is_held else "👁 关注列表" if is_watchlist else ""
-
-    lines: list[str] = [
-        f"<b>{emoji} SEC 8-K · {filing.ticker} · {tier_top}</b>",
-        f"申报日：<code>{filing.filing_date}</code>"
-        + (" <i>(amendment)</i>" if filing.is_amendment else ""),
-    ]
-    if badge:
-        lines.append(badge)
-
-    lines.append("")
-    lines.append("<b>项目</b>")
-    for item in event.items:
-        emoji_i = _tier_emoji(item.priority_tier)
-        annotation = "  <i>(数据由 ⑧ 处理)</i>" if item.code == "2.02" else ""
-        lines.append(
-            f"  {emoji_i} <code>{item.code}</code> "
-            f"[{item.priority_tier}] {item.description}{annotation}"
-        )
-
-    # 5.02 extraction summary if present
-    item_5_02 = next(
-        (it for it in event.items if it.code == "5.02"), None,
-    )
-    if item_5_02 and item_5_02.extracted_meta:
-        meta = item_5_02.extracted_meta
-        departures = meta.get("departures") or []
-        appointments = meta.get("appointments") or []
-        if departures or appointments:
-            lines.append("")
-            lines.append("<b>5.02 抽取</b>")
-            for d in departures[:3]:
-                name = d.get("name", "")
-                title = d.get("title", "")
-                if name:
-                    lines.append(f"  📤 离职：{name} ({title})")
-            for a in appointments[:3]:
-                name = a.get("name", "")
-                title = a.get("title", "")
-                if name:
-                    lines.append(f"  📥 任命：{name} ({title})")
-
-    return "\n".join(lines)
-
-
 def _emit_one(
     notifier: TelegramNotifier,
     trace,
@@ -167,7 +97,7 @@ def _emit_one(
     }
     priority = compute_importance(kind, metadata)
 
-    text = _format_8k_card(event, is_held=is_held, is_watchlist=is_watchlist)
+    text = format_sec_8k_card(event, is_held=is_held, is_watchlist=is_watchlist)
     notifier.send_text(
         text,
         trace=trace,

@@ -14,7 +14,9 @@ Cron time note: Stage 2 prompt proposed 17:30 ET but that collides
 with ① Daily Screen. Slotted at 17:45 ET (clean — between ② Anomaly
 Monitor 17:35 and ③ Lateral / ④ Institutional 18:00).
 
-Card format inline; Stage 5 will lift to ``v2.reporting.format_sec_*``.
+Card formatters (``format_sec_form4_individual_card`` /
+``format_sec_form4_cluster_card``) live in ``v2.sec._bot_cards`` and are
+re-exported through ``v2.reporting`` (Phase 1/2 pattern).
 """
 
 from __future__ import annotations
@@ -29,7 +31,12 @@ from dotenv import load_dotenv
 from v2.archive import Archive
 from v2.bot import state as bot_state
 from v2.observability import capture_trace_with_framing, install_all
-from v2.reporting import TelegramNotifier, notify_on_error
+from v2.reporting import (
+    TelegramNotifier,
+    format_sec_form4_cluster_card,
+    format_sec_form4_individual_card,
+    notify_on_error,
+)
 from v2.reporting.priority import compute_importance
 from v2.sec import run_sec_scan
 from v2.sec.models import Form4Cluster, Form4Transaction
@@ -60,105 +67,6 @@ def _resolve_universe() -> tuple[list[str], set[str], set[str]]:
 
 
 # ---------------------------------------------------------------------------
-# Inline card formatters (Stage 5 lift target)
-# ---------------------------------------------------------------------------
-
-def _fmt_usd(v: float | None) -> str:
-    if v is None:
-        return "未披露"
-    if v >= 1_000_000:
-        return f"${v / 1_000_000:.2f}M"
-    if v >= 1_000:
-        return f"${v / 1_000:.1f}K"
-    return f"${v:,.0f}"
-
-
-def _role_label(role: str | None) -> str:
-    if not role:
-        return ""
-    pretty = {
-        "CEO": "🔴 CEO", "CFO": "🔴 CFO", "COO": "🟠 COO",
-        "Chairman": "🟠 Chairman", "President": "🟠 President",
-        "GC": "🟡 General Counsel", "Director": "🟢 董事",
-        "Officer": "🔵 高管", "10% holder": "🔵 10% 大股东",
-    }
-    return pretty.get(role, role)
-
-
-def _format_form4_signal_card(
-    tx: Form4Transaction,
-    *,
-    is_held: bool,
-    is_watchlist: bool,
-) -> str:
-    """Single P or S transaction → one card."""
-    f = tx.filing
-    badge = "🟢 持仓股" if is_held else "👁 关注列表" if is_watchlist else ""
-
-    if tx.transaction_code == "P":
-        direction_label = "📥 内部人买入"
-    else:
-        direction_label = "📤 内部人卖出"
-
-    plan_tag = "<i>(10b5-1 plan)</i>" if tx.is_10b5_1 else "<i>(discretionary)</i>"
-
-    lines: list[str] = [
-        f"<b>{direction_label} · {f.ticker}</b>",
-        f"申报：<code>{f.filing_date}</code> · 交易：<code>{tx.transaction_date}</code>",
-    ]
-    if badge:
-        lines.append(badge)
-    lines.append("")
-
-    role = _role_label(tx.insider_role)
-    role_suffix = f" · {role}" if role else ""
-    lines.append(f"申报人：<b>{tx.insider_name or '?'}</b>{role_suffix}")
-
-    lines.append(
-        f"交易：<code>{tx.shares:,.0f}</code> 股 × "
-        f"{_fmt_usd(tx.price)}/股 = <b>{_fmt_usd(tx.transaction_usd)}</b> "
-        f"{plan_tag}"
-    )
-
-    return "\n".join(lines)
-
-
-def _format_cluster_card(
-    cluster: Form4Cluster,
-    *,
-    is_held: bool,
-    is_watchlist: bool,
-) -> str:
-    """Cluster card — N insiders same day same direction."""
-    badge = "🟢 持仓股" if is_held else "👁 关注列表" if is_watchlist else ""
-
-    if cluster.direction == "purchase":
-        emoji, label = "📥", "内部人集群买入"
-    else:
-        emoji, label = "📤", "内部人集群卖出"
-
-    lines: list[str] = [
-        f"<b>{emoji} {label} · {cluster.ticker}</b>",
-        f"日期：<code>{cluster.cluster_date}</code> · "
-        f"{cluster.transaction_count} 笔 / {len(cluster.insider_names)} 人",
-    ]
-    if badge:
-        lines.append(badge)
-    lines.append("")
-
-    lines.append(f"总金额：<b>{_fmt_usd(cluster.total_usd)}</b>")
-    lines.append("")
-
-    lines.append("<b>申报人</b>")
-    for name in cluster.insider_names[:6]:
-        lines.append(f"  • {name}")
-    if len(cluster.insider_names) > 6:
-        lines.append(f"  ... 另 {len(cluster.insider_names) - 6} 人")
-
-    return "\n".join(lines)
-
-
-# ---------------------------------------------------------------------------
 # Push helpers
 # ---------------------------------------------------------------------------
 
@@ -179,7 +87,7 @@ def _push_signal(
         "is_watchlist": is_watchlist,
     }
     priority = compute_importance(kind, metadata)
-    text = _format_form4_signal_card(tx, is_held=is_held, is_watchlist=is_watchlist)
+    text = format_sec_form4_individual_card(tx, is_held=is_held, is_watchlist=is_watchlist)
 
     direction = "买入" if tx.transaction_code == "P" else "卖出"
     notifier.send_text(
@@ -206,7 +114,7 @@ def _push_cluster(
         "is_watchlist": is_watchlist,
     }
     priority = compute_importance("sec_form4_cluster", metadata)
-    text = _format_cluster_card(cluster, is_held=is_held, is_watchlist=is_watchlist)
+    text = format_sec_form4_cluster_card(cluster, is_held=is_held, is_watchlist=is_watchlist)
 
     notifier.send_text(
         text,
