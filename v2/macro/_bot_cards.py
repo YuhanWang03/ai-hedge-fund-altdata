@@ -156,6 +156,7 @@ def format_macro_daily_snapshot(snap: MacroSnapshot) -> str:
     )
 
     # Rates
+    lines.append("")
     lines.append("<b>利率 (FRED EOD)</b>")
     ff_band = "—"
     if snap.fed_funds_upper is not None and snap.fed_funds_lower is not None:
@@ -172,7 +173,7 @@ def format_macro_daily_snapshot(snap: MacroSnapshot) -> str:
     elif snap.t10y2y is not None and snap.t10y2y < 0:
         curve_tag = " <i>(倒挂)</i>"
     lines.append(
-        f"  10Y-2Y: <code>{_fmt_level(snap.t10y2y)}%</code>{curve_tag}"
+        f"  10Y-2Y: <code>{_fmt_bps(snap.t10y2y)}</code>{curve_tag}"
     )
 
     if snap.rates_shocked:
@@ -229,6 +230,16 @@ def format_macro_release_card(
         lines.append(f"  Core: <code>{_fmt_num(release.core)}</code>")
 
     if release.consensus is not None:
+        # Match the consensus format to whatever change metric the
+        # release reports. CPI / PCE / PPI / GDP carry mom_pct so
+        # consensus is also a fraction (render as pct). NFP uses
+        # mom_change_k so consensus is an absolute count (render
+        # as a number). This keeps the consensus line readable on
+        # the same scale as the MoM/YoY rows above it.
+        if release.mom_pct is not None:
+            consensus_str = _fmt_pct(release.consensus)
+        else:
+            consensus_str = _fmt_num(release.consensus)
         sigma_str = ""
         if release.surprise_sigma is not None:
             sigma_str = (
@@ -236,7 +247,7 @@ def format_macro_release_card(
                 f"{html.escape(release.surprise_label)})"
             )
         lines.append(
-            f"  Consensus: <code>{_fmt_num(release.consensus)}</code>{sigma_str}"
+            f"  Consensus: <code>{consensus_str}</code>{sigma_str}"
         )
 
     lines.append(f"  3M 趋势: <i>{html.escape(release.trailing_3mo_trend)}</i>")
@@ -442,7 +453,16 @@ def format_macro_weekly_recap(recap: dict) -> str:
     lines.append("<b>本周变化</b>")
     for sid, label in _DELTA_LABELS:
         d = deltas.get(sid)
-        lines.append(f"  {label}: <code>{_fmt_delta(d)}</code>")
+        # VIX is an absolute index level — week-over-week change is
+        # in "pts". Treasury yields (DGS10 / DGS2 / T10Y2Y) come as
+        # fractions in pct units, so weekly change renders as bps —
+        # the industry-standard unit and consistent with the ⑭
+        # snapshot + /macro dashboard spreads.
+        if sid == "VIXCLS":
+            rendered = f"{_fmt_delta(d)} pts" if d is not None else "—"
+        else:
+            rendered = _fmt_bps(d)
+        lines.append(f"  {label}: <code>{rendered}</code>")
 
     this_week = recap.get("this_week_releases") or {}
     lines.append("")
