@@ -193,3 +193,89 @@ def test_existing_intents_not_regressed_by_sec():
     for text, expected in cases:
         name, _ = _stub_classify(text)
         assert name == expected, f"{text!r} → {name} (want {expected})"
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 Stage 4 — macro intents (macro_view + release_check)
+# ---------------------------------------------------------------------------
+
+def test_classify_macro_zh():
+    """'宏观怎么样' → macro_view."""
+    name, args = _stub_classify("宏观怎么样")
+    assert name == "macro_view"
+    assert args == {}
+
+
+def test_classify_macro_en():
+    """English 'macro' keyword routes to macro_view."""
+    name, _ = _stub_classify("what's the macro picture")
+    assert name == "macro_view"
+
+
+def test_classify_macro_yields():
+    """'收益率曲线' → macro_view (yields panel is the dashboard's yields block)."""
+    name, _ = _stub_classify("收益率曲线怎么样")
+    assert name == "macro_view"
+
+
+def test_classify_release_check_cpi_zh():
+    """'最近 CPI' → release_check(release_type='cpi')."""
+    name, args = _stub_classify("最近 CPI 数据")
+    assert name == "release_check"
+    assert args.get("release_type") == "cpi"
+
+
+def test_classify_release_check_fomc_zh():
+    """'上次 FOMC' → release_check(release_type='fomc')."""
+    name, args = _stub_classify("上次 FOMC 怎么说")
+    assert name == "release_check"
+    assert args.get("release_type") == "fomc"
+
+
+def test_classify_release_check_nfp_en():
+    """'NFP data' → release_check(release_type='nfp')."""
+    name, args = _stub_classify("NFP data this month")
+    assert name == "release_check"
+    assert args.get("release_type") == "nfp"
+
+
+def test_classify_release_check_claims_zh():
+    """'失业金申请' → release_check(release_type='claims')."""
+    name, args = _stub_classify("最近失业金申请")
+    assert name == "release_check"
+    assert args.get("release_type") == "claims"
+
+
+def test_classify_release_check_payrolls_en():
+    """English 'payrolls' alias → nfp."""
+    name, args = _stub_classify("US payrolls")
+    assert name == "release_check"
+    assert args.get("release_type") == "nfp"
+
+
+def test_classify_release_check_fed_zh():
+    """'Fed 决议' → release_check(release_type='fomc')."""
+    name, args = _stub_classify("最近的 Fed 决议")
+    assert name == "release_check"
+    assert args.get("release_type") == "fomc"
+
+
+def test_existing_intents_not_regressed_by_macro():
+    """Phase 4 keyword additions must NOT swallow Phase 0/1/2/3 intents."""
+    cases = [
+        ("NVDA 为什么跌？", "explain_move"),
+        ("看看 AAPL 怎么样", "summary"),
+        ("找一下 AMD 的产业链", "chain"),
+        ("巴菲特最近买了什么", "thirteen_f"),
+        ("谁持有 NVDA", "holders_view"),
+        ("ark 今天买啥", "etf_view"),
+        ("最近有什么异动", "find_anomalies"),
+        # Phase 1+2+3 intents
+        ("AAPL 什么时候发财报", "earnings_view"),
+        ("我的组合风险", "risk_view"),
+        ("AAPL 最近 8-K", "eight_k_view"),
+        ("NVDA 内部人交易", "insider_view"),
+    ]
+    for text, expected in cases:
+        name, _ = _stub_classify(text)
+        assert name == expected, f"{text!r} → {name} (want {expected})"

@@ -462,6 +462,93 @@ async def cmd_8k(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 @authorized_only
+async def cmd_macro(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """``/macro`` — real-time macro dashboard.
+
+    No args. Pulls live VIX/yields/calendar via build_macro_snapshot
+    + release_calendar lookups. Read-only: no archive write, no
+    priority computed.
+    """
+    placeholder = await update.message.reply_html(
+        "🌐 拉取宏观 dashboard...\n"
+        "<i>VIX / 收益率 / 最近 release (预计 3-5 秒)</i>"
+    )
+    result = await _run_blocking(responders.macro_view, {})
+    await placeholder.edit_text(
+        result, parse_mode="HTML", disable_web_page_preview=True,
+    )
+
+
+_RELEASE_LABELS = {
+    "CPI": "📈 CPI · 通胀",
+    "PCE": "📈 PCE · 通胀",
+    "NFP": "📈 NFP · 就业",
+    "GDP": "📈 GDP · 经济增长",
+    "PPI": "📈 PPI · 生产者物价",
+    "Claims": "📈 Initial Claims · 失业金申请",
+    "FOMC": "🏛 FOMC · Fed 利率决议",
+}
+
+
+async def _release_check_handler(
+    update: Update, release_type: str, *,
+    needs_llm: bool = True,
+) -> None:
+    """Backend shared by /cpi /pce /nfp /gdp /ppi /claims /fomc.
+
+    ``release_type`` MUST be one of the closed enum values used by
+    the responder ("CPI" / "PCE" / "NFP" / "GDP" / "PPI" / "Claims"
+    / "FOMC"). FOMC takes longer because the responder runs Python
+    statement diff + Tavily aggregate (Layer 3 path).
+    """
+    label = _RELEASE_LABELS.get(release_type, release_type)
+    eta_blurb = (
+        "<i>预计 8-15 秒 (含 FRED + LLM template-fill + Tavily)</i>"
+        if needs_llm else "<i>预计 5-8 秒 (FRED + LLM)</i>"
+    )
+    placeholder = await update.message.reply_html(
+        f"{label} 拉取中...\n{eta_blurb}"
+    )
+    result = await _run_blocking(
+        responders.release_check, {"release_type": release_type.lower()},
+    )
+    await placeholder.edit_text(
+        result, parse_mode="HTML", disable_web_page_preview=True,
+    )
+
+
+@authorized_only
+async def cmd_cpi(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """``/cpi`` — latest CPI release with summarizer output."""
+    await _release_check_handler(update, "CPI")
+
+
+@authorized_only
+async def cmd_fomc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """``/fomc`` — most recent FOMC decision (statement diff + SEP +
+    Tavily sell-side aggregate). Layer 3 path: no LLM hawkish/dovish
+    verdict."""
+    await _release_check_handler(update, "FOMC", needs_llm=False)
+
+
+@authorized_only
+async def cmd_yields(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """``/yields`` — current Treasury curve + 10Y-2Y / 10Y-3M spreads.
+
+    Reuses the macro_view dashboard (the yields panel is the
+    information operators want from /yields). Stage 5 may split this
+    into a dedicated narrower card.
+    """
+    placeholder = await update.message.reply_html(
+        "🏛 拉取收益率曲线...\n<i>FRED canonical EOD (预计 2-4 秒)</i>"
+    )
+    result = await _run_blocking(responders.macro_view, {})
+    await placeholder.edit_text(
+        result, parse_mode="HTML", disable_web_page_preview=True,
+    )
+
+
+@authorized_only
 async def cmd_insiders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """``/insiders TICKER [DAYS]`` — Form 4 summary for one ticker.
 
@@ -526,6 +613,8 @@ _INTENT_DISPLAY = {
     "pnl_period":       "📊 周期盈亏",
     "eight_k_view":     "📋 SEC 8-K",
     "insider_view":     "📥 内部人交易",
+    "macro_view":       "🌐 宏观 dashboard",
+    "release_check":    "📈 宏观 release",
     "unknown":          "❓ 未识别",
 }
 
@@ -549,6 +638,7 @@ async def cmd_nl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     days_horizon = parsed.get("days_horizon", 0) or 0
     period = parsed.get("period", "") or ""
     days_back = parsed.get("days_back", 0) or 0
+    release_type = parsed.get("release_type", "") or ""
 
     # Tell the user how we routed — transparency builds trust
     routing_chip = (
@@ -768,6 +858,19 @@ async def cmd_nl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if days_back:
                 args_d["days_back"] = days_back
             result = await _run_blocking(responders.insider_view, args_d)
+            await placeholder.edit_text(routing_chip + result, parse_mode="HTML",
+                                         disable_web_page_preview=True)
+
+        elif name == "macro_view":
+            result = await _run_blocking(responders.macro_view, {})
+            await placeholder.edit_text(routing_chip + result, parse_mode="HTML",
+                                         disable_web_page_preview=True)
+
+        elif name == "release_check":
+            args_d2: dict = {}
+            if release_type:
+                args_d2["release_type"] = release_type
+            result = await _run_blocking(responders.release_check, args_d2)
             await placeholder.edit_text(routing_chip + result, parse_mode="HTML",
                                          disable_web_page_preview=True)
 

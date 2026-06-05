@@ -620,6 +620,21 @@ _MODULE: dict[str, Explanation] = {
         "store":  "read-only — 不写 archive，不算 priority（priority 只跟 cron-pushed 卡片相关）",
         "next":   "渲染为单一回复卡，Telegram / dashboard 单条返回",
     },
+    # On-demand macro bot queries (Phase 4 Stage 4) — read-only, not cron
+    "_r_macro_view": {
+        "source": "用户实时请求（/macro 或 NL「宏观怎么样 / market 状态」），调 build_macro_snapshot + release_calendar 窗口",
+        "how":    "yfinance VIX/DXY/WTI/Gold + FRED canonical rates (DGS2/DGS10/T10Y2Y/Fed Funds) → 与 ⑭ cron 同源；同时 get_releases_in_window 拉过去 14 天 + 未来 30 天 release schedule",
+        "what":   "多段卡片：市场状态 + 收益率 + 最近 release + 下次 release。warnings list 在数据源失败时显示「数据待入库」",
+        "store":  "read-only — 不写 archive，不算 priority（priority 只跟 cron-pushed 卡片相关）",
+        "next":   "渲染为单一回复卡，Telegram / dashboard 单条返回",
+    },
+    "_r_release_check": {
+        "source": "用户实时请求（/cpi / /fomc / NL「最近 CPI」「上次 FOMC」），按 release_type 枚举（cpi/pce/nfp/gdp/ppi/claims/fomc）",
+        "how":    "release_calendar 找到最近一个该 release_type 的 release date → build_release_event(that_date) 拉 FRED + summarizer LLM（Layer 1+2 defense）。FOMC 单独走 fomc_parser + tavily_consensus（Layer 3：Python diff + sell-side majority vote，绝不让 LLM 判鹰鸽）",
+        "what":   "单条 release 卡：数据点（Python 算）+ LLM 定性标签（bull/bear/narrative/tone，≤40 字，禁止数字泄漏）+ 下次发布提示。FOMC 卡含 statement diff（新增/移除 phrases）+ SEP dot plot + Tavily 来源",
+        "store":  "read-only",
+        "next":   "渲染为单一回复卡",
+    },
     "_r_insider_view": {
         "source": "用户实时请求（/insiders NVDA 或 NL「NVDA 内部人交易」），单 ticker SEC EDGAR 拉过去 N 天 Form 4（默认 90 天）",
         "how":    "edgartools Form4.to_dataframe()['Code'] 全量解析 → 按 P/S/A/M/F/G/C 分桶 → cluster.find_clusters 滚动窗口 ≥3 distinct insiders",
@@ -642,6 +657,36 @@ _MODULE: dict[str, Explanation] = {
         "what":   "周/月回报 + 1M 最大回撤 + 主要行业暴露 + 下周财报清单 + 权益曲线图",
         "store":  "image 写到 data/images/，元数据 + caption 入 archive.db",
         "next":   "推 Telegram photo + dashboard auto-push；priority 强制 P1 底线（周报性质，operator 需看见）",
+    },
+
+    # Phase 4 Macro Agent — ⑭⑮⑯⑰
+    "_r_macro_snapshot": {
+        "source": "scheduler 触发（16:30 ET Mon-Fri），yfinance VIX/DXY/WTI/Gold + FRED canonical Fed Funds / DGS2 / DGS10 / T10Y2Y / VIXCLS",
+        "how":    "build_macro_snapshot 拉两路独立数据：market_client(yfinance) + fred_client(REST/wrapper)。任何单点失败聚合到 warnings list，不阻塞",
+        "what":   "MacroSnapshot 含 VIX 当日 + 1d% / DXY / WTI / Gold / 2Y / 10Y / T10Y2Y + 4 个 anomaly flags（vix_spike +20% / vix_elevated +10% / curve_flip / rates_shocked ≥20bps）",
+        "store":  "推送本身写 archive.db pushes 表",
+        "next":   "anomaly flags 决定 priority kind：vix_spike→macro_vix_spike (P0) / curve_flip→macro_curve_flip (P1) / 否则 macro_snapshot_p3 (P3 默认日常背景)",
+    },
+    "_r_macro_release": {
+        "source": "scheduler 触发（09:00 ET Mon-Fri），release_calendar.get_release_today 查今天有哪些 release（CPI/PCE/NFP/GDP/PPI/FOMC）",
+        "how":    "无 release → 静默退出。每个 release：FRED 拉对应 series → transforms 算 mom/yoy/trend → summarizer LLM template-fill（Layer 1 prompt + Layer 2 regex reject 预测性短语和数字泄漏）。FOMC 走专用路径：fomc_parser 做 statement diff + dot-plot 提取（Python only）+ tavily_consensus 抓 sell-side hawkish/dovish majority vote（绝不让 LLM 出鹰鸽判断）",
+        "what":   "MacroReport 含 today_releases（每条 MacroRelease 含 headline/core/mom/yoy/consensus/surprise_sigma/surprise_label/trend + bull/bear/narrative/tone 标签）和 fomc_event（含 statement_diff / sep_median_dots / sep_dot_plot_change / sell_side_sentiment）",
+        "store":  "推送写 archive.db pushes 表",
+        "next":   "compute_importance 按 surprise_sigma 升级：≥3σ→P0 / 2σ→+10 / 1σ→+5 / FOMC SEP shift→+15",
+    },
+    "_r_macro_claims": {
+        "source": "scheduler 触发（Thu 09:30 ET），FRED ICSA 周度初请失业金数据",
+        "how":    "build_claims_event 拉 ICSA series → headline = latest weekly print, core = 4-week moving average smoothed level。星期四 deterministic 触发（不查 release_calendar，trigger 已 gating）",
+        "what":   "MacroRelease(release_type='Claims') 含 weekly 数 + 4-week MA + trailing trend 标签",
+        "store":  "推送写 archive.db pushes 表",
+        "next":   "默认 macro_release_p2 (P2)。surprise_sigma > 2 升 P1。假期周（Thanksgiving / 跨年）ICSA 无数据 → silent skip",
+    },
+    "_r_macro_weekly": {
+        "source": "scheduler 触发（Fri 19:30 ET，错开 ⑨ 18:30 / ⑩ 19:00），release_calendar 本周已发生 + 下周预告 + FRED 1W deltas",
+        "how":    "build_weekly_recap 拉 (week_start, today) 的已发布列表 + (today, today+7d) 的预告 + 4 个核心指标（VIX/DGS10/DGS2/T10Y2Y）的 1W 净变化",
+        "what":   "dict 含 this_week_releases / next_week_releases / weekly_deltas（每个 series 1W delta float）",
+        "store":  "推送写 archive.db pushes 表",
+        "next":   "固定 macro_weekly (P1 floor) — operator 周末复盘视图，priority 不因数据多寡变化",
     },
 
     # Earnings agent — Phase 1

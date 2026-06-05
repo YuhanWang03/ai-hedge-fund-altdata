@@ -59,6 +59,14 @@ BASE_SCORES: dict[str, int] = {
     "sec_form4_purchase":  75,  # insider P-code base P1
     "sec_form4_sale":      50,  # insider S-code base P2 (default noise)
     "sec_form4_cluster":   75,  # ≥3 distinct insiders same-day same-direction
+    # Phase 4 Macro Agent — daily snapshot + release-driven kinds
+    "macro_release_p2":    55,  # in-line print (CPI/PCE/NFP/GDP/PPI/FOMC)
+    "macro_release_p1":    65,  # 1-2σ surprise → P1
+    "macro_release_p0":    85,  # ≥3σ surprise OR FOMC SEP shift → P0
+    "macro_snapshot_p3":   35,  # ⑭ daily ambient (VIX/yields/DXY/WTI/gold)
+    "macro_vix_spike":     85,  # VIX +20% single-day → P0
+    "macro_curve_flip":    65,  # T10Y2Y sign change today → P1
+    "macro_weekly":        65,  # ⑰ Fri 19:30 ET — operator-visibility floor
     "scheduler_status":    30,  # scheduler startup message — P3
     "error_alert":         75,  # error reported by @notify_on_error — P1
     "p2_digest":           65,  # the digest itself is P1
@@ -216,6 +224,36 @@ def compute_importance(
             adjustments.append((+5, "earnings_item"))
         elif item.startswith("5."):
             adjustments.append((+5, "exec_change"))
+
+    # ---- Phase 4 Macro release (CPI / PCE / NFP / GDP / PPI / FOMC) ----
+    if event_kind.startswith("macro_release"):
+        sigma = abs(float(md.get("surprise_sigma") or 0))
+        if sigma >= 3.0:
+            adjustments.append((+20, f"extreme_surprise_{sigma:.1f}sigma"))
+        elif sigma >= 2.0:
+            adjustments.append((+10, f"big_surprise_{sigma:.1f}sigma"))
+        elif sigma >= 1.0:
+            adjustments.append((+5, f"moderate_surprise_{sigma:.1f}sigma"))
+
+        if md.get("is_fomc") and md.get("sep_shift") in (
+            "hawkish_shift", "dovish_shift",
+        ):
+            adjustments.append((+15, f"sep_{md['sep_shift']}"))
+
+        if md.get("sell_side_consensus") == "hawkish_unexpected":
+            adjustments.append((+10, "sell_side_hawkish"))
+
+    # ---- Phase 4 VIX spike (⑭ snapshot) ----
+    if event_kind == "macro_vix_spike":
+        vix_pct = float(md.get("vix_pct_change_1d") or 0)
+        if vix_pct >= 0.30:
+            adjustments.append((+20, f"vix_extreme_+{vix_pct:.0%}"))
+        elif vix_pct >= 0.20:
+            adjustments.append((+10, f"vix_strong_+{vix_pct:.0%}"))
+
+    # ---- Phase 4 yield curve flip ----
+    if event_kind == "macro_curve_flip":
+        adjustments.append((+10, "yield_curve_inverted"))
 
     raw = base + sum(d for d, _ in adjustments)
     score = max(0, min(100, raw))

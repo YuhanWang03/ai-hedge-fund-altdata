@@ -181,6 +181,8 @@ LLM_ROLE_FINGERPRINTS: tuple[tuple[str, str], ...] = (
     ("财报发布总结分析师", "earnings_summarizer"),
     # v2/sec/ner_5_02.py — 8-K item 5.02 NER (CEO/CFO departures + appointments)
     ("8-K 5.02 高管变动信息抽取器", "sec_5_02_extractor"),
+    # v2/macro/summarizer.py — Phase 4 macro release LLM template-fill
+    ("宏观数据解读分析师",         "macro_summarizer"),
 )
 
 

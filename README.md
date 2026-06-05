@@ -1,6 +1,6 @@
 # AI Hedge Fund · Alternative Data Agent System
 
-A production-grade alternative-data intelligence platform delivered through a Telegram bot. Six post-market batch agents continuously monitor US equity markets, two earnings crons track watchlist + holdings for D-3/D-1/D-0 reminders and post-release summaries, two portfolio risk crons push daily concentration / P&L / drawdown snapshots plus a Friday weekly recap, two SEC monitoring crons scan daily 8-K material events and Form 4 insider transactions (with same-day ≥3 distinct-insider cluster detection), one intraday streamer scans for live anomalies and price-alert triggers, twenty-one natural-language intents handle interactive queries, and five distinct hallucination-defense mechanisms keep every claim grounded in primary sources.
+A production-grade alternative-data intelligence platform delivered through a Telegram bot. Six post-market batch agents continuously monitor US equity markets, two earnings crons track watchlist + holdings for D-3/D-1/D-0 reminders and post-release summaries, two portfolio risk crons push daily concentration / P&L / drawdown snapshots plus a Friday weekly recap, two SEC monitoring crons scan daily 8-K material events and Form 4 insider transactions (with same-day ≥3 distinct-insider cluster detection), four macro-data crons push the daily VIX / yields snapshot plus CPI/PCE/NFP/GDP/PPI release cards and FOMC statement-diff + SEP dot-plot cards plus a Friday macro weekly recap, one intraday streamer scans for live anomalies and price-alert triggers, twenty-three natural-language intents handle interactive queries, and five distinct hallucination-defense mechanisms keep every claim grounded in primary sources.
 
 Built as a portfolio project to demonstrate end-to-end ownership of a multi-source data pipeline, dual-LLM verification architecture, and 24/7 deployed system.
 
@@ -12,11 +12,11 @@ Built as a portfolio project to demonstrate end-to-end ownership of a multi-sour
 
 The system runs three concurrent services on a single $6/month VPS:
 
-**Scheduler** — fourteen cron jobs covering screening, anomaly detection, supply-chain expansion, institutional 13F tracking, weekly backfills, daily ETF holdings ingestion, earnings reminders, post-release earnings summaries, portfolio risk snapshot, portfolio weekly recap, SEC 8-K scanner, SEC Form 4 scanner, P2 daily digest, and archive sweep. Each job is process-isolated; one crashing cannot poison the others.
+**Scheduler** — eighteen cron jobs covering screening, anomaly detection, supply-chain expansion, institutional 13F tracking, weekly backfills, daily ETF holdings ingestion, earnings reminders, post-release earnings summaries, portfolio risk snapshot, portfolio weekly recap, SEC 8-K scanner, SEC Form 4 scanner, macro daily snapshot, macro release scanner, macro Initial Claims, macro weekly recap, P2 daily digest, and archive sweep. Each job is process-isolated; one crashing cannot poison the others.
 
 **Streamer** — minute-level intraday scanner. Polls Alpaca's real-time feed during US market hours (9:30 - 16:00 ET) and does two things: checks user-set price alerts for crossings, and scans the TECH_30 universe for dual-threshold anomalies (≥3% price move AND ≥2.5× volume pace). Deliberately runs no LLM/Tavily during market hours — deep attribution happens at 17:35 ET.
 
-**Telegram Bot** — always-on long-polling bot supporting twenty-one slash commands, three watchlist commands, and a natural-language intent classifier with twenty-one canonical intents. Authorized to a single user (chat ID filter).
+**Telegram Bot** — always-on long-polling bot supporting twenty-five slash commands, three watchlist commands, and a natural-language intent classifier with twenty-three canonical intents. Authorized to a single user (chat ID filter).
 
 All three services share seven SQLite databases via WAL mode and a ChromaDB vector store for RAG memory.
 
@@ -29,16 +29,20 @@ All three services share seven SQLite databases via WAL mode and a ChromaDB vect
 │                     hedge-fund-scheduler.service                 │
 ├──────────────────────────────────────────────────────────────────┤
 │  08:00 ET Mon-Fri  ⑦ Earnings Reminders        → Telegram push   │
+│  09:00 ET Mon-Fri  ⑮ Macro Release Scanner     → Telegram push   │
+│  09:30 ET Thu      ⑯ Macro Initial Claims      → Telegram push   │
+│  16:30 ET Mon-Fri  ⑭ Macro Daily Snapshot      → Telegram push   │
 │  17:00 ET Mon-Fri  ⑤ ETF Daily Snapshot       (silent ingest)    │
+│  17:05 ET Mon-Fri  ⑪ SEC 8-K Scanner           → Telegram push   │
 │  17:30 ET Mon-Fri  ① Daily Screen              → Telegram push   │
 │  17:35 ET Mon-Fri  ② Anomaly Monitor           → Telegram push   │
+│  17:45 ET Mon-Fri  ⑫ SEC Form 4 Scanner        → Telegram push   │
 │  18:00 ET Mon      ③ Lateral Expansion         → Telegram push   │
 │  18:00 ET Tue/Fri  ④ Institutional 13F         → Telegram push   │
-│  17:05 ET Mon-Fri  ⑪ SEC 8-K Scanner           → Telegram push   │
-│  17:45 ET Mon-Fri  ⑫ SEC Form 4 Scanner        → Telegram push   │
 │  18:30 ET Mon-Fri  ⑨ Portfolio Risk Snapshot   → Telegram push   │
 │  18:30 ET Sun      ④b 13F Backfill             (silent refresh)  │
 │  19:00 ET Fri      ⑩ Portfolio Weekly Recap    → Telegram push   │
+│  19:30 ET Fri      ⑰ Macro Weekly Recap        → Telegram push   │
 │  21:00 ET Mon-Fri  ⑧ Earnings Summaries        → Telegram push   │
 └──────────────────────────────────────────────────────────────────┘
 
@@ -66,11 +70,12 @@ All three services share seven SQLite databases via WAL mode and a ChromaDB vect
 │                   /portfolio /pnl /risk /settings                │
 │                   /watchlist /add /remove                        │
 │                   /earnings /8k /insiders                        │
-│  NL classifier  · 21 intents · DeepSeek T=0 · strict-enum        │
+│                   /macro /cpi /fomc /yields                      │
+│  NL classifier  · 23 intents · DeepSeek T=0 · strict-enum        │
 └──────────────────────────────────────────────────────────────────┘
 
 External: financialdatasets.ai · yfinance · SEC EDGAR · ARK CSV CDN
-          Alpaca · Tavily News API · DeepSeek LLM · OpenAI embeddings
+          Alpaca · FRED · Tavily News API · DeepSeek LLM · OpenAI embeddings
 ```
 
 ---
@@ -160,7 +165,7 @@ A typical fire looks like:
 
 ## Telegram interface
 
-The bot's natural-language layer classifies free-form Chinese or English text into twenty-one canonical intents using DeepSeek at temperature=0. Outputs are validated against a closed enum whitelist — unrecognized intents fall back to `unknown`, guaranteeing bounded behavior.
+The bot's natural-language layer classifies free-form Chinese or English text into twenty-three canonical intents using DeepSeek at temperature=0. Outputs are validated against a closed enum whitelist — unrecognized intents fall back to `unknown`, guaranteeing bounded behavior.
 
 ### Slash commands
 
@@ -280,6 +285,7 @@ v2/
 ├── earnings/         # ⑦⑧ yfinance calendar + FD history + LLM summary + cards
 ├── portfolio/        # ⑨⑩ Alpaca positions → RiskReport (concentration / exposure / P&L / drawdown)
 ├── sec/              # ⑪⑫ edgartools wrapper + 8-K item parser + Form 4 + cluster + 5.02 NER
+├── macro/            # ⑭⑮⑯⑰ FRED + yfinance + Tavily + LLM template-fill + FOMC fomc_parser
 ├── streamer/         # intraday runner + universe scanner
 ├── broker/           # Alpaca paper-account adapter (read-only)
 ├── universe/         # TECH_30 list + sector ETF mapping
@@ -304,7 +310,11 @@ scripts/
 ├── portfolio_risk_to_telegram.py    # ⑨
 ├── portfolio_weekly_to_telegram.py  # ⑩
 ├── sec_8k_to_telegram.py            # ⑪
-└── sec_form4_to_telegram.py         # ⑫
+├── sec_form4_to_telegram.py         # ⑫
+├── macro_daily_snapshot.py          # ⑭
+├── macro_release_to_telegram.py     # ⑮
+├── macro_claims_to_telegram.py      # ⑯
+└── macro_weekly_to_telegram.py      # ⑰
 ```
 
 ---
@@ -446,7 +456,7 @@ Berkshire reports AAPL across three subsidiaries (BHRG, GEICO, National Indemnit
 
 ### Strict-enum intent classification
 
-The NL classifier outputs one of twenty-one intents plus arguments. Output is JSON, parsed, validated against a whitelist set. Anything else becomes `unknown`. The LLM never decides what to *say* — only which tool to *call*. If users wanted DeepSeek to write financial analysis from its imagination, they could ask DeepSeek directly. The point of this system is grounded, multi-source, verified output.
+The NL classifier outputs one of twenty-three intents plus arguments. Output is JSON, parsed, validated against a whitelist set. Anything else becomes `unknown`. The LLM never decides what to *say* — only which tool to *call*. If users wanted DeepSeek to write financial analysis from its imagination, they could ask DeepSeek directly. The point of this system is grounded, multi-source, verified output.
 
 ### Atomic alert firing
 
@@ -507,14 +517,15 @@ Intraday streamer adds ~30 Alpaca API calls/minute during market hours (one batc
 - **Phase 2 · Portfolio Risk Agent (⑨⑩ + /risk + /pnl extension)** — daily concentration / P&L / drawdown / 7-day earnings risk, Friday weekly recap, 4 public formatters with byte-equal pins, drawdown 5-layer sign-convention defense
 - **Phase 2.5-mini · BROAD-market ETF bucket** — IVV/SPY/VOO/QQQ classification
 - **Phase 3 · SEC Monitoring Agent (⑪⑫ + /8k + /insiders)** — daily 8-K material-event scanner across 24 priority-graded item codes + Form 4 insider-transaction scanner with noise/signal split (83% A/M/F/G/C → digest, 17% P/S → individual cards) + same-day ≥3 distinct-insider cluster detection + 5.02 LLM NER for executive departures/appointments + 10b5-1 plan vs discretionary distinction, 5 public formatters with byte-equal pins, HTML safety lint
+- **Phase 4 · Macro Agent (⑭⑮⑯⑰ + /macro + /cpi + /fomc + /yields)** — daily VIX/yields snapshot + CPI/PCE/NFP/GDP/PPI release scanner + weekly Initial Claims + Friday macro recap. FRED + yfinance hybrid (avoids Yahoo's ×10 Treasury raw bug). LLM 4-layer hallucination defense (Template-Fill / Post-Parse Reject / FOMC Layer 3 no-LLM-verdict via fomc_parser + tavily_consensus / Historical analog deferred to Phase 4.5). 6 public formatters with byte-equal pins, HTML safety lint, hard-coded `_2026_RELEASES` calendar regenerated yearly via `_seed_calendar.py` against FRED `/release/dates` REST endpoint.
 - **Web dashboard** — FastAPI + React + Tailwind over `archive.db` auto-push feed with trace replay and a user QA mode
 - **Observability SDK** — `v2/observability/` monkey-patches FD / DeepSeek / Tavily / intent classifier so every agent produces a trace automatically
-- **272 sandbox unit tests** across all four phases — Phase 1 (21 earnings byte-equal + 17 earnings priority + 10 earnings cron integration + 9 earnings pipeline) + Phase 2 (9 portfolio byte-equal + 19 portfolio priority + 5 priority floor + 10 portfolio pipeline edges + 13 portfolio cron integration + 20 portfolio smoke) + Phase 3 (21 SEC smoke + 21 SEC priority + 15 SEC byte-equal + 8 HTML safety + 20 cron integration + 11 bot responder) + general (9 archive migration + 23 intent classify + 18 base priority + 13 observability + the rest distributed across modules)
+- **354 sandbox unit tests** across all five phases — Phase 1 (21 earnings byte-equal + 17 earnings priority + 10 earnings cron integration + 9 earnings pipeline) + Phase 2 (9 portfolio byte-equal + 19 portfolio priority + 5 priority floor + 10 portfolio pipeline edges + 13 portfolio cron integration + 20 portfolio smoke) + Phase 3 (21 SEC smoke + 21 SEC priority + 15 SEC byte-equal + 8 HTML safety + 20 cron integration + 11 bot responder) + Phase 4 (40 macro smoke + 16 macro priority ladder + 16 macro byte-equal + 9 HTML safety + 9 bot responder + 22 cron integration) + general (9 archive migration + 33 intent classify + 18 base priority + 13 observability + the rest distributed across modules)
 
 ### In progress / TODO
 
 - **Phase 3.5 (optional)** — 10-Q parser + MD&A material-change diff / weekly insider digest cron (aggregates A/M/F/G/C noise_summary) / per-position weekly attribution (Phase 2 Stage 7 deferral)
-- **Phase 4 · Macro Agent (Stage 0 ack'd, awaiting `FRED_API_KEY` on VPS)** — FOMC / CPI / PCE / NFP via FRED + Tavily with dynamic macro calendar generation
+- **Phase 4.5 (optional)** — FOMC press-conference transcript +6h follow-up cron (Tavily-scrape Powell Q&A highlights) / Historical analog mode ("similar surprise → N-day market reaction" RAG) / Auto release_calendar scraping (replace yearly manual `_seed_calendar.py` rerun)
 - **Phase 5 · Market Regime + ARK significant-rebalance alerts**
 - **Phase 6 · News pipeline refactor + 3-tier Universe**
 - Ongoing: Migration system audit
@@ -527,7 +538,7 @@ Intraday streamer adds ~30 Alpaca API calls/minute during market hours (one batc
 
 ## Credits
 
-The repository's outer layout and the original educational `app/` directory come from [virattt/ai-hedge-fund](https://github.com/virattt/ai-hedge-fund), an open-source AI hedge fund concept project. The `v2/` directory — the entire alternative-data agent system described in this README (six post-market agents + two earnings crons + two portfolio risk crons + two SEC monitoring crons, intraday streamer, Telegram bot with 21 NL intents, 5 hallucination-defense mechanisms, push-priority system, all SQLite + ChromaDB stores, all systemd deployment scaffolding) — was built from scratch as a separate project on top of that foundation.
+The repository's outer layout and the original educational `app/` directory come from [virattt/ai-hedge-fund](https://github.com/virattt/ai-hedge-fund), an open-source AI hedge fund concept project. The `v2/` directory — the entire alternative-data agent system described in this README (six post-market agents + two earnings crons + two portfolio risk crons + two SEC monitoring crons + four macro-data crons, intraday streamer, Telegram bot with 23 NL intents, 5 hallucination-defense mechanisms, push-priority system, all SQLite + ChromaDB stores, all systemd deployment scaffolding) — was built from scratch as a separate project on top of that foundation.
 
 ## License
 

@@ -36,6 +36,9 @@ from v2.reporting import (
     format_holders,
     format_institutional_messages,
     format_lateral_result,
+    format_macro_dashboard,
+    format_macro_fomc_card,
+    format_macro_release_card,
     format_pnl,
     format_portfolio,
     format_portfolio_snapshot,
@@ -991,6 +994,174 @@ def insider_view(args: dict) -> str:
         ticker, signals, cluster_list, noise_counts, days_back,
         membership_note=membership_note,
     )
+
+
+# ---------------------------------------------------------------------------
+# /macro + /cpi + /pce + /nfp + /fomc + /yields — Phase 4 Stage 4
+# ---------------------------------------------------------------------------
+# Read-only contract: no archive write, no priority computed, no LLM
+# for FOMC hawkish/dovish (Layer 3 defense — defer to fomc_parser +
+# tavily_consensus). Format is inline; Stage 5 will lift it to
+# v2.reporting.format_macro_*.
+
+_VALID_RELEASE_TYPES = ("CPI", "PCE", "NFP", "GDP", "PPI", "Claims", "FOMC")
+_DEFAULT_RELEASE_TYPE = "CPI"
+
+
+def _normalize_release_type(raw: str | None) -> str:
+    """Coerce the user-supplied release_type to the closed enum.
+    Unknown / empty → default CPI."""
+    if not raw:
+        return _DEFAULT_RELEASE_TYPE
+    norm = raw.strip().upper()
+    aliases = {
+        "CLAIMS": "Claims",
+        "JOBS": "NFP", "NFP": "NFP", "PAYROLLS": "NFP",
+        "CPI": "CPI", "PCE": "PCE", "GDP": "GDP", "PPI": "PPI",
+        "FOMC": "FOMC", "FED": "FOMC",
+    }
+    return aliases.get(norm, _DEFAULT_RELEASE_TYPE)
+
+
+def macro_view(args: dict | None = None) -> str:
+    """Real-time macro dashboard.
+
+    args: ``{}`` (no inputs — fully derived from live data).
+
+    Composition:
+    - ``build_macro_snapshot`` for the market + rates panels
+    - ``release_calendar.get_releases_in_window`` for the next 5 events
+      (±30 days)
+    - The fixed list of FOMC dates within the window
+
+    No archive read (Stage 4 keeps it simple — Stage 5 may add an
+    archive-last-3-pushes overlay; ack'd in the Stage 4 spec).
+    """
+    from datetime import date, timedelta
+
+    today = date.today()
+    today_iso = today.isoformat()
+
+    try:
+        from v2.macro import build_macro_snapshot
+        snap = build_macro_snapshot(today_iso)
+    except Exception as exc:
+        logger.exception("macro_view: snapshot build failed")
+        return f"❌ 宏观快照失败: <code>{html.escape(str(exc))}</code>"
+
+    try:
+        from v2.macro.release_calendar import get_releases_in_window
+        window_start = (today - timedelta(days=14)).isoformat()
+        window_end = (today + timedelta(days=30)).isoformat()
+        window = get_releases_in_window(window_start, window_end)
+    except Exception as exc:
+        logger.warning("macro_view: calendar lookup failed: %s", exc)
+        window = {}
+
+    emit("render", card="macro_view_card", date=today_iso,
+         snapshot_warnings=len(snap.warnings),
+         window_dates=len(window))
+
+    return format_macro_dashboard(snap, window, today_iso)
+
+
+def release_check(args: dict | None = None) -> str:
+    """Single-release deep-dive.
+
+    args: ``{"release_type": "cpi" | "pce" | "nfp" | "gdp" | "ppi" |
+              "claims" | "fomc"}``.
+
+    Walks the release_calendar backwards from today for the latest
+    past date matching ``release_type``, then calls
+    ``build_release_event`` for that date and renders the matching
+    release. FOMC routes through the FOMC card with statement diff +
+    SEP shift + Tavily aggregate (Layer 3 path).
+    """
+    args = args or {}
+    rel_type = _normalize_release_type(args.get("release_type"))
+
+    from datetime import date
+    today = date.today()
+
+    target_date = _most_recent_release_date(rel_type, today)
+    if target_date is None:
+        return (
+            f"<b>📅 {rel_type}</b>\n"
+            f"<i>未找到 {rel_type} 在已知 release 日历内 (window 截至 2026)</i>"
+        )
+
+    try:
+        from v2.macro import build_release_event
+        report = build_release_event(target_date)
+    except Exception as exc:
+        logger.exception("release_check: build_release_event failed for %s", target_date)
+        return (
+            f"<b>📅 {rel_type}</b>\n"
+            f"❌ FRED / 数据获取失败: <code>{html.escape(str(exc))}</code>"
+        )
+
+    # FOMC has its own card via the FOMCEvent path
+    if rel_type == "FOMC":
+        if report.fomc_event is None:
+            return (
+                f"<b>🏛 FOMC · {target_date}</b>\n"
+                "<i>该日 FOMC 数据暂不可用 (statement / SEP / Tavily 全部 fetch 失败)</i>"
+            )
+        next_fomc = _next_release_date("FOMC", today)
+        return format_macro_fomc_card(
+            report.fomc_event, next_fomc_date=next_fomc,
+        )
+
+    matching = [r for r in report.today_releases if r.release_type == rel_type]
+    if not matching:
+        return (
+            f"<b>📅 {rel_type} · {target_date}</b>\n"
+            f"<i>该日 {rel_type} release 数据暂不可用</i>"
+        )
+
+    next_date = _next_release_date(rel_type, today)
+    emit("render", card="release_check_card",
+         release_type=rel_type, target_date=target_date)
+    return format_macro_release_card(matching[0], next_release_date=next_date)
+
+
+# ---- Helpers --------------------------------------------------------------
+
+def _most_recent_release_date(rel_type: str, today) -> str | None:
+    """Walk the release_calendar backwards from ``today`` for the
+    latest entry matching ``rel_type``. Returns ISO string or None."""
+    from v2.macro.release_calendar import _2026_RELEASES
+
+    today_iso = today.isoformat()
+    candidates = []
+    for iso, entries in _2026_RELEASES.items():
+        if iso > today_iso:
+            continue
+        for entry_type, _label, _src in entries:
+            if entry_type == rel_type:
+                candidates.append(iso)
+                break
+    if not candidates:
+        return None
+    return max(candidates)
+
+
+def _next_release_date(rel_type: str, today) -> str | None:
+    """Next scheduled release date for ``rel_type`` after ``today``."""
+    from v2.macro.release_calendar import _2026_RELEASES
+
+    today_iso = today.isoformat()
+    candidates = []
+    for iso, entries in _2026_RELEASES.items():
+        if iso <= today_iso:
+            continue
+        for entry_type, _label, _src in entries:
+            if entry_type == rel_type:
+                candidates.append(iso)
+                break
+    if not candidates:
+        return None
+    return min(candidates)
 
 
 # ---- /8k + /insiders helpers ----------------------------------------------
