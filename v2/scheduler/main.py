@@ -25,6 +25,10 @@ from v2.scheduler.jobs import (
     institutional_job,
     lateral_expansion_job,
     p2_digest_job,
+    macro_claims_job,
+    macro_daily_snapshot_job,
+    macro_release_job,
+    macro_weekly_job,
     portfolio_risk_job,
     portfolio_weekly_job,
     sec_8k_job,
@@ -188,6 +192,63 @@ def build_scheduler() -> BlockingScheduler:
         id="p2_digest",
         name="📋 P2 Digest (Mon-Fri 16:45 ET)",
         misfire_grace_time=1800,
+        coalesce=True,
+    )
+
+    # ⑭ Macro daily snapshot — 16:30 ET Mon-Fri. Post-close ambient
+    # snapshot: VIX (yfinance) + DXY / WTI / Gold + Fed Funds / 2Y /
+    # 10Y / T10Y2Y (FRED). 4 pinned anomaly flags (vix_spike +20% /
+    # vix_elevated +10% / curve_flip / rates_shocked ≥20bps) bump
+    # priority via the kind enum (macro_vix_spike / macro_curve_flip
+    # / macro_snapshot_p3). 15 min before ⑥ P2 digest so the snapshot
+    # row can be picked up by the digest if it lands at P2.
+    scheduler.add_job(
+        macro_daily_snapshot_job,
+        CronTrigger(hour=16, minute=30, day_of_week="mon-fri", timezone=_TZ),
+        id="macro_snapshot",
+        name="⑭ Macro Daily Snapshot (Mon-Fri 16:30 ET)",
+        misfire_grace_time=3600,
+        coalesce=True,
+    )
+
+    # ⑮ Macro release scanner — 09:00 ET Mon-Fri. Gates internally on
+    # release_calendar.get_release_today(today_iso); non-release days
+    # exit silently with no archive write. On release days routes
+    # CPI/PCE/NFP/GDP/PPI through summarizer (Layer 1+2 defense) and
+    # FOMC through fomc_parser + tavily_consensus (never an LLM
+    # verdict for hawkish/dovish).
+    scheduler.add_job(
+        macro_release_job,
+        CronTrigger(hour=9, minute=0, day_of_week="mon-fri", timezone=_TZ),
+        id="macro_release",
+        name="⑮ Macro Release Scanner (Mon-Fri 09:00 ET)",
+        misfire_grace_time=1800,
+        coalesce=True,
+    )
+
+    # ⑯ Macro Initial Claims — Thu 09:30 ET. Deterministic Thursday
+    # cadence; no calendar lookup. build_claims_event surfaces the
+    # weekly print + 4-week MA smoothed level. Holiday weeks (Thanks-
+    # giving / year-end shift) where ICSA omits a print → silent skip.
+    scheduler.add_job(
+        macro_claims_job,
+        CronTrigger(hour=9, minute=30, day_of_week="thu", timezone=_TZ),
+        id="macro_claims",
+        name="⑯ Macro Initial Claims (Thu 09:30 ET)",
+        misfire_grace_time=3600,
+        coalesce=True,
+    )
+
+    # ⑰ Macro weekly recap — Fri 19:30 ET. Slot pinned by Stage 0
+    # design to clear ⑨ 18:30 / ⑩ 19:00. This-week fired releases
+    # + next-week schedule + 1W deltas on VIX / DGS10 / DGS2 / T10Y2Y.
+    # Always P1 floor (operator visibility — same posture as ⑩).
+    scheduler.add_job(
+        macro_weekly_job,
+        CronTrigger(hour=19, minute=30, day_of_week="fri", timezone=_TZ),
+        id="macro_weekly",
+        name="⑰ Macro Weekly Recap (Fri 19:30 ET)",
+        misfire_grace_time=7200,
         coalesce=True,
     )
 

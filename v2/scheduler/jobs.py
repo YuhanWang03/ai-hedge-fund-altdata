@@ -104,6 +104,49 @@ def sec_form4_job() -> None:
     _run("sec_form4_to_telegram.py")
 
 
+def macro_daily_snapshot_job() -> None:
+    """⑭ Mon-Fri 16:30 ET — Macro daily snapshot.
+
+    Post-close: VIX / DXY / WTI / Gold (yfinance) + Fed Funds / 2Y /
+    10Y / T10Y2Y (FRED canonical). 16:30 ET slot deliberately sits
+    15 min before the 16:45 ET P2 digest and 30 min before the 17:00 ET
+    cron block — no collision with the rest of the schedule.
+    """
+    _run("macro_daily_snapshot.py")
+
+
+def macro_release_job() -> None:
+    """⑮ Mon-Fri 09:00 ET — Macro release scanner.
+
+    Gates internally on release_calendar.get_release_today(today). On
+    release days routes CPI/PCE/NFP/GDP/PPI through summarizer (Layer
+    1+2 defense) and FOMC through fomc_parser + tavily_consensus
+    (Python diff + sell-side majority vote — never an LLM hawkish
+    verdict).
+    """
+    _run("macro_release_to_telegram.py")
+
+
+def macro_claims_job() -> None:
+    """⑯ Thu 09:30 ET — Initial Jobless Claims.
+
+    Thursday-only trigger is the deterministic gate (no calendar lookup
+    needed — ICSA releases every Thursday 08:30 ET). build_claims_event
+    surfaces the weekly print + 4-week MA smoothed level.
+    """
+    _run("macro_claims_to_telegram.py")
+
+
+def macro_weekly_job() -> None:
+    """⑰ Fri 19:30 ET — Macro weekly recap.
+
+    19:30 slot picked to clear ⑨ 18:30 / ⑩ 19:00 (Stage 0 macro spec
+    requirement). Recap = this-week fired releases + next-week
+    schedule + 1W deltas on VIX / DGS10 / DGS2 / T10Y2Y.
+    """
+    _run("macro_weekly_to_telegram.py")
+
+
 def p2_digest_job() -> None:
     """Daily roll-up of P2-tier pushes — runs 16:45 ET before the
     17:00–18:30 ET cron block."""
