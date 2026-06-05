@@ -179,6 +179,8 @@ LLM_ROLE_FINGERPRINTS: tuple[tuple[str, str], ...] = (
     ("bull + bear",        "narrator"),
     # v2/earnings/summarizer.py — post-release bull/bear/narrative
     ("财报发布总结分析师", "earnings_summarizer"),
+    # v2/sec/ner_5_02.py — 8-K item 5.02 NER (CEO/CFO departures + appointments)
+    ("8-K 5.02 高管变动信息抽取器", "sec_5_02_extractor"),
 )
 
 
