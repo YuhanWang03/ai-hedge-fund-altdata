@@ -32,6 +32,7 @@ from typing import Any, Callable
 from v2.sec import client as edgar_client_mod
 from v2.sec import eight_k_parser, form4_parser, ner_5_02
 from v2.sec.cluster import find_clusters
+from v2.sec.eight_k_parser import get_item_text
 from v2.sec.models import (
     EightKEvent,
     Form4Transaction,
@@ -103,7 +104,14 @@ def run_sec_scan(
             event = eight_k_parser.parse_eight_k_filing(edgar_filing, sec_filing)
             if event is None:
                 continue
-            _apply_5_02_extraction(event, llm_extractor, result.warnings)
+            # Stage 2 pickup: extract the 5.02 item's raw text from the
+            # parsed EightK obj and pass to the LLM extractor. The
+            # extractor falls back to safe defaults on empty text.
+            try:
+                eight_k_obj = edgar_filing.obj()
+            except Exception:
+                eight_k_obj = None
+            _apply_5_02_extraction(event, eight_k_obj, llm_extractor, result.warnings)
             result.eight_k_events.append(event)
 
         # ---- Form 4 ----
@@ -178,6 +186,7 @@ def _build_sec_filing(
 
 def _apply_5_02_extraction(
     event: EightKEvent,
+    eight_k_obj,
     llm_extractor: Callable[[str], dict],
     warnings: list[str],
 ) -> None:
@@ -185,20 +194,27 @@ def _apply_5_02_extraction(
 
     Mutates ``event`` in place. Adds a warning if the extractor degrades
     to the fallback (so the dashboard trace shows the degraded run).
+
+    Args:
+        event: the EightKEvent to mutate in place.
+        eight_k_obj: the underlying edgartools ``EightK`` instance used
+            to extract the raw 5.02 item text. Can be ``None`` on
+            upstream parse failure; the LLM fallback path handles that.
+        llm_extractor: callable taking item-text string and returning
+            the structured extraction dict.
+        warnings: list to append failure messages to.
     """
     for item in event.items:
         if item.code != "5.02":
             continue
 
-        # Pull the 5.02 item-text block from the underlying edgartools
-        # object if available. The parser doesn't currently capture the
-        # raw text — Stage 2 cron has access via edgar_filing.obj() but
-        # for the standalone pipeline call here we pass the description
-        # placeholder so the LLM extractor at least gets the framing.
-        # In production cron, _apply_5_02_extraction is called with the
-        # full text via a slight pipeline tweak (Stage 2). For Stage 1
-        # smoke we exercise via the llm_extractor seam directly.
-        item_text = event.items_text_5_02 if hasattr(event, "items_text_5_02") else item.description
+        # Stage 2 pickup: read the raw 5.02 section text from the
+        # underlying edgartools obj. Empty text triggers ner_5_02's
+        # conservative fallback (has_senior_exec=True → P0 escalation).
+        if eight_k_obj is not None:
+            item_text = get_item_text(eight_k_obj, "5.02")
+        else:
+            item_text = ""
 
         try:
             extracted = llm_extractor(item_text)

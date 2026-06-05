@@ -109,6 +109,79 @@ def classify_item(code: str) -> tuple[PriorityTier, str]:
     return _ITEM_TABLE.get(code, (_DEFAULT_TIER, _DEFAULT_DESC))
 
 
+# ---------------------------------------------------------------------------
+# Stage 2 pickup — item-text extractor for the 5.02 LLM path
+# ---------------------------------------------------------------------------
+
+# Matches "Item 5.02" / "ITEM 5.02" / "Item 5.02:" / "Item 5.02 Departure of..."
+# at the start of a section. The ``\b`` after the code prevents matching
+# 5.02 inside a longer code (no real 8-K item starts with 5.020+ but the
+# regex is defensive).
+def _item_header_pattern(code: str) -> "re.Pattern[str]":
+    return re.compile(
+        rf"item\s+{re.escape(code)}\b",
+        re.IGNORECASE,
+    )
+
+
+def get_item_text(eight_k_obj, code: str) -> str:
+    """Extract the body text for one specific item from a parsed 8-K.
+
+    edgartools' ``EightK`` exposes ``.text`` containing the full filing
+    body. SEC 8-Ks structure each item as a section starting with
+    "Item X.YY [Title]". This function locates the requested ``code``'s
+    header and returns the text up to the next "Item X.YY" header (or
+    end of document).
+
+    Args:
+        eight_k_obj: an edgartools ``EightK`` instance (from ``filing.obj()``).
+        code: the item code to extract, e.g. ``"5.02"``.
+
+    Returns:
+        The item body text. Returns ``""`` on:
+        - missing/empty ``.text`` attribute
+        - item code not found in the document
+        - any parsing exception
+
+    Empty return triggers ner_5_02's conservative fallback (
+    ``has_senior_exec=True``), so the cron still escalates to P0 on
+    parser failure rather than silently dropping the LLM call.
+    """
+    try:
+        text = getattr(eight_k_obj, "text", None) or ""
+        if not text:
+            return ""
+
+        header_re = _item_header_pattern(code)
+        match = header_re.search(text)
+        if match is None:
+            return ""
+
+        start = match.start()
+
+        # Find the next "Item X.YY" boundary. Search after the current
+        # header's end (not start, to avoid matching itself).
+        next_re = re.compile(
+            r"item\s+\d{1,2}\.\d{2}\b",
+            re.IGNORECASE,
+        )
+        next_match = next_re.search(text, match.end())
+        end = next_match.start() if next_match else len(text)
+
+        # Sanity cap: 8-K items are typically 200-2000 chars. If
+        # something matched implausibly large (e.g. the next-boundary
+        # regex failed because the SDK normalized whitespace), cap to
+        # 4000 chars so the LLM context stays well below budget.
+        section = text[start:end].strip()
+        if len(section) > 4000:
+            section = section[:4000]
+        return section
+
+    except Exception as exc:
+        logger.warning("get_item_text(%s) failed: %s", code, exc)
+        return ""
+
+
 def parse_eight_k_filing(
     edgar_filing: Any,
     sec_filing: SecFiling,

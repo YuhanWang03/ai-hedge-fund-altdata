@@ -9,7 +9,7 @@ snapshots. See Stage 0 task 1 for the architectural decision.
 
 from v2.sec.client import get_recent_filings
 from v2.sec.cluster import find_clusters
-from v2.sec.eight_k_parser import classify_item, parse_eight_k_filing
+from v2.sec.eight_k_parser import classify_item, get_item_text, parse_eight_k_filing
 from v2.sec.form4_parser import parse_form4_filing
 from v2.sec.insider_role import lookup_insider_role
 from v2.sec.models import (
@@ -39,6 +39,7 @@ __all__ = [
     "classify_item",
     "extract_5_02",
     "find_clusters",
+    "get_item_text",
     "get_recent_filings",
     "lookup_insider_role",
     "parse_eight_k_filing",

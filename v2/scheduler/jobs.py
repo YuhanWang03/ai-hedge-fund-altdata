@@ -89,6 +89,21 @@ def portfolio_weekly_job() -> None:
     _run("portfolio_weekly_to_telegram.py")
 
 
+def sec_8k_job() -> None:
+    """⑪ Mon-Fri 17:05 ET — SEC 8-K scanner for held + watchlist universe."""
+    _run("sec_8k_to_telegram.py")
+
+
+def sec_form4_job() -> None:
+    """⑫ Mon-Fri 17:45 ET — SEC Form 4 (insider transactions) scanner.
+
+    Time slot chosen to avoid collision with ① Daily Screen (17:30 ET)
+    and ② Anomaly Monitor (17:35 ET). 17:45 ET sits cleanly between
+    them and the 18:00 ET ③/④ block.
+    """
+    _run("sec_form4_to_telegram.py")
+
+
 def p2_digest_job() -> None:
     """Daily roll-up of P2-tier pushes — runs 16:45 ET before the
     17:00–18:30 ET cron block."""

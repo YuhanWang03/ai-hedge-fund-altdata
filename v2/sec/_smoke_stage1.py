@@ -199,6 +199,78 @@ def test_eight_k_unknown_item_defaults_p3():
     print("  ok   unknown 9.99 → P3 default + 其他 item description")
 
 
+def test_get_item_text_finds_5_02_section_in_multi_item():
+    """Stage 2 pickup — extract the 5.02 body from a multi-item 8-K.
+
+    Real 8-K filings concatenate items in document order with the
+    "Item X.YY" headers. Our extractor must isolate just the 5.02
+    section so the LLM doesn't get confused by adjacent items'
+    discussion.
+    """
+    from v2.sec.eight_k_parser import get_item_text
+
+    # Simulated EightK obj with .text — mirrors HPE multi-item filing
+    document = (
+        "Item 1.01 Entry into a Material Definitive Agreement\n"
+        "On May 30, 2026, the Company entered into a credit facility...\n"
+        "\n"
+        "Item 2.02 Results of Operations and Financial Condition\n"
+        "Quarterly earnings of $X.YY per share, attached as Exhibit 99.1.\n"
+        "\n"
+        "Item 5.02 Departure of Directors or Certain Officers; Election...\n"
+        "Effective June 4, 2026, John Smith resigned as Chief Executive Officer.\n"
+        "The Board appointed Jane Doe as interim CEO effective June 5, 2026.\n"
+        "\n"
+        "Item 7.01 Regulation FD Disclosure\n"
+        "A press release announcing the foregoing is attached as Exhibit 99.2.\n"
+        "\n"
+        "Item 9.01 Financial Statements and Exhibits\n"
+        "99.1 Press release dated June 4, 2026\n"
+    )
+    eight_k = SimpleNamespace(text=document)
+
+    extracted = get_item_text(eight_k, "5.02")
+    # The section header should be present
+    assert extracted.lower().startswith("item 5.02"), (
+        f"section should start with header, got: {extracted[:80]!r}"
+    )
+    # The 5.02 body content must be present
+    assert "John Smith resigned" in extracted
+    assert "Jane Doe" in extracted
+    # The 7.01 section must NOT bleed in
+    assert "Regulation FD" not in extracted
+    assert "Exhibit 99.2" not in extracted
+    # Length check — typical 5.02 sections are 200-2000 chars
+    assert 50 < len(extracted) < 1000
+    print(f"  ok   5.02 section extracted: {len(extracted)} chars, no 7.01 bleed")
+
+
+def test_get_item_text_missing_code_returns_empty():
+    """Item not in document → empty string, no exception."""
+    from v2.sec.eight_k_parser import get_item_text
+
+    eight_k = SimpleNamespace(text="Item 1.01 Material Agreement\n...\n")
+    assert get_item_text(eight_k, "5.02") == ""
+    assert get_item_text(eight_k, "9.99") == ""
+    print("  ok   missing item code → '' (no exception)")
+
+
+def test_get_item_text_no_text_attr_returns_empty():
+    """Defensive: SDK could return EightK without .text — handle gracefully."""
+    from v2.sec.eight_k_parser import get_item_text
+
+    # No text attribute at all
+    eight_k = SimpleNamespace()
+    assert get_item_text(eight_k, "5.02") == ""
+    # Empty text
+    eight_k2 = SimpleNamespace(text="")
+    assert get_item_text(eight_k2, "5.02") == ""
+    # None text
+    eight_k3 = SimpleNamespace(text=None)
+    assert get_item_text(eight_k3, "5.02") == ""
+    print("  ok   missing/empty/None .text → '' (no AttributeError)")
+
+
 # ---------------------------------------------------------------------------
 # Form 4 parser tests
 # ---------------------------------------------------------------------------
@@ -562,6 +634,9 @@ def main() -> int:
         ("eight_k_2_02_only_overlap",   test_eight_k_2_02_only_marked_overlap),
         ("eight_k_amendment_flag",      test_eight_k_amendment_flag),
         ("eight_k_unknown_item_p3",     test_eight_k_unknown_item_defaults_p3),
+        ("get_item_text_5_02_section",  test_get_item_text_finds_5_02_section_in_multi_item),
+        ("get_item_text_missing_empty", test_get_item_text_missing_code_returns_empty),
+        ("get_item_text_no_text_attr",  test_get_item_text_no_text_attr_returns_empty),
         # Form 4 parser
         ("form4_Code_column_fix",       test_form4_to_dataframe_uses_Code_column),
         ("form4_classify_PSAMFGC",      test_form4_classify_PSAMFGC),

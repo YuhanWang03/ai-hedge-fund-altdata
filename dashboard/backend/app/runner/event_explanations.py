@@ -597,6 +597,22 @@ _MODULE: dict[str, Explanation] = {
         "next":   "渲染为单卡，read-only 回复",
     },
 
+    # SEC monitoring agent — Phase 3
+    "_r_sec_8k": {
+        "source": "scheduler 触发（17:05 ET Mon-Fri），watchlist + Alpaca 持仓 的合并 ticker 集合 + SEC EDGAR",
+        "how":    "edgartools Company(ticker).get_filings(form='8-K', filing_date=today) → 解析 .items 拿 item codes → 按 Stage-0 优先级表分级",
+        "what":   "EightKEvent 含全部 items 及各自评级（P0-P3）。5.02 调 LLM template-fill 抽取 CEO/CFO 姓名 confirm senior exec",
+        "store":  "推送写 archive.db pushes 表",
+        "next":   "max(items) 决定卡片 tier，2.02-only filings skip（⑧ Earnings Summaries 处理）",
+    },
+    "_r_sec_form4": {
+        "source": "scheduler 触发（17:45 ET Mon-Fri），watchlist + Alpaca 持仓 + SEC EDGAR Form 4",
+        "how":    "edgartools Form4.to_dataframe()['Code'] 拿 transaction code → P/S 个人卡片 / A/M/F/G/C 进 noise_summary / 同日同向 ≥3 distinct insiders 算 cluster",
+        "what":   "Form4Transaction (P/S signal) + Form4Cluster + noise_summary。priority 按 USD magnitude + insider role (CEO/CFO +10) + 10b5-1 plan (-10) 算",
+        "store":  "推送写 archive，A/M/F/G/C noise 暂存等 Phase 3.5 weekly digest 消费",
+        "next":   "cluster 卡先推（更重要），再推单笔 signal 卡。同 cluster 内的单笔不重复推送",
+    },
+
     # Portfolio risk agent — Phase 2
     "_r_portfolio_risk": {
         "source": "scheduler 触发（18:30 ET Mon-Fri），Alpaca 当前持仓 + portfolio_history(1M, 1D) + yfinance 7d 财报日历",
