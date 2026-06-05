@@ -246,14 +246,18 @@ Live signal example from production: `MU +3.63% with SMH -1.10% on 1.5× volume 
 
 | Source | What | Why this |
 |---|---|---|
-| financialdatasets.ai | Fundamentals, prices, insider trades, earnings | Primary commercial API; consistent schema |
-| yfinance | Fallback prices, options chains (OI + volume) | Free; what powers the unusual-options-activity detector |
-| SEC EDGAR (via `edgartools`) | 13F-HR institutional filings | Authoritative source for fund holdings |
-| ARK Invest CDN | Daily ETF holdings CSV | Public; daily granularity |
-| Alpaca (paper) | Real-time prices, account portfolio + P&L | Free; powers `/portfolio`, `/pnl`, streamer alerts |
-| Tavily News API | News search for attribution + verification | Search-engine quality without scraping |
-| DeepSeek (`deepseek-chat`) | Generation + verification + intent classification | Best price/performance for Chinese + English |
-| OpenAI `text-embedding-3-small` | RAG memory embeddings | Cheap, accurate; small dimension |
+| **yfinance** (default daily prices, Phase 4.5-mini onwards) | Daily OHLCV (`get_prices`) for ① screen / ② monitor / ③ lateral / `/why` `/summary` bot paths | Real-time EOD; eliminates FD free-tier's 1-3 day lag that forced `fd_safe_today() = today-3` in Phase 1-4. Cards now display today's date instead of today-3. |
+| financialdatasets.ai | Earnings history (`get_earnings`), insider transactions (`get_insider_trades`), company fundamentals (`get_financial_metrics` / `get_company_info`) | Quarterly + episodic data — no daily-lag problem here. Primary commercial API; consistent schema. |
+| yfinance (other uses) | Options chains (OI + volume) + Phase 4 macro VIX/DXY/WTI/Gold | Free; powers the unusual-options-activity detector + macro snapshot. |
+| SEC EDGAR (via `edgartools`) | 13F-HR institutional filings + 8-K / Form 4 / 10-Q monitoring | Authoritative source. |
+| ARK Invest CDN | Daily ETF holdings CSV | Public; daily granularity. |
+| Alpaca (paper) | Real-time prices (streamer), account portfolio + P&L | Free; powers `/portfolio`, `/pnl`, streamer alerts, portfolio risk cron. |
+| FRED (Federal Reserve Economic Data) | Macro time series (CPI / PCE / NFP / GDP / PPI / Treasury yields / Fed Funds) | Authoritative EOD source; vintage handling included; avoids yfinance `^TNX` × 10 raw bug. |
+| Tavily News API | News search for attribution + verification + FOMC sell-side aggregate | Search-engine quality without scraping; Layer 3 defense replaces LLM hawkish/dovish verdict. |
+| DeepSeek (`deepseek-chat`) | Generation + verification + intent classification | Best price/performance for Chinese + English. |
+| OpenAI `text-embedding-3-small` | RAG memory embeddings | Cheap, accurate; small dimension. |
+
+**Phase 4.5-mini price-source decoupling** (commit `b36d5e3` series): `v2/data/price_source.py` exposes a `PriceSource` Protocol + `YFinancePriceSource` (default) + `FDPriceSource` (kept for backtest / event-study reproducibility) + `default_price_source()` factory. Ops can flip back to FD via `V2_PRICE_SOURCE=fd` env var without redeploying. The FD client remains source-of-truth for the non-time-sensitive endpoints listed above.
 
 ---
 
@@ -518,6 +522,7 @@ Intraday streamer adds ~30 Alpaca API calls/minute during market hours (one batc
 - **Phase 2.5-mini · BROAD-market ETF bucket** — IVV/SPY/VOO/QQQ classification
 - **Phase 3 · SEC Monitoring Agent (⑪⑫ + /8k + /insiders)** — daily 8-K material-event scanner across 24 priority-graded item codes + Form 4 insider-transaction scanner with noise/signal split (83% A/M/F/G/C → digest, 17% P/S → individual cards) + same-day ≥3 distinct-insider cluster detection + 5.02 LLM NER for executive departures/appointments + 10b5-1 plan vs discretionary distinction, 5 public formatters with byte-equal pins, HTML safety lint
 - **Phase 4 · Macro Agent (⑭⑮⑯⑰ + /macro + /cpi + /fomc + /yields)** — daily VIX/yields snapshot + CPI/PCE/NFP/GDP/PPI release scanner + weekly Initial Claims + Friday macro recap. FRED + yfinance hybrid (avoids Yahoo's ×10 Treasury raw bug). LLM 4-layer hallucination defense (Template-Fill / Post-Parse Reject / FOMC Layer 3 no-LLM-verdict via fomc_parser + tavily_consensus / Historical analog deferred to Phase 4.5). 6 public formatters with byte-equal pins, HTML safety lint, hard-coded `_2026_RELEASES` calendar regenerated yearly via `_seed_calendar.py` against FRED `/release/dates` REST endpoint.
+- **Phase 4.5-mini · Daily prices migration FD → yfinance** — `v2/data/price_source.py` exposes a `PriceSource` Protocol + `YFinancePriceSource` (default) + `FDPriceSource` (kept for backtest) + `default_price_source()` factory with `V2_PRICE_SOURCE=fd` ops escape hatch. Removes Phase 1-4's `fd_safe_today()` `today - 3` buffer: ① / ② / ③ / `/why` / `/summary` cards now display today's date instead of today - 3. `v2/data_safety.py` module deleted in full; 8 callers (5 v2 modules + 3 cron scripts) + 1 utility migrated; 12 price_source smoke tests. FD client remains source-of-truth for earnings / insider / financials.
 - **Web dashboard** — FastAPI + React + Tailwind over `archive.db` auto-push feed with trace replay and a user QA mode
 - **Observability SDK** — `v2/observability/` monkey-patches FD / DeepSeek / Tavily / intent classifier so every agent produces a trace automatically
 - **354 sandbox unit tests** across all five phases — Phase 1 (21 earnings byte-equal + 17 earnings priority + 10 earnings cron integration + 9 earnings pipeline) + Phase 2 (9 portfolio byte-equal + 19 portfolio priority + 5 priority floor + 10 portfolio pipeline edges + 13 portfolio cron integration + 20 portfolio smoke) + Phase 3 (21 SEC smoke + 21 SEC priority + 15 SEC byte-equal + 8 HTML safety + 20 cron integration + 11 bot responder) + Phase 4 (40 macro smoke + 16 macro priority ladder + 16 macro byte-equal + 9 HTML safety + 9 bot responder + 22 cron integration) + general (9 archive migration + 33 intent classify + 18 base priority + 13 observability + the rest distributed across modules)
