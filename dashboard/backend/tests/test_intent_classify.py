@@ -110,3 +110,86 @@ def test_existing_intents_not_regressed_by_earnings():
     for text, expected in cases:
         name, _ = _stub_classify(text)
         assert name == expected, f"{text!r} → {name} (want {expected})"
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 Stage 4 — SEC monitoring intents
+# ---------------------------------------------------------------------------
+
+def test_classify_8k_with_ticker():
+    name, args = _stub_classify("AAPL 最近 8-K")
+    assert name == "eight_k_view"
+    assert args.get("ticker") == "AAPL"
+
+
+def test_classify_8k_english_phrase():
+    name, args = _stub_classify("NVDA 8K")
+    assert name == "eight_k_view"
+    assert args.get("ticker") == "NVDA"
+
+
+def test_classify_insider_view_chinese():
+    name, args = _stub_classify("NVDA 内部人交易")
+    assert name == "insider_view"
+    assert args.get("ticker") == "NVDA"
+
+
+def test_classify_insider_view_english():
+    name, args = _stub_classify("TSLA insider trading")
+    assert name == "insider_view"
+    assert args.get("ticker") == "TSLA"
+
+
+def test_classify_insider_with_days_back_phrase():
+    """'过去 30 天 insider' → insider_view + days_back=30."""
+    name, args = _stub_classify("NVDA 过去 30 天 insider")
+    assert name == "insider_view"
+    assert args.get("ticker") == "NVDA"
+    assert args.get("days_back") == 30
+
+
+def test_classify_insider_with_days_back_long():
+    """'过去一年 insider' → days_back=365 (bounded max)."""
+    name, args = _stub_classify("AAPL 过去一年 insider 内部人")
+    assert name == "insider_view"
+    assert args.get("days_back") == 365
+
+
+def test_classify_insider_days_back_clamped_high():
+    """'过去 9999 天' → clamped to 365."""
+    name, args = _stub_classify("AAPL 过去 9999 天 insider")
+    assert name == "insider_view"
+    assert args.get("days_back") == 365
+
+
+def test_classify_insider_days_back_clamped_low():
+    """'过去 2 天' → clamped to 7."""
+    name, args = _stub_classify("AAPL 过去 2 天 insider")
+    assert name == "insider_view"
+    assert args.get("days_back") == 7
+
+
+def test_existing_intents_not_regressed_by_sec():
+    """Phase 3 keyword additions must NOT swallow Phase 0/1/2 intents."""
+    cases = [
+        ("NVDA 为什么跌？", "explain_move"),
+        ("看看 AAPL 怎么样", "summary"),
+        ("找一下 AMD 的产业链", "chain"),
+        ("巴菲特最近买了什么", "thirteen_f"),
+        ("谁持有 NVDA", "holders_view"),
+        ("ark 今天买啥", "etf_view"),
+        ("最近有什么异动", "find_anomalies"),
+        ("提醒我 NVDA 突破 130", "alert_set"),
+        ("我的 portfolio", "portfolio_view"),
+        ("watchlist", "watchlist_view"),
+        ("设置", "settings"),
+        # Phase 1 earnings still works
+        ("AAPL 什么时候发财报", "earnings_view"),
+        ("下周谁要发财报", "earnings_calendar"),
+        # Phase 2 portfolio still works
+        ("我的组合风险", "risk_view"),
+        ("这周亏了多少", "pnl_period"),
+    ]
+    for text, expected in cases:
+        name, _ = _stub_classify(text)
+        assert name == expected, f"{text!r} → {name} (want {expected})"

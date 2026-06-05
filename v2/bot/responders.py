@@ -797,6 +797,444 @@ def earnings_calendar(args: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
+# /8k + /insiders — SEC monitoring on-demand queries (Phase 3 Stage 4)
+# ---------------------------------------------------------------------------
+# Read-only contract — no archive write, no priority computed.
+# Same as Phase 1 earnings_view and Phase 2 risk_view, mirrors that
+# semantic.
+
+_DEFAULT_8K_DAYS = 30
+_DEFAULT_INSIDER_DAYS_BACK = 90
+_INSIDER_MIN_DAYS = 7
+_INSIDER_MAX_DAYS = 365
+
+
+def _is_valid_ticker(s: str) -> bool:
+    """US ticker shape: 1-5 uppercase letters (Berkshire-style BRK.A
+    not supported by this view but rare in queryable universe)."""
+    return bool(s) and 1 <= len(s) <= 5 and s.isascii() and s.isalpha()
+
+
+def eight_k_view(args: dict) -> str:
+    """Single-ticker 8-K history card (last 30 days).
+
+    args: ``{"ticker": "AAPL"}``
+
+    For each filing in the window, parses items + runs 5.02 LLM
+    extraction (reuses the cron path). On any LLM failure shows
+    "(姓名待解析)" placeholder instead of crashing the card.
+
+    Read-only — never writes archive, never computes priority. Bot
+    surface, not push surface.
+    """
+    from datetime import date, timedelta
+
+    from v2.sec import client as sec_client
+    from v2.sec import eight_k_parser, ner_5_02
+    from v2.sec.models import SecFiling
+
+    ticker = str(args.get("ticker") or "").strip().upper()
+    if not _is_valid_ticker(ticker):
+        return (
+            f"<b>🚫 无效 ticker: {html.escape(ticker or '(empty)')}</b>\n"
+            "请使用美股 ticker（1-5 大写字母，如 <code>AAPL</code>）"
+        )
+
+    today = date.today()
+    since = (today - timedelta(days=_DEFAULT_8K_DAYS)).isoformat()
+    until = today.isoformat()
+
+    try:
+        filings = sec_client.get_recent_filings(ticker, "8-K", since, until)
+    except Exception as exc:
+        logger.exception("eight_k_view: SEC fetch failed for %s", ticker)
+        return f"❌ SEC 查询失败: <code>{html.escape(str(exc))}</code>"
+
+    membership_note = _build_membership_note(ticker)
+
+    if not filings:
+        return _format_8k_empty_card(ticker, _DEFAULT_8K_DAYS, membership_note)
+
+    # Parse each filing's items + run 5.02 LLM extraction
+    rendered_filings: list[dict] = []
+    total_items = 0
+    for f in filings:
+        sec_filing = _build_sec_filing_for_view(f, ticker)
+        if sec_filing is None:
+            continue
+        event = eight_k_parser.parse_eight_k_filing(f, sec_filing)
+        if event is None:
+            continue
+
+        # Run 5.02 LLM extraction if 5.02 present + escalate tier when
+        # senior_exec confirmed (mirrors cron pipeline behavior so the
+        # bot card's tier chip shows P0 for CEO/CFO departures).
+        extracted_5_02: dict = {}
+        for idx, it in enumerate(event.items):
+            if it.code != "5.02":
+                continue
+            try:
+                obj = f.obj()
+                text = eight_k_parser.get_item_text(obj, "5.02")
+                extracted_5_02 = ner_5_02.extract_5_02(text)
+            except Exception as exc:
+                logger.warning("5.02 extraction failed in /8k %s: %s", ticker, exc)
+                extracted_5_02 = {}     # → "(姓名待解析)" placeholder
+            if extracted_5_02 and extracted_5_02.get("has_senior_exec"):
+                event.items[idx] = it.__class__(
+                    code=it.code, priority_tier="P0",
+                    description=it.description,
+                    extracted_meta=extracted_5_02,
+                )
+            break
+
+        rendered_filings.append({
+            "filing": event.filing,
+            "items": event.items,
+            "extracted_5_02": extracted_5_02,
+        })
+        total_items += len(event.items)
+
+    emit("render", card="sec_8k_view_card",
+         ticker=ticker, n_filings=len(rendered_filings), n_items=total_items)
+
+    return _format_8k_view_card(
+        ticker, rendered_filings, total_items, _DEFAULT_8K_DAYS, membership_note,
+    )
+
+
+def insider_view(args: dict) -> str:
+    """Single-ticker Form 4 summary card (last N days, default 90).
+
+    args: ``{"ticker": "NVDA", "days_back": 90}`` (days_back optional)
+
+    Splits transactions into:
+    - P (Purchase) — listed with name + role + USD
+    - S (Sale) — same, marked 10b5-1 plan if applicable
+    - A/M/F/G/C/D — aggregated counts only (noise codes per Stage 0)
+    - Same-period clusters (≥3 distinct insiders same-day same-direction)
+
+    No LLM calls — pure Python aggregation.
+    """
+    from datetime import date, timedelta
+
+    from v2.sec import client as sec_client, cluster, form4_parser
+    from v2.sec.models import (
+        NOISE_TRANSACTION_CODES, SIGNAL_TRANSACTION_CODES,
+    )
+
+    ticker = str(args.get("ticker") or "").strip().upper()
+    if not _is_valid_ticker(ticker):
+        return (
+            f"<b>🚫 无效 ticker: {html.escape(ticker or '(empty)')}</b>\n"
+            "请使用美股 ticker（1-5 大写字母，如 <code>NVDA</code>）"
+        )
+
+    # days_back: int, bounded
+    try:
+        days_back = int(args.get("days_back") or _DEFAULT_INSIDER_DAYS_BACK)
+    except (TypeError, ValueError):
+        days_back = _DEFAULT_INSIDER_DAYS_BACK
+    days_back = max(_INSIDER_MIN_DAYS, min(_INSIDER_MAX_DAYS, days_back))
+
+    today = date.today()
+    since = (today - timedelta(days=days_back)).isoformat()
+    until = today.isoformat()
+
+    try:
+        filings = sec_client.get_recent_filings(ticker, "4", since, until)
+    except Exception as exc:
+        logger.exception("insider_view: SEC fetch failed for %s", ticker)
+        return f"❌ SEC 查询失败: <code>{html.escape(str(exc))}</code>"
+
+    membership_note = _build_membership_note(ticker)
+
+    if not filings:
+        return _format_insider_empty_card(ticker, days_back, membership_note)
+
+    # Parse every Form 4 to a flat transactions list
+    all_txs: list = []
+    for f in filings:
+        sec_filing = _build_sec_filing_for_view(f, ticker, form="4")
+        if sec_filing is None:
+            continue
+        try:
+            txs = form4_parser.parse_form4_filing(f, sec_filing)
+        except Exception as exc:
+            logger.warning("form4 parse failed for %s acc=%s: %s",
+                           ticker, sec_filing.accession_number, exc)
+            continue
+        all_txs.extend(txs)
+
+    # Bucket by code class
+    purchases = [t for t in all_txs if t.transaction_code == "P"]
+    sales = [t for t in all_txs if t.transaction_code == "S"]
+    noise_counts: dict[str, int] = {}
+    for t in all_txs:
+        if t.transaction_code in NOISE_TRANSACTION_CODES:
+            noise_counts[t.transaction_code] = noise_counts.get(t.transaction_code, 0) + 1
+
+    # Same-day clusters across the whole window
+    cluster_list = cluster.find_clusters(purchases + sales)
+
+    emit("render", card="sec_insider_view_card",
+         ticker=ticker, days_back=days_back,
+         n_purchases=len(purchases), n_sales=len(sales),
+         n_noise_codes=sum(noise_counts.values()),
+         n_clusters=len(cluster_list))
+
+    return _format_insider_view_card(
+        ticker, days_back,
+        purchases=purchases, sales=sales,
+        noise_counts=noise_counts,
+        clusters=cluster_list,
+        membership_note=membership_note,
+    )
+
+
+# ---- /8k + /insiders helpers ----------------------------------------------
+
+
+def _build_sec_filing_for_view(edgar_filing, ticker: str, *, form: str = "8-K"):
+    """Mirror of pipeline._build_sec_filing but used for bot view path.
+
+    Bot view doesn't need to track is_amendment for priority (no
+    priority computed) but the SecFiling dataclass requires it.
+    """
+    from v2.sec.models import SecFiling
+    try:
+        accession = str(
+            getattr(edgar_filing, "accession_number", None)
+            or getattr(edgar_filing, "accession_no", None)
+            or ""
+        ).strip()
+        filing_date = str(getattr(edgar_filing, "filing_date", "") or "").strip()
+        cik = str(getattr(edgar_filing, "cik", "") or "").strip()
+        actual_form = str(getattr(edgar_filing, "form", form) or form).strip()
+    except Exception:
+        return None
+
+    if not accession:
+        return None
+
+    return SecFiling(
+        ticker=ticker, cik=cik, form=actual_form,
+        filing_date=filing_date, accession_number=accession,
+        is_amendment=actual_form.endswith("/A"),
+    )
+
+
+def _build_membership_note(ticker: str) -> str:
+    """Return small ℹ️ note if ticker is outside the user's universe.
+
+    Read-only path lets the user query ANY ticker — even ones not in
+    watchlist or holdings. The note helps the user understand context
+    without blocking the query.
+    """
+    try:
+        held, watchlist = _user_universe()
+    except Exception:
+        return ""
+    if ticker in held or ticker in watchlist:
+        return ""
+    return f"<i>ℹ️ {html.escape(ticker)} 不在你的 universe (持仓 + 关注)</i>"
+
+
+_TIER_EMOJI = {"P0": "🚨", "P1": "📋", "P2": "📎", "P3": "📌"}
+
+
+def _format_8k_empty_card(ticker: str, days: int, membership_note: str) -> str:
+    lines = [
+        f"<b>📋 SEC 8-K · {html.escape(ticker)} · 过去 {days} 天</b>",
+        "━━━━━━━━━━━━━━━━━━━━",
+        "<i>无 8-K 申报</i>",
+    ]
+    if membership_note:
+        lines.append("")
+        lines.append(membership_note)
+    return "\n".join(lines)
+
+
+def _format_8k_view_card(
+    ticker: str, rendered_filings: list[dict],
+    total_items: int, days: int, membership_note: str,
+) -> str:
+    """Render the multi-filing 8-K view card."""
+    lines: list[str] = [
+        f"<b>📋 SEC 8-K · {html.escape(ticker)} · 过去 {days} 天</b>",
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"共 <b>{len(rendered_filings)}</b> 个 filings · "
+        f"<b>{total_items}</b> 个 items",
+    ]
+    if membership_note:
+        lines.append(membership_note)
+
+    # Filings rendered newest first (SEC returns recent first)
+    for entry in rendered_filings:
+        f = entry["filing"]
+        items = entry["items"]
+        extracted = entry["extracted_5_02"]
+
+        lines.append("")
+        amendment_tag = " <i>(amendment)</i>" if f.is_amendment else ""
+        lines.append(
+            f"<b>{html.escape(f.filing_date)}</b> · "
+            f"<code>{html.escape(f.accession_number)}</code>{amendment_tag}"
+        )
+
+        for it in items:
+            emoji = _TIER_EMOJI.get(it.priority_tier, "📌")
+            annotation = ""
+            if it.code == "2.02":
+                annotation = " <i>(⑧ 处理)</i>"
+            lines.append(
+                f"  {emoji} <code>{html.escape(it.code)}</code> "
+                f"[{it.priority_tier}] {html.escape(it.description)}{annotation}"
+            )
+            if it.code == "5.02":
+                lines.extend(_format_5_02_extract_lines(extracted))
+
+    return "\n".join(lines)
+
+
+def _format_5_02_extract_lines(extracted: dict) -> list[str]:
+    """5.02 LLM extraction sub-block (departures + appointments).
+
+    Empty extracted dict → "(姓名待解析)" placeholder per Stage 4 spec
+    (covers both LLM-failure and silent-no-people cases).
+    """
+    if not extracted:
+        return ["       <i>(姓名待解析)</i>"]
+
+    departures = extracted.get("departures") or []
+    appointments = extracted.get("appointments") or []
+    out: list[str] = []
+    for p in departures[:3]:
+        name = html.escape(str(p.get("name", "") or ""))
+        title = html.escape(str(p.get("title", "") or ""))
+        if name:
+            out.append(f"       离职: <b>{name}</b> ({title})")
+    for p in appointments[:3]:
+        name = html.escape(str(p.get("name", "") or ""))
+        title = html.escape(str(p.get("title", "") or ""))
+        if name:
+            out.append(f"       任命: <b>{name}</b> ({title})")
+    if not out:
+        out.append("       <i>(姓名待解析)</i>")
+    return out
+
+
+def _format_insider_empty_card(ticker: str, days_back: int, membership_note: str) -> str:
+    lines = [
+        f"<b>📥 内部人交易摘要 · {html.escape(ticker)} · 过去 {days_back} 天</b>",
+        "━━━━━━━━━━━━━━━━━━━━",
+        "<i>无 Form 4 申报</i>",
+    ]
+    if membership_note:
+        lines.append("")
+        lines.append(membership_note)
+    return "\n".join(lines)
+
+
+def _format_insider_view_card(
+    ticker: str, days_back: int, *,
+    purchases: list, sales: list,
+    noise_counts: dict[str, int],
+    clusters: list,
+    membership_note: str,
+) -> str:
+    """Render the multi-Form4 insider summary card."""
+    lines: list[str] = [
+        f"<b>📥 内部人交易摘要 · {html.escape(ticker)} · 过去 {days_back} 天</b>",
+        "━━━━━━━━━━━━━━━━━━━━",
+    ]
+    if membership_note:
+        lines.append(membership_note)
+        lines.append("")
+
+    # Purchase block
+    if purchases:
+        total_p = sum((t.transaction_usd or 0.0) for t in purchases)
+        lines.append(
+            f"<b>P (Purchase): {len(purchases)} 笔</b>, 总 {_fmt_money_kb(total_p)}"
+        )
+        biggest_p = max(purchases, key=lambda t: (t.transaction_usd or 0.0))
+        lines.append(f"  最大: {_fmt_tx_one_liner(biggest_p)}")
+    else:
+        lines.append("<b>P (Purchase): 0 笔</b>")
+
+    # Sale block
+    if sales:
+        total_s = sum((t.transaction_usd or 0.0) for t in sales)
+        lines.append(
+            f"<b>S (Sale):</b> {len(sales)} 笔, 总 {_fmt_money_kb(total_s)}"
+        )
+        biggest_s = max(sales, key=lambda t: (t.transaction_usd or 0.0))
+        lines.append(f"  最大: {_fmt_tx_one_liner(biggest_s)}")
+    else:
+        lines.append("<b>S (Sale):</b> 0 笔")
+
+    # Noise counts (A/M/F/G/C)
+    if noise_counts:
+        lines.append("")
+        noise_labels = {
+            "A": "Award (薪酬授予)",
+            "M": "Exercise (option vest)",
+            "F": "Tax (RSU vest 税款)",
+            "G": "Gift (赠予)",
+            "C": "Conversion (转换)",
+        }
+        for code in ("A", "M", "F", "G", "C"):
+            n = noise_counts.get(code, 0)
+            if n > 0:
+                label = noise_labels[code]
+                lines.append(f"<b>{code}</b>: {n} 笔  <i>({label})</i>")
+
+    # Clusters
+    lines.append("")
+    if not clusters:
+        lines.append(
+            f"<b>集群:</b> 无同日 ≥3 distinct insiders 集群 ({days_back} 天内)"
+        )
+    else:
+        lines.append(f"<b>集群:</b> {len(clusters)} 个")
+        for c in clusters[:3]:
+            direction_label = "买入" if c.direction == "purchase" else "卖出"
+            names_preview = ", ".join(html.escape(n) for n in c.insider_names[:4])
+            more = f", +{len(c.insider_names) - 4}" if len(c.insider_names) > 4 else ""
+            lines.append(
+                f"  {html.escape(c.cluster_date)} · {c.transaction_count} 笔 / "
+                f"{len(c.insider_names)} 人 {direction_label} · "
+                f"{_fmt_money_kb(c.total_usd)}"
+            )
+            lines.append(f"    {names_preview}{more}")
+
+    return "\n".join(lines)
+
+
+def _fmt_money_kb(v: float | None) -> str:
+    """USD formatter for insider view — K / M units."""
+    if v is None:
+        return "未披露"
+    abs_v = abs(v)
+    if abs_v >= 1_000_000:
+        return f"${v / 1_000_000:.2f}M"
+    if abs_v >= 1_000:
+        return f"${v / 1_000:.1f}K"
+    return f"${v:,.0f}"
+
+
+def _fmt_tx_one_liner(tx) -> str:
+    """One-line description of a Form 4 transaction for the view card."""
+    name = html.escape(tx.insider_name or "?")
+    role_tag = f" ({html.escape(tx.insider_role)})" if tx.insider_role else ""
+    plan = " · 10b5-1" if tx.is_10b5_1 else ""
+    usd = _fmt_money_kb(tx.transaction_usd)
+    date_s = html.escape(tx.transaction_date or tx.filing.filing_date)
+    return f"{name}{role_tag} · {usd} · {date_s}{plan}"
+
+
+# ---------------------------------------------------------------------------
 # /earnings helpers — read user universe (held + watchlist)
 # ---------------------------------------------------------------------------
 

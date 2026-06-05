@@ -43,6 +43,8 @@ IntentName = Literal[
     "earnings_calendar",
     "risk_view",
     "pnl_period",
+    "eight_k_view",
+    "insider_view",
     "unknown",
 ]
 
@@ -66,6 +68,8 @@ _VALID_INTENTS = {
     "earnings_calendar",
     "risk_view",
     "pnl_period",
+    "eight_k_view",
+    "insider_view",
     "unknown",
 }
 
@@ -73,10 +77,15 @@ _VALID_INTENTS = {
 # silently coerced to "day" (the default behavior, matches /pnl no-arg).
 _VALID_PNL_PERIODS = frozenset({"day", "week", "month"})
 
+# Bounds for insider_view.days_back. Default 90; user can override 7-365.
+_INSIDER_DAYS_BACK_MIN = 7
+_INSIDER_DAYS_BACK_MAX = 365
+_INSIDER_DAYS_BACK_DEFAULT = 90
+
 
 _SYSTEM_PROMPT = (
     "你是一个股票分析助手的【意图分类器】。\n"
-    "把用户的话归类到下列**固定 19 个 intent 之一**，并提取参数。"
+    "把用户的话归类到下列**固定 21 个 intent 之一**，并提取参数。"
     "你不要回答问题，只做分类。\n"
     "\n"
     "【支持的 intents】\n"
@@ -104,6 +113,12 @@ _SYSTEM_PROMPT = (
     "「组合 drawdown」「我持仓里有几只快出财报」\n"
     "- pnl_period: 用户问指定周期的 P&L。例：「这周亏了多少」「本月赚了多少」"
     "「上周 pnl」「月度收益」「过去一个月赚了多少」\n"
+    "- eight_k_view: 用户想看某只股票的 SEC 8-K 申报历史（最近 30 天）。"
+    "例：「AAPL 最近有什么 8-K」「NVDA 8-K」「苹果有发什么 SEC 公告」"
+    "「特斯拉最近的 8-K 申报」「META 8K」\n"
+    "- insider_view: 用户想看某只股票的内部人交易（Form 4）。"
+    "例：「NVDA 内部人交易」「苹果高管买卖」「TSLA insider trading」"
+    "「META 过去 30 天 Form 4」「AMZN 高管最近有没有买入」「ARM insider」\n"
     "- unknown: 都不匹配 / 含糊不清 / 与股票无关\n"
     "\n"
     "【参数提取规则】\n"
@@ -128,16 +143,20 @@ _SYSTEM_PROMPT = (
     "「本月」「这个月」「月度」「过去一个月」→ month。"
     "其他任何值（包括 quarter / ytd / all 等）一律输出空字符串。"
     "用户没指定时也输出空字符串（responder 默认 day）。\n"
+    "- days_back: 当 intent=insider_view 时，提取用户问的回溯天数（整数）。"
+    "「过去 30 天」/「最近 30 天」→ 30；「过去三个月」→ 90；「半年」→ 180；"
+    "「过去一年」→ 365。范围 7-365；用户没指定时输出 0（responder 默认 90）。\n"
     "\n"
     "【约束】\n"
     "1. **只输出 JSON，不要 markdown，不要解释**\n"
     "2. 不确定时输出 unknown\n"
     "3. ticker / manager / etf / direction / period 字段没有时输出空字符串\n"
-    "4. target_price / days_horizon 没有时输出 0\n"
+    "4. target_price / days_horizon / days_back 没有时输出 0\n"
     "\n"
     "【JSON 格式】\n"
     '{"intent": "explain_move", "ticker": "NVDA", "manager": "", "etf": "", '
-    '"target_price": 0, "direction": "", "days_horizon": 0, "period": "", "raw": "..."}'
+    '"target_price": 0, "direction": "", "days_horizon": 0, "period": "", '
+    '"days_back": 0, "raw": "..."}'
 )
 
 
@@ -197,6 +216,20 @@ def classify(text: str) -> dict:
     period_raw = str(parsed.get("period", "")).strip().lower()
     period = period_raw if period_raw in _VALID_PNL_PERIODS else ""
 
+    # days_back: bounded 7-365, default 0 means "use responder default (90)"
+    try:
+        days_back_raw = int(parsed.get("days_back", 0) or 0)
+    except (TypeError, ValueError):
+        days_back_raw = 0
+    if days_back_raw == 0:
+        days_back = 0     # responder applies _INSIDER_DAYS_BACK_DEFAULT
+    elif days_back_raw < _INSIDER_DAYS_BACK_MIN:
+        days_back = _INSIDER_DAYS_BACK_MIN
+    elif days_back_raw > _INSIDER_DAYS_BACK_MAX:
+        days_back = _INSIDER_DAYS_BACK_MAX
+    else:
+        days_back = days_back_raw
+
     return {
         "intent": intent,
         "ticker": str(parsed.get("ticker", "")).strip().upper(),
@@ -206,6 +239,7 @@ def classify(text: str) -> dict:
         "direction": str(parsed.get("direction", "")).strip().lower(),
         "days_horizon": days_horizon,
         "period": period,
+        "days_back": days_back,
         "raw": str(parsed.get("raw", text))[:80],
     }
 
@@ -220,5 +254,6 @@ def _unknown(text: str) -> dict:
         "direction": "",
         "days_horizon": 0,
         "period": "",
+        "days_back": 0,
         "raw": text[:80],
     }

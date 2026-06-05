@@ -612,6 +612,21 @@ _MODULE: dict[str, Explanation] = {
         "store":  "推送写 archive，A/M/F/G/C noise 暂存等 Phase 3.5 weekly digest 消费",
         "next":   "cluster 卡先推（更重要），再推单笔 signal 卡。同 cluster 内的单笔不重复推送",
     },
+    # On-demand SEC bot queries (Phase 3 Stage 4) — read-only, not cron
+    "_r_eight_k_view": {
+        "source": "用户实时请求（/8k AAPL 或 NL「AAPL 最近 8-K」），单 ticker SEC EDGAR 拉过去 30 天 8-K",
+        "how":    "edgartools.Company(ticker).get_filings(form='8-K', filing_date=(today-30d, today)) → 解析 items → 5.02 调 LLM template-fill",
+        "what":   "多 filing 单卡：每个 filing 列出所有 items 及评级 + 5.02 抽取的 CEO/CFO 姓名（LLM 失败显示 '(姓名待解析)' 占位）",
+        "store":  "read-only — 不写 archive，不算 priority（priority 只跟 cron-pushed 卡片相关）",
+        "next":   "渲染为单一回复卡，Telegram / dashboard 单条返回",
+    },
+    "_r_insider_view": {
+        "source": "用户实时请求（/insiders NVDA 或 NL「NVDA 内部人交易」），单 ticker SEC EDGAR 拉过去 N 天 Form 4（默认 90 天）",
+        "how":    "edgartools Form4.to_dataframe()['Code'] 全量解析 → 按 P/S/A/M/F/G/C 分桶 → cluster.find_clusters 滚动窗口 ≥3 distinct insiders",
+        "what":   "P/S 列具体笔（含 USD + 申报人 + 10b5-1 标记），A/M/F/G/C 仅显示 count，cluster 单独列出",
+        "store":  "read-only — 不写 archive，不算 priority，不调 LLM",
+        "next":   "单一汇总卡返回",
+    },
 
     # Portfolio risk agent — Phase 2
     "_r_portfolio_risk": {
