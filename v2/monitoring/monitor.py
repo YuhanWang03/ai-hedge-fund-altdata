@@ -6,6 +6,7 @@ import logging
 from datetime import date, timedelta
 
 from v2.data.client import FDClient
+from v2.data.price_source import PriceSource, default_price_source
 from v2.monitoring.detectors import detect
 from v2.monitoring.models import Anomaly, MonitorConfig
 from v2.monitoring.options import OptionsTracker
@@ -21,12 +22,20 @@ def run_monitoring(
     tickers: list[str],
     fd_client: FDClient,
     config: MonitorConfig,
+    *,
+    price_source: PriceSource | None = None,
 ) -> list[Anomaly]:
-    """Scan *tickers*, return all anomalies found on the latest trading day."""
-    # fd_safe_today caps end at today - 3 days so the FD request stays
-    # inside the coverage window (no HTTP 400 → empty cascade).
-    from v2.data_safety import fd_safe_today
-    end = fd_safe_today()
+    """Scan *tickers*, return all anomalies found on the latest trading day.
+
+    ``price_source`` provides daily OHLCV (Phase 4.5-mini default:
+    yfinance real-time EOD). ``fd_client`` still serves non-price
+    endpoints inside :func:`v2.monitoring.detectors.detect`
+    (financials / earnings / insider).
+    """
+    if price_source is None:
+        price_source = default_price_source()
+
+    end = date.today()
     start = (end - timedelta(days=_HISTORY_CALENDAR_DAYS)).isoformat()
     end_str = end.isoformat()
 
@@ -34,11 +43,11 @@ def run_monitoring(
     options_tracker = OptionsTracker()
 
     # Pre-fetch sector ETF price series ONCE per run. Bounded extra cost:
-    # |SECTOR_ETFS| FD calls regardless of universe size.
+    # |SECTOR_ETFS| price calls (through the injected price_source).
     etf_prices = {}
     for etf in SECTOR_ETFS:
         try:
-            series = fd_client.get_prices(etf, start, end_str)
+            series = price_source.get_prices(etf, start, end_str)
         except Exception as exc:
             logger.warning("ETF %s prefetch failed: %s", etf, exc)
             continue
@@ -47,7 +56,7 @@ def run_monitoring(
 
     anomalies: list[Anomaly] = []
     for ticker in tickers:
-        prices = fd_client.get_prices(ticker, start, end_str)
+        prices = price_source.get_prices(ticker, start, end_str)
         if not prices:
             continue
         anomaly = detect(

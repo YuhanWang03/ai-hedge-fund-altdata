@@ -14,6 +14,7 @@ import numpy as np
 from dotenv import load_dotenv
 
 from v2.data import FDClient
+from v2.data.price_source import default_price_source
 from v2.screening import TECH_30
 
 load_dotenv()
@@ -49,10 +50,13 @@ def main() -> None:
 
     counts = {"have_rev": 0, "have_gm": 0, "have_vol": 0, "no_data": 0}
 
+    # Phase 4.5-mini: prices via yfinance (no FD 3-day lag); FD still
+    # serves the financial-metrics column.
+    price_source = default_price_source()
     with FDClient() as fd:
         for ticker in TECH_30:
             metrics = fd.get_financial_metrics(ticker, today_str, limit=1)
-            prices = fd.get_prices(ticker, history_start, today_str)
+            prices = price_source.get_prices(ticker, history_start, today_str)
 
             note_parts: list[str] = []
             mc = rev = gm = vol = None

@@ -18,7 +18,7 @@ from datetime import date, timedelta
 import numpy as np
 
 from v2.data import CachedFDClient
-from v2.data_safety import fd_safe_today
+from v2.data.price_source import default_price_source
 from v2.institutional import MANAGERS
 from v2.observability import emit
 from v2.institutional.client import fetch_recent_13f
@@ -85,12 +85,15 @@ def explain_move(ticker: str) -> str:
 
 
 def _build_query_anomaly(ticker: str, fd: CachedFDClient) -> Anomaly | None:
-    """Construct an Anomaly representing 'user asked about this ticker today'."""
-    # fd_safe_today caps end_date at today - 3 days so we don't request
-    # past FD's coverage window (which would return HTTP 400 → empty).
-    today = fd_safe_today()
+    """Construct an Anomaly representing 'user asked about this ticker today'.
+
+    Prices come from :func:`default_price_source` (yfinance real-time
+    EOD, no FD lag). The ``fd`` arg is kept for non-price endpoints
+    (earnings / insider) the caller still needs."""
+    today = date.today()
     start = (today - timedelta(days=400)).isoformat()
-    prices = fd.get_prices(ticker, start, today.isoformat())
+    price_source = default_price_source()
+    prices = price_source.get_prices(ticker, start, today.isoformat())
     if not prices or len(prices) < 2:
         return None
 
@@ -122,14 +125,17 @@ def _build_query_anomaly(ticker: str, fd: CachedFDClient) -> Anomaly | None:
 
 def summary(ticker: str) -> str:
     ticker = ticker.upper()
-    # fd_safe_today: stay inside FD's coverage window — see v2/data_safety.py.
-    today = fd_safe_today()
+    today = date.today()
     history_start = (today - timedelta(days=400)).isoformat()
     today_str = today.isoformat()
+    price_source = default_price_source()
 
     try:
         with CachedFDClient() as fd:
-            candidate = build_candidate(ticker, fd, today_str, history_start)
+            candidate = build_candidate(
+                ticker, fd, today_str, history_start,
+                price_source=price_source,
+            )
             if candidate is None:
                 return f"<b>🚫 No data for {html.escape(ticker)}</b>"
 
