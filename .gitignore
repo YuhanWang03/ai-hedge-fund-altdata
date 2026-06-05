@@ -31,6 +31,15 @@ ENV/
 data/
 logs/
 
+# v2/data is production-only (FDClient + Price models ship on the VPS,
+# not in this repo). Carve out Phase 4.5-mini's price_source.py + its
+# smoke test so the yfinance migration is repo-tracked; production's
+# __init__.py / client.py / models.py stay untracked.
+!v2/data/
+v2/data/*
+!v2/data/price_source.py
+!v2/data/test_price_source.py
+
 # IDE
 .idea/
 .vscode/
