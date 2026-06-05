@@ -27,6 +27,7 @@ tavily-python = "^0.5"
 yfinance = "^0.2"
 edgartools = "^5.31.5"
 alpaca-py = "^0.43.4"
+fredapi = "^0.5.2"
 # Infrastructure
 apscheduler = "^3.10"
 tzdata = "^2026.2"

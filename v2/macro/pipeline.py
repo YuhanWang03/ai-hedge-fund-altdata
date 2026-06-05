@@ -319,15 +319,21 @@ def build_claims_event(
     fred_series_fetch: Callable | None = None,
     llm_invoke: Callable | None = None,
 ) -> MacroRelease | None:
-    """Thursday weekly Claims release. Same shape as a CPI release with
-    the ICSA series tuple. Returns None if today isn't a Claims day
-    on the calendar."""
-    warnings: list[str] = []
-    todays = cal.get_release_today(today_iso)
-    is_claims_day = any(t[0] == "Claims" for t in todays)
-    if not is_claims_day:
-        return None
+    """Build the Thursday Initial Jobless Claims release report.
 
+    Unlike ⑮, this builder does NOT gate on
+    :func:`release_calendar.get_release_today`. ICSA releases every
+    Thursday 08:30 ET on a deterministic weekly cadence, so the ⑯
+    cron uses ``CronTrigger(day_of_week="thu")`` and calls this
+    function unconditionally; the calendar would carry no extra
+    information (and the FRED release_id we'd seed for ICSA — 85 —
+    is not in the calendar dict by design).
+
+    Sets ``release.core`` to the 4-week MA smoothed level, which is
+    the figure operators actually care about for the trend signal
+    (the raw weekly number is too noisy).
+    """
+    warnings: list[str] = []
     fetch_fred = fred_series_fetch or _default_fred_fetch
     release = _build_one_release(
         "Claims", today_iso, "Initial Claims",

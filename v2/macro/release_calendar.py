@@ -44,25 +44,55 @@ _SOURCE_URLS = {
 # AUTOGEN BLOCK START — replace via `poetry run python -m v2.macro._seed_calendar`
 # Each entry: {ISO_date: [(release_type, label, source_authority)]}
 # `source_authority` is one of: "BLS" / "BEA" / "Fed" / "FRED"
+#
+# Generated 2026-06-05 from FRED API (release IDs 10/50/54/53/46) + Fed
+# Aug 9 announcement (FOMC). Window: 2026-06-05 → 2026-12-23.
+# 40 entries across 33 dates: 7×{NFP, CPI, PPI, PCE, GDP}, 5×FOMC.
+#
+# Claims (ICSA) is deliberately NOT in this dict — Initial Jobless
+# Claims releases every Thursday at 08:30 ET on a deterministic
+# schedule, so the ⑯ cron uses a CronTrigger(day_of_week="thu") gate
+# and calls build_claims_event() unconditionally. Putting it in the
+# calendar would either require pulling the correct weekly FRED
+# release_id (85, not 21 which is the Unemployment Insurance Weekly
+# Claims monthly summary release we mis-mapped originally) AND a
+# 52-entry calendar that buys us nothing over a weekday trigger.
 # ===========================================================================
 
 _2026_RELEASES: dict[str, list[tuple[str, str, str]]] = {
-    # FOMC meetings — hardcoded from Fed 2024-08-09 announcement.
-    # source: federalreserve.gov/monetarypolicy/fomccalendars.htm
-    "2026-06-17": [("FOMC", "Jun FOMC + SEP",   "Fed")],
-    "2026-07-29": [("FOMC", "Jul FOMC",         "Fed")],
-    "2026-09-16": [("FOMC", "Sep FOMC + SEP",   "Fed")],
-    "2026-10-28": [("FOMC", "Oct FOMC",         "Fed")],
-    "2026-12-09": [("FOMC", "Dec FOMC + SEP",   "Fed")],
-
-    # Sample monthly prints — _seed_calendar.py overwrites this block
-    # with the live FRED schedule. source: FRED release IDs (BLS / BEA).
-    "2026-06-10": [("CPI",  "CPI May 2026",     "BLS")],   # FRED release_id=10
-    "2026-06-11": [("PPI",  "PPI May 2026",     "BLS")],   # FRED release_id=46
-    "2026-06-13": [("Claims", "Initial Claims Wk 24", "BLS")],   # FRED release_id=21 (weekly)
-    "2026-06-25": [("PCE",  "PCE May 2026",     "BEA")],   # FRED release_id=54
-    "2026-06-26": [("GDP",  "GDP Q1 2026 (3rd)", "BEA")],  # FRED release_id=53
-    "2026-07-02": [("NFP",  "NFP Jun 2026",     "BLS")],   # FRED release_id=50
+    "2026-06-05": [("NFP", "NFP (FRED release_id=50)", "BLS")],
+    "2026-06-10": [("CPI", "CPI (FRED release_id=10)", "BLS")],
+    "2026-06-11": [("PPI", "PPI (FRED release_id=46)", "BLS")],
+    "2026-06-17": [("FOMC", "Jun FOMC + SEP", "Fed")],
+    "2026-06-25": [("PCE", "PCE (FRED release_id=54)", "BEA"), ("GDP", "GDP (FRED release_id=53)", "BEA")],
+    "2026-07-02": [("NFP", "NFP (FRED release_id=50)", "BLS")],
+    "2026-07-14": [("CPI", "CPI (FRED release_id=10)", "BLS")],
+    "2026-07-15": [("PPI", "PPI (FRED release_id=46)", "BLS")],
+    "2026-07-29": [("FOMC", "Jul FOMC", "Fed")],
+    "2026-07-30": [("PCE", "PCE (FRED release_id=54)", "BEA"), ("GDP", "GDP (FRED release_id=53)", "BEA")],
+    "2026-08-07": [("NFP", "NFP (FRED release_id=50)", "BLS")],
+    "2026-08-12": [("CPI", "CPI (FRED release_id=10)", "BLS")],
+    "2026-08-13": [("PPI", "PPI (FRED release_id=46)", "BLS")],
+    "2026-08-26": [("PCE", "PCE (FRED release_id=54)", "BEA"), ("GDP", "GDP (FRED release_id=53)", "BEA")],
+    "2026-09-04": [("NFP", "NFP (FRED release_id=50)", "BLS")],
+    "2026-09-10": [("PPI", "PPI (FRED release_id=46)", "BLS")],
+    "2026-09-11": [("CPI", "CPI (FRED release_id=10)", "BLS")],
+    "2026-09-16": [("FOMC", "Sep FOMC + SEP", "Fed")],
+    "2026-09-30": [("PCE", "PCE (FRED release_id=54)", "BEA"), ("GDP", "GDP (FRED release_id=53)", "BEA")],
+    "2026-10-02": [("NFP", "NFP (FRED release_id=50)", "BLS")],
+    "2026-10-14": [("CPI", "CPI (FRED release_id=10)", "BLS")],
+    "2026-10-15": [("PPI", "PPI (FRED release_id=46)", "BLS")],
+    "2026-10-28": [("FOMC", "Oct FOMC", "Fed")],
+    "2026-10-29": [("PCE", "PCE (FRED release_id=54)", "BEA"), ("GDP", "GDP (FRED release_id=53)", "BEA")],
+    "2026-11-06": [("NFP", "NFP (FRED release_id=50)", "BLS")],
+    "2026-11-10": [("CPI", "CPI (FRED release_id=10)", "BLS")],
+    "2026-11-13": [("PPI", "PPI (FRED release_id=46)", "BLS")],
+    "2026-11-25": [("PCE", "PCE (FRED release_id=54)", "BEA"), ("GDP", "GDP (FRED release_id=53)", "BEA")],
+    "2026-12-04": [("NFP", "NFP (FRED release_id=50)", "BLS")],
+    "2026-12-09": [("FOMC", "Dec FOMC + SEP", "Fed")],
+    "2026-12-10": [("CPI", "CPI (FRED release_id=10)", "BLS")],
+    "2026-12-15": [("PPI", "PPI (FRED release_id=46)", "BLS")],
+    "2026-12-23": [("PCE", "PCE (FRED release_id=54)", "BEA"), ("GDP", "GDP (FRED release_id=53)", "BEA")],
 }
 
 # ===========================================================================

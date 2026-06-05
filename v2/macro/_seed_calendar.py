@@ -60,7 +60,14 @@ FRED_RELEASES: dict[str, tuple[int, str]] = {
     "PCE":    (54, "BEA"),
     "GDP":    (53, "BEA"),
     "PPI":    (46, "BLS"),
-    "Claims": (21, "BLS"),
+    # Initial Jobless Claims is NOT seeded into the calendar. ICSA
+    # releases every Thursday 08:30 ET — the ⑯ cron uses a
+    # CronTrigger(day_of_week="thu") gate instead of a calendar lookup.
+    # Adding 52 weekly entries buys no value over a weekday trigger,
+    # and the FRED release_id we originally tried (21) was the wrong
+    # one — it's the monthly Unemployment Insurance Weekly Claims
+    # summary, not the weekly ICSA itself (release_id 85 if we ever
+    # decide we do want it in the calendar).
 }
 
 
