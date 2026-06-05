@@ -102,6 +102,164 @@ def test_surprise_label_buckets():
 
 
 # ---------------------------------------------------------------------------
+# fred_client.py — REST path for /release/dates
+# ---------------------------------------------------------------------------
+
+def test_get_release_dates_rest_returns_iso_strings():
+    """REST path: well-formed JSON → list of ISO date strings."""
+    import os
+    from v2.macro.fred_client import get_release_dates
+
+    os.environ["FRED_API_KEY"] = "fake-key-for-test"
+
+    captured_calls = {"n": 0, "url": None, "params": None}
+
+    class _FakeResponse:
+        def raise_for_status(self): pass
+        def json(self):
+            return {
+                "release_dates": [
+                    {"release_id": 10, "date": "2026-06-10"},
+                    {"release_id": 10, "date": "2026-07-15"},
+                    {"release_id": 10, "date": "2026-08-12"},
+                ],
+            }
+
+    def fake_http_get(url, *, params, timeout):
+        captured_calls["n"] += 1
+        captured_calls["url"] = url
+        captured_calls["params"] = params
+        return _FakeResponse()
+
+    dates = get_release_dates(
+        10, start="2026-06-01", end="2026-12-31",
+        http_get=fake_http_get,
+    )
+    assert dates == ["2026-06-10", "2026-07-15", "2026-08-12"]
+    assert captured_calls["n"] == 1
+    assert captured_calls["params"]["release_id"] == 10
+    assert captured_calls["params"]["realtime_start"] == "2026-06-01"
+    assert captured_calls["params"]["include_release_dates_with_no_data"] == "true"
+    assert "/fred/release/dates" in captured_calls["url"]
+    print("  ok")
+
+
+def test_get_release_dates_rest_retries_on_500():
+    """HTTPError twice then success → returns the success payload.
+    Verifies the 3-attempt linear-backoff retry."""
+    import os
+    import httpx
+    from v2.macro.fred_client import get_release_dates
+
+    os.environ["FRED_API_KEY"] = "fake-key-for-test"
+
+    attempts = {"n": 0}
+
+    class _FakeResponse:
+        def raise_for_status(self): pass
+        def json(self):
+            return {"release_dates": [{"release_id": 10, "date": "2026-06-10"}]}
+
+    def flaky_http_get(url, *, params, timeout):
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            raise httpx.HTTPError(f"FRED 502 attempt {attempts['n']}")
+        return _FakeResponse()
+
+    # Monkey-patch the retry backoff to 0 to keep the test fast
+    import v2.macro.fred_client as fc_mod
+    orig_backoff = fc_mod._RETRY_BACKOFF_SEC
+    fc_mod._RETRY_BACKOFF_SEC = 0.0
+    try:
+        dates = get_release_dates(
+            10, start="2026-06-01", end="2026-06-30",
+            http_get=flaky_http_get,
+        )
+    finally:
+        fc_mod._RETRY_BACKOFF_SEC = orig_backoff
+    assert dates == ["2026-06-10"]
+    assert attempts["n"] == 3, f"expected 3 attempts, got {attempts['n']}"
+    print("  ok")
+
+
+def test_get_release_dates_rest_exhausted_retries_raises():
+    """Persistent HTTPError → FredUnavailable after 3 attempts."""
+    import os
+    import httpx
+    from v2.macro.fred_client import FredUnavailable, get_release_dates
+
+    os.environ["FRED_API_KEY"] = "fake-key-for-test"
+
+    def always_fails(url, *, params, timeout):
+        raise httpx.HTTPError("FRED 502 always")
+
+    import v2.macro.fred_client as fc_mod
+    orig_backoff = fc_mod._RETRY_BACKOFF_SEC
+    fc_mod._RETRY_BACKOFF_SEC = 0.0
+    try:
+        try:
+            get_release_dates(
+                10, start="2026-06-01", end="2026-06-30",
+                http_get=always_fails,
+            )
+            raised = False
+        except FredUnavailable:
+            raised = True
+    finally:
+        fc_mod._RETRY_BACKOFF_SEC = orig_backoff
+    assert raised, "expected FredUnavailable after exhausted retries"
+    print("  ok")
+
+
+def test_get_release_dates_rest_no_key_raises_FredUnavailable():
+    """No FRED_API_KEY in env → immediate FredUnavailable, no HTTP call."""
+    import os
+    from v2.macro.fred_client import FredUnavailable, get_release_dates
+
+    prev = os.environ.pop("FRED_API_KEY", None)
+
+    def should_not_be_called(*a, **kw):
+        raise AssertionError("http_get should not be called when key missing")
+
+    try:
+        try:
+            get_release_dates(
+                10, start="2026-06-01", end="2026-06-30",
+                http_get=should_not_be_called,
+            )
+            raised = False
+        except FredUnavailable as exc:
+            raised = True
+            assert "FRED_API_KEY" in str(exc)
+    finally:
+        if prev is not None:
+            os.environ["FRED_API_KEY"] = prev
+    assert raised, "expected FredUnavailable when key missing"
+    print("  ok")
+
+
+def test_fredapi_dependency_surface():
+    """Pin the set of fredapi methods we depend on. If a future fredapi
+    upgrade removes one of these, fail loudly here instead of at
+    runtime against the live API. Also documents what we do NOT
+    depend on (get_release_dates lives in our REST path)."""
+    from fredapi import Fred
+
+    # Methods we DO use
+    assert hasattr(Fred, "get_series"), \
+        "fredapi.Fred.get_series missing — used by get_series()"
+
+    # Methods we explicitly do NOT depend on (REST path covers them).
+    # The presence of this assertion documents the choice — flip if a
+    # future fredapi release ships a working wrapper.
+    assert not hasattr(Fred, "get_release_dates"), (
+        "fredapi.Fred.get_release_dates now exists — consider migrating "
+        "v2/macro/fred_client.py off the REST path."
+    )
+    print("  ok")
+
+
+# ---------------------------------------------------------------------------
 # release_calendar.py
 # ---------------------------------------------------------------------------
 
@@ -583,6 +741,12 @@ def main() -> int:
         ("transforms_surprise_sigma_zero_std", test_surprise_sigma_zero_std_returns_inf),
         ("transforms_trend_label_3_inc",       test_trend_label_three_increasing_returns_accelerating),
         ("transforms_surprise_label_buckets",  test_surprise_label_buckets),
+        # fred_client REST path
+        ("fred_rest_returns_iso_strings",      test_get_release_dates_rest_returns_iso_strings),
+        ("fred_rest_retries_on_500",           test_get_release_dates_rest_retries_on_500),
+        ("fred_rest_exhausted_retries_raises", test_get_release_dates_rest_exhausted_retries_raises),
+        ("fred_rest_no_key_raises",            test_get_release_dates_rest_no_key_raises_FredUnavailable),
+        ("fredapi_dependency_surface",         test_fredapi_dependency_surface),
         # release calendar
         ("calendar_today_empty_off_day",       test_release_today_returns_empty_on_non_release_day),
         ("calendar_fomc_jun_17",               test_release_today_returns_FOMC_on_jun_17),

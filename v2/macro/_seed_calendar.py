@@ -71,13 +71,14 @@ def _today_iso() -> str:
 def _seed(start_iso: str, end_iso: str) -> dict[str, list[tuple[str, str, str]]]:
     calendar: dict[str, list[tuple[str, str, str]]] = {}
 
-    # FRED-sourced monthly + weekly releases
+    # FRED-sourced monthly + weekly releases (REST direct — fredapi
+    # wrapper does NOT expose this endpoint; see fred_client.py for
+    # the rationale).
     for name, (rid, source) in FRED_RELEASES.items():
         try:
             dates = get_release_dates(
-                rid,
-                start=start_iso, end=end_iso,
-                include_release_dates_with_no_data=True,
+                rid, start=start_iso, end=end_iso,
+                include_no_data=True,
             )
         except FredUnavailable as exc:
             print(f"# FATAL: {exc}", file=sys.stderr)
@@ -86,12 +87,14 @@ def _seed(start_iso: str, end_iso: str) -> dict[str, list[tuple[str, str, str]]]
             print(f"# WARNING {name} (release_id={rid}): {exc}", file=sys.stderr)
             continue
 
-        for d in dates:
-            iso = d.strftime("%Y-%m-%d") if hasattr(d, "strftime") else str(d)
+        for iso in dates:
+            # REST returns ISO strings already; defensive str() in case
+            # a future wrapper change yields a date object.
+            iso_str = iso if isinstance(iso, str) else str(iso)
             label = f"{name} (FRED release_id={rid})"
-            calendar.setdefault(iso, []).append((name, label, source))
+            calendar.setdefault(iso_str, []).append((name, label, source))
 
-    # FOMC — hardcoded
+    # FOMC — hardcoded (not in FRED).
     for iso, label in FOMC_2026:
         calendar.setdefault(iso, []).append(("FOMC", label, "Fed"))
 
