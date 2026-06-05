@@ -14,6 +14,7 @@ import logging
 from datetime import date, timedelta
 
 from v2.data.client import FDClient
+from v2.data.price_source import PriceSource, default_price_source
 from v2.data.yfinance_client import KNOWN_ADRS, YFinanceClient
 from v2.lateral.discover import discover
 from v2.lateral.models import LateralResult, Neighbor
@@ -34,11 +35,22 @@ def run_lateral_expansion(
     universe: set[str],
     fd_client: FDClient,
     filter_config: FilterConfig,
+    *,
+    price_source: PriceSource | None = None,
 ) -> LateralResult:
-    """Run the full pipeline for one expansion pass."""
-    # fd_safe_today: respect FD's 1-3 day coverage lag.
-    from v2.data_safety import fd_safe_today
-    today = fd_safe_today()
+    """Run the full pipeline for one expansion pass.
+
+    ``price_source`` provides daily OHLCV for the candidate build pass
+    (Phase 4.5-mini default: yfinance real-time EOD). The non-price
+    FD endpoints inside :func:`v2.screening.build_candidate` —
+    ``get_financial_metrics`` / ``get_earnings`` — return quarterly
+    data with their own 45-90 day reporting lag, so a 3-day buffer is
+    moot there and ``date.today()`` is correct.
+    """
+    if price_source is None:
+        price_source = default_price_source()
+
+    today = date.today()
     today_str = today.isoformat()
     history_start = (today - timedelta(days=400)).isoformat()
 
@@ -83,6 +95,7 @@ def run_lateral_expansion(
         candidate = build_candidate(
             n.ticker, fd_client, today_str, history_start,
             fallback=use_fallback,
+            price_source=price_source,
         )
         api_calls += 2  # metrics + prices
         if candidate is None:

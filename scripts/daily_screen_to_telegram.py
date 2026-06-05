@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 
 from v2.archive import Archive
 from v2.data import CachedFDClient
+from v2.data.price_source import default_price_source
 from v2.observability import capture_trace_with_framing, install_all
 from v2.reporting import TelegramNotifier, format_screening_result, notify_on_error
 from v2.reporting.priority import compute_importance
@@ -28,8 +29,14 @@ def main() -> None:
         text="(自动推送) 科技股筛选",
         responder_name="_r_daily_screen",
     ) as trace:
+        # Phase 4.5-mini: daily prices come from yfinance (no FD 3-day lag).
+        # FD is still used for fundamentals / earnings. Ops can flip via
+        # V2_PRICE_SOURCE=fd in env.
+        price_source = default_price_source()
         with CachedFDClient() as fd:
-            result = run_screening(TECH_30, fd, DEFAULT_FILTERS)
+            result = run_screening(
+                TECH_30, fd, DEFAULT_FILTERS, price_source=price_source,
+            )
 
         print(f"Passed: {len(result.candidates)}/{result.universe_size}")
 

@@ -17,6 +17,7 @@ logging.basicConfig(level=logging.WARNING, format="  [%(levelname)s] %(message)s
 
 from v2.archive import Archive
 from v2.data import CachedFDClient
+from v2.data.price_source import default_price_source
 from v2.memory import AnomalyMemory
 from v2.monitoring import DEFAULT_CONFIG, attribute, run_monitoring
 from v2.observability import capture_trace_with_framing, install_all
@@ -38,8 +39,14 @@ def main() -> None:
     print(f"Monitoring {len(TECH_30)} tickers...")
     # Keep FD context open through attribution so we can fetch company names
     # for the entity-filter step.
+    # Phase 4.5-mini: daily prices come from yfinance (no FD 3-day lag).
+    # FD is still used for financials / earnings / insider inside the
+    # detectors. Ops can flip back to FD via V2_PRICE_SOURCE=fd in env.
+    price_source = default_price_source()
     with CachedFDClient() as fd:
-        anomalies = run_monitoring(TECH_30, fd, DEFAULT_CONFIG)
+        anomalies = run_monitoring(
+            TECH_30, fd, DEFAULT_CONFIG, price_source=price_source,
+        )
 
         if not anomalies:
             print("No anomalies on the latest trading day — staying silent.")

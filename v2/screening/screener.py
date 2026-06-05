@@ -8,6 +8,7 @@ from datetime import date, timedelta
 import numpy as np
 
 from v2.data.client import FDClient
+from v2.data.price_source import PriceSource, default_price_source
 from v2.screening.delta_fetcher import enrich_with_delta
 from v2.screening.filters import passes_filter
 from v2.screening.models import FilterConfig, ScreenCandidate, ScreenResult
@@ -23,11 +24,20 @@ def run_screening(
     tickers: list[str],
     fd_client: FDClient,
     config: FilterConfig,
+    *,
+    price_source: PriceSource | None = None,
 ) -> ScreenResult:
-    """Scan *tickers*, fetch metrics + prices, return candidates that pass."""
-    # fd_safe_today: respect FD's 1-3 day coverage lag. See v2/data_safety.py.
-    from v2.data_safety import fd_safe_today
-    today = fd_safe_today()
+    """Scan *tickers*, fetch metrics + prices, return candidates that pass.
+
+    ``price_source`` is the daily-OHLCV source (Phase 4.5-mini); defaults
+    to :func:`v2.data.price_source.default_price_source` which returns
+    a real-time EOD yfinance client. Tests / backtest inject an
+    :class:`FDPriceSource` to reproduce historical snapshots.
+    """
+    if price_source is None:
+        price_source = default_price_source()
+
+    today = date.today()
     today_str = today.isoformat()
     # Pull ~400 calendar days to ensure we get >=252 trading days
     history_start = (today - timedelta(days=400)).isoformat()
@@ -43,6 +53,7 @@ def run_screening(
     for ticker in tickers:
         candidate = build_candidate(
             ticker, fd_client, today_str, history_start,
+            price_source=price_source,
         )
         invocation_count += 2
         if candidate is None:
@@ -63,9 +74,11 @@ def run_screening(
         c.tags = _compute_tags(c)
 
     # ETF benchmarking — populate sector relative-strength context for
-    # the narrator's template fill. Bounded extra cost: |SECTOR_ETFS| FD calls.
+    # the narrator's template fill. Bounded extra cost: |SECTOR_ETFS| price
+    # calls (through the injected price_source).
     _enrich_with_sector_strength(
-        candidates, fd_client, today_str, history_start,
+        candidates, today_str, history_start,
+        price_source=price_source,
     )
 
     # 改进 ①: Enrich passing candidates with dynamic delta context for narrator
@@ -96,17 +109,30 @@ def build_candidate(
     history_start: str,
     *,
     fallback=None,
+    price_source: PriceSource | None = None,
 ) -> ScreenCandidate | None:
-    """Fetch metrics + prices + earnings and build a snapshot, or None if data unusable."""
-    metrics_list = fd.get_financial_metrics(ticker, today, limit=1)
-    prices = fd.get_prices(ticker, history_start, today)
+    """Fetch metrics + prices + earnings and build a snapshot, or None if data unusable.
 
-    # Fallback path — try the secondary source for whichever piece is missing
+    ``price_source`` is the daily-OHLCV provider; defaults to
+    :func:`default_price_source` (yfinance). ``fd`` still handles
+    metrics + (in :func:`enrich_with_earnings`) earnings. The
+    ``fallback`` argument is the metrics-side fallback (e.g.
+    :class:`YFinanceClient` for foreign ADRs FD doesn't cover) — it
+    falls back on metrics only; prices already come from the
+    injected ``price_source``.
+    """
+    if price_source is None:
+        price_source = default_price_source()
+
+    metrics_list = fd.get_financial_metrics(ticker, today, limit=1)
+    prices = price_source.get_prices(ticker, history_start, today)
+
+    # Fallback path — try the secondary source for metrics-side gap.
+    # Prices come from the injected price_source so we don't repeat the
+    # fallback round-trip here.
     if fallback is not None:
         if not metrics_list:
             metrics_list = fallback.get_financial_metrics(ticker, today, limit=1)
-        if len(prices) < _MIN_PRICE_HISTORY:
-            prices = fallback.get_prices(ticker, history_start, today)
 
     if not metrics_list or len(prices) < _MIN_PRICE_HISTORY:
         return None
@@ -180,9 +206,10 @@ def enrich_with_earnings(candidate: ScreenCandidate, fd: FDClient) -> None:
 
 def _enrich_with_sector_strength(
     candidates: list[ScreenCandidate],
-    fd: FDClient,
     today: str,
     history_start: str,
+    *,
+    price_source: PriceSource,
 ) -> None:
     """Populate sector_etf / sector_return_1w / sector_diff_1w_pp in place.
 
@@ -194,7 +221,7 @@ def _enrich_with_sector_strength(
 
     for etf in needed_etfs:
         try:
-            prices = fd.get_prices(etf, history_start, today)
+            prices = price_source.get_prices(etf, history_start, today)
         except Exception as exc:
             logger.warning("Sector ETF %s fetch failed: %s", etf, exc)
             continue
