@@ -108,6 +108,26 @@ CREATE TABLE IF NOT EXISTS earnings_summarized (
     outcome       TEXT,
     PRIMARY KEY (ticker, report_period)
 );
+
+-- Phase 2.5 full: per-day positions snapshot, written by ⑨b at 16:25 ET
+-- Mon-Fri. Consumed by ⑩ Fri 19:00 ET to compute per-position weekly
+-- attribution (avg_weight × weekly_return). PRIMARY KEY on
+-- (snapshot_date, ticker) makes the ⑨b INSERT OR REPLACE idempotent
+-- — a same-day cron rerun overwrites instead of duplicating rows.
+CREATE TABLE IF NOT EXISTS positions_snapshot (
+    snapshot_date TEXT NOT NULL,
+    ticker        TEXT NOT NULL,
+    market_value  REAL NOT NULL,
+    weight        REAL NOT NULL,
+    sector_etf    TEXT,
+    PRIMARY KEY (snapshot_date, ticker)
+);
+-- "today's positions" lookup (⑨b idempotent write checks)
+CREATE INDEX IF NOT EXISTS idx_positions_snapshot_date
+    ON positions_snapshot(snapshot_date);
+-- "this ticker's 5-day window" lookup (⑩ attribution loop)
+CREATE INDEX IF NOT EXISTS idx_positions_snapshot_ticker
+    ON positions_snapshot(ticker, snapshot_date);
 """
 
 
@@ -424,6 +444,82 @@ class Archive:
         except sqlite3.Error as exc:
             logger.warning("clear_p2_digest failed: %s", exc)
             return 0
+
+    # ---- Phase 2.5 full — positions_snapshot table ---------------------
+
+    def write_position_snapshots(self, rows: Iterable[dict]) -> int:
+        """Bulk INSERT OR REPLACE into ``positions_snapshot``.
+
+        Each row dict must carry: ``snapshot_date`` (ISO),
+        ``ticker``, ``market_value``, ``weight``, ``sector_etf``
+        (``None`` allowed). Returns the number of rows written.
+
+        Idempotent on (snapshot_date, ticker) — a same-day rerun
+        overwrites the prior entry instead of duplicating. Returns 0
+        on any SQLite error (matches the rest of this class's
+        silent-skip posture so the cron stays alive on a transient
+        lock conflict).
+        """
+        payload = [
+            (
+                r["snapshot_date"], r["ticker"],
+                float(r["market_value"]), float(r["weight"]),
+                r.get("sector_etf"),
+            )
+            for r in rows
+        ]
+        if not payload:
+            return 0
+        try:
+            with self._conn() as conn:
+                conn.executemany(
+                    """INSERT OR REPLACE INTO positions_snapshot
+                       (snapshot_date, ticker, market_value, weight, sector_etf)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    payload,
+                )
+                return len(payload)
+        except sqlite3.Error as exc:
+            logger.warning("write_position_snapshots failed: %s", exc)
+            return 0
+
+    def get_position_snapshots(
+        self,
+        *,
+        ticker: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
+    ) -> list[dict]:
+        """Query ``positions_snapshot``. All filters optional.
+
+        Returns rows as dicts ordered by (snapshot_date ASC, ticker ASC)
+        so the ⑩ attribution loop can iterate the time series in order
+        without sorting downstream.
+        """
+        clauses: list[str] = []
+        params: list = []
+        if ticker is not None:
+            clauses.append("ticker = ?")
+            params.append(ticker)
+        if since is not None:
+            clauses.append("snapshot_date >= ?")
+            params.append(since)
+        if until is not None:
+            clauses.append("snapshot_date <= ?")
+            params.append(until)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        sql = (
+            f"SELECT snapshot_date, ticker, market_value, weight, sector_etf "
+            f"FROM positions_snapshot {where} "
+            f"ORDER BY snapshot_date ASC, ticker ASC"
+        )
+        try:
+            with self._conn() as conn:
+                cur = conn.execute(sql, tuple(params))
+                return [dict(row) for row in cur.fetchall()]
+        except sqlite3.Error as exc:
+            logger.warning("get_position_snapshots failed: %s", exc)
+            return []
 
     def _resolve_tickers(
         self,
