@@ -26,7 +26,9 @@ from v2.sec._bot_cards import (   # noqa: E402
     format_sec_form4_cluster_card,
     format_sec_form4_individual_card,
     format_sec_form4_view,
+    format_sec_insider_digest,
 )
+from v2.sec.insider_digest import WeeklyInsiderSummary   # noqa: E402
 from v2.sec.models import (   # noqa: E402
     EightKEvent, EightKItem, Form4Cluster, Form4Transaction, SecFiling,
 )
@@ -442,6 +444,7 @@ def test_bot_cards_module_exposes_all_five_formatters():
         "format_sec_form4_individual_card",
         "format_sec_form4_cluster_card",
         "format_sec_form4_view",
+        "format_sec_insider_digest",
     ):
         assert hasattr(_bot_cards, name), f"_bot_cards missing {name}"
         assert name in _bot_cards.__all__, f"{name} not in __all__"
@@ -473,3 +476,149 @@ def test_reporting_shim_re_exports_same_identities():
     assert shim.format_sec_form4_individual_card is src.format_sec_form4_individual_card
     assert shim.format_sec_form4_cluster_card is src.format_sec_form4_cluster_card
     assert shim.format_sec_form4_view is src.format_sec_form4_view
+    assert shim.format_sec_insider_digest is src.format_sec_insider_digest
+
+
+# ---------------------------------------------------------------------------
+# format_sec_insider_digest — ⑫b weekly digest byte-equal (Phase 3.5)
+# ---------------------------------------------------------------------------
+
+def _digest_normal() -> WeeklyInsiderSummary:
+    """7 pushes, 5 tickers, 1 buy cluster + 1 sell cluster, no unusual."""
+    return WeeklyInsiderSummary(
+        week_start="2026-06-01", week_end="2026-06-05",
+        purchase_push_count=2, sale_push_count=3,
+        cluster_purchase_count=1, cluster_sale_count=1,
+        by_ticker={"NVDA": 2, "AAPL": 2, "MSFT": 1, "ARM": 1, "TSLA": 1},
+        unusual_tickers=[],
+        total_tickers_active=5, total_push_count=7,
+    )
+
+
+def _digest_quiet() -> WeeklyInsiderSummary:
+    """Empty week — is_quiet_week=True, no footer caption."""
+    return WeeklyInsiderSummary(
+        week_start="2026-06-01", week_end="2026-06-05",
+    )
+
+
+def _digest_unusual_three() -> WeeklyInsiderSummary:
+    """3 unusual tickers — no overflow (≤5)."""
+    return WeeklyInsiderSummary(
+        week_start="2026-06-01", week_end="2026-06-05",
+        purchase_push_count=4, sale_push_count=8,
+        cluster_purchase_count=2, cluster_sale_count=1,
+        by_ticker={"NVDA": 5, "ARM": 4, "TSLA": 3, "AAPL": 2, "MSFT": 1},
+        unusual_tickers=["NVDA", "ARM", "TSLA"],
+        total_tickers_active=5, total_push_count=15,
+    )
+
+
+def _digest_unusual_overflow() -> WeeklyInsiderSummary:
+    """8 unusual tickers — top 5 + '... 另 3 只' tail."""
+    return WeeklyInsiderSummary(
+        week_start="2026-06-01", week_end="2026-06-05",
+        purchase_push_count=12, sale_push_count=18,
+        cluster_purchase_count=3, cluster_sale_count=2,
+        by_ticker={
+            "NVDA": 7, "ARM": 6, "TSLA": 5, "AAPL": 4, "MSFT": 4,
+            "META": 3, "AMZN": 3, "GOOGL": 3, "AVGO": 2,
+        },
+        unusual_tickers=[
+            "NVDA", "ARM", "TSLA", "AAPL", "MSFT",
+            "META", "AMZN", "GOOGL",
+        ],
+        total_tickers_active=9, total_push_count=35,
+    )
+
+
+def test_insider_digest_normal_week_byte_equal():
+    """7 pushes, 5 tickers, both cluster lines — full footer caption."""
+    actual = format_sec_insider_digest(_digest_normal())
+    expected = (
+        "<b>📥 内部人活动周报 · 2026-06-01 → 2026-06-05</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "<b>本周总览</b>\n"
+        "  总 push 数: <code>7</code> · 涉及 ticker: <code>5</code> 只\n"
+        "\n"
+        "<b>方向分布</b>\n"
+        "  📥 买入 (purchase): <code>2</code> 笔\n"
+        "  📤 卖出 (sale): <code>3</code> 笔\n"
+        "  🔗 集群 (cluster): <code>2</code> 笔 (买入 1 / 卖出 1)\n"
+        "\n"
+        "<i>注：基于 ⑫ push title 统计（Phase 3.5 简化口径，"
+        "per-code A/M/F/G/C breakdown 见 Phase 3.5.5）</i>"
+    )
+    assert actual == expected, (
+        f"\n--- actual ---\n{actual}\n\n--- expected ---\n{expected}"
+    )
+
+
+def test_insider_digest_quiet_week_no_footer_byte_equal():
+    """Empty week — placeholder line, no footer caption per Polish 2."""
+    actual = format_sec_insider_digest(_digest_quiet())
+    expected = (
+        "<b>📥 内部人活动周报 · 2026-06-01 → 2026-06-05</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "<i>本周 ⑫ Form 4 推送平静（0 笔）</i>"
+    )
+    assert actual == expected, (
+        f"\n--- actual ---\n{actual}\n\n--- expected ---\n{expected}"
+    )
+
+
+def test_insider_digest_unusual_three_tickers_byte_equal():
+    """3 unusual tickers — ≤5 so no overflow tail."""
+    actual = format_sec_insider_digest(_digest_unusual_three())
+    expected = (
+        "<b>📥 内部人活动周报 · 2026-06-01 → 2026-06-05</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "<b>本周总览</b>\n"
+        "  总 push 数: <code>15</code> · 涉及 ticker: <code>5</code> 只\n"
+        "\n"
+        "<b>方向分布</b>\n"
+        "  📥 买入 (purchase): <code>4</code> 笔\n"
+        "  📤 卖出 (sale): <code>8</code> 笔\n"
+        "  🔗 集群 (cluster): <code>3</code> 笔 (买入 2 / 卖出 1)\n"
+        "\n"
+        "<b>⚠️ 异常活跃 ticker</b> (≥3 pushes)\n"
+        "  <b>NVDA</b>: 5 pushes\n"
+        "  <b>ARM</b>: 4 pushes\n"
+        "  <b>TSLA</b>: 3 pushes\n"
+        "\n"
+        "<i>注：基于 ⑫ push title 统计（Phase 3.5 简化口径，"
+        "per-code A/M/F/G/C breakdown 见 Phase 3.5.5）</i>"
+    )
+    assert actual == expected, (
+        f"\n--- actual ---\n{actual}\n\n--- expected ---\n{expected}"
+    )
+
+
+def test_insider_digest_unusual_overflow_top5_byte_equal():
+    """8 unusual tickers — top 5 listed + '... 另 3 只' tail per Polish 3."""
+    actual = format_sec_insider_digest(_digest_unusual_overflow())
+    expected = (
+        "<b>📥 内部人活动周报 · 2026-06-01 → 2026-06-05</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "<b>本周总览</b>\n"
+        "  总 push 数: <code>35</code> · 涉及 ticker: <code>9</code> 只\n"
+        "\n"
+        "<b>方向分布</b>\n"
+        "  📥 买入 (purchase): <code>12</code> 笔\n"
+        "  📤 卖出 (sale): <code>18</code> 笔\n"
+        "  🔗 集群 (cluster): <code>5</code> 笔 (买入 3 / 卖出 2)\n"
+        "\n"
+        "<b>⚠️ 异常活跃 ticker</b> (≥3 pushes)\n"
+        "  <b>NVDA</b>: 7 pushes\n"
+        "  <b>ARM</b>: 6 pushes\n"
+        "  <b>TSLA</b>: 5 pushes\n"
+        "  <b>AAPL</b>: 4 pushes\n"
+        "  <b>MSFT</b>: 4 pushes\n"
+        "  <i>... 另 3 只</i>\n"
+        "\n"
+        "<i>注：基于 ⑫ push title 统计（Phase 3.5 简化口径，"
+        "per-code A/M/F/G/C breakdown 见 Phase 3.5.5）</i>"
+    )
+    assert actual == expected, (
+        f"\n--- actual ---\n{actual}\n\n--- expected ---\n{expected}"
+    )

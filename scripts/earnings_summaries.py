@@ -95,6 +95,17 @@ def _push_summarized(
         # "guidance lowered" we'll set this. Stays False for now.
         "guidance_lowered": False,
     }
+    # Phase 3.5 — 10-Q auditor flags surface into priority metadata so
+    # going_concern / material_weakness pushes the priority +20 / +15
+    # (the rule lives in v2.reporting.priority but only fires when the
+    # cron forwards the flags here). Duck-typed access so we don't pull
+    # in v2.sec at import time.
+    tq = getattr(summary, "ten_q_delta", None)
+    if tq is not None:
+        if getattr(tq, "has_going_concern", False):
+            md["has_going_concern"] = True
+        if getattr(tq, "has_material_weakness", False):
+            md["has_material_weakness"] = True
     priority = compute_importance("earnings_summary", md)
 
     text = format_earnings_summary(

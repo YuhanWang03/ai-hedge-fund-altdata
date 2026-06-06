@@ -612,6 +612,13 @@ _MODULE: dict[str, Explanation] = {
         "store":  "推送写 archive，A/M/F/G/C noise 暂存等 Phase 3.5 weekly digest 消费",
         "next":   "cluster 卡先推（更重要），再推单笔 signal 卡。同 cluster 内的单笔不重复推送",
     },
+    "_r_sec_insider_digest": {
+        "source": "scheduler 触发（⑫b Fri 19:15 ET，错开 ⑩ 19:00 / ⑰ 19:30），归档 ⑫ Form 4 cron 本周（Mon-Fri）已写入 archive.pushes 的所有 push title",
+        "how":    "build_weekly_digest 按 (ticker, direction) 聚合 push title — 通过 _TITLE_SIGNAL_RE / _TITLE_CLUSTER_RE 正则解析 'Form 4 · TICKER · 买入' 与 'Form 4 集群 · TICKER · purchase' 两种形态，per-A/M/F/G/C breakdown 延后到 Phase 3.5.5",
+        "what":   "WeeklyInsiderSummary 含 purchase/sale/cluster push 计数 + by_ticker 分布 + ≥3 pushes 的 unusual_tickers + is_quiet_week 标志",
+        "store":  "推送写 archive.db pushes 表；空周也推一张 operator-visibility 卡",
+        "next":   "默认 sec_insider_digest (P2 floor)；unusual_tickers ≥3 升 P1。卡片明确标注 Phase 3.5 是 title-only 聚合口径",
+    },
     # On-demand SEC bot queries (Phase 3 Stage 4) — read-only, not cron
     "_r_eight_k_view": {
         "source": "用户实时请求（/8k AAPL 或 NL「AAPL 最近 8-K」），单 ticker SEC EDGAR 拉过去 30 天 8-K",

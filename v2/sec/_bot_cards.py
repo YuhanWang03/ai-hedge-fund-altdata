@@ -36,6 +36,7 @@ __all__ = [
     "format_sec_form4_individual_card",
     "format_sec_form4_cluster_card",
     "format_sec_form4_view",
+    "format_sec_insider_digest",
 ]
 
 
@@ -451,5 +452,87 @@ def format_sec_form4_view(
                 f"{_fmt_money_kb(c.total_usd)}"
             )
             lines.append(f"    {names_preview}{more}")
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# ⑫b Weekly insider digest (Phase 3.5)
+# ---------------------------------------------------------------------------
+
+def format_sec_insider_digest(summary) -> str:
+    """⑫b Fri 19:15 ET card — title-only aggregation per Phase 3.5
+    Decision 4.
+
+    ``summary`` is a :class:`v2.sec.insider_digest.WeeklyInsiderSummary`
+    (duck-typed so this module doesn't need a runtime import — keeps
+    the cross-module surface minimal). Render strategy:
+
+    - Empty week → operator-visibility floor card, no footer caption
+      (the 平静 placeholder is self-explanatory).
+    - Non-empty → 总览 + 方向分布 + (optional) 异常活跃 ticker block +
+      footer caption explaining the title-only granularity.
+    """
+    week_start = getattr(summary, "week_start", "—")
+    week_end = getattr(summary, "week_end", "—")
+
+    lines: list[str] = [
+        f"<b>📥 内部人活动周报 · {html.escape(str(week_start))} → "
+        f"{html.escape(str(week_end))}</b>",
+        "━━━━━━━━━━━━━━━━━━━━",
+    ]
+
+    if getattr(summary, "is_quiet_week", False):
+        # Quiet week — skip the Phase 3.5 口径 footer; the placeholder
+        # line is self-explanatory and the caption only matters when
+        # actual counts are on display.
+        lines.append("<i>本周 ⑫ Form 4 推送平静（0 笔）</i>")
+        return "\n".join(lines)
+
+    # 总览
+    lines.append("<b>本周总览</b>")
+    lines.append(
+        f"  总 push 数: <code>{summary.total_push_count}</code> · "
+        f"涉及 ticker: <code>{summary.total_tickers_active}</code> 只"
+    )
+
+    # 方向分布
+    lines.append("")
+    lines.append("<b>方向分布</b>")
+    lines.append(
+        f"  📥 买入 (purchase): <code>{summary.purchase_push_count}</code> 笔"
+    )
+    lines.append(
+        f"  📤 卖出 (sale): <code>{summary.sale_push_count}</code> 笔"
+    )
+    cluster_total = summary.cluster_purchase_count + summary.cluster_sale_count
+    if cluster_total:
+        lines.append(
+            f"  🔗 集群 (cluster): <code>{cluster_total}</code> 笔"
+            f" (买入 {summary.cluster_purchase_count} / "
+            f"卖出 {summary.cluster_sale_count})"
+        )
+
+    # 异常活跃 ticker — top 5 (the digest's unusual_tickers list is
+    # already ordered by push count desc via Counter.most_common).
+    # Overflow gets a "... 另 N 只" tail so the reader knows the list
+    # was truncated for display, not exhaustive.
+    unusual = list(getattr(summary, "unusual_tickers", []) or [])
+    if unusual:
+        lines.append("")
+        lines.append("<b>⚠️ 异常活跃 ticker</b> (≥3 pushes)")
+        by_ticker = getattr(summary, "by_ticker", {}) or {}
+        for t in unusual[:5]:
+            n = by_ticker.get(t, 0)
+            lines.append(f"  <b>{html.escape(t)}</b>: {n} pushes")
+        if len(unusual) > 5:
+            lines.append(f"  <i>... 另 {len(unusual) - 5} 只</i>")
+
+    # Footer caption
+    lines.append("")
+    lines.append(
+        "<i>注：基于 ⑫ push title 统计（Phase 3.5 简化口径，"
+        "per-code A/M/F/G/C breakdown 见 Phase 3.5.5）</i>"
+    )
 
     return "\n".join(lines)

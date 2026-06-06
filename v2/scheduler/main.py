@@ -34,6 +34,7 @@ from v2.scheduler.jobs import (
     positions_snapshot_job,
     sec_8k_job,
     sec_form4_job,
+    sec_insider_digest_job,
 )
 
 logger = logging.getLogger(__name__)
@@ -46,9 +47,10 @@ def build_scheduler() -> BlockingScheduler:
     """Configure jobs without starting. Returns the scheduler ready to .start().
 
     Default APScheduler ``ThreadPoolExecutor`` uses ``max_workers=10``.
-    With 14 jobs (Phase 3 added ⑪ + ⑫) and Mon-Fri 17:00-21:00 ET burst
-    window, a server restart catching up multiple misfires could saturate
-    10 workers. Bumped to 20 — costs near zero, comfortable headroom.
+    With 20 jobs (Phase 3.5 added ⑫b weekly insider digest) and Mon-Fri
+    17:00-21:00 ET burst window, a server restart catching up multiple
+    misfires could saturate 10 workers. Bumped to 20 — costs near zero,
+    comfortable headroom.
     """
     scheduler = BlockingScheduler(
         timezone=_TZ,
@@ -182,6 +184,20 @@ def build_scheduler() -> BlockingScheduler:
         id="sec_form4",
         name="⑫ SEC Form 4 Scanner (Mon-Fri 17:45 ET)",
         misfire_grace_time=3600,
+        coalesce=True,
+    )
+
+    # ⑫b Weekly insider activity digest — Fri 19:15 ET (Phase 3.5).
+    # Sits between ⑩ Portfolio Weekly (19:00) and ⑰ Macro Weekly (19:30).
+    # Aggregates past Mon-Fri's ⑫ Form 4 cron pushes from archive
+    # (title-only aggregation per Stage 0 Decision 4 — per-A/M/F/G/C
+    # breakdown deferred to Phase 3.5.5).
+    scheduler.add_job(
+        sec_insider_digest_job,
+        CronTrigger(hour=19, minute=15, day_of_week="fri", timezone=_TZ),
+        id="sec_insider_digest",
+        name="⑫b SEC Insider Digest (Fri 19:15 ET)",
+        misfire_grace_time=1800,
         coalesce=True,
     )
 

@@ -326,7 +326,43 @@ def format_earnings_summary(
         lines.append("")
         lines.append(f'📜 <a href="{summary.transcript_url}">电话会记录</a>')
 
+    # Phase 3.5 — optional 10-Q delta section. Rendered ONLY when
+    # ten_q_delta is present AND has something meaningful to surface
+    # (at least one added MD&A paragraph, an auditor flag, or new
+    # risk factors). A bare TenQDelta with all empty fields means the
+    # 10-Q was successfully fetched but the diff was uninformative
+    # (first quarter after deploy / nothing changed) — silent skip
+    # avoids cluttering the card with an empty header.
+    tq = summary.ten_q_delta
+    if tq is not None and _has_meaningful_ten_q_signal(tq):
+        lines.append("")
+        lines.append("<b>📋 10-Q MD&amp;A 关键变化</b>")
+        for para in (getattr(tq, "mda_added_paragraphs", None) or [])[:3]:
+            lines.append(f"  ➕ <i>{html.escape(str(para))}</i>")
+        if getattr(tq, "has_going_concern", False):
+            lines.append("  ⚠️ <b>Going concern</b> 关键词出现")
+        if getattr(tq, "has_material_weakness", False):
+            lines.append("  ⚠️ <b>Material weakness</b> auditor finding")
+        new_rf_n = int(getattr(tq, "new_risk_factor_count", 0) or 0)
+        if new_rf_n:
+            lines.append(f"  📌 {new_rf_n} 个新 risk factor 段落")
+
     return "\n".join(lines)
+
+
+def _has_meaningful_ten_q_signal(tq) -> bool:
+    """True iff the TenQDelta carries at least one signal worth
+    rendering. Avoids empty '📋 10-Q MD&A 关键变化' header on a
+    no-diff filing."""
+    if getattr(tq, "mda_added_paragraphs", None):
+        return True
+    if getattr(tq, "has_going_concern", False):
+        return True
+    if getattr(tq, "has_material_weakness", False):
+        return True
+    if int(getattr(tq, "new_risk_factor_count", 0) or 0) > 0:
+        return True
+    return False
 
 
 def format_earnings_pending(

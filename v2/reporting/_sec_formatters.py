@@ -17,6 +17,7 @@ from v2.sec._bot_cards import (
     format_sec_form4_cluster_card,
     format_sec_form4_individual_card,
     format_sec_form4_view,
+    format_sec_insider_digest,
 )
 
 __all__ = [
@@ -25,4 +26,5 @@ __all__ = [
     "format_sec_form4_cluster_card",
     "format_sec_form4_individual_card",
     "format_sec_form4_view",
+    "format_sec_insider_digest",
 ]
