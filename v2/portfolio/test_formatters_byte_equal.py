@@ -172,6 +172,8 @@ def test_risk_view_is_byte_equal_to_risk_card():
 # ---------------------------------------------------------------------------
 
 def test_weekly_card_byte_equal_snapshot():
+    """Clean week, attribution arg defaulted to None → no attribution
+    block rendered (Phase 2.5 full silent-when-fresh contract)."""
     actual = format_weekly_card(_risk_report_weekly_clean())
 
     expected = (
@@ -188,14 +190,105 @@ def test_weekly_card_byte_equal_snapshot():
         "<b>🏭 主要行业暴露</b>\n"
         "  XLK: 35.0%\n"
         "  SMH: 30.0%\n"
-        "  XLF: 18.0%\n"
-        "<i>（per-position 周表现归因待开发——Alpaca 不提供每个持仓的历史曲线，"
-        "需自建每日快照表 → Phase 2.5）</i>"
+        "  XLF: 18.0%"
     )
 
     assert actual == expected, (
         f"\n--- actual ---\n{actual}\n\n--- expected ---\n{expected}"
     )
+
+
+def test_weekly_card_with_full_attribution_byte_equal():
+    """5+ days snapshot → best / worst / net rows rendered."""
+    from v2.portfolio.snapshot import AttributionItem
+
+    attribution = [
+        AttributionItem(ticker="NVDA", avg_weight=0.30,
+                        weekly_return=0.05, contribution=0.015),
+        AttributionItem(ticker="MSFT", avg_weight=0.20,
+                        weekly_return=0.01, contribution=0.002),
+        AttributionItem(ticker="JPM",  avg_weight=0.15,
+                        weekly_return=-0.02, contribution=-0.003),
+    ]
+    actual = format_weekly_card(
+        _risk_report_weekly_clean(),
+        attribution=attribution,
+        snapshot_days_available=5,
+    )
+    expected = (
+        "<b>📊 周 P&amp;L 复盘 · 2026-06-06</b>\n"
+        "<i>(截至昨日收盘的口径)</i>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "组合价值 <code>$130.0K</code> "
+        "(持仓 <code>$104.6K</code> · 现金 <code>$25.4K</code>, 19.5%)\n"
+        "<b>本周回报</b> 🟢 +1.50%\n"
+        "<b>本月回报</b> 🟢 +2.80%\n"
+        "<b>📉 1M 最大回撤</b> -1.80%\n"
+        "  峰值 <code>$105.1K</code> @ <code>2026-06-03</code>\n"
+        "  当前距峰 -0.50%\n"
+        "<b>🏭 主要行业暴露</b>\n"
+        "  XLK: 35.0%\n"
+        "  SMH: 30.0%\n"
+        "  XLF: 18.0%\n"
+        "<b>📊 本周 per-position 表现归因</b>\n"
+        "  最佳: <b>NVDA</b> 🟢 +5.00% (贡献 🟢 +1.50%)\n"
+        "  最差: <b>JPM</b> 🔴 -2.00% (贡献 🔴 -0.30%)\n"
+        "  净贡献: <code>🟢 +1.40%</code>"
+    )
+    assert actual == expected, (
+        f"\n--- actual ---\n{actual}\n\n--- expected ---\n{expected}"
+    )
+
+
+def test_weekly_card_insufficient_snapshots_byte_equal():
+    """3-day window (< WEEKLY_MIN_DAYS=5) → italic '累积中' fallback."""
+    from v2.portfolio.snapshot import AttributionItem
+
+    attribution = [
+        AttributionItem(ticker="NVDA", avg_weight=0.30,
+                        weekly_return=0.03, contribution=0.009),
+    ]
+    actual = format_weekly_card(
+        _risk_report_weekly_clean(),
+        attribution=attribution,
+        snapshot_days_available=3,
+    )
+    expected = (
+        "<b>📊 周 P&amp;L 复盘 · 2026-06-06</b>\n"
+        "<i>(截至昨日收盘的口径)</i>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "组合价值 <code>$130.0K</code> "
+        "(持仓 <code>$104.6K</code> · 现金 <code>$25.4K</code>, 19.5%)\n"
+        "<b>本周回报</b> 🟢 +1.50%\n"
+        "<b>本月回报</b> 🟢 +2.80%\n"
+        "<b>📉 1M 最大回撤</b> -1.80%\n"
+        "  峰值 <code>$105.1K</code> @ <code>2026-06-03</code>\n"
+        "  当前距峰 -0.50%\n"
+        "<b>🏭 主要行业暴露</b>\n"
+        "  XLK: 35.0%\n"
+        "  SMH: 30.0%\n"
+        "  XLF: 18.0%\n"
+        "<i>归因数据累积中 (3/5 天)</i>"
+    )
+    assert actual == expected, (
+        f"\n--- actual ---\n{actual}\n\n--- expected ---\n{expected}"
+    )
+
+
+def test_weekly_card_no_snapshots_silent():
+    """0 snapshots (fresh account / cron never ran) → no block, no italic.
+
+    Phase 2.5 full contract: don't apologise for missing data on a
+    fresh account — silently omit the section so the card reads cleanly
+    on the first Friday after deploy."""
+    actual = format_weekly_card(
+        _risk_report_weekly_clean(),
+        attribution=[],
+        snapshot_days_available=0,
+    )
+    # Same as the default test_weekly_card_byte_equal_snapshot output
+    assert "归因" not in actual
+    assert "per-position" not in actual
 
 
 # ---------------------------------------------------------------------------

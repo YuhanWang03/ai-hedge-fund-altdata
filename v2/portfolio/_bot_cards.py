@@ -241,14 +241,27 @@ def _build_alerts(report: RiskReport) -> list[str]:
 
 def format_weekly_card(
     report: RiskReport,
-    attribution: dict | None = None,    # placeholder for Phase 2.5
+    attribution: list | None = None,
+    snapshot_days_available: int = 0,
 ) -> str:
     """⑩ Fri 19:00 ET cron card.
 
     Focuses on portfolio-level weekly numbers (no earnings-risk section,
-    no alert footer — the daily ⑨ already surfaces those). The
-    ``attribution`` arg is reserved for the Phase-2.5 per-position
-    weekly attribution work; ignored for now and surfaced as italics.
+    no alert footer — the daily ⑨ already surfaces those).
+
+    Phase 2.5 full per-position attribution:
+
+    - ``attribution`` is the list of :class:`AttributionItem` from
+      :func:`v2.portfolio.snapshot.compute_weekly_attribution` —
+      already sorted by contribution descending. The card surfaces
+      best / worst / net.
+    - ``snapshot_days_available`` is how many days of positions
+      snapshots fed the attribution (cron only writes Mon-Fri so a
+      full week = 5). Below
+      :data:`v2.portfolio.snapshot.WEEKLY_MIN_DAYS` (= 5) we render
+      "归因数据累积中 (N/5 天)" instead of the best/worst rows.
+    - When ``snapshot_days_available == 0`` the attribution block is
+      silently omitted — fresh-account state, nothing to apologise for.
     """
     today = report.snapshot_date
     pnl = report.pnl
@@ -302,10 +315,32 @@ def format_weekly_card(
                 f"<b>{html.escape(item.ticker)}</b>"
             )
 
-    lines.append(
-        "<i>（per-position 周表现归因待开发——Alpaca 不提供每个持仓的历史曲线，"
-        "需自建每日快照表 → Phase 2.5）</i>"
-    )
+    # Phase 2.5 full — per-position weekly attribution. Sourced from
+    # ⑨b's positions_snapshot table via compute_weekly_attribution.
+    if attribution and snapshot_days_available >= 5:
+        lines.append("<b>📊 本周 per-position 表现归因</b>")
+        best = attribution[0]
+        worst = attribution[-1]
+        lines.append(
+            f"  最佳: <b>{html.escape(best.ticker)}</b> "
+            f"{_fmt_signed_pct(best.weekly_return)} "
+            f"(贡献 {_fmt_signed_pct(best.contribution)})"
+        )
+        # Only render "最差" when it's a distinct entry — single-position
+        # weeks would otherwise repeat the same row.
+        if worst.ticker != best.ticker:
+            lines.append(
+                f"  最差: <b>{html.escape(worst.ticker)}</b> "
+                f"{_fmt_signed_pct(worst.weekly_return)} "
+                f"(贡献 {_fmt_signed_pct(worst.contribution)})"
+            )
+        net = sum(a.contribution for a in attribution)
+        lines.append(f"  净贡献: <code>{_fmt_signed_pct(net)}</code>")
+    elif snapshot_days_available > 0:
+        lines.append(
+            f"<i>归因数据累积中 ({snapshot_days_available}/5 天)</i>"
+        )
+    # else: snapshot_days_available == 0 → silent (fresh account)
 
     if report.warnings:
         lines.append("<i>⚠ 数据不全：</i>")

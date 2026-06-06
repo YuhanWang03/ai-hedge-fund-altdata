@@ -34,6 +34,10 @@ from v2.archive import Archive
 from v2.broker import AlpacaUnavailable, get_portfolio_history
 from v2.observability import capture_trace_with_framing, install_all
 from v2.portfolio import build_risk_report
+from v2.portfolio.snapshot import (
+    compute_weekly_attribution,
+    read_weekly_window,
+)
 from v2.reporting import (
     TelegramNotifier,
     format_portfolio_weekly_card,
@@ -144,7 +148,26 @@ def main() -> int:
             reasons=list(priority.reasons) + ["+10_weekly_recap_floor"],
         )
 
-    text = format_portfolio_weekly_card(report)
+    # Phase 2.5 full — per-position weekly attribution. Reads ⑨b's
+    # rolling 7-day window (Mon-Fri snapshots, typically 5 trading
+    # days). compute_weekly_attribution returns [] if no snapshots
+    # exist yet (fresh account) — the card silently omits the block;
+    # 1-4 snapshots → "归因数据累积中"; 5+ → best/worst/net rows.
+    snapshots = read_weekly_window(archive, today_iso, window_days=7)
+    attribution = compute_weekly_attribution(snapshots, report.positions)
+    # Per-ticker "days available" can vary (mid-week add/remove); the
+    # card's gating threshold uses the longest series we observed —
+    # if at least one ticker has 5+ days the window is "full" for
+    # display purposes.
+    snapshot_days_available = (
+        max((len(snaps) for snaps in snapshots.values()), default=0)
+    )
+
+    text = format_portfolio_weekly_card(
+        report,
+        attribution=attribution,
+        snapshot_days_available=snapshot_days_available,
+    )
     chart = _render_equity_chart(f"组合权益曲线 · 1M · {today_iso}")
 
     notifier = TelegramNotifier(archive=archive)
