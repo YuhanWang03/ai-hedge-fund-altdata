@@ -124,3 +124,10 @@ class EarningsSummary:
     bull: str = ""
     bear: str = ""
     narrative: str = ""
+
+    # Phase 3.5 — optional 10-Q delta block surfaced as a separate
+    # card section. None when the ticker has no recent 10-Q (just
+    # filed an 8-K-only earnings release / parse failed). Typed as
+    # ``object`` to avoid a v2.earnings → v2.sec runtime import; the
+    # formatter duck-types on the field names of TenQDelta.
+    ten_q_delta: object | None = None

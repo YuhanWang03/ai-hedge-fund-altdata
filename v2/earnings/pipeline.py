@@ -137,6 +137,74 @@ class SummaryRun:
     outcomes: list[SummaryOutcome] = field(default_factory=list)
 
 
+def _fetch_recent_ten_q(
+    ticker: str,
+    today_iso: str,
+    *,
+    lookback_days: int = 200,
+    fetcher: Callable | None = None,
+    parser_fn: Callable | None = None,
+    diff_fn: Callable | None = None,
+):
+    """Phase 3.5: pull most-recent 10-Q for ``ticker`` + diff vs prior.
+
+    Returns a populated ``TenQDelta`` (with diff fields filled if a
+    prior 10-Q is within lookback) or ``None``. Any sub-failure
+    silently returns ``None`` — the ⑧ card section is purely additive
+    and must not break the existing earnings flow when SEC is flaky.
+
+    ``lookback_days=200`` covers ~2 quarterly cycles (90 + 90 + buffer);
+    prevents stale 10-Qs from older quarters from polluting the section.
+
+    Latency: edgartools ``filing.obj()`` is 3-8s per call. Worst case
+    for ⑧'s 3-5 daily tickers × 2 lookups (current + prior) → ~30-80s
+    extra. Acceptable for ⑧'s 21:00 ET slot.
+
+    Test seams (``fetcher`` / ``parser_fn`` / ``diff_fn``) keep the
+    smoke tests offline without dragging in v2.sec.client.
+    """
+    from datetime import date, timedelta
+
+    if fetcher is None:
+        from v2.sec import client as _sec_client
+        fetcher = _sec_client.get_recent_filings
+    if parser_fn is None:
+        from v2.sec.ten_q_parser import parse_ten_q as _parse
+        parser_fn = _parse
+    if diff_fn is None:
+        from v2.sec.ten_q_parser import diff_ten_q as _diff
+        diff_fn = _diff
+
+    try:
+        today_d = date.fromisoformat(today_iso)
+    except ValueError:
+        return None
+    since = (today_d - timedelta(days=lookback_days)).isoformat()
+    until = today_iso
+
+    try:
+        filings = fetcher(ticker, "10-Q", since, until)
+    except Exception as exc:                          # noqa: BLE001
+        logger.info("_fetch_recent_ten_q: SEC fetch failed for %s: %s",
+                    ticker, exc)
+        return None
+
+    if not filings:
+        return None
+
+    # filings is typically sorted descending by filing_date already
+    # (edgar default). Take [0] = most recent, [1] = prior if present.
+    current_delta = parser_fn(filings[0])
+    if current_delta is None:
+        return None
+
+    prior_delta = None
+    if len(filings) >= 2:
+        prior_delta = parser_fn(filings[1])
+
+    return diff_fn(current_delta, prior_delta)
+
+
 def run_summaries(
     tickers_releasing_today: list[str],
     fd: Any,
@@ -145,6 +213,7 @@ def run_summaries(
     already_summarized: set[tuple[str, str]] | None = None,
     summarize_fn: Callable[..., tuple[dict[str, str], int]] | None = None,
     transcript_fn: Callable[..., transcript_mod.TranscriptHit | None] | None = None,
+    ten_q_fn: Callable[..., object] | None = None,
 ) -> SummaryRun:
     """Emit post-release summaries for tickers that had a release today.
 
@@ -196,6 +265,20 @@ def run_summaries(
         snippet = hit.snippet if hit else None
         blurb, _tokens = summarize_fn(ticker, latest, recent=recent, transcript_snippet=snippet)
 
+        # Phase 3.5 — optional 10-Q delta. Silent skip on SEC failure
+        # so a transient EDGAR outage doesn't block the earnings card.
+        try:
+            ten_q_delta = (
+                ten_q_fn(ticker, today_iso) if ten_q_fn is not None
+                else _fetch_recent_ten_q(ticker, today_iso)
+            )
+        except Exception as exc:                      # noqa: BLE001
+            logger.warning(
+                "10-Q lookup raised for %s — skipping section: %s",
+                ticker, exc,
+            )
+            ten_q_delta = None
+
         summary = EarningsSummary(
             ticker=ticker,
             report_period=latest.report_period,
@@ -212,6 +295,7 @@ def run_summaries(
             bull=blurb.get("bull", ""),
             bear=blurb.get("bear", ""),
             narrative=blurb.get("narrative", ""),
+            ten_q_delta=ten_q_delta,
         )
         outcomes.append(SummaryOutcome(
             ticker=ticker,

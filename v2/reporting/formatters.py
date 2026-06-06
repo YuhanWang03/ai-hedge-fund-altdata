@@ -1245,6 +1245,7 @@ from v2.reporting._sec_formatters import (  # noqa: E402
     format_sec_form4_cluster_card,
     format_sec_form4_individual_card,
     format_sec_form4_view,
+    format_sec_insider_digest,
 )
 
 

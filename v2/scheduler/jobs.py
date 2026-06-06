@@ -116,6 +116,17 @@ def sec_form4_job() -> None:
     _run("sec_form4_to_telegram.py")
 
 
+def sec_insider_digest_job() -> None:
+    """⑫b Fri 19:15 ET — Weekly insider activity digest (Phase 3.5).
+
+    Aggregates the past Mon-Fri's ⑫ Form 4 cron pushes from
+    archive.pushes (title-only aggregation per Stage 0 Decision 4).
+    Sits between ⑩ Portfolio Weekly (19:00 ET) and ⑰ Macro Weekly
+    (19:30 ET) — operator-visibility floor card.
+    """
+    _run("sec_insider_digest_to_telegram.py")
+
+
 def macro_daily_snapshot_job() -> None:
     """⑭ Mon-Fri 16:30 ET — Macro daily snapshot.
 

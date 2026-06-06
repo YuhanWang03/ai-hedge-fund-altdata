@@ -35,6 +35,7 @@ from v2.reporting.formatters import (
     format_sec_form4_cluster_card,
     format_sec_form4_individual_card,
     format_sec_form4_view,
+    format_sec_insider_digest,
     render_equity_curve,
     render_price_sparkline,
 )
@@ -77,6 +78,7 @@ __all__ = [
     "format_sec_form4_cluster_card",
     "format_sec_form4_individual_card",
     "format_sec_form4_view",
+    "format_sec_insider_digest",
     "notify_on_error",
     "render_equity_curve",
     "render_price_sparkline",

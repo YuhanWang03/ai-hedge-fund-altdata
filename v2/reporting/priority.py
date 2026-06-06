@@ -59,6 +59,7 @@ BASE_SCORES: dict[str, int] = {
     "sec_form4_purchase":  75,  # insider P-code base P1
     "sec_form4_sale":      50,  # insider S-code base P2 (default noise)
     "sec_form4_cluster":   75,  # ≥3 distinct insiders same-day same-direction
+    "sec_insider_digest":  55,  # ⑫b Fri 19:15 ET — P2 floor, P1 on unusual ≥3
     # Phase 4 Macro Agent — daily snapshot + release-driven kinds
     "macro_release_p2":    55,  # in-line print (CPI/PCE/NFP/GDP/PPI/FOMC)
     "macro_release_p1":    65,  # 1-2σ surprise → P1
@@ -132,6 +133,14 @@ def compute_importance(
             adjustments.append((+30, f"big_surprise_{surprise:.1%}"))
         if md.get("guidance_lowered"):
             adjustments.append((+10, "guidance_lowered"))
+        # Phase 3.5 — 10-Q auditor / regulator flags. ⑧ surfaces these
+        # via the optional ten_q_delta block; the cron threads the
+        # flags into compute_importance metadata so the priority
+        # escalation is auditable in the trace.
+        if md.get("has_going_concern"):
+            adjustments.append((+20, "going_concern_in_10q"))
+        if md.get("has_material_weakness"):
+            adjustments.append((+15, "material_weakness_in_10q"))
 
     # ---- portfolio ----
     if event_kind == "portfolio_risk":
@@ -206,6 +215,15 @@ def compute_importance(
             adjustments.append((+15, f"big_discretionary_sale_${usd/1e6:.1f}M"))
         elif usd >= 1_000_000 and md.get("is_10b5_1"):
             adjustments.append((-5, "10b5_1_plan_sale"))
+
+    # ---- Phase 3.5 weekly insider digest (⑫b Fri 19:15 ET) ----
+    if event_kind == "sec_insider_digest":
+        # P2 (55) base. Bump to P1 when ≥3 tickers exceeded the
+        # _UNUSUAL_PUSH_THRESHOLD this week — that's a coordinated
+        # signal worth pulling out of the digest roll-up.
+        n_unusual = int(md.get("unusual_ticker_count") or 0)
+        if n_unusual >= 3:
+            adjustments.append((+10, f"unusual_tickers_{n_unusual}"))
 
     # ---- Phase 3 Form 4 cluster (≥3 distinct insiders same day) ----
     if event_kind == "sec_form4_cluster":
