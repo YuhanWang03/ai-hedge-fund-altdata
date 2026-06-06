@@ -14,33 +14,45 @@ Built as a portfolio project to demonstrate end-to-end ownership of a multi-sour
 
 Three concurrent services on a single $6/month VPS — **Scheduler** (21 cron jobs spanning 08:00–21:00 ET) + **Streamer** (minute-level intraday alert + anomaly scan) + **Telegram Bot** (25 slash + 23-intent NL). All three share 7 SQLite databases (WAL) + ChromaDB.
 
-### Cron Jobs · time table
+### Scheduled pushes (Cron Jobs full table)
 
-Sorted by US/Eastern time (agent details in [## Feature Reference](#feature-reference) → Cron Agents):
+Sorted by US/Eastern time (agent details in [## Feature Reference](#feature-reference) → Cron Agents). ⚠️ marks current implementation that's simplified or requires data accumulation — see footnote below:
 
-| Time (ET) | ID | Name | Frequency | Family | Pushes |
-|---|---|---|---|---|---|
-| 02:00 UTC | ⑥ | Archive Cleanup | daily | infra | (maintenance) |
-| 08:00 | ⑦ | Earnings Reminders | mon-fri | Earnings | ✅ |
-| 08:30 | ⑬ | ARK Alerts | mon-fri | ARK | ✅ pre-market |
-| 09:00 | ⑮ | Macro Release Scanner | mon-fri | Macro | ✅ on hit day |
-| 09:30 | ⑯ | Macro Initial Claims | **thu** | Macro | ✅ |
-| 16:25 | ⑨b | Positions Snapshot | mon-fri | Portfolio | 🔇 archive only |
-| 16:30 | ⑭ | Macro Daily Snapshot | mon-fri | Macro | ✅ |
-| 16:45 | 📋 | P2 Digest | mon-fri | infra | ✅ rollup |
-| 17:00 | ⑤ | ETF Daily Snapshot | mon-fri | Early signals | 🔇 dashboard only |
-| 17:05 | ⑪ | SEC 8-K Scanner | mon-fri | SEC | ✅ |
-| 17:30 | ① | Daily Screen | mon-fri | Early signals | ✅ |
-| 17:35 | ② | Anomaly Monitor | mon-fri | Early signals | ✅ |
-| 17:45 | ⑫ | SEC Form 4 Scanner | mon-fri | SEC | ✅ |
-| 18:00 | ③ | Lateral Expansion | **mon** | Early signals | ✅ |
-| 18:00 | ④ | Institutional 13F | **tue/fri** | Early signals | ✅ |
-| 18:30 | ④b | 13F Backfill | **sun** | Early signals | 🔇 maintenance |
-| 18:30 | ⑨ | Portfolio Risk | mon-fri | Portfolio | ✅ |
-| 19:00 | ⑩ | Portfolio Weekly | **fri** | Portfolio | ✅ |
-| 19:15 | ⑫b | SEC Insider Weekly Digest | **fri** | SEC | ✅ |
-| 19:30 | ⑰ | Macro Weekly Recap | **fri** | Macro | ✅ |
-| 21:00 | ⑧ | Earnings Summaries | mon-fri | Earnings | ✅ |
+| Time · Frequency | ID | Name | Function | Family · Pushes |
+|---|---|---|---|---|
+| **02:00 UTC** · daily | ⑥ | Archive Cleanup | Purge > 90-day archive rows | infra · 🔇 no push |
+| **08:00 ET** · mon-fri | ⑦ | Earnings Reminders | watchlist + holdings D-3/D-1/D-0 alerts | Earnings · ✅ |
+| **08:30 ET** · mon-fri | ⑬ | ARK Alerts | ARK 4 funds material rebalance (new/exit/±20%) | ARK · ✅ pre-market |
+| **09:00 ET** · mon-fri | ⑮ | Macro Release Scanner | CPI/PCE/NFP/GDP/PPI/FOMC release interpretation (σ ladder) | Macro · ✅ on hit day |
+| **09:30 ET** · **thu** | ⑯ | Macro Initial Claims | ICSA weekly initial unemployment + 4W MA | Macro · ✅ |
+| **16:25 ET** · mon-fri | ⑨b | Positions Snapshot | Daily holdings snapshot (input to ⑩ attribution) | Portfolio · 🔇 archive only |
+| **16:30 ET** · mon-fri | ⑭ | Macro Daily Snapshot | VIX/yields/commodities EOD + 4 anomaly flags | Macro · ✅ |
+| **16:45 ET** · mon-fri | 📋 | P2 Digest | Roll up day's P2 pushes into one card | infra · ✅ rollup |
+| **17:00 ET** · mon-fri | ⑤ | ETF Daily Snapshot | 4 ARK fund holdings CSV persist (⑬ baseline) | Early signals · 🔇 dashboard only |
+| **17:05 ET** · mon-fri | ⑪ | SEC 8-K Scanner | Today's 8-K + 24-item priority + 5.02 LLM NER | SEC · ✅ |
+| **17:30 ET** · mon-fri | ① | Daily Screen | TECH_30 hard-rule screen + sector benchmark | Early signals · ✅ |
+| **17:35 ET** · mon-fri | ② | Anomaly Monitor | Anomaly detect + Tavily multi-source attribution + Verifier | Early signals · ✅ |
+| **17:45 ET** · mon-fri | ⑫ | SEC Form 4 Scanner | Insider P/S individual + same-day ≥3 distinct cluster | SEC · ✅ |
+| **18:00 ET** · **mon** | ③ | Lateral Expansion | LLM supply-chain lateral + Tavily co-occurrence verify | Early signals · ✅ |
+| **18:00 ET** · **tue/fri** | ④ | Institutional 13F | 10 manager quarterly holdings + diff (CUSIP-aggregated) | Early signals · ✅ |
+| **18:30 ET** · **sun** | ④b | 13F Backfill | 13F weekly refill + catch amended filings | Early signals · 🔇 maintenance |
+| **18:30 ET** · mon-fri | ⑨ | Portfolio Risk | Portfolio risk (concentration/drawdown/earnings 7d/sector) | Portfolio · ✅ |
+| **19:00 ET** · **fri** | ⑩ | Portfolio Weekly | Weekly review + per-position attribution ⚠️ | Portfolio · ✅ |
+| **19:15 ET** · **fri** | ⑫b | SEC Insider Weekly Digest ⚠️ | Aggregate this week's ⑫ pushes (title-only simplification) | SEC · ✅ |
+| **19:30 ET** · **fri** | ⑰ | Macro Weekly Recap | This week released + next week preview + intraweek yields delta | Macro · ✅ |
+| **21:00 ET** · mon-fri | ⑧ | Earnings Summaries | LLM summary + 10-Q MD&A diff + going_concern → P0 | Earnings · ✅ |
+
+**⚠️ Partial implementation / data accumulation required**:
+
+- **⑩ Portfolio Weekly** — per-position attribution uses 3-state gating: ≥5 days of ⑨b snapshots → full best/worst/net; 1–4 days → "归因数据累积中 (N/5 天)" placeholder; 0 days → fully silent. **First complete week after deployment is required for full attribution data.**
+- **⑫b SEC Insider Weekly Digest** — currently **title-only simplification** (⑫ archive `trace_json` doesn't persist per-transaction codes, only push titles are queryable). Full per-A/M/F/G/C breakdown + insider-name dimension aggregation is deferred to **Phase 3.5.5** (see [Roadmap](#roadmap)).
+
+**⏳ Planned but not yet implemented cron jobs** (see [## Roadmap](#roadmap)):
+
+| Time · Frequency | ID | Name | Function | Trigger |
+|---|---|---|---|---|
+| **FOMC day +6h** · ad hoc | ⑮b | FOMC Transcript Follow-up | Powell presser transcript scrape supplemental card | Phase 4.5 — after 06-17 FOMC battle test |
+| **16:35 ET** · mon-fri | ⑭b | Market Regime Detection | VIX+yields+breadth composite regime judgment + switch alerts | Phase 5b — after Phase 4 runs ≥ 4 weeks (avoid overfit) |
 
 **Time design**: 17:00–19:30 ET is the dense main push window (post-close data lands fastest); 08:00–09:30 ET is pre-market (earnings reminders + ARK rebalance + macro releases); 16:25–16:45 ET is silent post-close batch; ⑧ runs at 21:00 ET because FD earnings data typically fully lands between 19:30–21:00 ET.
 

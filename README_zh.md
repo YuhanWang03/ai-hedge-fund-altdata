@@ -14,33 +14,45 @@
 
 系统在一台 $6/月 的 VPS 上并发运行三个服务：**Scheduler**（21 个 cron 任务覆盖 08:00–21:00 ET）+ **Streamer**（盘中分钟级 alert + 异动扫描）+ **Telegram Bot**（25 slash + 23 NL intent）。三服务通过 WAL 模式共享 7 个 SQLite 数据库 + ChromaDB 向量库（RAG 记忆），单服务崩溃不污染其他。
 
-### Cron Jobs 全表
+### 定时推送（Cron Jobs 全表）
 
-按美东时间排序，21 个 agents（agent 详解见 [## 功能详解](#功能详解) → Cron Agents 各 family 子节）：
+按美东时间排序，21 个 agents（agent 详解见 [## 功能详解](#功能详解) → Cron Agents 各 family 子节）。⚠️ 标记 = 当前实现存在简化或待数据累积，详见表后脚注：
 
-| 时间 (ET) | ID | 名称 | 频率 | Family | 推送 |
-|---|---|---|---|---|---|
-| **02:00 UTC** | ⑥ | Archive Cleanup | daily | 维护 | （维护，无推送） |
-| **08:00** | ⑦ | Earnings Reminders | mon-fri | Earnings | ✅ |
-| **08:30** | ⑬ | ARK Alerts | mon-fri | ARK | ✅ pre-market |
-| **09:00** | ⑮ | Macro Release Scanner | mon-fri | Macro | ✅ 命中日 |
-| **09:30** | ⑯ | Macro Initial Claims | **thu** | Macro | ✅ |
-| **16:25** | ⑨b | Positions Snapshot | mon-fri | Portfolio | 🔇 archive only |
-| **16:30** | ⑭ | Macro Daily Snapshot | mon-fri | Macro | ✅ |
-| **16:45** | 📋 | P2 Digest | mon-fri | 维护 | ✅ 汇总 |
-| **17:00** | ⑤ | ETF Daily Snapshot | mon-fri | 早期信号 | 🔇 dashboard only |
-| **17:05** | ⑪ | SEC 8-K Scanner | mon-fri | SEC | ✅ |
-| **17:30** | ① | Daily Screen | mon-fri | 早期信号 | ✅ |
-| **17:35** | ② | Anomaly Monitor | mon-fri | 早期信号 | ✅ |
-| **17:45** | ⑫ | SEC Form 4 Scanner | mon-fri | SEC | ✅ |
-| **18:00** | ③ | Lateral Expansion | **mon** | 早期信号 | ✅ |
-| **18:00** | ④ | Institutional 13F | **tue/fri** | 早期信号 | ✅ |
-| **18:30** | ④b | 13F Backfill | **sun** | 早期信号 | 🔇 维护 |
-| **18:30** | ⑨ | Portfolio Risk | mon-fri | Portfolio | ✅ |
-| **19:00** | ⑩ | Portfolio Weekly | **fri** | Portfolio | ✅ |
-| **19:15** | ⑫b | SEC Insider Weekly Digest | **fri** | SEC | ✅ |
-| **19:30** | ⑰ | Macro Weekly Recap | **fri** | Macro | ✅ |
-| **21:00** | ⑧ | Earnings Summaries | mon-fri | Earnings | ✅ |
+| 时间 · 频率 | ID | 名称 | 功能 | Family · 推送 |
+|---|---|---|---|---|
+| **02:00 UTC** · daily | ⑥ | Archive Cleanup | 清理 > 90 天 archive 记录 | 维护 · 🔇 无推送 |
+| **08:00 ET** · mon-fri | ⑦ | Earnings Reminders | watchlist + 持仓 D-3/D-1/D-0 财报提醒 | Earnings · ✅ |
+| **08:30 ET** · mon-fri | ⑬ | ARK Alerts | ARK 4 funds 显著调仓告警（新建仓/清仓/±20%）| ARK · ✅ pre-market |
+| **09:00 ET** · mon-fri | ⑮ | Macro Release Scanner | CPI/PCE/NFP/GDP/PPI/FOMC release 解读（σ ladder）| Macro · ✅ 命中日 |
+| **09:30 ET** · **thu** | ⑯ | Macro Initial Claims | ICSA 周度初请失业金 + 4W MA | Macro · ✅ |
+| **16:25 ET** · mon-fri | ⑨b | Positions Snapshot | 持仓每日快照（⑩ per-position 归因输入）| Portfolio · 🔇 archive only |
+| **16:30 ET** · mon-fri | ⑭ | Macro Daily Snapshot | VIX/yields/大宗 EOD + 4 个 anomaly flag | Macro · ✅ |
+| **16:45 ET** · mon-fri | 📋 | P2 Digest | 当日 P2 推送汇总成单卡 | 维护 · ✅ 汇总 |
+| **17:00 ET** · mon-fri | ⑤ | ETF Daily Snapshot | 4 ARK funds 持仓 CSV 持久化（⑬ baseline）| Early signals · 🔇 dashboard only |
+| **17:05 ET** · mon-fri | ⑪ | SEC 8-K Scanner | 当日 8-K + 24 item priority + 5.02 LLM NER | SEC · ✅ |
+| **17:30 ET** · mon-fri | ① | Daily Screen | TECH_30 硬规则筛选 + 板块相对强度 | Early signals · ✅ |
+| **17:35 ET** · mon-fri | ② | Anomaly Monitor | 异动检测 + Tavily 多源归因 + Verifier | Early signals · ✅ |
+| **17:45 ET** · mon-fri | ⑫ | SEC Form 4 Scanner | 内部人 P/S 单笔 + 同日 ≥3 distinct cluster | SEC · ✅ |
+| **18:00 ET** · **mon** | ③ | Lateral Expansion | LLM 产业链上下游扩展 + Tavily 共现验证 | Early signals · ✅ |
+| **18:00 ET** · **tue/fri** | ④ | Institutional 13F | 10 manager 季度持仓 + diff（CUSIP 聚合）| Early signals · ✅ |
+| **18:30 ET** · **sun** | ④b | 13F Backfill | 13F 周度回填 + 捕获修正 filing | Early signals · 🔇 维护 |
+| **18:30 ET** · mon-fri | ⑨ | Portfolio Risk | 组合风险（集中度/回撤/财报 7d/sector）| Portfolio · ✅ |
+| **19:00 ET** · **fri** | ⑩ | Portfolio Weekly | 周复盘 + per-position attribution ⚠️ | Portfolio · ✅ |
+| **19:15 ET** · **fri** | ⑫b | SEC Insider Weekly Digest ⚠️ | 本周 ⑫ 推送聚合（title-only 简化）| SEC · ✅ |
+| **19:30 ET** · **fri** | ⑰ | Macro Weekly Recap | 本周已发布 + 下周预告 + 周内 yields 变化 | Macro · ✅ |
+| **21:00 ET** · mon-fri | ⑧ | Earnings Summaries | LLM 总结 + 10-Q MD&A diff + going_concern 升 P0 | Earnings · ✅ |
+
+**⚠️ 部分实现 / 待完善说明**：
+
+- **⑩ Portfolio Weekly** — per-position attribution 走 3-state gating：≥5 天 ⑨b snapshot → 完整 best/worst/net；1–4 天 → "归因数据累积中 (N/5 天)" 占位；0 天 → 完全静默。**新部署后第一个完整周才有 5 天数据**。
+- **⑫b SEC Insider Weekly Digest** — 当前为 **title-only 简化口径**（⑫ archive `trace_json` 没持久化 per-transaction codes，只能回查 push title）。完整的 per-A/M/F/G/C breakdown + insider-name 维度聚合 deferred 到 **Phase 3.5.5**（详见 [Roadmap](#roadmap)）。
+
+**⏳ 已规划但尚未实现的 cron**（详见 [## Roadmap](#roadmap)）：
+
+| 时间 · 频率 | ID | 名称 | 功能 | 触发条件 |
+|---|---|---|---|---|
+| **FOMC day +6h** · ad hoc | ⑮b | FOMC Transcript Follow-up | Powell 记者会 transcript 抓取补卡 | Phase 4.5 — 06-17 FOMC 实战后启动 |
+| **16:35 ET** · mon-fri | ⑭b | Market Regime Detection | VIX+yields+breadth 综合判断 risk_on/off + 切换告警 | Phase 5b — Phase 4 跑满 4 周后启动（避免 overfit） |
 
 **时间设计哲学**：晚 17:00–19:30 ET 是主推送密集窗口（盘后数据落地最快），08:00–09:30 ET 是早盘 pre-market 窗口（财报提醒 + ARK 调仓 + 宏观 release），16:25–16:45 ET 是收盘后 5–20 分钟的静默批量窗口（持仓快照 + macro snapshot + P2 汇总）。⑧ 财报总结 21:00 ET 因为 FD 财报数据当日通常 19:30–21:00 ET 才完整落地。
 
