@@ -1261,3 +1261,14 @@ from v2.reporting._macro_formatters import (  # noqa: E402
     format_macro_release_card,
     format_macro_weekly_recap,
 )
+
+
+# ---------------------------------------------------------------------------
+# ARK alert cards (Phase 5a)
+# ---------------------------------------------------------------------------
+# Same pattern. Implementation lives in v2/etf/_ark_alert_cards.py
+# (sandbox-runnable; v2/etf/ has no v2.data deps).
+from v2.reporting._ark_alert_formatters import (  # noqa: E402
+    format_ark_alert,
+    format_ark_summary,
+)

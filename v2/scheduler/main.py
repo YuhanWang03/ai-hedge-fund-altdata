@@ -17,6 +17,7 @@ from apscheduler.triggers.cron import CronTrigger
 from v2.scheduler.jobs import (
     anomaly_monitor_job,
     archive_cleanup_job,
+    ark_alerts_job,
     daily_screen_job,
     earnings_reminders_job,
     earnings_summaries_job,
@@ -47,7 +48,7 @@ def build_scheduler() -> BlockingScheduler:
     """Configure jobs without starting. Returns the scheduler ready to .start().
 
     Default APScheduler ``ThreadPoolExecutor`` uses ``max_workers=10``.
-    With 20 jobs (Phase 3.5 added ⑫b weekly insider digest) and Mon-Fri
+    With 21 jobs (Phase 5a added ⑬ ARK Alerts pre-market) and Mon-Fri
     17:00-21:00 ET burst window, a server restart catching up multiple
     misfires could saturate 10 workers. Bumped to 20 — costs near zero,
     comfortable headroom.
@@ -108,6 +109,21 @@ def build_scheduler() -> BlockingScheduler:
         id="etf_daily",
         name="⑤ ETF Daily Snapshot (Mon-Fri)",
         misfire_grace_time=3600,
+        coalesce=True,
+    )
+
+    # ⑬ ARK Alerts — 08:30 ET Mon-Fri pre-market.
+    # Reads ⑤'s 17:00 ET snapshot (etf.db) as the "yesterday" baseline,
+    # fetches today's ARK CSVs, classifies significant rebalances
+    # (new ≥0.5% / liquidated prior ≥0.5% / increase/decrease ≥20%
+    # relative), and pushes per-alert + overview cards. Quiet days
+    # exit silently. 30-min separation from ⑦ (08:00) and ⑮ (09:00).
+    scheduler.add_job(
+        ark_alerts_job,
+        CronTrigger(hour=8, minute=30, day_of_week="mon-fri", timezone=_TZ),
+        id="ark_alerts",
+        name="⑬ ARK Alerts (Mon-Fri 08:30 ET)",
+        misfire_grace_time=1800,
         coalesce=True,
     )
 

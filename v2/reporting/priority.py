@@ -60,6 +60,12 @@ BASE_SCORES: dict[str, int] = {
     "sec_form4_sale":      50,  # insider S-code base P2 (default noise)
     "sec_form4_cluster":   75,  # ≥3 distinct insiders same-day same-direction
     "sec_insider_digest":  55,  # ⑫b Fri 19:15 ET — P2 floor, P1 on unusual ≥3
+    # Phase 5a ⑬ ARK Alerts — graduated base ladder; cron primarily emits
+    # at ark_alert_p1 and lets metadata adjustments escalate. p0/p2 entries
+    # reserved for future direct-tier callers.
+    "ark_alert_p2":        55,
+    "ark_alert_p1":        65,
+    "ark_alert_p0":        85,
     # Phase 4 Macro Agent — daily snapshot + release-driven kinds
     "macro_release_p2":    55,  # in-line print (CPI/PCE/NFP/GDP/PPI/FOMC)
     "macro_release_p1":    65,  # 1-2σ surprise → P1
@@ -215,6 +221,33 @@ def compute_importance(
             adjustments.append((+15, f"big_discretionary_sale_${usd/1e6:.1f}M"))
         elif usd >= 1_000_000 and md.get("is_10b5_1"):
             adjustments.append((-5, "10b5_1_plan_sale"))
+
+    # ---- Phase 5a ARK Alerts (⑬ Mon-Fri 08:30 ET) ----
+    # Adjustments don't depend on is_held_position / is_watchlist (those
+    # already fire via the universal block above for any kind that carries
+    # them). The dedicated is_in_user_universe flag mirrors the
+    # held-or-watchlist semantics specifically for the ARK alert flow
+    # — kept as a separate reason so the audit trail is readable
+    # (`held_or_watchlist_ark` vs the generic `held_position`).
+    if event_kind.startswith("ark_alert"):
+        if md.get("is_in_user_universe"):
+            adjustments.append((+10, "held_or_watchlist_ark"))
+        if md.get("is_multi_fund"):
+            adjustments.append((+15, "multi_fund_coordination"))
+        action = md.get("action")
+        # today_weight + yesterday_weight metadata are in DECIMAL
+        # fraction units (0.02 = 2%) per the cron's metadata-build
+        # contract — see scripts/ark_alerts_to_telegram.py. The cron
+        # divides ArkAlert.today_weight (CSV pct unit) by 100 before
+        # passing here so the `:.1%` reason format renders cleanly.
+        if action == "new_position":
+            tw = float(md.get("today_weight") or 0.0)
+            if tw >= 0.02:
+                adjustments.append((+10, f"large_new_position_{tw:.1%}"))
+        elif action == "liquidated":
+            yw = float(md.get("yesterday_weight") or 0.0)
+            if yw >= 0.02:
+                adjustments.append((+10, f"large_liquidation_{yw:.1%}"))
 
     # ---- Phase 3.5 weekly insider digest (⑫b Fri 19:15 ET) ----
     if event_kind == "sec_insider_digest":
