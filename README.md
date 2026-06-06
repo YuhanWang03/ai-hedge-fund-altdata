@@ -547,6 +547,77 @@ Intraday streamer adds ~30 Alpaca API calls/minute during market hours (one batc
 - Backtesting integration with the existing v2 event-study framework
 - Switch Alpaca from paper to live (one config flag) after extended paper validation
 
+> **Next-phase trigger**: each of the deferred phases below starts only when its trigger conditions fire. Current focus is the production observation window — validating Phase 0-5a under real-world data.
+
+---
+
+## 🛣️ Future Work (deferred until data accumulates)
+
+Each phase below is **scoped and deferred** — waiting on production data accumulation or a specific calendar event. **Not in the current sprint.**
+
+> **Naming note** — there are two "4.5" entries that historically caused confusion:
+> - **Phase 4.5-mini** ✅ shipped — FD → yfinance daily prices migration (commit `b36d5e3` series)
+> - **Phase 4.5** ⏳ deferred — FOMC transcript + Historical analog mode (this section)
+
+### ⏳ Phase 4.5 — FOMC Transcript + Historical Analog Mode
+
+**Goal:**
+- **Task A**: FOMC ⑮b transcript +6h follow-up card — fetch Powell press-conference Q&A from Bloomberg / Reuters six hours after the meeting, surfacing tone signals (hawkish-phrase count / dovish-phrase count) beyond the raw statement diff
+- **Task B**: Historical analog mode — formal LLM Layer 4 defense, where the LLM cites "past N similar σ-surprise events and their SPX 5-day return" as a guardrail against narrative-only commentary
+
+**Why deferred:**
+- ⑮ FOMC + SEP needs to fire at least 1-2 times (2026-06-17 + 2026-09-16) before a real signal baseline exists
+- Layer 3 (Tavily aggregate + Python diff) must be validated against real data before layering on Layer 4
+- Historical-analog mode requires SPX + historical release-date backfill spanning 3-5 years ≈ 250 entries — non-trivial sunk cost
+
+**Trigger conditions:**
+- 2026-06-17 FOMC + SEP run completed in production
+- Phase 4 ⑮⑰ has been live for ≥ 2 full months
+- Operator has signal feedback on Layer 1+2 defense under real data
+
+**Effort:** 1.5-2 days · **Risk:** medium (Tavily Q&A quality + SPX historical-data completeness)
+
+### ⏳ Phase 5b — Market Regime Detection
+
+**Goal:**
+- Synthesise VIX + 10Y-2Y spread + market breadth + sentiment into a market regime label
+- 4 regimes: `risk_on` / `risk_off` / `transition` / `extreme_vol`
+- New ⑭b cron Mon-Fri 16:35 ET (5 min after ⑭); regime transitions push P0 alerts
+- Card shows: current regime + last ≤ 5 transitions + per-regime holdings attribution (integrated with ⑨b positions_snapshot for Brinson-style breakdown by regime)
+
+**Why deferred:**
+- Regime detection is overfit-prone — simplified thresholds (e.g. "VIX > 25 = risk_off") are inseparable from hindsight bias
+- Need real macro data from Phase 4 ⑰ + ⑮ for ≥ 1 month before calibrating regime-switch thresholds
+- The "looks great in backtest, falls apart in live" failure mode is the classic regime-model trap
+
+**Trigger conditions:**
+- Phase 4 full suite (⑭⑮⑯⑰) live for ≥ 4 weeks
+- Phase 4.5 (above) shipped and validating Layer 3/4 defense stability
+- Operator has built intuitive scale for macro signals
+
+**Effort:** 2-3 days · **Risk:** high (regime detection prone to overfitting)
+
+### ⏳ Phase 6 — News Refactor + 3-tier Universe
+
+**Goal:**
+- **Task A**: News-layer refactor — central Tavily query gateway + per-ticker cache + NER ticker mapping; eliminates the duplicate same-day queries across agents on the same ticker
+- **Task B**: 3-tier Universe —
+  - Tier 1 core (held + high-conviction watchlist): full daily cron suite
+  - Tier 2 watchlist (general focus): daily lightweight + weekly deep
+  - Tier 3 broad observation (industry / theme pools): weekly batch only
+
+**Why deferred:**
+- Current universe is ~10 tickers — 3-tier design has no practical value at this scale (over-engineering)
+- News refactor is cost optimisation; current Tavily ~500 queries/month + LLM ~$1/month — neither is a bottleneck
+- Duplicate-query waste is marginal at small universe size (≤ 5% waste rate)
+
+**Trigger conditions (any one):**
+- Universe expands to ≥ 30 tickers (held + watchlist combined)
+- OR monthly LLM cost exceeds $50 (current ~$5-10 range)
+- OR ≥ 5% of pushes observed to be Tier-3/4 news noise
+
+**Effort:** 4 days · **Risk:** medium (NER accuracy + cache invalidation are the perennial hard parts)
+
 ---
 
 ## Credits
