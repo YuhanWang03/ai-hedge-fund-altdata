@@ -68,6 +68,17 @@ def etf_daily_job() -> None:
     _run("etf_daily_snapshot.py")
 
 
+def ark_alerts_job() -> None:
+    """⑬ Mon-Fri 08:30 ET — ARK significant-rebalance alerts.
+
+    Reads the daily snapshot ⑤ wrote to ``etf.db`` at 17:00 ET the
+    previous trading day, diffs against today's CSV, classifies
+    rebalances above the Stage 1 thresholds, and pushes per-alert
+    + overview cards. Quiet days exit silently.
+    """
+    _run("ark_alerts_to_telegram.py")
+
+
 def earnings_reminders_job() -> None:
     """⑦ Daily 08:00 ET — calendar reminders (D-3 / D-1 / D-0)."""
     _run("earnings_reminders.py")

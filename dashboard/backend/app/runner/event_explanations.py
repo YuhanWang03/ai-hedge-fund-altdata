@@ -552,6 +552,13 @@ _MODULE: dict[str, Explanation] = {
         "store":  "持久化到 data/etf.db（每日累积时间序列）",
         "next":   "通过 chat_message emit 推送到 Telegram + archive.db",
     },
+    "_r_ark_alerts": {
+        "source": "scheduler 触发（⑬ Mon-Fri 08:30 ET pre-market），消费 ⑤ 17:00 ET 已写入 etf.db 的昨日 snapshot",
+        "how":    "fetch_holdings(fund) for SUPPORTED_FUNDS → get_latest_snapshot_before 拿昨日 → compute_daily_changes 算 diff → classify_alerts 按 (new ≥0.5% / liquidated ≥0.5% / increase/decrease |Δ| ≥20%) 阈值过滤 + multi-fund 协同检测 + user_universe (held∪watchlist) 标记",
+        "what":   "ArkScanResult 含 ArkAlert 列表（4 种 action × 协同 + 持仓 tag）+ funds_scanned + warnings；每个 alert 一张 individual 卡（按 multi-fund / user-universe / |Δ| desc 排序），结尾一张 overview 卡",
+        "store":  "推送写 archive.db（agent='ark'）；底层 etf.db.snapshots 由 ⑤ 维护，⑬ 只读不写",
+        "next":   "priority 默认 ark_alert_p1 (65) → P1；is_in_user_universe +10 / is_multi_fund +15 / large_new_position +10 / large_liquidation +10 升 P0；quiet 日 silent skip（archive 仍记 trace）",
+    },
     "_r_anomaly_monitor": {
         "source": "scheduler 触发（17:35 ET），扫描 TECH_30 universe",
         "how":    "调用 v2.monitoring 检测异动并对每个 ticker 跑 attribute()",
