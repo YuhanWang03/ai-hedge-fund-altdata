@@ -468,7 +468,8 @@ def format_sec_insider_digest(summary) -> str:
     (duck-typed so this module doesn't need a runtime import — keeps
     the cross-module surface minimal). Render strategy:
 
-    - Empty week → silent operator-visibility floor card.
+    - Empty week → operator-visibility floor card, no footer caption
+      (the 平静 placeholder is self-explanatory).
     - Non-empty → 总览 + 方向分布 + (optional) 异常活跃 ticker block +
       footer caption explaining the title-only granularity.
     """
@@ -482,12 +483,10 @@ def format_sec_insider_digest(summary) -> str:
     ]
 
     if getattr(summary, "is_quiet_week", False):
+        # Quiet week — skip the Phase 3.5 口径 footer; the placeholder
+        # line is self-explanatory and the caption only matters when
+        # actual counts are on display.
         lines.append("<i>本周 ⑫ Form 4 推送平静（0 笔）</i>")
-        lines.append("")
-        lines.append(
-            "<i>注：基于 ⑫ push title 统计（Phase 3.5 简化口径，"
-            "per-code A/M/F/G/C breakdown 见 Phase 3.5.5）</i>"
-        )
         return "\n".join(lines)
 
     # 总览
@@ -514,15 +513,20 @@ def format_sec_insider_digest(summary) -> str:
             f"卖出 {summary.cluster_sale_count})"
         )
 
-    # 异常活跃 ticker
+    # 异常活跃 ticker — top 5 (the digest's unusual_tickers list is
+    # already ordered by push count desc via Counter.most_common).
+    # Overflow gets a "... 另 N 只" tail so the reader knows the list
+    # was truncated for display, not exhaustive.
     unusual = list(getattr(summary, "unusual_tickers", []) or [])
     if unusual:
         lines.append("")
         lines.append("<b>⚠️ 异常活跃 ticker</b> (≥3 pushes)")
         by_ticker = getattr(summary, "by_ticker", {}) or {}
-        for t in unusual[:6]:
+        for t in unusual[:5]:
             n = by_ticker.get(t, 0)
             lines.append(f"  <b>{html.escape(t)}</b>: {n} pushes")
+        if len(unusual) > 5:
+            lines.append(f"  <i>... 另 {len(unusual) - 5} 只</i>")
 
     # Footer caption
     lines.append("")

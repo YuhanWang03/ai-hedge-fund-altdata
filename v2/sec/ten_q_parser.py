@@ -87,7 +87,9 @@ _RISK_HEADING_RE = re.compile(
 
 # Truncate-paragraph display length for the card. ⑧ card has limited
 # vertical real estate; we surface added paragraphs (truncated) only.
-_PARAGRAPH_DISPLAY_LEN = 100
+# 80 chars + "…" keeps each line single-row on mobile Telegram.
+_PARAGRAPH_DISPLAY_LEN = 80
+_TRUNCATE_SUFFIX = "…"
 
 
 # ---------------------------------------------------------------------------
@@ -211,8 +213,14 @@ def diff_ten_q(current: TenQDelta, prior: TenQDelta | None) -> TenQDelta:
         norm = _normalize(para)
         if norm[:80] in prior_prefixes:
             continue
-        # Truncate for display
-        display = para.strip()[:_PARAGRAPH_DISPLAY_LEN]
+        # Truncate for display. Append "…" suffix when the original
+        # paragraph exceeded the display window so the reader knows
+        # there's more text in the filing.
+        stripped = para.strip()
+        if len(stripped) > _PARAGRAPH_DISPLAY_LEN:
+            display = stripped[:_PARAGRAPH_DISPLAY_LEN] + _TRUNCATE_SUFFIX
+        else:
+            display = stripped
         if display:
             added.append(display)
     current.mda_added_paragraphs = added[:5]   # truncate to 5 paragraphs
