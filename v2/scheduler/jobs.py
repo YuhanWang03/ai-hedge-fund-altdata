@@ -89,6 +89,18 @@ def portfolio_weekly_job() -> None:
     _run("portfolio_weekly_to_telegram.py")
 
 
+def positions_snapshot_job() -> None:
+    """⑨b Mon-Fri 16:25 ET — silent backend positions snapshot.
+
+    Writes one row per current holding into the ``positions_snapshot``
+    table. Consumed by ⑩ Friday recap for per-position weekly
+    attribution. No Telegram push; archive records the trace only.
+    Sits 5 min before ⑭ Macro Daily Snapshot (16:30 ET) to keep
+    the log timeline serial under the scheduler's thread pool.
+    """
+    _run("portfolio_snapshot.py")
+
+
 def sec_8k_job() -> None:
     """⑪ Mon-Fri 17:05 ET — SEC 8-K scanner for held + watchlist universe."""
     _run("sec_8k_to_telegram.py")

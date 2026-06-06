@@ -36,11 +36,29 @@ from v2.portfolio.models import DrawdownMetrics
 logger = logging.getLogger(__name__)
 
 
-def compute_drawdown(broker: Any | None = None) -> tuple[DrawdownMetrics, list[str]]:
+def compute_drawdown(
+    broker: Any | None = None,
+    *,
+    today_realtime_value: float | None = None,
+) -> tuple[DrawdownMetrics, list[str]]:
     """Compute current + max drawdown over 1M of daily equity history.
 
     Returns ``(metrics, warnings)``. ``current_drawdown_pct`` and
     ``max_drawdown_pct`` are non-negative magnitudes (see module docstring).
+
+    ``today_realtime_value`` (Phase 2.5 full): when supplied, appends
+    today's intraday portfolio value to the EOD series before walking,
+    so an intraday drop appears in ``current_drawdown_pct`` instead of
+    waiting for tomorrow's EOD print. Fixes the prod UX bug where the
+    portfolio card showed "今日 P/L 🔴 -3.72%" alongside
+    "drawdown 0.00%" — the EOD series's last point was yesterday's
+    close, so today's real-time decline was invisible to the drawdown
+    walk. Backward compat: ``None`` → behaviour identical to Phase 2.
+
+    Idempotent on same-day reruns: if the latest series point already
+    bears today's ISO date, the realtime point replaces it instead of
+    appending — avoids inflating the series length and double-counting
+    today.
     """
     if broker is None:
         from v2 import broker as _broker
@@ -56,8 +74,31 @@ def compute_drawdown(broker: Any | None = None) -> tuple[DrawdownMetrics, list[s
         warnings.append(msg)
         return DrawdownMetrics.unavailable(), warnings
 
-    equity = hist.get("equity") or []
-    timestamps = hist.get("timestamp") or []
+    equity = list(hist.get("equity") or [])
+    timestamps = list(hist.get("timestamp") or [])
+
+    # Phase 2.5 full — append today's realtime value if supplied and
+    # the EOD series doesn't already cover today. This makes a same-day
+    # intraday drawdown visible in the card.
+    if today_realtime_value is not None and equity:
+        today_d = date.today()
+        last_date = _ts_to_date(timestamps[-1]) if timestamps else None
+        # Synthesize a timestamp for today at UTC midnight so _ts_to_date
+        # round-trips to today's ISO date. Alpaca's daily bars are unix
+        # seconds at midnight UTC; we match that shape.
+        today_unix = int(
+            datetime(
+                today_d.year, today_d.month, today_d.day, tzinfo=timezone.utc,
+            ).timestamp()
+        )
+        if last_date == today_d:
+            # EOD print already has today — overwrite with the fresher
+            # realtime value rather than appending a duplicate point.
+            equity[-1] = float(today_realtime_value)
+            timestamps[-1] = today_unix
+        else:
+            equity.append(float(today_realtime_value))
+            timestamps.append(today_unix)
 
     if not equity:
         return DrawdownMetrics.unavailable(), warnings

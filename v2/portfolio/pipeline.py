@@ -90,8 +90,19 @@ def build_risk_report(
     report.pnl = pnl_metrics
     report.warnings.extend(pnl_warnings)
 
-    # ----- 5. drawdown (Alpaca history) -----
-    dd_metrics, dd_warnings = compute_drawdown(broker=broker)
+    # ----- 5. drawdown (Alpaca history + today realtime) -----
+    # Phase 2.5 full: pass today's real-time portfolio_value so an
+    # intraday decline shows up in current_drawdown_pct on the SAME
+    # day. Prior to this, Alpaca's get_portfolio_history series ended
+    # at yesterday's close and today's realtime drop was invisible
+    # to the drawdown walk — produced cards reading "今日 -3.72%"
+    # next to "drawdown 0.00%". When portfolio_value is unavailable
+    # (Alpaca down → 0.0), we pass None to preserve the old
+    # behaviour rather than appending a meaningless 0.
+    realtime_value = portfolio_value if portfolio_value > 0 else None
+    dd_metrics, dd_warnings = compute_drawdown(
+        broker=broker, today_realtime_value=realtime_value,
+    )
     report.drawdown = dd_metrics
     report.warnings.extend(dd_warnings)
 

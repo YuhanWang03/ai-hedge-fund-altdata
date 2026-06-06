@@ -31,6 +31,7 @@ from v2.scheduler.jobs import (
     macro_weekly_job,
     portfolio_risk_job,
     portfolio_weekly_job,
+    positions_snapshot_job,
     sec_8k_job,
     sec_form4_job,
 )
@@ -192,6 +193,22 @@ def build_scheduler() -> BlockingScheduler:
         id="p2_digest",
         name="📋 P2 Digest (Mon-Fri 16:45 ET)",
         misfire_grace_time=1800,
+        coalesce=True,
+    )
+
+    # ⑨b Positions snapshot — 16:25 ET Mon-Fri. Silent backend job:
+    # writes one row per holding to positions_snapshot table so ⑩ Fri
+    # 19:00 ET can compute per-position weekly attribution. No Telegram
+    # push. 5 min before ⑭ Macro Snapshot — strictly serial under the
+    # scheduler thread pool keeps log timestamps unambiguous when ops
+    # grep. Captures EOD positions after the 16:00 close (Alpaca
+    # account state is final by 16:15 even with after-hours feed lag).
+    scheduler.add_job(
+        positions_snapshot_job,
+        CronTrigger(hour=16, minute=25, day_of_week="mon-fri", timezone=_TZ),
+        id="positions_snapshot",
+        name="⑨b Positions Snapshot (Mon-Fri 16:25 ET)",
+        misfire_grace_time=600,
         coalesce=True,
     )
 

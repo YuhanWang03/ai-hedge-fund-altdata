@@ -652,11 +652,18 @@ _MODULE: dict[str, Explanation] = {
         "next":   "compute_importance 按 6 个 metadata 算 priority（daily_pnl ≤ -5% 升 P0），推 Telegram + dashboard auto-push",
     },
     "_r_portfolio_weekly": {
-        "source": "scheduler 触发（Fri 19:00 ET），同 ⑨ 的 RiskReport + 额外 portfolio_history(1M, 1D) 渲图",
-        "how":    "复用 build_risk_report 拿数字，再用 matplotlib 渲染 1M equity curve PNG（标峰值位置）",
-        "what":   "周/月回报 + 1M 最大回撤 + 主要行业暴露 + 下周财报清单 + 权益曲线图",
+        "source": "scheduler 触发（Fri 19:00 ET），同 ⑨ 的 RiskReport + 额外 portfolio_history(1M, 1D) 渲图 + Phase 2.5 full 读 positions_snapshot 最近 7 天",
+        "how":    "复用 build_risk_report 拿组合数字，再用 matplotlib 渲染 1M equity curve PNG（标峰值位置）。read_weekly_window + compute_weekly_attribution 算 per-position 周表现归因",
+        "what":   "周/月回报 + 1M 最大回撤 + 主要行业暴露 + per-position 表现归因（最佳/最差/净贡献，<5 天显示'累积中'）+ 下周财报清单 + 权益曲线图",
         "store":  "image 写到 data/images/，元数据 + caption 入 archive.db",
         "next":   "推 Telegram photo + dashboard auto-push；priority 强制 P1 底线（周报性质，operator 需看见）",
+    },
+    "_r_positions_snapshot": {
+        "source": "scheduler 触发（⑨b Mon-Fri 16:25 ET），Alpaca 当前持仓",
+        "how":    "get_flat_positions(broker) → write_daily_snapshot(positions, today_iso, archive)。INSERT OR REPLACE on (snapshot_date, ticker) — 同日 rerun 覆盖不重复",
+        "what":   "positions_snapshot 表每持仓一行 (snapshot_date / ticker / market_value / weight / sector_etf)",
+        "store":  "positions_snapshot 表（archive.db 新增 Phase 2.5 full table），无 Telegram push",
+        "next":   "⑩ Fri 19:00 ET 读最近 7 天窗口，算 per-position weekly attribution",
     },
 
     # Phase 4 Macro Agent — ⑭⑮⑯⑰

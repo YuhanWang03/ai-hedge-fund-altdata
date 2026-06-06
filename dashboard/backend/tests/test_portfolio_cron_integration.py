@@ -756,3 +756,244 @@ class TestBotResponderIdentity:
         assert cron_card == bot_card, (
             "⑨ cron card and /risk bot card must be byte-equal"
         )
+
+
+# ===========================================================================
+# Phase 2.5 full — ⑩ attribution + ⑨ drawdown realtime
+# ===========================================================================
+
+def _seed_positions_snapshot_window(
+    archive_db_path,
+    days: int,
+    *,
+    end_iso: str,
+    tickers: dict[str, list[float]],
+) -> None:
+    """Seed positions_snapshot with a rolling window ending at end_iso.
+
+    ``tickers`` maps each ticker to ``days``-long list of market_value
+    observations (one per snapshot day, oldest first). Weight is
+    derived as a constant share of the day's total invested value so
+    the math stays clean in test asserts.
+    """
+    import sqlite3
+    from datetime import date, timedelta
+
+    end_d = date.fromisoformat(end_iso)
+    rows: list[tuple] = []
+    for i in range(days):
+        snap_date = (end_d - timedelta(days=days - 1 - i)).isoformat()
+        # Per-day total invested = sum of that day's market_values
+        day_total = sum(vals[i] for vals in tickers.values())
+        for ticker, vals in tickers.items():
+            mv = vals[i]
+            weight = (mv / day_total) if day_total > 0 else 0.0
+            rows.append((snap_date, ticker, mv, weight, "XLK"))
+
+    conn = sqlite3.connect(str(archive_db_path))
+    try:
+        # Bring schema up to date (the test temp_archive fixture creates
+        # the file but the snapshot table needs Archive.__init__ to
+        # have been called once with the new _SCHEMA). The Phase 2.5
+        # CREATE TABLE IF NOT EXISTS lives in _SCHEMA so any Archive
+        # construction creates it; we rely on the cron's own Archive
+        # instantiation having already happened. Use IF NOT EXISTS
+        # here for paranoia in case the test seeds before cron runs.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS positions_snapshot (
+                snapshot_date TEXT NOT NULL,
+                ticker        TEXT NOT NULL,
+                market_value  REAL NOT NULL,
+                weight        REAL NOT NULL,
+                sector_etf    TEXT,
+                PRIMARY KEY (snapshot_date, ticker)
+            )
+        """)
+        conn.executemany(
+            """INSERT OR REPLACE INTO positions_snapshot
+               (snapshot_date, ticker, market_value, weight, sector_etf)
+               VALUES (?, ?, ?, ?, ?)""",
+            rows,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+class TestPortfolioWeeklyAttribution:
+    """Phase 2.5 full — ⑩ Friday recap surfaces per-position weekly
+    attribution computed from the rolling ⑨b snapshot window."""
+
+    def _run_weekly(self, monkeypatch, broker_overrides):
+        _install_cron_stubs(monkeypatch, broker_overrides=broker_overrides)
+        cron = _load_script("portfolio_weekly_to_telegram.py")
+        # Skip the matplotlib chart (Archive.save_photo rejects tmp_path
+        # paths via _PROJECT_ROOT.relative_to; same workaround as the
+        # existing weekly cron tests).
+        monkeypatch.setattr(cron, "_render_equity_chart", lambda title: None)
+
+        captured: dict = {}
+
+        def _factory(**kw):
+            recorder = _RecordingNotifier(**kw)
+            captured["recorder"] = recorder
+            return recorder
+
+        monkeypatch.setattr(cron, "TelegramNotifier", _factory)
+        rc = cron.main()
+        return rc, captured["recorder"]
+
+    def test_cron10_with_full_5day_snapshot_attribution(
+        self, monkeypatch, temp_archive, stub_calendar,
+    ):
+        """5 days of snapshot data → ⑩ card renders 最佳/最差/净贡献."""
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        today_iso = datetime.now(ZoneInfo("US/Eastern")).date().isoformat()
+
+        # Seed snapshot table BEFORE the cron runs. Need archive.db to
+        # exist + have the table created. Stage 1's _SCHEMA appends
+        # `positions_snapshot` so any Archive() constructor creates it;
+        # we manually open the file and CREATE TABLE IF NOT EXISTS to
+        # be order-independent.
+        _seed_positions_snapshot_window(
+            temp_archive / "archive.db",
+            days=5,
+            end_iso=today_iso,
+            tickers={
+                "NVDA": [30000, 30500, 31000, 31500, 31500],   # +5%
+                "AAPL": [20000, 20100, 20100, 20100, 20100],   # +0.5%
+                "JPM":  [15000, 14900, 14800, 14700, 14700],   # -2%
+            },
+        )
+
+        rc, rec = self._run_weekly(monkeypatch, {
+            "get_portfolio": lambda: _NORMAL_PORTFOLIO,
+            "get_pnl": lambda: {"intraday_pl": 0.0, "intraday_pl_pct": 0.0},
+            "get_portfolio_history": lambda **kw: _NORMAL_HISTORY,
+        })
+        assert rc == 0
+        call = rec.calls[0]
+        # Attribution block present
+        assert "本周 per-position 表现归因" in call["text"]
+        # Best is NVDA (largest contribution: ~30% weight × +5%)
+        assert "最佳: <b>NVDA</b>" in call["text"]
+        # Worst is JPM (-2% × ~15% weight)
+        assert "最差: <b>JPM</b>" in call["text"]
+        # Net contribution rendered as a single line
+        assert "净贡献:" in call["text"]
+        # Old "待开发" placeholder is gone
+        assert "待开发" not in call["text"]
+
+    def test_cron10_with_3day_snapshot_shows_accumulating(
+        self, monkeypatch, temp_archive, stub_calendar,
+    ):
+        """3 days < WEEKLY_MIN_DAYS(5) → '归因数据累积中 (3/5 天)'."""
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        today_iso = datetime.now(ZoneInfo("US/Eastern")).date().isoformat()
+        _seed_positions_snapshot_window(
+            temp_archive / "archive.db",
+            days=3,
+            end_iso=today_iso,
+            tickers={"NVDA": [30000, 30500, 31000]},
+        )
+
+        rc, rec = self._run_weekly(monkeypatch, {
+            "get_portfolio": lambda: _NORMAL_PORTFOLIO,
+            "get_pnl": lambda: {"intraday_pl": 0.0, "intraday_pl_pct": 0.0},
+            "get_portfolio_history": lambda **kw: _NORMAL_HISTORY,
+        })
+        assert rc == 0
+        call = rec.calls[0]
+        assert "归因数据累积中 (3/5 天)" in call["text"]
+        # No best/worst block when window incomplete
+        assert "最佳:" not in call["text"]
+        assert "最差:" not in call["text"]
+
+    def test_cron10_no_snapshots_silent(
+        self, monkeypatch, temp_archive, stub_calendar,
+    ):
+        """0 snapshots → card silently omits attribution block — no
+        italic '累积中' fallback either. Fresh-account contract."""
+        rc, rec = self._run_weekly(monkeypatch, {
+            "get_portfolio": lambda: _NORMAL_PORTFOLIO,
+            "get_pnl": lambda: {"intraday_pl": 0.0, "intraday_pl_pct": 0.0},
+            "get_portfolio_history": lambda **kw: _NORMAL_HISTORY,
+        })
+        assert rc == 0
+        call = rec.calls[0]
+        # No attribution block, no italic — fully silent
+        assert "本周 per-position 表现归因" not in call["text"]
+        assert "归因数据累积中" not in call["text"]
+        assert "待开发" not in call["text"]
+
+    def test_cron9_drawdown_realtime_visible(
+        self, monkeypatch, temp_archive, stub_calendar,
+    ):
+        """Phase 2.5 full drawdown realtime fix end-to-end.
+
+        Repro of the prod-bug (2026-06-05): EOD history ends yesterday
+        at $101K peak, today's Alpaca real-time portfolio_value $96.7K
+        → drawdown should display ≈ 4.26%, not 0%.
+
+        Pre-fix: card showed '今日 P/L 🔴 -3.72%' alongside
+        'drawdown 当前 0.00%' because the EOD series's last point was
+        yesterday and the drawdown walk never saw today's decline.
+        """
+        portfolio_v25 = {
+            "account": {"portfolio_value": 96_700.0, "cash": 0.0},
+            "positions": [
+                {"symbol": "NVDA", "market_value": "96700"},   # all-in NVDA
+            ],
+        }
+        # 5-day EOD history ending YESTERDAY at 101 — stable around 100
+        from datetime import date, datetime, timedelta, timezone
+        today_d = date.today()
+        history_dates = [today_d - timedelta(days=5 - i) for i in range(5)]
+        equity = [100.0, 101.0, 100.0, 100.5, 100.0]
+        # Scale equity to match the $96.7K portfolio_value's order of magnitude
+        equity_scaled = [v * 1000 for v in equity]      # 100K .. 101K range
+        timestamps = [
+            int(datetime(d.year, d.month, d.day, tzinfo=timezone.utc).timestamp())
+            for d in history_dates
+        ]
+
+        _install_cron_stubs(monkeypatch, broker_overrides={
+            "get_portfolio": lambda: portfolio_v25,
+            "get_pnl": lambda: {
+                "intraday_pl": -3742.0, "intraday_pl_pct": -0.0372,
+            },
+            "get_portfolio_history": lambda **kw: {
+                "equity": equity_scaled, "timestamp": timestamps,
+            },
+        })
+        cron = _load_script("portfolio_risk_to_telegram.py")
+        captured: dict = {}
+
+        def _factory(**kw):
+            recorder = _RecordingNotifier(**kw)
+            captured["recorder"] = recorder
+            return recorder
+
+        monkeypatch.setattr(cron, "TelegramNotifier", _factory)
+        assert cron.main() == 0
+        text = captured["recorder"].calls[0]["text"]
+
+        # Drawdown should be non-zero — the prod-bug exact scenario
+        # would show "当前 0.00%" pre-fix; with today_realtime_value
+        # threaded through, the realtime drop from $101K peak to $96.7K
+        # appears in the walk.
+        # Pin via explicit math: (101000 - 96700) / 101000 ≈ 4.26%
+        assert "-4.26%" in text, (
+            f"Drawdown realtime fix not visible. Card text:\n{text}"
+        )
+        # Make sure we didn't silently show 0
+        assert "当前 0.00%" not in text
+        # P0 escalation: daily_pnl -3.72% < -2% but > -5% → +10 → P1
+        # PLUS max_drawdown 4.26% < 10% → no nudge. Tier stays P1.
+        # (We're not asserting the exact tier — that's a priority test
+        # concern, not a drawdown one. Just verify the card rendered.)
+        assert "组合风险" in captured["recorder"].calls[0]["title"]
