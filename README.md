@@ -12,7 +12,62 @@ Built as a portfolio project to demonstrate end-to-end ownership of a multi-sour
 
 ## What it does
 
-Three concurrent services on a single $6/month VPS — **Scheduler** (21 cron jobs spanning 08:00–21:00 ET main window + 16:25–17:00 ET silent batch + 02:00 UTC maintenance, every job process-isolated), **Streamer** (minute-level intraday scanner during 9:30–16:00 ET, checks user `/alert` triggers + scans TECH_30 for dual-threshold anomalies; **no LLM/Tavily during market hours**, deep attribution at 17:35 ET), **Telegram Bot** (25 slash commands + 23-intent NL classifier, single-user chat-ID filter). All three share 7 SQLite databases (WAL) + ChromaDB.
+Three concurrent services on a single $6/month VPS — **Scheduler** (21 cron jobs spanning 08:00–21:00 ET) + **Streamer** (minute-level intraday alert + anomaly scan) + **Telegram Bot** (25 slash + 23-intent NL). All three share 7 SQLite databases (WAL) + ChromaDB.
+
+### Cron Jobs · time table
+
+Sorted by US/Eastern time (agent details in [## Feature Reference](#feature-reference) → Cron Agents):
+
+| Time (ET) | ID | Name | Frequency | Family | Pushes |
+|---|---|---|---|---|---|
+| 02:00 UTC | ⑥ | Archive Cleanup | daily | infra | (maintenance) |
+| 08:00 | ⑦ | Earnings Reminders | mon-fri | Earnings | ✅ |
+| 08:30 | ⑬ | ARK Alerts | mon-fri | ARK | ✅ pre-market |
+| 09:00 | ⑮ | Macro Release Scanner | mon-fri | Macro | ✅ on hit day |
+| 09:30 | ⑯ | Macro Initial Claims | **thu** | Macro | ✅ |
+| 16:25 | ⑨b | Positions Snapshot | mon-fri | Portfolio | 🔇 archive only |
+| 16:30 | ⑭ | Macro Daily Snapshot | mon-fri | Macro | ✅ |
+| 16:45 | 📋 | P2 Digest | mon-fri | infra | ✅ rollup |
+| 17:00 | ⑤ | ETF Daily Snapshot | mon-fri | Early signals | 🔇 dashboard only |
+| 17:05 | ⑪ | SEC 8-K Scanner | mon-fri | SEC | ✅ |
+| 17:30 | ① | Daily Screen | mon-fri | Early signals | ✅ |
+| 17:35 | ② | Anomaly Monitor | mon-fri | Early signals | ✅ |
+| 17:45 | ⑫ | SEC Form 4 Scanner | mon-fri | SEC | ✅ |
+| 18:00 | ③ | Lateral Expansion | **mon** | Early signals | ✅ |
+| 18:00 | ④ | Institutional 13F | **tue/fri** | Early signals | ✅ |
+| 18:30 | ④b | 13F Backfill | **sun** | Early signals | 🔇 maintenance |
+| 18:30 | ⑨ | Portfolio Risk | mon-fri | Portfolio | ✅ |
+| 19:00 | ⑩ | Portfolio Weekly | **fri** | Portfolio | ✅ |
+| 19:15 | ⑫b | SEC Insider Weekly Digest | **fri** | SEC | ✅ |
+| 19:30 | ⑰ | Macro Weekly Recap | **fri** | Macro | ✅ |
+| 21:00 | ⑧ | Earnings Summaries | mon-fri | Earnings | ✅ |
+
+**Time design**: 17:00–19:30 ET is the dense main push window (post-close data lands fastest); 08:00–09:30 ET is pre-market (earnings reminders + ARK rebalance + macro releases); 16:25–16:45 ET is silent post-close batch; ⑧ runs at 21:00 ET because FD earnings data typically fully lands between 19:30–21:00 ET.
+
+### Intraday Streamer
+
+Runs in parallel to the scheduler. Polls every 60s during 9:30–16:00 ET Mon-Fri; 5-min idle outside. **No LLM/Tavily during market hours** — deep attribution at 17:35 ET. Details: [## Feature Reference → Intraday Streamer](#intraday-streamer-details).
+
+| Trigger | Source | Freq | When fires |
+|---|---|---|---|
+| User-set price alerts | Alpaca `get_stock_latest_trade` | 1/min | Created via `/alert NVDA 130 above` or NL |
+| TECH_30 auto anomaly | Alpaca latest-trade × 29 tickers | 1/min | Dual threshold: ≥3% move AND ≥2.5× volume pace |
+
+### Telegram interactive query
+
+24/7 long-polling bot, single-user (chat-ID filter), 25 slash + 23 NL intents + 10 manager aliases. Details: [## Feature Reference → Telegram interface](#telegram-interface-details).
+
+| Category | Slash | NL example |
+|---|---|---|
+| Watchlist | `/watchlist`, `/add NVDA`, `/remove TSLA` | `我关注了哪些股票` |
+| Analysis | `/why`, `/summary`, `/chain`, `/13f`, `/holders`, `/etf` | `NVDA 为什么跌？`, `Cathie 今天买啥` |
+| Alerts | `/alert`, `/alerts`, `/alert_remove` | `提醒我 NVDA 突破 130` |
+| Account | `/portfolio`, `/pnl [day\|week\|month]`, `/risk` | `我的当日盈亏`, `组合风险怎么样` |
+| Earnings | `/earnings AAPL`, `/earnings` (calendar) | `苹果什么时候发财报` |
+| SEC | `/8k TICKER`, `/insiders TICKER [days]` | `NVDA 内部人交易` |
+| Macro | `/macro`, `/cpi`, `/fomc`, `/yields` | `宏观怎么样`, `最近 CPI` |
+
+NL classifier: DeepSeek temperature=0 + JSON + **whitelist enum validation** — outside-whitelist → `unknown` (bounded behavior).
 
 ---
 
@@ -46,70 +101,6 @@ External: financialdatasets.ai · yfinance · SEC EDGAR · ARK CSV CDN
           Alpaca · FRED · Tavily News API · DeepSeek LLM · OpenAI embeddings
 ```
 
-### 21 cron jobs · time table
-
-Sorted by US/Eastern time (agent details in [Agents](#agents)):
-
-| Time (ET) | ID | Name | Frequency | Pushes |
-|---|---|---|---|---|
-| 02:00 UTC | ⑥ | Archive Cleanup | daily | (maintenance) |
-| 08:00 | ⑦ | Earnings Reminders | mon-fri | ✅ |
-| 08:30 | ⑬ | ARK Alerts | mon-fri | ✅ pre-market |
-| 09:00 | ⑮ | Macro Release Scanner | mon-fri | ✅ on hit day |
-| 09:30 | ⑯ | Macro Initial Claims | **thu** | ✅ |
-| 16:25 | ⑨b | Positions Snapshot | mon-fri | 🔇 archive only |
-| 16:30 | ⑭ | Macro Daily Snapshot | mon-fri | ✅ |
-| 16:45 | 📋 | P2 Digest | mon-fri | ✅ rollup |
-| 17:00 | ⑤ | ETF Daily Snapshot | mon-fri | 🔇 dashboard only |
-| 17:05 | ⑪ | SEC 8-K Scanner | mon-fri | ✅ |
-| 17:30 | ① | Daily Screen | mon-fri | ✅ |
-| 17:35 | ② | Anomaly Monitor | mon-fri | ✅ |
-| 17:45 | ⑫ | SEC Form 4 Scanner | mon-fri | ✅ |
-| 18:00 | ③ | Lateral Expansion | **mon** | ✅ |
-| 18:00 | ④ | Institutional 13F | **tue/fri** | ✅ |
-| 18:30 | ④b | 13F Backfill | **sun** | 🔇 maintenance |
-| 18:30 | ⑨ | Portfolio Risk | mon-fri | ✅ |
-| 19:00 | ⑩ | Portfolio Weekly | **fri** | ✅ |
-| 19:15 | ⑫b | SEC Insider Weekly Digest | **fri** | ✅ |
-| 19:30 | ⑰ | Macro Weekly Recap | **fri** | ✅ |
-| 21:00 | ⑧ | Earnings Summaries | mon-fri | ✅ |
-
-**Time design**: 17:00–19:30 ET is the dense main push window (post-close data lands fastest); 08:00–09:30 ET is pre-market (earnings reminders + ARK rebalance + macro releases); 16:25–16:45 ET is silent post-close batch; ⑧ runs at 21:00 ET because FD earnings data typically fully lands between 19:30–21:00 ET.
-
----
-
-## Intraday streamer service
-
-Runs in parallel to the scheduler. Polls every 60s during 9:30–16:00 ET Mon-Fri; 5-min idle outside.
-
-**A. User-set price alerts** — `/alert NVDA 130 above` (or NL). Each minute: query unfired alerts, batch tickers into one Alpaca `get_stock_latest_trade`, run `alert_fire_check` which atomically marks any crossed alerts via `UPDATE … WHERE fired_at IS NULL`. One-shot SQL-layer semantics.
-
-**B. TECH_30 automated anomaly scan** — every minute scans 29 tickers for dual-threshold anomalies (≥3% move AND ≥2.5× volume pace). Volume pace = `today_volume / (avg_30d × market_progress)` normalizes for partial session. 30d baseline auto-refreshes every 7 trading days. Sector-relative chip auto-attached. 30-min per-ticker cooldown. **No LLM during market hours** — fast signals first, deep attribution at 17:35 ET.
-
-Typical fire: `⚡ 盘中异动 · IBM · 10:15 ET — +7.45% vs 开盘 · 节奏 3.6× · vs XLK +0.40% (差 ↑+7.05pp ★ 逆势) — 用 /why IBM 看盘后完整归因`.
-
----
-
-## Telegram interface
-
-NL layer classifies free-form text into **23 canonical intents** via DeepSeek temperature=0 + JSON output + whitelist enum validation. Outside-whitelist → `unknown` (bounded behavior).
-
-### Slash commands
-
-- **Watchlist**: `/watchlist`, `/add NVDA`, `/remove TSLA`
-- **Analysis**: `/why TICKER` (attribution) · `/summary TICKER` (multi-dim snapshot) · `/chain TICKER` (lateral) · `/13f MANAGER` · `/holders TICKER` · `/etf SYMBOL` · `/earnings AAPL` (single-ticker) · `/earnings` (14-day calendar)
-- **Alerts**: `/alert NVDA 130 above` · `/alerts` · `/alert_remove ID`
-- **Account**: `/portfolio` · `/pnl [day|week|month]` · `/risk`
-- **SEC**: `/8k TICKER` (8-K + 5.02 NER) · `/insiders TICKER [days]` (bounded 7-365)
-- **Macro**: `/macro` (dashboard) · `/cpi` · `/fomc` · `/yields`
-- **Meta**: `/settings`, `/help`, `/start`
-
-### Natural-language examples
-
-`NVDA 为什么跌？` → `explain_move` · NVDA; `巴菲特最近买了什么` → `thirteen_f` · brk; `Cathie 今天买啥` → `etf_view` · ARKK; `提醒我 NVDA 突破 130` → `alert_set` · NVDA · 130 · above; `最近有什么异动` → `find_anomalies`; `苹果什么时候发财报` → `earnings_view` · AAPL; `这周亏了多少` → `pnl_period` · period=week; `AAPL 最近 8-K` → `eight_k_view` · AAPL; `上次 FOMC 怎么说` → `release_check` · release_type=fomc; `今天天气怎么样` → `unknown`.
-
-Manager aliases (10): `brk/berkshire/buffett`, `burry/scion`, `ackman/pershing`, `einhorn/greenlight`, `renaissance/rentech`, `twosigma`, `deshaw/shaw`, `citadel`, `coatue`, `ark/cathie/wood`.
-
 ---
 
 ## Hallucination defense + Priority
@@ -136,9 +127,9 @@ Base score + metadata adjustments: held +15, watchlist +10, surprise ≥10% +15,
 
 ---
 
-## Agents
+## Feature Reference
 
-Organized by family. Each section: data sources, trigger logic, priority ladder, output examples, bot interface.
+Deep-dive on the three functional modules: **Cron Agents** (21 jobs organized by family — each section has data sources, trigger logic, priority ladder, output examples, bot interface) + **Intraday Streamer** (A user alerts + B auto-scan) + **Telegram interface** (full slash list + 23 NL examples + manager aliases).
 
 ### Five early post-market agents
 
@@ -300,6 +291,52 @@ EPS：2.10 vs 预期 1.80 (+16.7%) · 营收：$95.00B vs 预期 $91.00B (+4.4%)
 ```
 
 **First-deploy edge** handled: `get_latest_snapshot_before` returns None → silent skip per fund (⑤ populates baseline at 17:00 ET, signals start next day).
+
+---
+
+### Intraday Streamer details
+
+Runs in parallel to the scheduler. Polls every 60s during 9:30–16:00 ET Mon-Fri; 5-min idle outside.
+
+**A. User-set price alerts** — `/alert NVDA 130 above` (or NL). Each minute: query unfired alerts, batch tickers into one Alpaca `get_stock_latest_trade`, run `alert_fire_check` which atomically marks any crossed alerts via `UPDATE … WHERE fired_at IS NULL`. One-shot SQL-layer semantics — never re-fires.
+
+**B. TECH_30 automated anomaly scan** — every minute scans 29 tickers for dual-threshold anomalies (≥3% move AND ≥2.5× volume pace). Volume pace = `today_volume / (avg_30d × market_progress)` normalizes for partial session (no false positives in first hour). 30d baseline auto-refreshes every 7 trading days via Alpaca daily bars. Sector-relative chip auto-attached (`★ 逆势` chip when ticker reverse-moves vs sector ETF by ≥1.5pp). 30-min per-ticker cooldown via `intraday_cooldown` table prevents flood. **No LLM during market hours** — fast signals first, deep attribution at 17:35 ET (intraday news lags price).
+
+Typical fire:
+
+```
+⚡ 盘中异动 · IBM · 10:15 ET
+━━━━━━━━━━━━━━━━━━━━
+📈 现价 $297.97  +7.45%  vs 开盘 $277.30
+当日成交 28.4M  ·  节奏 3.6×  (已交易 11% 时段)
+对比 XLK +0.40%  ·  差 ↑+7.05pp ★ 逆势
+
+用 /why IBM 看盘后完整归因（17:35 ET 起效）
+```
+
+---
+
+### Telegram interface details
+
+NL layer classifies free-form text into **23 canonical intents** via DeepSeek temperature=0 + JSON output + whitelist enum validation. Outside-whitelist → `unknown` (bounded behavior).
+
+#### Slash commands (full list)
+
+- **Watchlist**: `/watchlist`, `/add NVDA`, `/remove TSLA`
+- **Analysis**: `/why TICKER` (attribution) · `/summary TICKER` (multi-dim snapshot) · `/chain TICKER` (lateral) · `/13f MANAGER` · `/holders TICKER` · `/etf SYMBOL` · `/earnings AAPL` (single-ticker) · `/earnings` (14-day calendar)
+- **Alerts**: `/alert NVDA 130 above` · `/alerts` · `/alert_remove ID`
+- **Account**: `/portfolio` · `/pnl [day|week|month]` · `/risk`
+- **SEC**: `/8k TICKER` (8-K + 5.02 NER) · `/insiders TICKER [days]` (bounded 7-365)
+- **Macro**: `/macro` (dashboard) · `/cpi` · `/fomc` · `/yields`
+- **Meta**: `/settings`, `/help`, `/start`
+
+#### Natural-language examples (all 23 intents)
+
+`NVDA 为什么跌？` → `explain_move` · NVDA; `看看 AAPL 怎么样` → `summary` · AAPL; `找一下 AMD 的产业链` → `chain` · AMD; `巴菲特最近买了什么` → `thirteen_f` · brk; `谁持有 NVDA` → `holders_view` · NVDA; `Cathie 今天买啥` → `etf_view` · ARKK; `提醒我 NVDA 突破 130` → `alert_set` · NVDA · 130 · above; `我设了哪些提醒` → `alert_list`; `看看 Alpaca 持仓` → `portfolio_view`; `我的当日盈亏` → `pnl_view`; `我关注了哪些股票` → `watchlist_view`; `最近有什么异动` → `find_anomalies`; `苹果什么时候发财报` → `earnings_view` · AAPL; `下周谁要发财报` → `earnings_calendar` · days_horizon=7; `组合风险怎么样` → `risk_view`; `这周亏了多少` → `pnl_period` · period=week; `本月赚了多少` → `pnl_period` · period=month; `AAPL 最近 8-K` → `eight_k_view` · AAPL; `NVDA 内部人交易` → `insider_view` · NVDA; `NVDA 过去 30 天 insider` → `insider_view` · NVDA · days_back=30; `宏观怎么样` → `macro_view`; `最近 CPI 数据` → `release_check` · release_type=cpi; `上次 FOMC 怎么说` → `release_check` · release_type=fomc; `NFP data this month` → `release_check` · release_type=nfp; `今天天气怎么样` → `unknown`.
+
+#### Manager aliases (10 supported)
+
+`brk/berkshire/buffett`, `burry/scion`, `ackman/pershing`, `einhorn/greenlight`, `renaissance/rentech`, `twosigma`, `deshaw/shaw`, `citadel`, `coatue`, `ark/cathie/wood`.
 
 ---
 

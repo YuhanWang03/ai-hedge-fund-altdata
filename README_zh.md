@@ -12,15 +12,62 @@
 
 ## 它能做什么
 
-系统在一台 $6/月 的 VPS 上并发运行三个服务：
+系统在一台 $6/月 的 VPS 上并发运行三个服务：**Scheduler**（21 个 cron 任务覆盖 08:00–21:00 ET）+ **Streamer**（盘中分钟级 alert + 异动扫描）+ **Telegram Bot**（25 slash + 23 NL intent）。三服务通过 WAL 模式共享 7 个 SQLite 数据库 + ChromaDB 向量库（RAG 记忆），单服务崩溃不污染其他。
 
-**Scheduler（调度器）** —— 21 个 cron 任务，按 ET 时间贯穿一天（08:00–21:00 ET 主推送窗口 + 16:30–17:00 ET 静默批量 + 02:00 UTC 维护）。每个任务进程隔离，单个崩溃不会污染其他。详见下一节时间表。
+### Cron Jobs 全表
 
-**Streamer（实时扫描）** —— 分钟级盘中扫描器。在美股交易时段（9:30–16:00 ET）轮询 Alpaca 实时行情，检查用户设置的价格提醒并扫描 TECH_30 universe 寻找双门槛异动（≥3% 价格变动 **且** ≥2.5× 成交量节奏）。**盘中绝对不调用 LLM / Tavily** —— 深度归因留给 17:35 ET 的盘后 agent。
+按美东时间排序，21 个 agents（agent 详解见 [## 功能详解](#功能详解) → Cron Agents 各 family 子节）：
 
-**Telegram Bot** —— 24/7 长轮询机器人，支持 25 个 slash 命令、3 个 watchlist 命令，以及一个含 23 种意图的自然语言分类器。通过 chat ID 过滤实现单用户授权。
+| 时间 (ET) | ID | 名称 | 频率 | Family | 推送 |
+|---|---|---|---|---|---|
+| **02:00 UTC** | ⑥ | Archive Cleanup | daily | 维护 | （维护，无推送） |
+| **08:00** | ⑦ | Earnings Reminders | mon-fri | Earnings | ✅ |
+| **08:30** | ⑬ | ARK Alerts | mon-fri | ARK | ✅ pre-market |
+| **09:00** | ⑮ | Macro Release Scanner | mon-fri | Macro | ✅ 命中日 |
+| **09:30** | ⑯ | Macro Initial Claims | **thu** | Macro | ✅ |
+| **16:25** | ⑨b | Positions Snapshot | mon-fri | Portfolio | 🔇 archive only |
+| **16:30** | ⑭ | Macro Daily Snapshot | mon-fri | Macro | ✅ |
+| **16:45** | 📋 | P2 Digest | mon-fri | 维护 | ✅ 汇总 |
+| **17:00** | ⑤ | ETF Daily Snapshot | mon-fri | 早期信号 | 🔇 dashboard only |
+| **17:05** | ⑪ | SEC 8-K Scanner | mon-fri | SEC | ✅ |
+| **17:30** | ① | Daily Screen | mon-fri | 早期信号 | ✅ |
+| **17:35** | ② | Anomaly Monitor | mon-fri | 早期信号 | ✅ |
+| **17:45** | ⑫ | SEC Form 4 Scanner | mon-fri | SEC | ✅ |
+| **18:00** | ③ | Lateral Expansion | **mon** | 早期信号 | ✅ |
+| **18:00** | ④ | Institutional 13F | **tue/fri** | 早期信号 | ✅ |
+| **18:30** | ④b | 13F Backfill | **sun** | 早期信号 | 🔇 维护 |
+| **18:30** | ⑨ | Portfolio Risk | mon-fri | Portfolio | ✅ |
+| **19:00** | ⑩ | Portfolio Weekly | **fri** | Portfolio | ✅ |
+| **19:15** | ⑫b | SEC Insider Weekly Digest | **fri** | SEC | ✅ |
+| **19:30** | ⑰ | Macro Weekly Recap | **fri** | Macro | ✅ |
+| **21:00** | ⑧ | Earnings Summaries | mon-fri | Earnings | ✅ |
 
-三个服务通过 WAL 模式共享 7 个 SQLite 数据库 + 一个 ChromaDB 向量库（用于 RAG 记忆）。
+**时间设计哲学**：晚 17:00–19:30 ET 是主推送密集窗口（盘后数据落地最快），08:00–09:30 ET 是早盘 pre-market 窗口（财报提醒 + ARK 调仓 + 宏观 release），16:25–16:45 ET 是收盘后 5–20 分钟的静默批量窗口（持仓快照 + macro snapshot + P2 汇总）。⑧ 财报总结 21:00 ET 因为 FD 财报数据当日通常 19:30–21:00 ET 才完整落地。
+
+### 盘中 Streamer 实时推送
+
+与 scheduler 并行运行。交易时段（周一-周五 9:30–16:00 ET）每 60 秒轮询一次，非交易时段 5 分钟一查。**盘中绝对不调用 LLM / Tavily** —— 深度归因留给 17:35 ET 盘后 ② Anomaly Monitor。详解见 [## 功能详解 → Streamer 盘中](#streamer-盘中)。
+
+| 触发器 | 数据源 | 频率 | 何时触发 |
+|---|---|---|---|
+| 用户设置的价格提醒 | Alpaca `get_stock_latest_trade` | 1/min | `/alert NVDA 130 above` 或 "提醒我 NVDA 突破 130" 创建 |
+| TECH_30 自动异动扫描 | Alpaca latest-trade × 29 ticker | 1/min | 双门槛：≥3% 价格变动 **AND** ≥2.5× 成交量节奏 |
+
+### Telegram 主动查询
+
+24/7 长轮询机器人，单用户授权（通过 chat ID 过滤），25 个 slash 命令 + 23 种 NL intent + 10 个 manager 别名。详解见 [## 功能详解 → Telegram 交互界面](#telegram-交互界面)。
+
+| 类别 | Slash 命令 | NL 示例 |
+|---|---|---|
+| Watchlist | `/watchlist`, `/add NVDA`, `/remove TSLA` | "我关注了哪些股票" |
+| 分析 | `/why`, `/summary`, `/chain`, `/13f`, `/holders`, `/etf` | "NVDA 为什么跌？", "Cathie 今天买啥" |
+| 提醒 | `/alert`, `/alerts`, `/alert_remove` | "提醒我 NVDA 突破 130" |
+| 账户 | `/portfolio`, `/pnl [day\|week\|month]`, `/risk` | "我的当日盈亏", "组合风险怎么样" |
+| 财报 | `/earnings AAPL`, `/earnings`（日历）| "苹果什么时候发财报" |
+| SEC | `/8k TICKER`, `/insiders TICKER [days]` | "NVDA 内部人交易" |
+| Macro | `/macro`, `/cpi`, `/fomc`, `/yields` | "宏观怎么样", "最近 CPI", "上次 FOMC" |
+
+NL 分类器走 DeepSeek temperature=0 + JSON 输出 + **白名单枚举校验**——任何不在 23 个固定 intent 内的输出 fallback 到 `unknown`，行为有界。
 
 ---
 
@@ -61,141 +108,6 @@
 外部数据源：financialdatasets.ai · yfinance · SEC EDGAR · ARK CSV CDN
             Alpaca · FRED · Tavily News API · DeepSeek LLM · OpenAI embeddings
 ```
-
-### 21 个 Cron Jobs 时间表
-
-按美东时间排序（agent 详细解释见 [Agents 详解](#agents-详解)）：
-
-| 时间 (ET) | ID | 名称 | 频率 | 推送 |
-|---|---|---|---|---|
-| **02:00 UTC** | ⑥ | Archive Cleanup | daily | （维护，无推送） |
-| **08:00** | ⑦ | Earnings Reminders | mon-fri | ✅ |
-| **08:30** | ⑬ | ARK Alerts | mon-fri | ✅ pre-market |
-| **09:00** | ⑮ | Macro Release Scanner | mon-fri | ✅ 命中日 |
-| **09:30** | ⑯ | Macro Initial Claims | **thu** | ✅ |
-| **16:25** | ⑨b | Positions Snapshot | mon-fri | 🔇 archive only |
-| **16:30** | ⑭ | Macro Daily Snapshot | mon-fri | ✅ |
-| **16:45** | 📋 | P2 Digest | mon-fri | ✅ 汇总 |
-| **17:00** | ⑤ | ETF Daily Snapshot | mon-fri | 🔇 dashboard only |
-| **17:05** | ⑪ | SEC 8-K Scanner | mon-fri | ✅ |
-| **17:30** | ① | Daily Screen | mon-fri | ✅ |
-| **17:35** | ② | Anomaly Monitor | mon-fri | ✅ |
-| **17:45** | ⑫ | SEC Form 4 Scanner | mon-fri | ✅ |
-| **18:00** | ③ | Lateral Expansion | **mon** | ✅ |
-| **18:00** | ④ | Institutional 13F | **tue/fri** | ✅ |
-| **18:30** | ④b | 13F Backfill | **sun** | 🔇 维护 |
-| **18:30** | ⑨ | Portfolio Risk | mon-fri | ✅ |
-| **19:00** | ⑩ | Portfolio Weekly | **fri** | ✅ |
-| **19:15** | ⑫b | SEC Insider Weekly Digest | **fri** | ✅ |
-| **19:30** | ⑰ | Macro Weekly Recap | **fri** | ✅ |
-| **21:00** | ⑧ | Earnings Summaries | mon-fri | ✅ |
-
-**时间设计哲学**：晚 17:00–19:30 ET 是主推送密集窗口（盘后数据落地最快），08:00–09:30 ET 是早盘 pre-market 窗口（财报提醒 + ARK 调仓 + 宏观 release），16:25–16:45 ET 是收盘后 5–20 分钟的静默批量窗口（持仓快照 + macro snapshot + P2 汇总）。⑧ 财报总结 21:00 ET 因为 FD 财报数据当日通常 19:30–21:00 ET 才完整落地。
-
----
-
-## 盘中 Streamer 服务
-
-与 scheduler 并行运行。交易时段（周一-周五 9:30–16:00 ET）每 60 秒轮询一次，非交易时段 5 分钟一查。
-
-### A. 用户设置的价格提醒
-
-用户通过 `/alert NVDA 130 above` 或自然语言"提醒我 NVDA 突破 130"创建提醒。Streamer 每分钟：
-
-1. 查 `alerts` 表里所有未触发的条目
-2. 把涉及的 ticker 批量打包成一次 Alpaca `get_stock_latest_trade` 请求
-3. 对每个 ticker 跑 `alert_fire_check(ticker, current_price)` —— SQL 原子性地标记任何已突破的提醒（`UPDATE … WHERE fired_at IS NULL`）并返回
-4. 每个触发的提醒推送一张卡片；永远不重复触发（设计上的 one-shot 语义）
-
-### B. TECH_30 自动异动扫描
-
-每分钟同时扫描全部 29 只 TECH_30 ticker 寻找盘中异动：
-
-- **双门槛**：开盘以来 ≥3% 价格变动 **AND** ≥2.5× 成交量节奏
-- **成交量节奏** = `今日成交量 / (30 日均值 × 时段进度)` —— 对部分交易时段做归一化，避免开盘第一小时的 false positive
-- **30 日均值 baseline** 每 7 个交易日自动刷新（通过 Alpaca daily bars）
-- **板块相对强度** 自动附带（`★ 逆势` chip 当反向移动时出现）
-- **30 分钟单 ticker 冷却期** 通过 `intraday_cooldown` 表防止刷屏
-- **盘中刻意不调 LLM** —— 信号快速浮现是目标，深度归因留给 17:35 ET 盘后 agent
-
-典型触发卡片：
-
-```
-⚡ 盘中异动 · IBM · 10:15 ET
-━━━━━━━━━━━━━━━━━━━━
-📈 现价 $297.97  +7.45%  vs 开盘 $277.30
-当日成交 28.4M  ·  节奏 3.6×  (已交易 11% 时段)
-对比 XLK +0.40%  ·  差 ↑+7.05pp ★ 逆势
-
-用 /why IBM 看盘后完整归因（17:35 ET 起效）
-```
-
----
-
-## Telegram 交互界面
-
-机器人的自然语言层把任意中文 / 英文文本归类到 **23 个固定意图**之一，分类器是 DeepSeek temperature=0 + JSON 输出 + 白名单枚举校验。**任何不在白名单的输出都 fallback 到 `unknown`**，保证行为有界。
-
-### Slash 命令
-
-| 类别 | 命令 | 功能 |
-|---|---|---|
-| Watchlist | `/watchlist`, `/add NVDA`, `/remove TSLA` | 管理个人关注列表 |
-| 分析 | `/why TICKER` | 按需做异动归因 |
-| | `/summary TICKER` | 多维度快照（价格 + 财务 + 财报 surprise + 内部人 + 新闻）|
-| | `/chain TICKER` | 产业链横向扩展 |
-| | `/13f MANAGER` | 完整组合 + 季度变动 |
-| | `/holders TICKER` | 反查：哪些 manager 持有该 ticker |
-| | `/etf SYMBOL` | ARK 基金当日持仓 + 24h 调仓 |
-| | `/earnings AAPL` | 单股财报卡（下次日期 + 上次结果 + ⭐ 标记） |
-| | `/earnings` | 未来 14 天财报日历（watchlist ∪ 持仓） |
-| 提醒 | `/alert NVDA 130 above` | 创建价格门槛提醒 |
-| | `/alerts` | 列出未触发的提醒 |
-| | `/alert_remove ID` | 删除某条提醒 |
-| 账户 | `/portfolio` | Alpaca 当前持仓 + 现金 |
-| | `/pnl [day\|week\|month]` | 盈亏（默认 day；week/month 走 ⑨⑩ 数据）|
-| | `/risk` | 实时组合风险快照（同 ⑨ cron，read-only）|
-| SEC | `/8k TICKER` | 过去 30 天 8-K 摘要 + 5.02 LLM 抽取（同 ⑪ cron 数据源） |
-| | `/insiders TICKER [days]` | 过去 N 天 Form 4 摘要（默认 90，bounded 7-365）|
-| Macro | `/macro` | 综合宏观 dashboard（VIX / yields / 最近 + 下次 release）|
-| | `/cpi` | 最新 CPI release 卡（含 surprise σ + summarizer 输出）|
-| | `/fomc` | 最近 FOMC 决议（statement diff + SEP + Tavily 卖方读数）+ 下次会议预告 |
-| | `/yields` | 收益率曲线（复用 `/macro` dashboard）|
-| 元信息 | `/settings`, `/help`, `/start` | 阈值查看 + 命令参考 |
-
-### 自然语言示例
-
-| 用户输入 | 路由到 |
-|---|---|
-| `NVDA 为什么跌？` | `explain_move` · NVDA |
-| `看看 AAPL 怎么样` | `summary` · AAPL |
-| `找一下 AMD 的产业链` | `chain` · AMD |
-| `巴菲特最近买了什么` | `thirteen_f` · brk |
-| `谁持有 NVDA` | `holders_view` · NVDA |
-| `Cathie 今天买啥` | `etf_view` · ARKK |
-| `提醒我 NVDA 突破 130` | `alert_set` · NVDA · 130 · above |
-| `我设了哪些提醒` | `alert_list` |
-| `看看 Alpaca 持仓` | `portfolio_view` |
-| `我的当日盈亏` | `pnl_view` |
-| `我关注了哪些股票` | `watchlist_view` |
-| `最近有什么异动` | `find_anomalies` |
-| `苹果什么时候发财报` | `earnings_view` · AAPL |
-| `下周谁要发财报` | `earnings_calendar` · days_horizon=7 |
-| `组合风险怎么样` | `risk_view` |
-| `这周亏了多少` | `pnl_period` · period=week |
-| `本月赚了多少` | `pnl_period` · period=month |
-| `AAPL 最近 8-K` | `eight_k_view` · AAPL |
-| `NVDA 内部人交易` | `insider_view` · NVDA |
-| `NVDA 过去 30 天 insider` | `insider_view` · NVDA · days_back=30 |
-| `宏观怎么样` | `macro_view` |
-| `最近 CPI 数据` | `release_check` · release_type=cpi |
-| `上次 FOMC 怎么说` | `release_check` · release_type=fomc |
-| `NFP data this month` | `release_check` · release_type=nfp |
-| `今天天气怎么样` | `unknown` |
-
-### Manager 别名（支持 10 位）
-
-`brk / berkshire / buffett`、`burry / scion`、`ackman / pershing`、`einhorn / greenlight`、`renaissance / rentech`、`twosigma`、`deshaw / shaw`、`citadel`、`coatue`、`ark / cathie / wood`
 
 ---
 
@@ -284,9 +196,9 @@ P2 汇总 cron（周一-周五 16:45 ET）：
 
 ---
 
-## Agents 详解
+## 功能详解
 
-按 family 组织（不按 Phase chronology）。每个 family 自带数据源、触发逻辑、Priority Ladder、输出示例、Bot 接口。
+三大功能模块的深入说明：**Cron Agents**（21 个调度任务按 family 组织，每个 family 自带数据源 / 触发逻辑 / Priority Ladder / 输出示例 / Bot 接口）+ **Streamer 盘中**（A 用户提醒 + B 自动扫描）+ **Telegram 交互界面**（slash 命令 / NL 示例 / Manager 别名详解）。
 
 ### 早期 5 个盘后 Agent
 
@@ -690,6 +602,111 @@ Summary 总览卡（6 alerts mixed）：
 ```
 
 **First-deploy edge** 显式处理：`get_latest_snapshot_before` 返回 None → silent skip per fund（⑤ 17:00 ET 后续 populate baseline，次日开始有 signal）。
+
+---
+
+### Streamer 盘中
+
+与 scheduler 并行运行。交易时段（周一-周五 9:30–16:00 ET）每 60 秒轮询一次，非交易时段 5 分钟一查。
+
+#### A. 用户设置的价格提醒
+
+用户通过 `/alert NVDA 130 above` 或自然语言"提醒我 NVDA 突破 130"创建提醒。Streamer 每分钟：
+
+1. 查 `alerts` 表里所有未触发的条目
+2. 把涉及的 ticker 批量打包成一次 Alpaca `get_stock_latest_trade` 请求
+3. 对每个 ticker 跑 `alert_fire_check(ticker, current_price)` —— SQL 原子性地标记任何已突破的提醒（`UPDATE … WHERE fired_at IS NULL`）并返回
+4. 每个触发的提醒推送一张卡片；永远不重复触发（设计上的 one-shot 语义）
+
+#### B. TECH_30 自动异动扫描
+
+每分钟同时扫描全部 29 只 TECH_30 ticker 寻找盘中异动：
+
+- **双门槛**：开盘以来 ≥3% 价格变动 **AND** ≥2.5× 成交量节奏
+- **成交量节奏** = `今日成交量 / (30 日均值 × 时段进度)` —— 对部分交易时段做归一化，避免开盘第一小时的 false positive
+- **30 日均值 baseline** 每 7 个交易日自动刷新（通过 Alpaca daily bars）
+- **板块相对强度** 自动附带（`★ 逆势` chip 当反向移动时出现）
+- **30 分钟单 ticker 冷却期** 通过 `intraday_cooldown` 表防止刷屏
+- **盘中刻意不调 LLM** —— 信号快速浮现是目标，深度归因留给 17:35 ET 盘后 agent
+
+典型触发卡片：
+
+```
+⚡ 盘中异动 · IBM · 10:15 ET
+━━━━━━━━━━━━━━━━━━━━
+📈 现价 $297.97  +7.45%  vs 开盘 $277.30
+当日成交 28.4M  ·  节奏 3.6×  (已交易 11% 时段)
+对比 XLK +0.40%  ·  差 ↑+7.05pp ★ 逆势
+
+用 /why IBM 看盘后完整归因（17:35 ET 起效）
+```
+
+---
+
+### Telegram 交互界面
+
+机器人的自然语言层把任意中文 / 英文文本归类到 **23 个固定意图**之一，分类器是 DeepSeek temperature=0 + JSON 输出 + 白名单枚举校验。**任何不在白名单的输出都 fallback 到 `unknown`**，保证行为有界。
+
+#### Slash 命令完整列表
+
+| 类别 | 命令 | 功能 |
+|---|---|---|
+| Watchlist | `/watchlist`, `/add NVDA`, `/remove TSLA` | 管理个人关注列表 |
+| 分析 | `/why TICKER` | 按需做异动归因 |
+| | `/summary TICKER` | 多维度快照（价格 + 财务 + 财报 surprise + 内部人 + 新闻）|
+| | `/chain TICKER` | 产业链横向扩展 |
+| | `/13f MANAGER` | 完整组合 + 季度变动 |
+| | `/holders TICKER` | 反查：哪些 manager 持有该 ticker |
+| | `/etf SYMBOL` | ARK 基金当日持仓 + 24h 调仓 |
+| | `/earnings AAPL` | 单股财报卡（下次日期 + 上次结果 + ⭐ 标记） |
+| | `/earnings` | 未来 14 天财报日历（watchlist ∪ 持仓） |
+| 提醒 | `/alert NVDA 130 above` | 创建价格门槛提醒 |
+| | `/alerts` | 列出未触发的提醒 |
+| | `/alert_remove ID` | 删除某条提醒 |
+| 账户 | `/portfolio` | Alpaca 当前持仓 + 现金 |
+| | `/pnl [day\|week\|month]` | 盈亏（默认 day；week/month 走 ⑨⑩ 数据）|
+| | `/risk` | 实时组合风险快照（同 ⑨ cron，read-only）|
+| SEC | `/8k TICKER` | 过去 30 天 8-K 摘要 + 5.02 LLM 抽取（同 ⑪ cron 数据源） |
+| | `/insiders TICKER [days]` | 过去 N 天 Form 4 摘要（默认 90，bounded 7-365）|
+| Macro | `/macro` | 综合宏观 dashboard（VIX / yields / 最近 + 下次 release）|
+| | `/cpi` | 最新 CPI release 卡（含 surprise σ + summarizer 输出）|
+| | `/fomc` | 最近 FOMC 决议（statement diff + SEP + Tavily 卖方读数）+ 下次会议预告 |
+| | `/yields` | 收益率曲线（复用 `/macro` dashboard）|
+| 元信息 | `/settings`, `/help`, `/start` | 阈值查看 + 命令参考 |
+
+#### 自然语言示例（23 NL intents）
+
+| 用户输入 | 路由到 |
+|---|---|
+| `NVDA 为什么跌？` | `explain_move` · NVDA |
+| `看看 AAPL 怎么样` | `summary` · AAPL |
+| `找一下 AMD 的产业链` | `chain` · AMD |
+| `巴菲特最近买了什么` | `thirteen_f` · brk |
+| `谁持有 NVDA` | `holders_view` · NVDA |
+| `Cathie 今天买啥` | `etf_view` · ARKK |
+| `提醒我 NVDA 突破 130` | `alert_set` · NVDA · 130 · above |
+| `我设了哪些提醒` | `alert_list` |
+| `看看 Alpaca 持仓` | `portfolio_view` |
+| `我的当日盈亏` | `pnl_view` |
+| `我关注了哪些股票` | `watchlist_view` |
+| `最近有什么异动` | `find_anomalies` |
+| `苹果什么时候发财报` | `earnings_view` · AAPL |
+| `下周谁要发财报` | `earnings_calendar` · days_horizon=7 |
+| `组合风险怎么样` | `risk_view` |
+| `这周亏了多少` | `pnl_period` · period=week |
+| `本月赚了多少` | `pnl_period` · period=month |
+| `AAPL 最近 8-K` | `eight_k_view` · AAPL |
+| `NVDA 内部人交易` | `insider_view` · NVDA |
+| `NVDA 过去 30 天 insider` | `insider_view` · NVDA · days_back=30 |
+| `宏观怎么样` | `macro_view` |
+| `最近 CPI 数据` | `release_check` · release_type=cpi |
+| `上次 FOMC 怎么说` | `release_check` · release_type=fomc |
+| `NFP data this month` | `release_check` · release_type=nfp |
+| `今天天气怎么样` | `unknown` |
+
+#### Manager 别名（支持 10 位）
+
+`brk / berkshire / buffett`、`burry / scion`、`ackman / pershing`、`einhorn / greenlight`、`renaissance / rentech`、`twosigma`、`deshaw / shaw`、`citadel`、`coatue`、`ark / cathie / wood`
 
 ---
 
