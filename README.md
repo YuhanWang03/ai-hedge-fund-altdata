@@ -1,24 +1,18 @@
 # AI Hedge Fund · Alternative Data Agent System
 
-A production-grade alternative-data intelligence platform delivered through a Telegram bot. Six post-market batch agents continuously monitor US equity markets, two earnings crons track watchlist + holdings for D-3/D-1/D-0 reminders and post-release summaries, two portfolio risk crons push daily concentration / P&L / drawdown snapshots plus a Friday weekly recap, two SEC monitoring crons scan daily 8-K material events and Form 4 insider transactions (with same-day ≥3 distinct-insider cluster detection), one weekly SEC insider digest cron rolls up the week's ⑫ pushes into a Friday recap card, one ARK rebalance-alerts cron fires daily pre-market on significant ARK fund holdings changes (new positions / liquidations / ±20% rebalances with multi-fund coordination detection), four macro-data crons push the daily VIX / yields snapshot plus CPI/PCE/NFP/GDP/PPI release cards and FOMC statement-diff + SEP dot-plot cards plus a Friday macro weekly recap, one intraday streamer scans for live anomalies and price-alert triggers, twenty-three natural-language intents handle interactive queries, and five distinct hallucination-defense mechanisms keep every claim grounded in primary sources.
+A production-grade alternative-data intelligence platform delivered through a Telegram bot. **10 shipped phases** combine fundamental screening, anomaly detection, portfolio risk, SEC monitoring, macro data, and ARK rebalance signals into **21 process-isolated cron jobs**, with five layers of hallucination defense keeping every claim grounded in primary sources.
 
 Built as a portfolio project to demonstrate end-to-end ownership of a multi-source data pipeline, dual-LLM verification architecture, and 24/7 deployed system.
 
 [中文版 README](./README_zh.md)
 
+**Hero numbers**: 10 phases shipped · 21 cron jobs · 23 NL intents · 5-layer defense · 474 sandbox tests · **~$22/month** total ops cost
+
 ---
 
 ## What it does
 
-The system runs three concurrent services on a single $6/month VPS:
-
-**Scheduler** — twenty-one cron jobs covering screening, anomaly detection, supply-chain expansion, institutional 13F tracking, weekly backfills, daily ETF holdings ingestion, **ARK rebalance alerts (⑬, Mon-Fri 08:30 ET pre-market)**, earnings reminders, post-release earnings summaries (with optional 10-Q MD&A material-change diff section), portfolio risk snapshot, **positions snapshot (silent backend, ⑨b)**, portfolio weekly recap, SEC 8-K scanner, SEC Form 4 scanner, **SEC weekly insider digest (⑫b, Fri 19:15 ET)**, macro daily snapshot, macro release scanner, macro Initial Claims, macro weekly recap, P2 daily digest, and archive sweep. Each job is process-isolated; one crashing cannot poison the others.
-
-**Streamer** — minute-level intraday scanner. Polls Alpaca's real-time feed during US market hours (9:30 - 16:00 ET) and does two things: checks user-set price alerts for crossings, and scans the TECH_30 universe for dual-threshold anomalies (≥3% price move AND ≥2.5× volume pace). Deliberately runs no LLM/Tavily during market hours — deep attribution happens at 17:35 ET.
-
-**Telegram Bot** — always-on long-polling bot supporting twenty-five slash commands, three watchlist commands, and a natural-language intent classifier with twenty-three canonical intents. Authorized to a single user (chat ID filter).
-
-All three services share seven SQLite databases via WAL mode and a ChromaDB vector store for RAG memory.
+Three concurrent services on a single $6/month VPS — **Scheduler** (21 cron jobs spanning 08:00–21:00 ET main window + 16:25–17:00 ET silent batch + 02:00 UTC maintenance, every job process-isolated), **Streamer** (minute-level intraday scanner during 9:30–16:00 ET, checks user `/alert` triggers + scans TECH_30 for dual-threshold anomalies; **no LLM/Tavily during market hours**, deep attribution at 17:35 ET), **Telegram Bot** (25 slash commands + 23-intent NL classifier, single-user chat-ID filter). All three share 7 SQLite databases (WAL) + ChromaDB.
 
 ---
 
@@ -27,31 +21,11 @@ All three services share seven SQLite databases via WAL mode and a ChromaDB vect
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │                     hedge-fund-scheduler.service                 │
-├──────────────────────────────────────────────────────────────────┤
-│  08:00 ET Mon-Fri  ⑦ Earnings Reminders        → Telegram push   │
-│  08:30 ET Mon-Fri  ⑬ ARK Rebalance Alerts      → Telegram push   │
-│  09:00 ET Mon-Fri  ⑮ Macro Release Scanner     → Telegram push   │
-│  09:30 ET Thu      ⑯ Macro Initial Claims      → Telegram push   │
-│  16:25 ET Mon-Fri  ⑨b Positions Snapshot       (silent backend)  │
-│  16:30 ET Mon-Fri  ⑭ Macro Daily Snapshot      → Telegram push   │
-│  17:00 ET Mon-Fri  ⑤ ETF Daily Snapshot       (silent ingest)    │
-│  17:05 ET Mon-Fri  ⑪ SEC 8-K Scanner           → Telegram push   │
-│  17:30 ET Mon-Fri  ① Daily Screen              → Telegram push   │
-│  17:35 ET Mon-Fri  ② Anomaly Monitor           → Telegram push   │
-│  17:45 ET Mon-Fri  ⑫ SEC Form 4 Scanner        → Telegram push   │
-│  18:00 ET Mon      ③ Lateral Expansion         → Telegram push   │
-│  18:00 ET Tue/Fri  ④ Institutional 13F         → Telegram push   │
-│  18:30 ET Mon-Fri  ⑨ Portfolio Risk Snapshot   → Telegram push   │
-│  18:30 ET Sun      ④b 13F Backfill             (silent refresh)  │
-│  19:00 ET Fri      ⑩ Portfolio Weekly Recap    → Telegram push   │
-│  19:15 ET Fri      ⑫b SEC Insider Digest       → Telegram push   │
-│  19:30 ET Fri      ⑰ Macro Weekly Recap        → Telegram push   │
-│  21:00 ET Mon-Fri  ⑧ Earnings Summaries        → Telegram push   │
+│                       (21 cron jobs · see table below)           │
 └──────────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────────┐
 │                     hedge-fund-streamer.service                  │
-├──────────────────────────────────────────────────────────────────┤
 │  9:30 - 16:00 ET Mon-Fri · every 60s                             │
 │   ├─ User /alert triggers     · Alpaca latest-trade × ticker     │
 │   └─ TECH_30 auto-scan        · dual-threshold + sector contra   │
@@ -60,283 +34,321 @@ All three services share seven SQLite databases via WAL mode and a ChromaDB vect
                               ▼
 ┌──────────────────────────────────────────────────────────────────┐
 │                   Shared SQLite + ChromaDB                       │
-│  archive.db     fd_cache.db     edgar.db     etf.db              │
-│  bot_state.db   options.db      chroma/      screening_cache.db  │
 └──────────────────────────────────────────────────────────────────┘
                               ▲
                               │
 ┌──────────────────────────────────────────────────────────────────┐
 │                      hedge-fund-bot.service                      │
-├──────────────────────────────────────────────────────────────────┤
-│  Slash commands · /why /summary /chain /13f /holders /etf        │
-│                   /alert /alerts /alert_remove                   │
-│                   /portfolio /pnl /risk /settings                │
-│                   /watchlist /add /remove                        │
-│                   /earnings /8k /insiders                        │
-│                   /macro /cpi /fomc /yields                      │
-│  NL classifier  · 23 intents · DeepSeek T=0 · strict-enum        │
+│  25 slash commands + 23 NL intents · DeepSeek T=0 · strict-enum  │
 └──────────────────────────────────────────────────────────────────┘
 
 External: financialdatasets.ai · yfinance · SEC EDGAR · ARK CSV CDN
           Alpaca · FRED · Tavily News API · DeepSeek LLM · OpenAI embeddings
 ```
 
----
+### 21 cron jobs · time table
 
-## The six scheduled agents
+Sorted by US/Eastern time (agent details in [Agents](#agents)):
 
-### ① Daily Screen (Mon-Fri 17:30 ET)
+| Time (ET) | ID | Name | Frequency | Pushes |
+|---|---|---|---|---|
+| 02:00 UTC | ⑥ | Archive Cleanup | daily | (maintenance) |
+| 08:00 | ⑦ | Earnings Reminders | mon-fri | ✅ |
+| 08:30 | ⑬ | ARK Alerts | mon-fri | ✅ pre-market |
+| 09:00 | ⑮ | Macro Release Scanner | mon-fri | ✅ on hit day |
+| 09:30 | ⑯ | Macro Initial Claims | **thu** | ✅ |
+| 16:25 | ⑨b | Positions Snapshot | mon-fri | 🔇 archive only |
+| 16:30 | ⑭ | Macro Daily Snapshot | mon-fri | ✅ |
+| 16:45 | 📋 | P2 Digest | mon-fri | ✅ rollup |
+| 17:00 | ⑤ | ETF Daily Snapshot | mon-fri | 🔇 dashboard only |
+| 17:05 | ⑪ | SEC 8-K Scanner | mon-fri | ✅ |
+| 17:30 | ① | Daily Screen | mon-fri | ✅ |
+| 17:35 | ② | Anomaly Monitor | mon-fri | ✅ |
+| 17:45 | ⑫ | SEC Form 4 Scanner | mon-fri | ✅ |
+| 18:00 | ③ | Lateral Expansion | **mon** | ✅ |
+| 18:00 | ④ | Institutional 13F | **tue/fri** | ✅ |
+| 18:30 | ④b | 13F Backfill | **sun** | 🔇 maintenance |
+| 18:30 | ⑨ | Portfolio Risk | mon-fri | ✅ |
+| 19:00 | ⑩ | Portfolio Weekly | **fri** | ✅ |
+| 19:15 | ⑫b | SEC Insider Weekly Digest | **fri** | ✅ |
+| 19:30 | ⑰ | Macro Weekly Recap | **fri** | ✅ |
+| 21:00 | ⑧ | Earnings Summaries | mon-fri | ✅ |
 
-Fundamental screening of a TECH_30 universe against hard rules (market cap, revenue growth, gross margin, volatility), enriched with nine qualitative tags (高成长, 高毛利, 小盘, 业绩超预期, etc.). Passes get LLM narration in Template-Fill mode — the model outputs only qualitative logic while Python injects all numbers, eliminating numeric hallucination.
-
-Each candidate is augmented with **sector-relative strength** vs its mapped sector ETF (semis → SMH, broader tech → XLK), surfacing leadership patterns like *领涨 / 掉队 / 同步* that single-stock metrics miss.
-
-Survivors receive recent Tavily news headlines and peer-relative performance deltas for context.
-
-### ② Anomaly Monitor (Mon-Fri 17:35 ET)
-
-Detects volume spikes (≥3× 30-day average), 52-week highs/lows, and significant insider buy/sell clusters across the TECH_30 universe. Each detected anomaly:
-
-1. Gets a **sector-relative chip** (`★ 逆势上涨` when ticker and sector move in opposite directions with ≥1.5pp gap)
-2. Fires a multi-source attribution pipeline:
-   - Tavily news search filtered by entity match (ticker, company name, executives)
-   - Verifier LLM scores each source by tier (SEC/Reuters/Bloomberg = Tier 1, Investors/SeekingAlpha = Tier 2, others = Tier 3)
-   - Generator LLM synthesizes attribution using only Tier-1 + Tier-2 sources
-3. Result persisted to ChromaDB with deterministic ID `{ticker}_{date}` for RAG retrieval
-
-### ③ Lateral Expansion (Mon 18:00 ET)
-
-Takes the previous day's anomaly seeds and asks DeepSeek to propose supply-chain neighbors (suppliers, customers, smaller peers, beneficiaries). Each proposed relation is then verified by a follow-up Tavily search requiring co-occurrence of seed + neighbor tickers in news content — unverified relations are dropped.
-
-Verified neighbors are filtered against market cap / revenue growth / margin thresholds before being pushed.
-
-### ④ Institutional 13F (Tue/Fri 18:00 ET)
-
-Pulls fresh 13F-HR filings from SEC EDGAR for ten famous managers (Berkshire, Burry, Ackman, Einhorn, Renaissance, Two Sigma, D.E. Shaw, Citadel, Coatue, ARK). For each new filing, computes quarter-over-quarter position changes, classifies as 新进 / 加仓 / 减仓 / 清仓, sends top-20 changes to DeepSeek for ten-word strategic interpretations.
-
-Currently tracks **$1.29T AUM across 17,329 positions**.
-
-### ④b 13F Backfill (Sun 18:30 ET)
-
-Weekly safety net that re-fetches all ten managers' latest two filings, idempotently overwriting positions with the latest CUSIP-aggregated values. Catches amended filings, transient EDGAR errors, and race conditions the Tue/Fri push agent might have missed.
-
-### ⑤ ETF Daily Snapshot (Mon-Fri 17:00 ET)
-
-Silently fetches daily holdings CSVs for four ARK funds (ARKK, ARKW, ARKG, ARKF) from ARK Invest's public CDN. Builds a per-(fund, date, ticker) time series enabling 24-hour rebalance detection — daily granularity vs the 45-day-delayed 13F.
+**Time design**: 17:00–19:30 ET is the dense main push window (post-close data lands fastest); 08:00–09:30 ET is pre-market (earnings reminders + ARK rebalance + macro releases); 16:25–16:45 ET is silent post-close batch; ⑧ runs at 21:00 ET because FD earnings data typically fully lands between 19:30–21:00 ET.
 
 ---
 
-## The intraday streamer service
+## Intraday streamer service
 
-Runs in parallel to the scheduler. Polls every 60 seconds during the regular session (9:30 - 16:00 ET, Mon-Fri); sleeps in 5-minute windows outside trading hours.
+Runs in parallel to the scheduler. Polls every 60s during 9:30–16:00 ET Mon-Fri; 5-min idle outside.
 
-Each poll does two independent jobs:
+**A. User-set price alerts** — `/alert NVDA 130 above` (or NL). Each minute: query unfired alerts, batch tickers into one Alpaca `get_stock_latest_trade`, run `alert_fire_check` which atomically marks any crossed alerts via `UPDATE … WHERE fired_at IS NULL`. One-shot SQL-layer semantics.
 
-### A. User-set price alerts
+**B. TECH_30 automated anomaly scan** — every minute scans 29 tickers for dual-threshold anomalies (≥3% move AND ≥2.5× volume pace). Volume pace = `today_volume / (avg_30d × market_progress)` normalizes for partial session. 30d baseline auto-refreshes every 7 trading days. Sector-relative chip auto-attached. 30-min per-ticker cooldown. **No LLM during market hours** — fast signals first, deep attribution at 17:35 ET.
 
-Users create alerts via `/alert NVDA 130 above` or natural language ("提醒我 NVDA 突破 130"). Each minute, the streamer:
-
-1. Queries the `alerts` table for unfired entries
-2. Batches the distinct tickers into one Alpaca `get_stock_latest_trade` request
-3. For each ticker, runs `alert_fire_check(ticker, current_price)` which **atomically marks** any crossed alerts (`UPDATE … WHERE fired_at IS NULL`) and returns them
-4. Pushes a triggered card per fired alert; never re-fires (one-shot semantics by design)
-
-### B. TECH_30 automated anomaly scan
-
-Every minute, also scans all 29 TECH_30 tickers for intraday anomalies:
-
-- **Dual threshold**: ≥3% move from open AND ≥2.5× volume pace
-- **Volume pace** = `today_volume / (avg_30d × market_progress)` — normalizes for partial session
-- **30d avg volume** baseline auto-refreshes every 7 trading days via Alpaca daily bars
-- **Sector-relative context** included automatically (`★ 逆势` chip when contrarian)
-- **30-minute per-ticker cooldown** via `intraday_cooldown` table prevents spam
-- **Deliberately no LLM** during market hours — fast signals during session, deep attribution at 17:35 ET
-
-A typical fire looks like:
-
-```
-⚡ 盘中异动 · IBM · 10:15 ET
-━━━━━━━━━━━━━━━━━━━━
-📈 现价 $297.97  +7.45%  vs 开盘 $277.30
-当日成交 28.4M  ·  节奏 3.6×  (已交易 11% 时段)
-对比 XLK +0.40%  ·  差 ↑+7.05pp ★ 逆势
-
-用 /why IBM 看盘后完整归因（17:35 ET 起效）
-```
+Typical fire: `⚡ 盘中异动 · IBM · 10:15 ET — +7.45% vs 开盘 · 节奏 3.6× · vs XLK +0.40% (差 ↑+7.05pp ★ 逆势) — 用 /why IBM 看盘后完整归因`.
 
 ---
 
 ## Telegram interface
 
-The bot's natural-language layer classifies free-form Chinese or English text into twenty-three canonical intents using DeepSeek at temperature=0. Outputs are validated against a closed enum whitelist — unrecognized intents fall back to `unknown`, guaranteeing bounded behavior.
+NL layer classifies free-form text into **23 canonical intents** via DeepSeek temperature=0 + JSON output + whitelist enum validation. Outside-whitelist → `unknown` (bounded behavior).
 
 ### Slash commands
 
-| Category | Command | What it does |
-|---|---|---|
-| Watchlist | `/watchlist`, `/add NVDA`, `/remove TSLA` | Manage personal ticker list |
-| Analysis | `/why TICKER` | On-demand anomaly attribution |
-| | `/summary TICKER` | Multi-dimensional snapshot: price, fundamentals, earnings, insiders, news |
-| | `/chain TICKER` | Lateral supply-chain expansion |
-| | `/13f MANAGER` | Full portfolio snapshot + QoQ changes |
-| | `/holders TICKER` | Reverse query: which tracked managers hold this ticker |
-| | `/etf SYMBOL` | ARK fund daily holdings + 24h rebalance |
-| | `/earnings AAPL` | Single-ticker earnings card (next release + last filing + ⭐ chips) |
-| | `/earnings` | 14-day forward calendar across watchlist ∪ holdings |
-| Alerts | `/alert NVDA 130 above` | Create a price-threshold alert |
-| | `/alerts` | List unfired alerts |
-| | `/alert_remove ID` | Delete an alert |
-| Account | `/portfolio` | Alpaca holdings + cash |
-| | `/pnl [day\|week\|month]` | Today's P&L (default `day` = Phase 0 behavior); `week` / `month` use ⑨⑩ data |
-| | `/risk` | Real-time portfolio risk snapshot (same as ⑨ cron, read-only) |
-| Meta | `/settings`, `/help`, `/start` | Settings + command reference |
+- **Watchlist**: `/watchlist`, `/add NVDA`, `/remove TSLA`
+- **Analysis**: `/why TICKER` (attribution) · `/summary TICKER` (multi-dim snapshot) · `/chain TICKER` (lateral) · `/13f MANAGER` · `/holders TICKER` · `/etf SYMBOL` · `/earnings AAPL` (single-ticker) · `/earnings` (14-day calendar)
+- **Alerts**: `/alert NVDA 130 above` · `/alerts` · `/alert_remove ID`
+- **Account**: `/portfolio` · `/pnl [day|week|month]` · `/risk`
+- **SEC**: `/8k TICKER` (8-K + 5.02 NER) · `/insiders TICKER [days]` (bounded 7-365)
+- **Macro**: `/macro` (dashboard) · `/cpi` · `/fomc` · `/yields`
+- **Meta**: `/settings`, `/help`, `/start`
 
 ### Natural-language examples
 
-| User input | Routed to |
-|---|---|
-| `NVDA 为什么跌？` | `explain_move` · NVDA |
-| `看看 AAPL 怎么样` | `summary` · AAPL |
-| `找一下 AMD 的产业链` | `chain` · AMD |
-| `巴菲特最近买了什么` | `thirteen_f` · brk |
-| `谁持有 NVDA` | `holders_view` · NVDA |
-| `Cathie 今天买啥` | `etf_view` · ARKK |
-| `提醒我 NVDA 突破 130` | `alert_set` · NVDA · 130 · above |
-| `我设了哪些提醒` | `alert_list` |
-| `看看 Alpaca 持仓` | `portfolio_view` |
-| `我的当日盈亏` | `pnl_view` |
-| `我关注了哪些股票` | `watchlist_view` |
-| `最近有什么异动` | `find_anomalies` |
-| `今天天气怎么样` | `unknown` |
+`NVDA 为什么跌？` → `explain_move` · NVDA; `巴菲特最近买了什么` → `thirteen_f` · brk; `Cathie 今天买啥` → `etf_view` · ARKK; `提醒我 NVDA 突破 130` → `alert_set` · NVDA · 130 · above; `最近有什么异动` → `find_anomalies`; `苹果什么时候发财报` → `earnings_view` · AAPL; `这周亏了多少` → `pnl_period` · period=week; `AAPL 最近 8-K` → `eight_k_view` · AAPL; `上次 FOMC 怎么说` → `release_check` · release_type=fomc; `今天天气怎么样` → `unknown`.
 
-### Manager aliases (10 supported)
-
-`brk / berkshire / buffett`, `burry / scion`, `ackman / pershing`, `einhorn / greenlight`, `renaissance / rentech`, `twosigma`, `deshaw / shaw`, `citadel`, `coatue`, `ark / cathie / wood`
+Manager aliases (10): `brk/berkshire/buffett`, `burry/scion`, `ackman/pershing`, `einhorn/greenlight`, `renaissance/rentech`, `twosigma`, `deshaw/shaw`, `citadel`, `coatue`, `ark/cathie/wood`.
 
 ---
 
-## Hallucination defense — five layers
+## Hallucination defense + Priority
 
-LLMs in this system never produce numeric facts directly. They make classification decisions, write qualitative narration, and select between candidate sources. All numbers come from primary data sources.
+### 5-layer signal defense (system-wide)
 
-| Layer | Mechanism |
-|---|---|
-| 1. Entity filter | News results must contain the target ticker AND at least one company-name token before being shown to the Verifier |
-| 2. Source-tier scoring | Verifier LLM scores each source as Tier 1 (SEC, Reuters, Bloomberg, WSJ, FT, CNBC) / Tier 2 (MarketWatch, SeekingAlpha, Yahoo, Fool, Forbes) / Tier 3 (others). Tier 3 is discarded |
-| 3. Generator-Verifier split | A separate Verifier LLM call validates the Generator's output against the source list, with strict prompt rules forbidding numbers not present in input |
-| 4. Template Fill | Screening narrator outputs only qualitative phrases; Python f-string injects all numbers from the data layer. LLM cannot misread a metric |
-| 5. Stale-data chip | Filings older than 180 days show ⚠️; older than 365 days show ⚠️ 已 N 月未更新. Prevents users from interpreting 2023 13F data as current state |
+LLMs **never produce numeric facts directly** — they only classify, write qualitative narration, and select between candidate sources. **All numbers come from primary data**.
 
----
+1. **Entity filter** — news must contain target ticker AND ≥1 company-name token before reaching the Verifier.
+2. **Source-tier scoring** — Verifier scores Tier 1 (SEC/Reuters/Bloomberg/WSJ/FT/CNBC) / Tier 2 (MarketWatch/SeekingAlpha/Yahoo/Fool/Forbes) / Tier 3 (others, discarded).
+3. **Generator-Verifier split** — separate Verifier validates Generator output against the source list; strict prompt forbids numbers not in input.
+4. **Template Fill** — narrator outputs only qualitative phrases; Python f-string injects all numbers.
+5. **Stale-data chip** — filings > 180 days → ⚠️; > 365 days → stale-N-months. Prevents 2023 13F being read as current state.
 
-## Sector-relative benchmarking
+### LLM 4-layer defense (Macro Agent only)
 
-Every signal — screening, post-market anomaly, intraday anomaly — is compared against a sector ETF benchmark before being surfaced. A `+5%` volume spike on NVDA means something very different when SMH is `+4.5%` (market beta) versus when SMH is `-1%` (ticker-specific catalyst).
+`v2/macro/summarizer.py` adds macro-specific layers because release interpretation is especially sensitive to numeric leakage: **L1 Template-Fill** (`_SYSTEM_PROMPT` forbids numbers + forward predictions; 4 fixed JSON fields ≤40 chars each); **L2 Post-Parse Reject** (regex scans for "will/expect/may.*[rise/fall]" + digit leakage → fallback to neutral); **L3 FOMC bypass** (hawkish/dovish verdict fully LLM-free — Python diff over 15 KEY_PHRASES + SEP dot-plot extract + Tavily majority vote across 8 trusted domains); **L4 Historical analog** (deferred to Phase 4.5). LLM failure → `_NEUTRAL_FALLBACK`; priority isn't missed because sigma is Python-computed.
 
-| Ticker family | Sector ETF |
-|---|---|
-| Semiconductors (NVDA, AMD, AVGO, QCOM, INTC, TXN, MU) | SMH |
-| Mega-cap tech + software + internet (AAPL, MSFT, GOOGL, META, ORCL, CRM, ADBE, …) | XLK |
-| Default fallback | SPY |
+### Push priority P0/P1/P2/P3
 
-Sector ETF prices are pre-fetched once per agent run (3 extra FD calls for the whole universe). The `contrarian` flag fires when ticker and sector move in opposite directions with ≥1.5pp gap — only then does the `★ 逆势` chip appear.
+Every push computes `importance_score` (0–100) → 4 tiers. **P0** (≥80) immediate push + 🚨🚨🚨 + dashboard red frame (price alert, big loss, FOMC, ARK liquidation of held, material 8-K). **P1** (60–79) immediate push (anomaly attribution, watchlist earnings, 13F changes). **P2** (40–59) archive + 16:45 ET digest rollup. **P3** (<40) archive only, dashboard hidden.
 
-Live signal example from production: `MU +3.63% with SMH -1.10% on 1.5× volume → ★ 逆势 chip + Tier-1 attribution surfacing "MU 市值突破 $1T" as ticker-specific catalyst.`
+Base score + metadata adjustments: held +15, watchlist +10, surprise ≥10% +15, **daily loss ≥5% +30 (→P0)**, multi-factor stack up to +75, **going_concern +20**, material_weakness +15, **ARK multi-fund +15**, ARK large_new_position +10. Pure Python rules; `notifier.send_text` without `priority=` defaults to P1 (backward-compat).
 
 ---
 
-## Data sources
+## Agents
 
-| Source | What | Why this |
+Organized by family. Each section: data sources, trigger logic, priority ladder, output examples, bot interface.
+
+### Five early post-market agents
+
+- **① Daily Screen (Mon-Fri 17:30 ET)** — TECH_30 hard-rule screen + 9 qualitative tags + LLM Template-Fill narration (numbers Python-injected) + sector-relative chips + Tavily news.
+- **② Anomaly Monitor (Mon-Fri 17:35 ET)** — volume spikes (≥3× 30d) / 52-week extremes / insider clusters. Per anomaly: sector chip + multi-source attribution (Tavily → Verifier tier scoring → Generator with Tier 1+2 only) → persists to ChromaDB with deterministic ID `{ticker}_{date}`.
+- **③ Lateral Expansion (Mon 18:00 ET)** — anomaly seeds → DeepSeek proposes supply-chain neighbors → Tavily co-occurrence verification → market cap / revenue / margin thresholds.
+- **④ Institutional 13F (Tue/Fri 18:00 ET) + ④b Backfill (Sun 18:30 ET)** — 10 famous managers (Berkshire, Burry, Ackman, Einhorn, Renaissance, Two Sigma, D.E. Shaw, Citadel, Coatue, ARK). QoQ diffs → 新进/加仓/减仓/清仓 → DeepSeek 10-word interpretations. **Tracks $1.29T AUM × 17,329 positions**.
+- **⑤ ETF Daily Snapshot (Mon-Fri 17:00 ET)** — silently fetches 4 ARK funds' (ARKK/ARKW/ARKG/ARKF) daily CSVs to `etf.db.snapshots`. Per-(fund, date, ticker) time series enabling **24-hour rebalance detection** (vs 45-day 13F lag). Underlying data for ⑬.
+
+---
+
+### Earnings Agent (⑦⑧)
+
+| Cron | Time | Behavior | Priority |
+|---|---|---|---|
+| ⑦ Reminders | Mon-Fri **08:00 ET** | D-3/D-1/D-0 reminders across watchlist + holdings | D-3 = P2, D-1/D-0 = P1 |
+| ⑧ Summaries | Mon-Fri **21:00 ET** | Post-release LLM summary + 200-day-lookback 10-Q MD&A diff | Base P1 (70); \|surprise\| ≥10% → P0 (+30); going_concern +20 / material_weakness +15 |
+
+**Data**: yfinance `Ticker.calendar` (forward), FD `get_earnings` + `get_earnings_history`, Tavily transcript URL, SEC EDGAR via edgartools (10-Q MD&A + Risk Factors diff).
+
+**10-Q integration**: every summary reverse-fetches the ticker's most recent 10-Q within 200 days and diffs MD&A (Part I Item 2) + Risk Factors (Part II Item 1A) vs the prior quarter. Card appends `📋 10-Q MD&A 关键变化` block: top-3 added paragraphs (each capped at 80 chars + "…"), new risk-factor heading count, conservative auditor flags (regex matches for "going concern" / "material weakness"). 10-Q fetch failure → block silently omitted; earnings card still ships. Auditor flags route directly into priority: `has_going_concern` +20 (P0), `has_material_weakness` +15.
+
+**Output (BEAT held + 15% surprise + 10-Q, P0)**:
+
+```
+🚨🚨🚨 🟢 财报发布 · AAPL · BEAT
+EPS：2.10 vs 预期 1.80 (+16.7%) · 营收：$95.00B vs 预期 $91.00B (+4.4%)
+最近 4 季：BEAT → BEAT → MISS → BEAT
+👍 连续 BEAT，Services 加速  👎 iPhone 出货指引偏保守
+📋 10-Q MD&A 关键变化
+  ➕ Revenue growth driven by Services and wearables segments outpacing…
+  📌 1 个新 risk factor 段落
+```
+
+**Bot interface** (read-only): `/earnings AAPL`, `/earnings`. **Engineering**: yfinance / FD failure → silent skip per ticker; D-N recomputed daily; FD lag → P2 "pending" placeholder + auto-retry next 21:00 ET; Template-Fill mode (LLM only writes qualitative bull/bear/narrative); cross-quarter dedup via `PRIMARY KEY (ticker, report_period)`.
+
+---
+
+### Portfolio Risk Agent (⑨⑨b⑩)
+
+| Cron | Time | Behavior | Priority |
+|---|---|---|---|
+| ⑨ Risk | Mon-Fri **18:30 ET** | Real-time RiskReport (drawdown with today realtime fix) | See ladder |
+| ⑨b Snapshot | Mon-Fri **16:25 ET** | Silent backend: writes daily holdings to `positions_snapshot` table | No push (archive only) |
+| ⑩ Weekly | Fri **19:00 ET** | Weekly recap + monthly + 1M drawdown + sector exposure + per-position attribution | Fixed P1 (floor) |
+
+**Data**: Alpaca `account` + `positions` (TOTAL = invested + cash; `invested_value` is derived @property), `portfolio_history(1M, 1D)`, 90-ticker sector ETF mapping (with OTHER bucket), reuses `v2.earnings.calendar` for 7-day earnings risk.
+
+**Priority ladder (⑨)**: normal day P2/55; top_1 ≥30% +20 → P1; **daily_pnl ≤ -5% +30 → P0**; 1M drawdown ≥10% +15 → P1; multi-factor stack up to +75 → P0 (capped at 100).
+
+**Design**: single abnormal factor at most → P1 (reminder, not nag); single-day large loss OR multi-factor → P0.
+
+**Outputs (⑨ multi-factor P0 / ⑩ weekly per-position attribution P1)**:
+
+```
+💼 组合风险 · 2026-06-04
+今日 P/L 🔴 -1.78% · Top 1 NVDA 35.0% ⚠️ · SMH 38.0% ⚠️ · 1M 回撤 -12.00%
+⚠️ 单票 NVDA > 30% / SMH 行业 > 30% / 1M 回撤 > 10%
+
+📊 周 P&L 复盘 · 2026-06-06 — 本周 🟢 +1.50%
+📊 本周 per-position 表现归因
+  最佳: NVDA 🟢 +5.00% (贡献 🟢 +1.50%)
+  最差: JPM  🔴 -2.00% (贡献 🔴 -0.30%)
+  净贡献: 🟢 +1.40%
+```
+
+**Attribution 3-state gating**: ≥5 days ⑨b coverage → best/worst/net rows; 1-4 days → `归因数据累积中 (N/5 天)` placeholder; 0 days → fully silent (fresh-account contract).
+
+**Drawdown realtime fix**: Phase 2's `compute_drawdown` only used EOD canonical series → today's intraday drop didn't enter → card could show "今日 P/L -3.72% / drawdown 0.00%" (real prod bug 2026-06-05). Fix: `compute_drawdown(broker, today_realtime_value=portfolio_value)` appends today's Alpaca value to the EOD series. Backward-compat preserved (`None` → Phase 2 behavior).
+
+**Bot interface**: `/risk`, `/pnl [day|week|month]`. **Engineering**: `portfolio_value` is TOTAL (= invested + cash); weight denominator is invested_total (cash excluded from concentration); drawdown 5-layer sign defense; Alpaca-unavailable still pushes P2 "数据不全" card.
+
+---
+
+### SEC Monitoring (⑪⑫⑫b)
+
+| Cron | Time | Behavior | Priority |
+|---|---|---|---|
+| ⑪ 8-K | Mon-Fri **17:05 ET** | Single ticker → one card aggregating all items | Base by max item tier, 5.02 senior_exec +15 |
+| ⑫ Form 4 | Mon-Fri **17:45 ET** | P/S individual cards + same-day ≥3 cluster cards | Base 75 (P) / 50 (S) + magnitude / role / 10b5-1 |
+| ⑫b Insider Digest | **Fri 19:15 ET** | Reverse-look this week's ⑫ pushes → weekly summary | Base 55 (P2); unusual ≥3 tickers → P1 |
+
+**Data**: edgartools 5.31.5 (200ms throttle), reuses `EDGAR_IDENTITY` env var, separate `v2/sec/` module decoupled from `v2/institutional/`.
+
+**24 8-K item codes priority table**: **P0** 1.03 Bankruptcy / 1.05 Cybersecurity / 2.04 Off-BS triggering / 3.01 Delisting / 4.02 Non-reliance / 5.01 Change in control / 5.02 Senior exec (LLM-confirmed). **P1** 1.01 Material agreement / 1.02 Termination / 2.01 Acquisition / 2.03 Material obligation / 2.05 Restructuring / 2.06 Impairment / 4.01 Auditor change / 5.02 Other officer. **P2** 3.02 Unregistered sales / 3.03 Material modification / 5.08 Director nominations / 7.01 Reg FD / 8.01 Other. **P3** 1.04 Mine safety / 5.03 Bylaw / 5.04 Blackout suspension / 5.05 Ethics / 5.07 Shareholder vote / 9.01 Financial exhibits.
+
+**`2.02` strictly skipped** — handled by ⑧ at 21:00 ET. Mixed `{2.02, other}` filings keep card but annotate 2.02 as "(⑧ 处理)"; pure 2.02-only filings dropped.
+
+**Multi-item single card**: HPE-style 8-K (1.01 + 2.02 + 5.02 + 7.01 + 9.01) merged into one card with `max_priority_tier` driving overall priority. **5.02 LLM extraction**: DeepSeek template-fill extracts `{departures, appointments, has_senior_exec}` (entities only). LLM failure → `extracted_meta={}` → bot card shows "(姓名待解析)"; priority does NOT auto-escalate (conservative).
+
+**Form 4 noise vs signal** (Stage 0 calibrated 89 transactions): 83% is noise (A 44% / M 21% / F 15% / G 3% / C <1%) → `noise_summary` aggregate. Only P (8%) + S (8%) get individual cards. **Cluster detection**: same-ticker same-day same-direction with **≥3 distinct insiders** → one cluster card (coincidence on ≥3 insiders is extremely hard).
+
+**⑫b weekly digest** (title-only fallback): Fri 19:15 ET reverse-aggregates this week's ⑫ pushes from `archive.pushes` by (ticker, direction). Phase 3.5 Stage 0 trace probe confirmed ⑫'s `trace_json` only stores aggregate "N signal · Y cluster · Z noise" — per-transaction A/M/F/G/C isn't persisted. To avoid expanding archive schema, ⑫b uses **pure title-only fallback** (regex parses `Form 4 · NVDA · 买入` titles); full per-code breakdown deferred to Phase 3.5.5. Empty weeks still push "本周平静" card.
+
+**Priority ladders**: ⑪ 8-K base `sec_8k_p0=85` / p1=65 / p2=55 / p3=35; 5.02 senior_exec +5, amendment -5, held +15, watchlist +10. ⑫ Form 4 base `sec_form4_purchase=75` / `sale=50` / `cluster=75`; Purchase ≥$1M +25, CEO/CFO +10, 10b5-1 plan -10; Sale ≥$10M discretionary +15, 10b5-1 -5; Cluster ≥5 distinct +15. **Philosophy**: discretionary sale > 10b5-1 plan sale; cluster purchase > cluster sale (sale reasons are diverse).
+
+**Bot interface**: `/8k AAPL`, `/insiders NVDA [days]` (bounded 7-365). **Engineering**: edgartools shape calibration (PascalCase `Code` column, Stage 0 fix); 5.02 LLM-fail → don't auto-escalate; 2.02 strict skip vs mixed retain; 10b5-1 footnote regex; 5+1 SEC formatters source-of-truth in `v2/sec/_bot_cards.py` (sandbox-runnable).
+
+---
+
+### Macro Agent (⑭⑮⑯⑰)
+
+| Cron | Time | Behavior | Priority |
+|---|---|---|---|
+| ⑭ Daily Snapshot | Mon-Fri **16:30 ET** | VIX/yields/commodities + 4 anomaly flags | See ladder |
+| ⑮ Release Scanner | Mon-Fri **09:00 ET** | release_calendar-gated CPI/PCE/NFP/GDP/PPI/FOMC | σ ladder |
+| ⑯ Initial Claims | **Thu 09:30 ET** | Weekly ICSA + 4W MA smoothed | Base P2, σ>2 → P1 |
+| ⑰ Macro Weekly | **Fri 19:30 ET** | This-week + next-week preview + intra-week VIX/yields delta | Fixed P1 (floor) |
+
+**Data hybrid**: FRED canonical for Treasury yields + Fed Funds + CPI/PCE/NFP/GDP/PPI/Claims (avoids yfinance `^TNX` × 10 raw bug); yfinance for VIX realtime + DXY + WTI + Gold (15-min delay, FRED `VIXCLS` as EOD fallback); Tavily for FOMC sell-side aggregate across 8 trusted domains (Layer 3 defense); DeepSeek template-fill for release interpretation (Layer 1+2).
+
+**release_calendar.py — hard-coded 2026 schedule**: cron paths must be deterministic + offline-runnable. `_seed_calendar.py` (one-shot) hits FRED `/release/dates` REST to generate 40 release entries covering 33 dates, pasted between `AUTOGEN BLOCK START/END` sentinels. `_LAST_UPDATED` + 6-month staleness check warns at cron startup. Claims (ICSA) skips the calendar (Thursday-deterministic trigger).
+
+**Anomaly + σ ladders**: ⑭ `macro_snapshot_p3=35` / `macro_vix_spike=85` / `macro_curve_flip=65` — VIX ≥+30% +20 / +20% +10 → P0; T10Y2Y inversion +10 → P1; VIX +10% OR DGS10 ≥20bps → P1. ⑮ `macro_release_p2=55` / p1=65 / p0=85 — `|σ|≥3.0` +20 → P0; `≥2.0` +10 → P1; `≥1.0` +5; FOMC SEP shift +15 → P0; Tavily hawkish_unexpected +10 (FOMC path skips σ ladder, reads `sep_dot_plot_change`). ⑯ ICSA base P2; `|σ|≥2` → P1; holiday weeks silent skip. ⑰ fixed P1 floor (operator must see weekly recap, not event-driven).
+
+**Bot interface**: `/macro` / `/cpi` / `/fomc` / `/yields`. **Engineering**: fredapi REST patch (httpx direct + 3-attempt backoff); 6 macro formatters source-of-truth in `v2/macro/_bot_cards.py` (sandbox-runnable); Layer 3 FOMC path is Python-only — fomc_parser.py diffs 15 KEY_PHRASES, extract_dot_plot_table regex-extracts dot plot, Tavily uses 8 trusted domains for keyword-count majority vote — **LLM never participates in the hawkish/dovish verdict**.
+
+---
+
+### ARK Rebalance Alerts (⑬)
+
+| Cron | Time | Behavior | Priority |
+|---|---|---|---|
+| ⑬ ARK Alerts | Mon-Fri **08:30 ET** pre-market | Reads ⑤'s overnight `etf.db` baseline + today's CSV → diff → significant rebalances | Base 65 (P1); multi-fund / user-universe / large positions → P0 |
+
+**Why**: ARK Invest is Cathie Wood's actively-managed ETF family, and unlike traditional ETFs **publishes full holdings every trading day**. Conviction trades surface **45 days ahead of 13F**. Sudden liquidation = strong negative; new position ≥0.5% = strong positive (especially small-cap); multi-fund same-direction = department-level conviction.
+
+**Data — reuses ⑤ ETF infrastructure**: v2/etf/ has been fetching ARK CSVs + computing daily diffs + persisting to SQLite since Phase 0 (via ⑤ at 17:00 ET). Phase 5a reuses the entire infrastructure; only the alerts classifier + card formatter are new, **zero schema change, zero client/detector/tracker changes**. `SUPPORTED_FUNDS = ["ARKK", "ARKW", "ARKG", "ARKF"]` (ARKQ + ARKX deprecated by ARK on assets.ark-funds.com).
+
+**4 action types + thresholds** (`v2/etf/alerts.py` single source of truth):
+
+| Action | Threshold |
+|---|---|
+| `new_position` | today_weight ≥ 0.5% |
+| `liquidated` | yesterday_weight ≥ 0.5% |
+| `increase` / `decrease` | `|relative_change|` ≥ 20% |
+
+**Priority escalation** (base `ark_alert_p1` = 65, P1):
+
+| Trigger | Adjust | Reason |
 |---|---|---|
-| **yfinance** (default daily prices, Phase 4.5-mini onwards) | Daily OHLCV (`get_prices`) for ① screen / ② monitor / ③ lateral / `/why` `/summary` bot paths | Real-time EOD; eliminates FD free-tier's 1-3 day lag that forced `fd_safe_today() = today-3` in Phase 1-4. Cards now display today's date instead of today-3. |
-| financialdatasets.ai | Earnings history (`get_earnings`), insider transactions (`get_insider_trades`), company fundamentals (`get_financial_metrics` / `get_company_info`) | Quarterly + episodic data — no daily-lag problem here. Primary commercial API; consistent schema. |
-| yfinance (other uses) | Options chains (OI + volume) + Phase 4 macro VIX/DXY/WTI/Gold | Free; powers the unusual-options-activity detector + macro snapshot. |
-| SEC EDGAR (via `edgartools`) | 13F-HR institutional filings + 8-K / Form 4 / 10-Q monitoring | Authoritative source. |
-| ARK Invest CDN | Daily ETF holdings CSV | Public; daily granularity. |
-| Alpaca (paper) | Real-time prices (streamer), account portfolio + P&L | Free; powers `/portfolio`, `/pnl`, streamer alerts, portfolio risk cron. |
-| FRED (Federal Reserve Economic Data) | Macro time series (CPI / PCE / NFP / GDP / PPI / Treasury yields / Fed Funds) | Authoritative EOD source; vintage handling included; avoids yfinance `^TNX` × 10 raw bug. |
-| Tavily News API | News search for attribution + verification + FOMC sell-side aggregate | Search-engine quality without scraping; Layer 3 defense replaces LLM hawkish/dovish verdict. |
-| DeepSeek (`deepseek-chat`) | Generation + verification + intent classification | Best price/performance for Chinese + English. |
-| OpenAI `text-embedding-3-small` | RAG memory embeddings | Cheap, accurate; small dimension. |
+| User universe (held ∪ watchlist) | +10 | `held_or_watchlist_ark` |
+| Multi-fund coordination (≥2 funds same dir same ticker) | +15 | `multi_fund_coordination` |
+| Large new position (today_weight ≥ 2%) | +10 | `large_new_position_X.X%` |
+| Large liquidation (yesterday_weight ≥ 2%) | +10 | `large_liquidation_X.X%` |
 
-**Phase 4.5-mini price-source decoupling** (commit `b36d5e3` series): `v2/data/price_source.py` exposes a `PriceSource` Protocol + `YFinancePriceSource` (default) + `FDPriceSource` (kept for backtest / event-study reproducibility) + `default_price_source()` factory. Ops can flip back to FD via `V2_PRICE_SOURCE=fd` env var without redeploying. The FD client remains source-of-truth for the non-time-sensitive endpoints listed above.
+**Design**: multi-fund coordination (different PMs, same direction, same day) is the strongest conviction signal → standalone +15. User-universe boost uses a distinct reason label (`held_or_watchlist_ark`, separate from generic `held_position`) so the audit trail distinguishes cron origins.
 
----
+**Multi-fund detection**: `_mark_multi_fund` runs after per-fund classification and groups by `(ticker, direction)` (direction = buy/sell from action); ≥2 funds same direction same ticker → all matching alerts get `is_multi_fund=True`. **Opposite-direction same-ticker is explicitly NOT coordination** — different PMs reaching independent verdicts isn't a conviction signal; regression-pinned.
 
-## Tech stack
+**Card UX**: 4 action templates (🟢 new / 🔴 liquidated / 📈 increase / 📉 decrease), 2 optional banners (multi-fund 🚨 above → user-universe 🟢 below). Summary card: total alerts + multi-fund count + held/watchlist count + buys-then-sells action distribution + user-universe ticker list + multi-fund coordination details + **(N/M ARK funds)** fraction for partial-failure transparency.
 
-- **Python 3.11** + Poetry
-- **LangChain** + `langchain-deepseek` for LLM orchestration
-- **APScheduler** with `BlockingScheduler` and cron triggers in `US/Eastern`
-- **python-telegram-bot** (async, polling mode)
-- **alpaca-py** for real-time prices + paper account access
-- **SQLite** with WAL journal mode for concurrent read+write across services
-- **ChromaDB** for vector-backed long-term memory
-- **edgartools** for SEC filings
-- **matplotlib** with Noto Sans CJK for chart rendering
-- **systemd** for service supervision on Ubuntu 24.04
+**Output (multi-fund + held P0, base 65 + held +10 + multi_fund +15 = 90)**:
+
+```
+📈 ARK 增持 · TSMC — Fund: ARKK · 今日权重: 3.50% (+30.0%)
+🚨 多 Fund 协同（详见总览） · 🟢 持仓股 / 关注列表
+增持: 100,000 shares · ≈ $15.0M · 昨日权重: 2.30%
+```
+
+**First-deploy edge** handled: `get_latest_snapshot_before` returns None → silent skip per fund (⑤ populates baseline at 17:00 ET, signals start next day).
 
 ---
 
-## Project layout
+## Sector benchmarking · Data sources
+
+### Sector-relative benchmarking
+
+Every signal (screening / post-market anomaly / intraday) is compared against a sector ETF before push. `NVDA +5%` means different things when SMH is `+4.5%` (beta) vs `-1%` (ticker-specific). Mapping: semis (NVDA/AMD/AVGO/QCOM/INTC/TXN/MU) → SMH; mega-cap tech + software + internet (AAPL/MSFT/GOOGL/META/ORCL/CRM/ADBE, …) → XLK; default fallback → SPY. Pre-fetched once per agent run (3 extra FD calls). `contrarian` flag fires when ticker + sector move opposite with ≥1.5pp gap — only then does `★ 逆势` chip appear. Live example: `MU +3.63% with SMH -1.10% on 1.5× volume → ★ 逆势 + Tier-1 attribution "MU 市值突破 $1T"`.
+
+### External data sources (7)
+
+| Source | What | Why |
+|---|---|---|
+| **yfinance** | Daily OHLCV + options + macro VIX/DXY/WTI/Gold | Real-time EOD (no FD 1-3 day lag); free |
+| **financialdatasets.ai** | Earnings / insider / fundamentals | Quarterly + episodic data; commercial API |
+| **SEC EDGAR** (edgartools) | 13F-HR + 8-K + Form 4 + 10-Q | Authoritative |
+| **ARK Invest CDN** | Daily ETF holdings CSV | Public; daily granularity |
+| **Alpaca** (paper) | Real-time prices + account + P&L | Free; drives streamer + portfolio cron |
+| **FRED** | CPI/PCE/NFP/GDP/PPI/Treasury yields/Fed Funds | Authoritative EOD; vintage handling; avoids yfinance `^TNX` × 10 raw bug |
+| **Tavily News API** | News search + FOMC sell-side aggregate | Search-engine quality; Layer 3 defense |
+
+LLM layer: **DeepSeek** (`deepseek-chat`) for generation + verification + intent classification; **OpenAI** `text-embedding-3-small` for RAG embeddings.
+
+**Price-source decoupling**: `v2/data/price_source.py` exposes `PriceSource` Protocol + `YFinancePriceSource` (default) + `FDPriceSource` (backtest reproducibility) + `default_price_source()` factory. Ops can flip to FD via `V2_PRICE_SOURCE=fd` env var without redeploying.
+
+---
+
+## Project layout · Tech stack
+
+**Tech stack**: Python 3.11 + Poetry; LangChain + `langchain-deepseek`; APScheduler `BlockingScheduler` + `US/Eastern` cron; python-telegram-bot (async polling); alpaca-py; SQLite WAL; ChromaDB; edgartools; matplotlib + Noto Sans CJK; systemd (Ubuntu 24.04).
 
 ```
 v2/
-├── data/             # FDClient + CachedFDClient + NewsProvider Protocol
-├── screening/        # ① fundamental screen + delta enricher + narrator
-├── monitoring/       # ② detector + multi-source attributor + Verifier
-├── lateral/          # ③ LLM expansion + Tavily relation verification
-├── institutional/    # ④ EDGAR client + CUSIP aggregation + changes
-├── etf/              # ⑤ ARK CSV client + daily snapshot store + diff
-├── earnings/         # ⑦⑧ yfinance calendar + FD history + LLM summary + cards
-├── portfolio/        # ⑨⑩ Alpaca positions → RiskReport (concentration / exposure / P&L / drawdown)
-├── sec/              # ⑪⑫ edgartools wrapper + 8-K item parser + Form 4 + cluster + 5.02 NER
-├── macro/            # ⑭⑮⑯⑰ FRED + yfinance + Tavily + LLM template-fill + FOMC fomc_parser
-├── streamer/         # intraday runner + universe scanner
-├── broker/           # Alpaca paper-account adapter (read-only)
-├── universe/         # TECH_30 list + sector ETF mapping
-├── reporting/        # Telegram formatters + notifier + matplotlib charts
-├── memory/           # ChromaDB-backed AnomalyMemory
-├── archive/          # SQLite log of every push for offline query + RAG
-├── bot/              # Telegram bot: commands, intent classifier, responders, state
-└── scheduler/        # APScheduler config + job subprocesses
+├── data/  screening/  monitoring/  lateral/  institutional/   # ⓪–④
+├── etf/                            # ⑤⑬ ARK CSV + snapshot + diff + alerts classifier
+├── earnings/                       # ⑦⑧ yfinance + FD + LLM summary + 10-Q parser
+├── portfolio/                      # ⑨⑨b⑩ Alpaca → RiskReport + positions_snapshot + attribution
+├── sec/                            # ⑪⑫⑫b 8-K + Form 4 + cluster + 5.02 NER + insider digest
+├── macro/                          # ⑭⑮⑯⑰ FRED + yfinance + Tavily + fomc_parser
+├── streamer/  broker/  universe/   # intraday + Alpaca adapter + TECH_30 + 90-ticker sector mapping
+├── reporting/                      # formatters + notifier + priority + 8 4-layer shims
+├── memory/  archive/  bot/  scheduler/  observability/         # ChromaDB + SQLite log + bot + APScheduler + trace SDK
 
-scripts/
-├── run_scheduler.py             # Scheduler entrypoint
-├── run_telegram_bot.py          # Bot entrypoint
-├── run_streamer.py              # Streamer entrypoint (--test-now forces one scan)
-├── daily_screen_to_telegram.py  # ①
-├── anomaly_to_telegram.py       # ②
-├── lateral_to_telegram.py       # ③
-├── institutional_to_telegram.py # ④
-├── backfill_13f.py              # ④b
-├── etf_daily_snapshot.py        # ⑤
-├── earnings_reminders.py        # ⑦
-├── earnings_summaries.py        # ⑧
-├── portfolio_risk_to_telegram.py    # ⑨
-├── portfolio_weekly_to_telegram.py  # ⑩
-├── sec_8k_to_telegram.py            # ⑪
-├── sec_form4_to_telegram.py         # ⑫
-├── sec_insider_digest_to_telegram.py # ⑫b
-├── ark_alerts_to_telegram.py        # ⑬
-├── macro_daily_snapshot.py          # ⑭
-├── macro_release_to_telegram.py     # ⑮
-├── macro_claims_to_telegram.py      # ⑯
-└── macro_weekly_to_telegram.py      # ⑰
+scripts/  (21 cron + 3 service entrypoints — names match the time table above)
 ```
 
 ---
 
-## Quick start
-
-### Prerequisites
-
-- Python 3.11
-- Poetry
-- API keys: DeepSeek, financialdatasets.ai, Tavily, OpenAI, Telegram bot token, Alpaca (paper)
-
-### Setup
+## Quick start · Deployment
 
 ```bash
 git clone <repo-url> hedge-fund
@@ -344,44 +356,20 @@ cd hedge-fund
 poetry install --no-root
 
 cp .env.example .env
-# Fill in:
-#   DEEPSEEK_API_KEY, FINANCIAL_DATASETS_API_KEY, TAVILY_API_KEY,
-#   OPENAI_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
-#   APCA_API_KEY_ID, APCA_API_SECRET_KEY   (Alpaca — paper account is free)
-```
+# Fill: DEEPSEEK_API_KEY, FINANCIAL_DATASETS_API_KEY, TAVILY_API_KEY,
+#       OPENAI_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
+#       APCA_API_KEY_ID, APCA_API_SECRET_KEY   (Alpaca paper is free)
 
-### Smoke-test one agent
-
-```bash
+# Smoke-test one agent
 poetry run python scripts/daily_screen_to_telegram.py
-```
 
-### Run the scheduler (foreground)
-
-```bash
+# Run scheduler (optional --test fires every job once and exits)
 poetry run python scripts/run_scheduler.py
-# Optional: --test  to fire every job once and exit
-```
-
-### Run the bot
-
-```bash
 poetry run python scripts/run_telegram_bot.py
+poetry run python scripts/run_streamer.py  # --test-now bypasses market-hours
 ```
 
-### Run the streamer
-
-```bash
-poetry run python scripts/run_streamer.py
-# Optional: --test-now  to force ONE poll regardless of market hours,
-#           push results to Telegram, then exit
-```
-
----
-
-## Deployment (Ubuntu 24.04, systemd)
-
-Three services run concurrently. Sample unit files:
+**Production deployment (Ubuntu 24.04 + systemd)** — three service units of the same shape (replace paths/user, then `systemctl daemon-reload && systemctl enable --now hedge-fund-{scheduler,bot,streamer}`):
 
 ```ini
 # /etc/systemd/system/hedge-fund-scheduler.service
@@ -405,225 +393,107 @@ StandardError=append:/root/hedge-fund/logs/scheduler.err
 WantedBy=multi-user.target
 ```
 
-```ini
-# /etc/systemd/system/hedge-fund-bot.service
-[Unit]
-Description=AI Hedge Fund Telegram Bot
-After=network-online.target
+`hedge-fund-bot.service` and `hedge-fund-streamer.service` follow the same structure (swap script + log paths).
 
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/root/hedge-fund
-Environment="PATH=/root/.local/bin:/usr/local/bin:/usr/bin:/bin"
-Environment="PYTHONPATH=/root/hedge-fund"
-ExecStart=/root/.local/bin/poetry run python scripts/run_telegram_bot.py
-Restart=on-failure
-RestartSec=30
-StandardOutput=append:/root/hedge-fund/logs/bot.log
-StandardError=append:/root/hedge-fund/logs/bot.err
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```ini
-# /etc/systemd/system/hedge-fund-streamer.service
-[Unit]
-Description=AI Hedge Fund Alert Streamer
-After=network-online.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/root/hedge-fund
-Environment="PATH=/root/.local/bin:/usr/local/bin:/usr/bin:/bin"
-Environment="PYTHONPATH=/root/hedge-fund"
-ExecStart=/root/.local/bin/poetry run python scripts/run_streamer.py
-Restart=on-failure
-RestartSec=30
-StandardOutput=append:/root/hedge-fund/logs/streamer.log
-StandardError=append:/root/hedge-fund/logs/streamer.err
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Combined resident memory: scheduler ~205 MB, bot ~50 MB, streamer ~80 MB. Runs comfortably on a 1 GB DigitalOcean droplet.
+**Resource footprint**: scheduler ~205 MB, bot ~50 MB, streamer ~80 MB. **Runs comfortably on a 1 GB DigitalOcean droplet.**
 
 ---
 
-## Engineering notes worth highlighting
+## Testing
 
-### Push vs pull semantics
+**474 sandbox unit tests, organized by family**:
 
-`/13f BRK` always returns the latest known portfolio, regardless of whether the same filing has already been pushed by the scheduler. The cron path dedupes against `edgar.db` to avoid duplicate alerts; the bot path skips that check entirely. Two distinct invocations of the same underlying pipeline, one for each access pattern.
+| Family | Count | Coverage |
+|---|---|---|
+| Earnings (⑦⑧) | **57** | byte-equal 21 / priority ladder 17 / pipeline 9 / cron integration 10 |
+| Portfolio (⑨⑨b⑩) | **79** | smoke 20 / priority ladder 19 + floor 5 / pipeline edges 10 / byte-equal 12 / cron integration 17 / ⑨b cron 6 |
+| SEC (⑪⑫⑫b + 10-Q) | **131** | smoke 21+20 / priority 21 / byte-equal 15+5 / HTML safety 8 / cron integration 20+10 / bot responder 11 |
+| Macro (⑭⑮⑯⑰) | **112** | smoke 40 / priority 16 / byte-equal 16 / HTML safety 9 / bot responder 9 / cron integration 22 |
+| ARK (⑬) | **35** | smoke 16 / byte-equal + HTML + shim 11 / cron integration 8 |
+| Cross-cutting | **60+** | archive migration 9 / intent classify 33 / base priority 18 / observability 13 |
 
-### CUSIP aggregation in 13F parsing
+**Architecture guard tests**: regression tests pin `v2/bot/responders.py` + `scripts/*_to_telegram.py` to forbid inline `_format_*` private helpers. All crons must `from v2.reporting import` via public API. Prevents future "convenient inline" rollbacks from undoing the lift-and-shift work.
 
-Berkshire reports AAPL across three subsidiaries (BHRG, GEICO, National Indemnity). The 13F-HR information table lists them as separate rows with identical CUSIP. The naive PK `(accession, cusip)` would silently drop two of the three via `INSERT OR REPLACE`. We aggregate at the EDGAR parser layer instead — one row per CUSIP per accession, summed shares and market value. Berkshire's AAPL stake reads $57.8B (22% of portfolio), not the $958M of whichever fragment landed last.
+**Byte-equal pin** (24+ cases across 8 formatter families): every public formatter (`format_earnings_*` / `format_portfolio_*` / `format_sec_*` / `format_macro_*` / `format_ark_*`) is locked byte-equal under multiple fixture × case combos. Cron push == bot response == formatter output.
 
-### Strict-enum intent classification
+All 474 tests pass under `pytest` in the sandbox environment with no v2.data deps required (production-only deps are stubbed via sys.modules).
 
-The NL classifier outputs one of twenty-three intents plus arguments. Output is JSON, parsed, validated against a whitelist set. Anything else becomes `unknown`. The LLM never decides what to *say* — only which tool to *call*. If users wanted DeepSeek to write financial analysis from its imagination, they could ask DeepSeek directly. The point of this system is grounded, multi-source, verified output.
+---
 
-### Atomic alert firing
+## Engineering highlights
 
-Streamer's `alert_fire_check` runs `UPDATE alerts SET fired_at=? WHERE id=? AND fired_at IS NULL`. The `fired_at IS NULL` guard makes the operation idempotent under concurrent streamer instances — even if two pollers raced for the same alert, only the first would claim it. One-shot alert semantics enforced at the SQL layer rather than in application code.
+**Push vs pull semantics separated** — `/13f BRK` always returns the latest portfolio regardless of scheduler push history. Cron dedupes against `edgar.db`; bot path skips that check. One pipeline, two interfaces. Streamer follows the same idea (user `/alert` and TECH_30 auto-scan are independent code paths sharing the loop).
 
-### Push and pull on the streamer too
+**CUSIP aggregation in 13F parsing** — Berkshire holds AAPL across three subsidiaries (BHRG, GEICO, National Indemnity) as separate rows with identical CUSIP. Naive `INSERT OR REPLACE` would silently drop two of three. We aggregate at the EDGAR parser layer. **Berkshire's AAPL stake reads $57.8B (22%) instead of the wrong $958M of whichever fragment landed last.**
 
-A user `/alert` and a TECH_30 auto-scan are independent code paths sharing the streamer loop. A failure in one doesn't suppress the other — `_check_user_alerts` and `scan_universe` are both wrapped in try/except. The streamer never dies because of one bad ticker; the worst case is that ticker silently skipped this minute.
+**Strict-enum intent classification** — 23 intents, JSON output validated against whitelist set, anything else → `unknown`. **The LLM never decides what to *say*, only which tool to *call*.** The point of this system is grounded, multi-source, verified output.
 
-### Sector benchmarking as a signal-quality moat
+**Atomic alert firing + sector-benchmark moat** — streamer's `alert_fire_check` runs `UPDATE alerts SET fired_at=? WHERE id=? AND fired_at IS NULL`; one-shot semantics enforced at SQL layer. Pre-fetched 3 ETF series (SPY/XLK/SMH) per agent run give every anomaly a relative-strength chip without LLM tokens.
 
-Pre-fetching 3 ETF series (SPY/XLK/SMH) per agent run gives every detected anomaly a relative-strength comparison without spending extra LLM tokens. The `★ 逆势` chip surfaces signals like *NVDA +3% on a day SMH is -1%* that the single-stock pipeline would file alongside true-beta noise like *AAPL +1.2% on a +1.0% market day*.
+**Source-tier defense + stale-data chip** — Verifier scores Tier 1/2/3; Generator only sees Tier 1+2. Silent omission > confident misinformation. Greenlight's latest 13F is 2023-Q4; without ⚠️ chip we'd silently misrepresent 29-month-old positions as Einhorn's current state.
 
-### Async-safe long-running operations
+**Intraday streamer deliberately runs no LLM** — during the regular session no Tavily, no DeepSeek, no news layer. Intraday news lags the move; firing LLM attribution at 10:15 on a 10:14 spike just produces fabrication.
 
-Bot commands like `/why NVDA` trigger 20-second pipelines (FD calls + Tavily + DeepSeek × 2). Wrapped via `asyncio.get_running_loop().run_in_executor(None, sync_fn, *args)` so the polling loop stays responsive to other users (it doesn't matter for single-user mode, but the pattern is correct).
+**8 4-layer formatter shims keep cross-surface byte-equal** — `format_*` source-of-truth in `v2/{earnings,portfolio,sec,macro,etf}/_bot_cards.py` (sandbox-runnable), re-exported via `v2/reporting/_*_formatters.py`. Cron + bot share the same function objects (identity-checked by tests).
 
-### Source-tier defense in attribution
-
-The Verifier prompt enumerates Tier-1 / Tier-2 / Tier-3 domains. The Generator only sees Tier-1 + Tier-2 sources. Avoiding pollution from speculation sites was an explicit design choice — silent omission beats confident misinformation.
-
-### Stale data is data integrity
-
-Greenlight Capital's latest 13F is 2023-Q4. They likely fell below the $100M reporting threshold. Showing this data without a ⚠️ chip would silently misrepresent 29-month-old positions as Einhorn's current state. The chip surfaces the temporal boundary explicitly.
-
-### Intraday scanner deliberately runs no LLM
-
-During regular session hours, the streamer scans TECH_30 every minute for dual-threshold anomalies and pushes a simplified card. **It does not call Tavily, does not call DeepSeek, does not even pull the news layer.** Intraday news lags the move; if you fire LLM attribution at 10:15 on a 10:14 spike, the model has nothing real to work with and will fabricate. Instead, the intraday card explicitly points to `/why TICKER` and notes that deep attribution becomes available at 17:35 ET when the post-market Anomaly Monitor runs.
+**Stage 0 audit + silent-ship defense** — Phase 5a Stage 0 audit found v2/etf/ already covered the ARK pipeline → scope pivot **saved 87% of code / 31% of hours** (~1500 → ~250 lines). Phase 3.5 Stage 4 cron-integration tests **caught a Stage 2 silent-ship bug** — priority.py added `+20 going_concern_in_10q` but the cron never forwarded the flag into metadata. End-to-end tests are the only defense. Phase 5a Stage 4 mirrors the pattern: asserts literal `multi_fund_coordination` / `held_or_watchlist_ark` strings in `priority_reasons` trail.
 
 ---
 
 ## Cost analysis
 
-Monthly operating cost on a real deployment:
-
-| Item | Cost |
-|---|---|
-| DigitalOcean droplet (1 GB) | $6.00 |
-| financialdatasets.ai (cached) | ~$15 |
-| DeepSeek tokens (~3M/mo across agents + bot) | ~$1 |
-| OpenAI embeddings (~50K dims/mo) | ~$0.10 |
-| Tavily News (~500 queries/mo) | $0 (free tier) |
-| Alpaca (paper account, IEX data) | $0 |
-| **Total** | **~$22/month** |
-
-The CachedFDClient layer eliminates roughly 65% of FD calls by routing per-endpoint queries through a SQLite TTL cache (24h for fundamentals, 6h for prices, 7d for company facts; news deliberately never cached).
-
-Intraday streamer adds ~30 Alpaca API calls/minute during market hours (one batched latest-trade + one batched day-bars call covering all 32 tracked symbols), well under the 200/min free-tier limit.
+DigitalOcean 1 GB droplet **$6.00** + financialdatasets.ai cached **~$15** + DeepSeek ~3M tokens/mo **~$1** + OpenAI embeddings ~50K dims/mo **~$0.10** + Tavily ~500/mo **$0 (free tier)** + Alpaca paper IEX **$0** = **~$22/month total**. `CachedFDClient` eliminates ~65% of FD calls via per-endpoint TTL SQLite cache (24h fundamentals, 6h prices, 7d company facts; news deliberately uncached). Intraday streamer adds ~30 Alpaca calls/min during market hours, well under the 200/min free-tier limit.
 
 ---
 
 ## Roadmap
 
-### Shipped ✅
+### ✅ Shipped (Phase 0–5a)
 
-- **Phase 0 · Push priority system** — `v2/reporting/priority.py` (P0/P1/P2/P3 + importance_score) plus 16:45 ET P2 digest cron
-- **Phase 1 · Earnings Agent (⑦⑧ + /earnings)** — yfinance forward calendar + FD actual/estimate + LLM template-fill summary + Tavily transcript + cross-quarter dedup
-- **Phase 2 · Portfolio Risk Agent (⑨⑩ + /risk + /pnl extension)** — daily concentration / P&L / drawdown / 7-day earnings risk, Friday weekly recap, 4 public formatters with byte-equal pins, drawdown 5-layer sign-convention defense
-- **Phase 2.5-mini · BROAD-market ETF bucket** — IVV/SPY/VOO/QQQ classification
-- **Phase 2.5 full · Per-position attribution + drawdown realtime fix** — new ⑨b silent sub-cron (Mon-Fri 16:25 ET) writes daily positions to a new `positions_snapshot` table; ⑩ Friday recap reads the rolling 7-day window and computes Brinson-style per-position contribution (`contribution = avg_weight × weekly_return`), rendering best / worst / net rows on a fully-populated week. `compute_drawdown` gains a `today_realtime_value` kwarg that appends today's intraday portfolio value to the EOD series, fixing the 2026-06-05 prod-bug where the card showed "今日 P/L -3.72%" alongside "drawdown 0.00%". Scheduler 18→19 jobs. 20 snapshot/attribution/drawdown smoke + 4 attribution + drawdown end-to-end cron integration + 6 ⑨b cron integration. No new deps.
-- **Phase 3 · SEC Monitoring Agent (⑪⑫ + /8k + /insiders)** — daily 8-K material-event scanner across 24 priority-graded item codes + Form 4 insider-transaction scanner with noise/signal split (83% A/M/F/G/C → digest, 17% P/S → individual cards) + same-day ≥3 distinct-insider cluster detection + 5.02 LLM NER for executive departures/appointments + 10b5-1 plan vs discretionary distinction, 5 public formatters with byte-equal pins, HTML safety lint
-- **Phase 3.5 · 10-Q parser + ⑫b SEC Insider Weekly Digest** — ⑧ earnings card now appends a `📋 10-Q MD&A 关键变化` section (top-3 added MD&A paragraphs capped at 80 chars + "…", count of new risk-factor headings, conservative auditor flags). `has_going_concern` triggers +20 priority bump (P0 promotion), `has_material_weakness` triggers +15. New ⑫b cron Fri 19:15 ET (between ⑩ 19:00 and ⑰ 19:30) aggregates the past Mon-Fri's ⑫ Form 4 push titles from `archive.pushes` into one weekly summary (title-only fallback per Stage 0 trace probe — per-A/M/F/G/C breakdown deferred to Phase 3.5.5 to avoid expanding the archive schema). Base P2 floor / 升 P1 when ≥3 tickers cross unusual-activity threshold. New 6th public SEC formatter (`format_sec_insider_digest`); 35 new tests (20 Stage 1 smoke + 5 byte-equal pin + 10 cron integration); scheduler 19→20.
-- **Phase 4 · Macro Agent (⑭⑮⑯⑰ + /macro + /cpi + /fomc + /yields)** — daily VIX/yields snapshot + CPI/PCE/NFP/GDP/PPI release scanner + weekly Initial Claims + Friday macro recap. FRED + yfinance hybrid (avoids Yahoo's ×10 Treasury raw bug). LLM 4-layer hallucination defense (Template-Fill / Post-Parse Reject / FOMC Layer 3 no-LLM-verdict via fomc_parser + tavily_consensus / Historical analog deferred to Phase 4.5). 6 public formatters with byte-equal pins, HTML safety lint, hard-coded `_2026_RELEASES` calendar regenerated yearly via `_seed_calendar.py` against FRED `/release/dates` REST endpoint.
-- **Phase 5a · ⑬ ARK Rebalance Alerts** — daily pre-market scanner (Mon-Fri 08:30 ET) for significant ARK fund holdings changes. Stage 0 audit found that ⑤ ETF Daily Snapshot has been fetching ARK CSVs into `etf.db.snapshots` since Phase 0 — so Phase 5a is purely an additive alerts layer (`v2/etf/alerts.py`) + two card formatters (`format_ark_alert` / `format_ark_summary`) + cron, reusing the existing CSV fetcher + day-over-day diff with zero schema changes. Four action thresholds: `new_position ≥0.5%` / `liquidated prior ≥0.5%` / `increase / decrease |relative| ≥20%`. Multi-fund coordination (same ticker, same direction, ≥2 funds same day) escalates to P0 via `+15 multi_fund_coordination`. User-universe (held ∪ watchlist) adds `+10 held_or_watchlist_ark`. Large positions (`today_weight ≥ 2%` for new / `yesterday_weight ≥ 2%` for liquidations) add `+10`. Per-card UX includes a 🚨 multi-fund banner (placed *above* the user-universe badge for visual priority), a buys-then-sells cluster in the summary card's action distribution, and a `(N/M ARK funds)` coverage fraction for partial-failure transparency. 35 new tests; scheduler 20→21.
-- **Phase 4.5-mini · Daily prices migration FD → yfinance** — `v2/data/price_source.py` exposes a `PriceSource` Protocol + `YFinancePriceSource` (default) + `FDPriceSource` (kept for backtest) + `default_price_source()` factory with `V2_PRICE_SOURCE=fd` ops escape hatch. Removes Phase 1-4's `fd_safe_today()` `today - 3` buffer: ① / ② / ③ / `/why` / `/summary` cards now display today's date instead of today - 3. `v2/data_safety.py` module deleted in full; 8 callers (5 v2 modules + 3 cron scripts) + 1 utility migrated; 12 price_source smoke tests. FD client remains source-of-truth for earnings / insider / financials.
-- **Web dashboard** — FastAPI + React + Tailwind over `archive.db` auto-push feed with trace replay and a user QA mode
-- **Observability SDK** — `v2/observability/` monkey-patches FD / DeepSeek / Tavily / intent classifier so every agent produces a trace automatically
-- **474 sandbox unit tests** across Phase 0-4 + 4.5-mini + 2.5 full + 3.5 + 5a — Phase 1 (21 earnings byte-equal + 17 earnings priority + 10 earnings cron integration + 9 earnings pipeline) + Phase 2 (12 portfolio byte-equal + 19 portfolio priority + 5 priority floor + 10 portfolio pipeline edges + 17 portfolio cron integration + 20 portfolio smoke) + Phase 2.5 full (20 snapshot/attribution/drawdown smoke + 6 ⑨b cron integration) + Phase 3 (21 SEC smoke + 21 SEC priority + 15 SEC byte-equal + 8 HTML safety + 20 cron integration + 11 bot responder) + Phase 3.5 (20 Stage 1 smoke + 5 Stage 3 byte-equal + 10 Stage 4 cron integration) + Phase 4 (40 macro smoke + 16 macro priority ladder + 16 macro byte-equal + 9 HTML safety + 9 bot responder + 22 cron integration) + Phase 4.5-mini (12 price_source smoke) + Phase 5a (16 ARK alerts smoke + 11 byte-equal/HTML/shim + 8 cron integration) + general (9 archive migration + 33 intent classify + 18 base priority + 13 observability + the rest distributed across modules)
+| Phase | Description |
+|---|---|
+| **Phase 0** | Push priority system (P0/P1/P2/P3 + importance_score + P2 digest cron) |
+| **Phase 1** | Earnings Agent (⑦⑧ + `/earnings`) |
+| **Phase 2** | Portfolio Risk Agent (⑨⑩ + `/risk` + `/pnl`) |
+| **Phase 2.5-mini** | BROAD-market ETF bucket (IVV/SPY/VOO/QQQ classification) |
+| **Phase 2.5 full** | Per-position attribution (⑨b 16:25 ET sub-cron + `positions_snapshot` + ⑩ Brinson-style) + drawdown realtime fix (2026-06-05 prod bug) |
+| **Phase 3** | SEC Monitoring (⑪⑫ + `/8k` + `/insiders`) + 24-item priority table + Form 4 noise/signal + ≥3 cluster + 5.02 LLM NER |
+| **Phase 3.5** | 10-Q parser + ⑧ MD&A diff (going_concern P0 / material_weakness +15) + ⑫b Insider Weekly Digest (Fri 19:15 ET, title-only) |
+| **Phase 4** | Macro Agent (⑭⑮⑯⑰ + `/macro` + `/cpi` + `/fomc` + `/yields`) + FRED+yfinance hybrid + LLM 4-layer defense |
+| **Phase 4.5-mini** | FD → yfinance daily-prices migration (`PriceSource` Protocol + `V2_PRICE_SOURCE=fd` fallback) |
+| **Phase 5a** | ⑬ ARK Rebalance Alerts (Mon-Fri 08:30 ET) + multi-fund coordination + reuses v2/etf/ |
+| **Cross-cutting** | Web dashboard (FastAPI + React + Tailwind + trace replay); observability SDK |
 
-### In progress / TODO
+### ⏳ Deferred — waiting on real data / trigger conditions
 
-- **Phase 3.5.5 (optional)** — `form4_transactions` structured table (replaces ⑫b's current title-only fallback): per-A/M/F/G/C complete breakdown + aggregate USD totals + per-insider-name trend aggregation
-- **Phase 4.5 (optional)** — FOMC press-conference transcript +6h follow-up cron (Tavily-scrape Powell Q&A highlights) / Historical analog mode ("similar surprise → N-day market reaction" RAG) / Auto release_calendar scraping (replace yearly manual `_seed_calendar.py` rerun)
-- **Phase 5b · Market Regime detection** — deferred until after the 2026-06-17 ⑮ FOMC + SEP run, so regime thresholds can be calibrated against fresh macro data instead of overfitting to historical windows
-- **Phase 6 · News pipeline refactor + 3-tier Universe**
-- Ongoing: Migration system audit
-- GitHub Actions CI (pytest on main)
-- Multi-user support with per-chat watchlists + holdings
-- Backtesting integration with the existing v2 event-study framework
-- Switch Alpaca from paper to live (one config flag) after extended paper validation
+> **Naming clarification**: Phase 4.5-mini ✅ shipped (FD → yfinance); Phase 4.5 ⏳ deferred (FOMC transcript + Historical analog).
 
-> **Next-phase trigger**: each of the deferred phases below starts only when its trigger conditions fire. Current focus is the production observation window — validating Phase 0-5a under real-world data.
+**⏳ Phase 3.5.5 — Form 4 structured table**
 
----
+`form4_transactions` table replacing ⑫b's title-only fallback: per-A/M/F/G/C breakdown + aggregate USD + per-insider trends. **Trigger**: ⑫b weekly digest live for 1+ months with operator feedback on per-code breakdown needs.
 
-## 🛣️ Future Work (deferred until data accumulates)
+**⏳ Phase 4.5 — FOMC Transcript + Historical Analog (LLM Layer 4)**
 
-Each phase below is **scoped and deferred** — waiting on production data accumulation or a specific calendar event. **Not in the current sprint.**
+Task A: ⑮b FOMC transcript +6h follow-up (Bloomberg/Reuters Q&A → hawkish/dovish phrase count). Task B: Historical-analog mode (Layer 4 defense — LLM cites past N similar σ-surprise events + SPX 5-day returns as guardrail). **Trigger**: 2026-06-17 FOMC + SEP completed; Phase 4 ⑮⑰ live ≥ 2 months; operator has Layer 1+2 feedback. **Effort**: 1.5-2 days · **Risk**: medium.
 
-> **Naming note** — there are two "4.5" entries that historically caused confusion:
-> - **Phase 4.5-mini** ✅ shipped — FD → yfinance daily prices migration (commit `b36d5e3` series)
-> - **Phase 4.5** ⏳ deferred — FOMC transcript + Historical analog mode (this section)
+**⏳ Phase 5b — Market Regime Detection**
 
-### ⏳ Phase 4.5 — FOMC Transcript + Historical Analog Mode
+Synthesize VIX + 10Y-2Y + breadth + sentiment → regime label (risk_on / risk_off / transition / extreme_vol). New ⑭b cron Mon-Fri 16:35 ET; regime transitions → P0 alerts; per-regime holdings attribution (with ⑨b snapshot). **Trigger**: Phase 4 full suite live ≥ 4 weeks; Phase 4.5 shipped; operator has macro-signal scale. **Effort**: 2-3 days · **Risk**: high (regime detection is overfit-prone).
 
-**Goal:**
-- **Task A**: FOMC ⑮b transcript +6h follow-up card — fetch Powell press-conference Q&A from Bloomberg / Reuters six hours after the meeting, surfacing tone signals (hawkish-phrase count / dovish-phrase count) beyond the raw statement diff
-- **Task B**: Historical analog mode — formal LLM Layer 4 defense, where the LLM cites "past N similar σ-surprise events and their SPX 5-day return" as a guardrail against narrative-only commentary
+**⏳ Phase 6 — News Refactor + 3-tier Universe**
 
-**Why deferred:**
-- ⑮ FOMC + SEP needs to fire at least 1-2 times (2026-06-17 + 2026-09-16) before a real signal baseline exists
-- Layer 3 (Tavily aggregate + Python diff) must be validated against real data before layering on Layer 4
-- Historical-analog mode requires SPX + historical release-date backfill spanning 3-5 years ≈ 250 entries — non-trivial sunk cost
+Task A: central Tavily query gateway + per-ticker cache + NER ticker mapping. Task B: 3-tier Universe (core / watchlist / broad, each with different cron frequency). **Trigger** (any one): universe ≥ 30 tickers; OR monthly LLM cost > $50; OR ≥ 5% pushes are Tier-3/4 noise. **Effort**: 4 days · **Risk**: medium.
 
-**Trigger conditions:**
-- 2026-06-17 FOMC + SEP run completed in production
-- Phase 4 ⑮⑰ has been live for ≥ 2 full months
-- Operator has signal feedback on Layer 1+2 defense under real data
+### Ongoing / pending
 
-**Effort:** 1.5-2 days · **Risk:** medium (Tavily Q&A quality + SPX historical-data completeness)
+Migration system audit; GitHub Actions CI (pytest on main); multi-user support; backtesting integration; Alpaca paper→live switch.
 
-### ⏳ Phase 5b — Market Regime Detection
-
-**Goal:**
-- Synthesise VIX + 10Y-2Y spread + market breadth + sentiment into a market regime label
-- 4 regimes: `risk_on` / `risk_off` / `transition` / `extreme_vol`
-- New ⑭b cron Mon-Fri 16:35 ET (5 min after ⑭); regime transitions push P0 alerts
-- Card shows: current regime + last ≤ 5 transitions + per-regime holdings attribution (integrated with ⑨b positions_snapshot for Brinson-style breakdown by regime)
-
-**Why deferred:**
-- Regime detection is overfit-prone — simplified thresholds (e.g. "VIX > 25 = risk_off") are inseparable from hindsight bias
-- Need real macro data from Phase 4 ⑰ + ⑮ for ≥ 1 month before calibrating regime-switch thresholds
-- The "looks great in backtest, falls apart in live" failure mode is the classic regime-model trap
-
-**Trigger conditions:**
-- Phase 4 full suite (⑭⑮⑯⑰) live for ≥ 4 weeks
-- Phase 4.5 (above) shipped and validating Layer 3/4 defense stability
-- Operator has built intuitive scale for macro signals
-
-**Effort:** 2-3 days · **Risk:** high (regime detection prone to overfitting)
-
-### ⏳ Phase 6 — News Refactor + 3-tier Universe
-
-**Goal:**
-- **Task A**: News-layer refactor — central Tavily query gateway + per-ticker cache + NER ticker mapping; eliminates the duplicate same-day queries across agents on the same ticker
-- **Task B**: 3-tier Universe —
-  - Tier 1 core (held + high-conviction watchlist): full daily cron suite
-  - Tier 2 watchlist (general focus): daily lightweight + weekly deep
-  - Tier 3 broad observation (industry / theme pools): weekly batch only
-
-**Why deferred:**
-- Current universe is ~10 tickers — 3-tier design has no practical value at this scale (over-engineering)
-- News refactor is cost optimisation; current Tavily ~500 queries/month + LLM ~$1/month — neither is a bottleneck
-- Duplicate-query waste is marginal at small universe size (≤ 5% waste rate)
-
-**Trigger conditions (any one):**
-- Universe expands to ≥ 30 tickers (held + watchlist combined)
-- OR monthly LLM cost exceeds $50 (current ~$5-10 range)
-- OR ≥ 5% of pushes observed to be Tier-3/4 news noise
-
-**Effort:** 4 days · **Risk:** medium (NER accuracy + cache invalidation are the perennial hard parts)
+> Currently in the production observation phase — focus is validating Phase 0–5a under real-world data.
 
 ---
 
-## Credits
+## Credits · License
 
-The repository's outer layout and the original educational `app/` directory come from [virattt/ai-hedge-fund](https://github.com/virattt/ai-hedge-fund), an open-source AI hedge fund concept project. The `v2/` directory — the entire alternative-data agent system described in this README (six post-market agents + two earnings crons + two portfolio risk crons + three SEC monitoring crons (including the ⑫b weekly insider digest) + one ARK rebalance-alerts cron (⑬ pre-market) + four macro-data crons, intraday streamer, Telegram bot with 23 NL intents, 5 hallucination-defense mechanisms, push-priority system, all SQLite + ChromaDB stores, all systemd deployment scaffolding) — was built from scratch as a separate project on top of that foundation.
+The repository's outer layout and the original educational `app/` directory come from [virattt/ai-hedge-fund](https://github.com/virattt/ai-hedge-fund), an open-source AI hedge fund concept project. The `v2/` directory — the entire alternative-data agent system described in this README (21 cron jobs, intraday streamer, Telegram bot with 23 NL intents, 5 hallucination-defense mechanisms, push-priority system, all SQLite + ChromaDB stores, all systemd deployment scaffolding) — was built from scratch as a separate project on top of that foundation.
 
-## License
-
-MIT. Educational project. Not investment advice.
+License: **MIT**, educational project, **not investment advice**.
