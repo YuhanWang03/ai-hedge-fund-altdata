@@ -98,6 +98,11 @@ class ArkAlert:
 class ArkScanResult:
     """Aggregated output of one ⑬ run.
 
+    ``funds_scanned`` is the funds that produced usable data (today's
+    CSV + yesterday's baseline both present); ``funds_attempted`` is
+    every fund the cron tried — used by the summary card to render
+    "(N/M)" coverage fraction so partial failures are transparent.
+
     ``warnings`` carries per-fund failures the cron / dashboard can
     surface without aborting (e.g. one ARK CSV 404 should not block
     the other 3 funds' alerts)."""
@@ -106,6 +111,7 @@ class ArkScanResult:
     funds_scanned: list[str]
     alerts: list[ArkAlert] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    funds_attempted: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

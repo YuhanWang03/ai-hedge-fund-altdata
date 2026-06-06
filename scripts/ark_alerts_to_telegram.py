@@ -217,6 +217,7 @@ def main() -> int:
         result = ArkScanResult(
             scan_date=today_iso,
             funds_scanned=funds_scanned,
+            funds_attempted=list(SUPPORTED_FUNDS),
             alerts=alerts,
             warnings=warnings,
         )

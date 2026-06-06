@@ -100,10 +100,15 @@ def _multi_fund_banner(alert: ArkAlert) -> str | None:
 # format_ark_alert — 4 templates by action
 # ---------------------------------------------------------------------------
 
+# Insertion order matters — format_ark_summary iterates this dict to render
+# the action-distribution block. Polish 2: buys cluster (new_position +
+# increase) BEFORE sells cluster (liquidated + decrease) so the visual
+# grouping matches reader mental model. Individual-card lookups use the
+# key directly so order doesn't affect them.
 _ACTION_HEADER = {
     "new_position": ("🟢", "新建仓"),
-    "liquidated":   ("🔴", "清仓"),
     "increase":     ("📈", "增持"),
+    "liquidated":   ("🔴", "清仓"),
     "decrease":     ("📉", "减持"),
 }
 
@@ -155,12 +160,15 @@ def format_ark_alert(alert: ArkAlert) -> str:
         tail = " ".join(p for p in header_extras if p.startswith("("))
         lines.append(f"{head} {tail}".rstrip())
 
-    badge = _user_universe_badge(alert)
-    if badge:
-        lines.append(badge)
+    # Polish 1: multi-fund banner FIRST (visual priority for P0 escalation
+    # factor), then the user-universe badge — emoji order on mobile reads
+    # as 🚨 → 🟢 → ━━━ for a coordinated held-position alert.
     banner = _multi_fund_banner(alert)
     if banner:
         lines.append(banner)
+    badge = _user_universe_badge(alert)
+    if badge:
+        lines.append(badge)
 
     lines.append("━━━━━━━━━━━━━━━━━━━━")
 
@@ -220,6 +228,7 @@ def format_ark_summary(result: ArkScanResult) -> str:
     """
     scan_date = html.escape(str(result.scan_date or "—"))
     funds_scanned = list(result.funds_scanned or [])
+    funds_attempted = list(result.funds_attempted or [])
 
     lines: list[str] = [
         f"<b>🔔 ARK 调仓总览 · {scan_date}</b>",
@@ -229,9 +238,12 @@ def format_ark_summary(result: ArkScanResult) -> str:
     if not result.alerts:
         lines.append("<i>本日 ARK 调仓平静（0 触发）</i>")
         if funds_scanned:
-            funds_str = " / ".join(html.escape(f) for f in funds_scanned)
+            funds_str = " / ".join(
+                html.escape(f) for f in _sorted_funds(funds_scanned)
+            )
+            coverage = _coverage_str(funds_scanned, funds_attempted)
             lines.append(
-                f"已扫描: <code>{funds_str}</code>"
+                f"已扫描: <code>{funds_str}</code> {coverage}"
             )
         if result.warnings:
             lines.append("")
@@ -291,13 +303,15 @@ def format_ark_summary(result: ArkScanResult) -> str:
 
     # Funds covered today (always show — operator wants to know which
     # ARK funds were scanned, even on zero-alert days the empty branch
-    # above already covers it)
+    # above already covers it). Polish 3: when funds_attempted is set
+    # we render "(succeeded / attempted)" so partial failures (e.g.
+    # ARKG CSV 503) are transparent.
     if funds_scanned:
         funds_str = " / ".join(html.escape(f) for f in _sorted_funds(funds_scanned))
+        coverage = _coverage_str(funds_scanned, funds_attempted)
         lines.append("")
         lines.append(
-            f"<b>本日扫描 funds:</b> {funds_str} "
-            f"<i>({len(funds_scanned)} 个)</i>"
+            f"<b>本日扫描 funds:</b> {funds_str} {coverage}"
         )
 
     if result.warnings:
@@ -314,3 +328,18 @@ def _sorted_funds(funds) -> list[str]:
     out = [f for f in _FUND_ORDER if f in funds]
     out += sorted(funds - set(_FUND_ORDER))
     return out
+
+
+def _coverage_str(
+    funds_scanned: list[str], funds_attempted: list[str],
+) -> str:
+    """Render the "(N/M ARK funds)" partial-coverage fraction.
+
+    When ``funds_attempted`` is empty (caller didn't track), fall back
+    to the legacy "(N 个)" display so old call sites stay rendering.
+    """
+    n_scanned = len(funds_scanned)
+    if not funds_attempted:
+        return f"<i>({n_scanned} 个)</i>"
+    n_attempted = len(funds_attempted)
+    return f"<i>({n_scanned}/{n_attempted} ARK funds)</i>"
