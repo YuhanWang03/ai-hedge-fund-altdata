@@ -342,7 +342,7 @@ NL layer classifies free-form text into **24 canonical intents** via DeepSeek te
 - **Alerts**: `/alert NVDA 130 above` · `/alerts` · `/alert_remove ID`
 - **Account**: `/portfolio` · `/pnl [day|week|month]` · `/risk`
 - **SEC**: `/8k TICKER` (8-K + 5.02 NER) · `/insiders TICKER [days]` (bounded 7-365)
-- **Money Flow**: `/flow TICKER` (CMF/RSI vs price divergence — 吸筹/派发; always shows the 3-axis read even when no verdict fires)
+- **Money Flow**: `/flow TICKER` (CMF/RSI vs price divergence — 吸筹/派发; always shows the 3-axis read even when no verdict fires; replies with a 3-panel Price/CMF/RSI chart)
 - **Macro**: `/macro` (dashboard) · `/cpi` · `/fomc` · `/yields`
 - **Meta**: `/settings`, `/help`, `/start`
 

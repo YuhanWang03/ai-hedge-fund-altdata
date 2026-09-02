@@ -14,6 +14,7 @@ import html
 import logging
 import os
 from functools import wraps
+from io import BytesIO
 
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -461,6 +462,25 @@ async def cmd_8k(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def _send_moneyflow(update, placeholder, caption: str, chart, prefix: str = "") -> None:
+    """Deliver a money-flow view: photo (card as caption) when a chart was
+    rendered, else fall back to editing the placeholder text. ``prefix`` is
+    an optional HTML routing chip (NL path)."""
+    body = prefix + caption
+    if chart:
+        await update.message.reply_photo(
+            photo=BytesIO(chart), caption=body, parse_mode="HTML",
+        )
+        try:
+            await placeholder.delete()
+        except Exception:
+            pass
+    else:
+        await placeholder.edit_text(
+            body, parse_mode="HTML", disable_web_page_preview=True,
+        )
+
+
 @authorized_only
 async def cmd_flow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """``/flow TICKER`` — on-demand money-flow divergence (CMF/RSI vs price).
@@ -479,12 +499,10 @@ async def cmd_flow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"📊 分析 <b>{html.escape(ticker)}</b> 资金流背离...\n"
         "<i>价格 / CMF / RSI 三轴（预计 3-6 秒）</i>"
     )
-    result = await _run_blocking(
+    caption, chart = await _run_blocking(
         responders.moneyflow_view, {"ticker": ticker},
     )
-    await placeholder.edit_text(
-        result, parse_mode="HTML", disable_web_page_preview=True,
-    )
+    await _send_moneyflow(update, placeholder, caption, chart)
 
 
 @authorized_only
@@ -908,11 +926,10 @@ async def cmd_nl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     parse_mode="HTML",
                 )
                 return
-            result = await _run_blocking(
+            caption, chart = await _run_blocking(
                 responders.moneyflow_view, {"ticker": ticker},
             )
-            await placeholder.edit_text(routing_chip + result, parse_mode="HTML",
-                                         disable_web_page_preview=True)
+            await _send_moneyflow(update, placeholder, caption, chart, prefix=routing_chip)
 
         else:  # "unknown"
             await placeholder.edit_text(

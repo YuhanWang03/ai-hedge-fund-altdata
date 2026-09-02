@@ -14,6 +14,7 @@ from v2.moneyflow.cards import format_view_card
 from v2.moneyflow.detector import detect_divergence, read_axes
 from v2.moneyflow.indicators import (
     chaikin_money_flow,
+    cmf_series,
     rsi,
     window_return,
 )
@@ -173,3 +174,49 @@ def test_view_card_with_verdict_shows_kind_and_narration():
     card = format_view_card(sig, sig)
     assert "疑似派发/出货" in card
     assert "空头视角" in card
+
+
+# --------------------------------------------------------------------------
+# cmf_series (charting) + chart render
+# --------------------------------------------------------------------------
+
+def test_cmf_series_alignment_and_sign():
+    closes = [100.0] * 30
+    highs = [c + 0.1 for c in closes]   # close near high → positive
+    lows = [c - 1.0 for c in closes]
+    vols = [1000] * 30
+    series = cmf_series(highs, lows, closes, vols, window=20)
+    assert len(series) == len(closes) - 20 + 1   # aligned to closes[window-1:]
+    assert all(v is not None and v > 0.5 for v in series)
+
+
+def _matplotlib_can_render() -> bool:
+    """Probe: some sandbox envs ship an incompatible numpy×matplotlib pair
+    (e.g. numpy 2.4 + matplotlib 3.7) where fill_between/savefig raise. Skip
+    the render test there — it's an env issue, not a code issue. Production
+    (VPS) renders fine."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from io import BytesIO
+        fig, ax = plt.subplots()
+        ax.fill_between([0, 1, 2], [1, 2, 1], 0)
+        fig.savefig(BytesIO(), format="png")
+        plt.close(fig)
+        return True
+    except Exception:
+        return False
+
+
+def test_render_chart_returns_png_bytes():
+    pytest.importorskip("matplotlib")
+    if not _matplotlib_can_render():
+        pytest.skip("matplotlib/numpy rendering broken in this env (not a code issue)")
+    from v2.moneyflow.chart import render_moneyflow_chart
+
+    closes = [100.0] * 40 + [100.0 + 0.1 * i for i in range(1, 21)]
+    sig = detect_divergence("BBB", _bars(closes, "outflow"), CFG)
+    png = render_moneyflow_chart("BBB", _bars(closes, "outflow"), CFG, signal=sig)
+    assert isinstance(png, (bytes, bytearray))
+    assert png[:8] == b"\x89PNG\r\n\x1a\n"   # PNG magic number

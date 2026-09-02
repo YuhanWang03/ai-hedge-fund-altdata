@@ -1007,15 +1007,16 @@ def insider_view(args: dict) -> str:
 # ---------------------------------------------------------------------------
 
 
-def moneyflow_view(args: dict) -> str:
-    """Single-ticker money-flow divergence card, computed on demand.
+def moneyflow_view(args: dict) -> tuple[str, bytes | None]:
+    """Single-ticker money-flow divergence view, computed on demand.
 
     args: ``{"ticker": "MSFT"}``
+    Returns ``(caption_html, chart_png_or_None)``.
 
     Pull-semantics twin of the ⑱ cron: always shows the three-axis read
-    (price / CMF / RSI) even when no divergence fires, and adds the
-    verdict + LLM 多空 narration when one does. Read-only — never writes
-    archive, never computes priority (bot surface, not push surface).
+    (price / CMF / RSI) even when no divergence fires, adds the verdict +
+    LLM 多空 narration when one does, and renders a 3-panel Price/CMF/RSI
+    chart. Read-only — never writes archive, never computes priority.
     """
     from datetime import date, timedelta
 
@@ -1031,7 +1032,8 @@ def moneyflow_view(args: dict) -> str:
     if not _is_valid_ticker(ticker):
         return (
             f"<b>🚫 无效 ticker: {html.escape(ticker or '(empty)')}</b>\n"
-            "请使用美股 ticker（1-5 大写字母，如 <code>MSFT</code>）"
+            "请使用美股 ticker（1-5 大写字母，如 <code>MSFT</code>）",
+            None,
         )
 
     today = date.today()
@@ -1042,13 +1044,14 @@ def moneyflow_view(args: dict) -> str:
             prices = fd.get_prices(ticker, history_start, today.isoformat())
     except Exception as exc:
         logger.exception("moneyflow_view: FD fetch failed for %s", ticker)
-        return f"❌ 行情查询失败: <code>{html.escape(str(exc))}</code>"
+        return f"❌ 行情查询失败: <code>{html.escape(str(exc))}</code>", None
 
     reading = read_axes(ticker, prices, DEFAULT_CONFIG)
     if reading is None:
         return (
             f"<b>📊 资金流分析 · {html.escape(ticker)}</b>\n"
-            "数据不足（需要约 60 个交易日的日线），暂无法计算。"
+            "数据不足（需要约 60 个交易日的日线），暂无法计算。",
+            None,
         )
 
     signal = detect_divergence(ticker, prices, DEFAULT_CONFIG)
@@ -1060,15 +1063,26 @@ def moneyflow_view(args: dict) -> str:
         signal.bull = note.get("bull", "")
         signal.bear = note.get("bear", "")
 
+    # 3-panel Price / CMF / RSI chart — best-effort; text card still sent
+    # if matplotlib rendering fails for any reason.
+    chart: bytes | None = None
+    try:
+        from v2.moneyflow.chart import render_moneyflow_chart
+        chart = render_moneyflow_chart(ticker, prices, DEFAULT_CONFIG, signal=signal)
+    except Exception as exc:
+        logger.warning("moneyflow_view: chart render failed for %s: %s", ticker, exc)
+
     emit("render", card="moneyflow_view_card",
          ticker=ticker,
          has_divergence=signal is not None,
+         has_chart=chart is not None,
          kind=getattr(signal, "kind", None),
          strength=getattr(signal, "strength", None))
 
-    return format_view_card(
+    caption = format_view_card(
         reading, signal, price_window=DEFAULT_CONFIG.price_window,
     )
+    return caption, chart
 
 
 # ---------------------------------------------------------------------------

@@ -46,6 +46,28 @@ def chaikin_money_flow(
     return float((mfm * v).sum() / total_vol)
 
 
+def cmf_series(
+    highs: Sequence[float],
+    lows: Sequence[float],
+    closes: Sequence[float],
+    volumes: Sequence[float],
+    window: int = 20,
+) -> list[float | None]:
+    """Rolling Chaikin Money Flow, one value per bar from index ``window-1``.
+
+    Returned list is aligned to ``closes[window-1:]`` — used for charting.
+    An element is ``None`` when that window had zero total volume.
+    """
+    n = len(closes)
+    if window <= 0 or n < window:
+        return []
+    out: list[float | None] = []
+    for i in range(window - 1, n):
+        s = slice(i - window + 1, i + 1)
+        out.append(chaikin_money_flow(highs[s], lows[s], closes[s], volumes[s], window))
+    return out
+
+
 def rsi_series(closes: Sequence[float], window: int = 14) -> list[float]:
     """Wilder's RSI for every bar from index *window* onward.
 
