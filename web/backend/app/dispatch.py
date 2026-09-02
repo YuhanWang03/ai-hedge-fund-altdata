@@ -16,6 +16,57 @@ def _err(msg: str) -> dict:
     return {"html": f"<b>⚠️ {_html.escape(msg)}</b>"}
 
 
+# Same shape v2.bot.intent.classify() returns, so dispatch() consumes either.
+_PARSED_BASE = {
+    "intent": "unknown", "ticker": "", "manager": "", "etf": "",
+    "period": "", "release_type": "", "days_back": 0, "days_horizon": 0,
+}
+
+
+def parse_slash(text: str) -> dict | None:
+    """Map a Telegram-style slash command to a parsed-intent dict.
+
+    Returns None for non-slash text (caller falls back to the LLM
+    classifier) or an unknown command.
+    """
+    text = text.strip()
+    if not text.startswith("/"):
+        return None
+    parts = text[1:].split()
+    if not parts:
+        return None
+    cmd = parts[0].lower()
+    a1 = parts[1] if len(parts) > 1 else ""
+    a2 = parts[2] if len(parts) > 2 else ""
+
+    def p(**kw) -> dict:
+        return {**_PARSED_BASE, **kw}
+
+    table = {
+        "flow":      lambda: p(intent="moneyflow_view", ticker=a1.upper()),
+        "why":       lambda: p(intent="explain_move", ticker=a1.upper()),
+        "summary":   lambda: p(intent="summary", ticker=a1.upper()),
+        "chain":     lambda: p(intent="chain", ticker=a1.upper()),
+        "13f":       lambda: p(intent="thirteen_f", manager=a1.lower()),
+        "holders":   lambda: p(intent="holders_view", ticker=a1.upper()),
+        "etf":       lambda: p(intent="etf_view", etf=a1.upper()),
+        "portfolio": lambda: p(intent="portfolio_view"),
+        "pnl":       lambda: p(intent="pnl_period", period=a1.lower()) if a1 else p(intent="pnl_view"),
+        "risk":      lambda: p(intent="risk_view"),
+        "earnings":  lambda: p(intent="earnings_view", ticker=a1.upper()) if a1 else p(intent="earnings_calendar"),
+        "8k":        lambda: p(intent="eight_k_view", ticker=a1.upper()),
+        "insiders":  lambda: p(intent="insider_view", ticker=a1.upper(),
+                               days_back=int(a2) if a2.isdigit() else 0),
+        "macro":     lambda: p(intent="macro_view"),
+        "cpi":       lambda: p(intent="release_check", release_type="cpi"),
+        "fomc":      lambda: p(intent="release_check", release_type="fomc"),
+        "yields":    lambda: p(intent="macro_view"),
+        "watchlist": lambda: p(intent="watchlist_view"),
+    }
+    fn = table.get(cmd)
+    return fn() if fn else None
+
+
 def dispatch(parsed: dict) -> dict:
     """parsed = output of v2.bot.intent.classify(). Returns a dict with:
     html (str), optional extra_html (list[str]), optional chart_b64 (str)."""

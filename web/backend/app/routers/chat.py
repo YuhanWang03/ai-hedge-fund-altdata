@@ -22,9 +22,14 @@ class ChatIn(BaseModel):
 
 @router.post("/chat", dependencies=[Depends(require_owner)])
 async def chat(body: ChatIn) -> dict:
-    from app.dispatch import dispatch
-    from v2.bot.intent import classify
+    from app.dispatch import dispatch, parse_slash
 
-    parsed = await run_in_threadpool(classify, body.text)
+    # Slash commands (/flow AAPL, /portfolio, ...) skip the LLM classifier;
+    # free-form text goes through it.
+    parsed = parse_slash(body.text)
+    if parsed is None:
+        from v2.bot.intent import classify
+        parsed = await run_in_threadpool(classify, body.text)
+
     result = await run_in_threadpool(dispatch, parsed)
     return {"intent": parsed.get("intent"), "args": parsed, **result}
