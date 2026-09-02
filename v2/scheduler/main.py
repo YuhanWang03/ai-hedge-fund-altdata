@@ -25,6 +25,7 @@ from v2.scheduler.jobs import (
     institutional_backfill_job,
     institutional_job,
     lateral_expansion_job,
+    moneyflow_job,
     p2_digest_job,
     macro_claims_job,
     macro_daily_snapshot_job,
@@ -72,6 +73,18 @@ def build_scheduler() -> BlockingScheduler:
         CronTrigger(hour=17, minute=35, day_of_week="mon-fri", timezone=_TZ),
         id="anomaly_monitor",
         name="② Anomaly Monitor",
+        misfire_grace_time=3600,
+        coalesce=True,
+    )
+
+    # ⑱ Money-flow divergence — 17:40 ET Mon-Fri. Sits after ① (17:30) and
+    # ② (17:35) so post-close bars are settled; 5-min spacing keeps the
+    # scheduler log timeline serial and clears the 18:00 ET ③/④ block.
+    scheduler.add_job(
+        moneyflow_job,
+        CronTrigger(hour=17, minute=40, day_of_week="mon-fri", timezone=_TZ),
+        id="moneyflow",
+        name="⑱ Money-Flow Divergence (Mon-Fri 17:40 ET)",
         misfire_grace_time=3600,
         coalesce=True,
     )

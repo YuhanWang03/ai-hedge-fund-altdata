@@ -74,6 +74,9 @@ BASE_SCORES: dict[str, int] = {
     "macro_vix_spike":     85,  # VIX +20% single-day → P0
     "macro_curve_flip":    65,  # T10Y2Y sign change today → P1
     "macro_weekly":        65,  # ⑰ Fri 19:30 ET — operator-visibility floor
+    # ⑱ Money-flow divergence — P2 base (rolls into daily digest); a
+    # "strong" verdict or a held/watchlist hit escalates it to P1.
+    "moneyflow_divergence": 55,
     "scheduler_status":    30,  # scheduler startup message — P3
     "error_alert":         75,  # error reported by @notify_on_error — P1
     "p2_digest":           65,  # the digest itself is P1
@@ -177,6 +180,16 @@ def compute_importance(
         n_earnings = int(md.get("n_earnings_next_7d") or 0)
         if n_earnings >= 3:
             adjustments.append((+10, f"earnings_density_{n_earnings}"))
+
+    # ---- Phase 6 ⑱ money-flow divergence ----
+    if event_kind == "moneyflow_divergence":
+        # "strong" (RSI in a confirming zone or an RSI divergence) is the
+        # only thing that lifts a no-holdings signal out of the digest into
+        # an immediate P1 push. "moderate" stays P2 by design.
+        if md.get("strength") == "strong":
+            adjustments.append((+10, "strong_divergence"))
+        if md.get("rsi_divergence") in ("bullish", "bearish"):
+            adjustments.append((+5, f"rsi_{md['rsi_divergence']}_divergence"))
 
     # ---- universal: holdings / watchlist matter for everything ----
     if md.get("is_held_position"):

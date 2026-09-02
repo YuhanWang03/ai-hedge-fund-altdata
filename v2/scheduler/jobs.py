@@ -50,6 +50,16 @@ def lateral_expansion_job() -> None:
     _run("lateral_to_telegram.py")
 
 
+def moneyflow_job() -> None:
+    """⑱ Mon-Fri 17:40 ET — money-flow divergence (CMF/RSI vs price).
+
+    Slots after ① Daily Screen (17:30) and ② Anomaly Monitor (17:35) so
+    the post-close bars are settled and it doesn't collide with the
+    18:00 ET ③/④ block. Quiet days exit silently.
+    """
+    _run("moneyflow_to_telegram.py")
+
+
 def institutional_job() -> None:
     _run("institutional_to_telegram.py")
 
