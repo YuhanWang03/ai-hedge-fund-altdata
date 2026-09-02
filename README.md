@@ -6,56 +6,42 @@ Built as a portfolio project to demonstrate end-to-end ownership of a multi-sour
 
 [中文版 README](./README_zh.md)
 
-**Hero numbers**: 10 phases shipped · 22 cron jobs · 24 NL intents · 5-layer defense · 490 sandbox tests · **~$22/month** total ops cost
+**Hero numbers**: 10 phases shipped · 6 scheduled pushes + on-demand bot · 24 NL intents · 5-layer defense · 490 sandbox tests · **~$22/month** total ops cost
 
 ---
 
 ## What it does
 
-Three concurrent services on a single $6/month VPS — **Scheduler** (22 cron jobs spanning 08:00–21:00 ET) + **Streamer** (minute-level intraday alert + anomaly scan) + **Telegram Bot** (26 slash + 24-intent NL). All three share 7 SQLite databases (WAL) + ChromaDB.
+Two concurrent services on a single $6/month VPS — **Scheduler** (6 daily-push core jobs) + **Streamer** (minute-level intraday alert + anomaly scan) — plus a **Telegram Bot** (26 slash + 24-intent NL). Only the highest-value signals push on a schedule; **everything else is on-demand** (query the bot when you want it). Shared 7 SQLite databases (WAL) + ChromaDB.
 
 ### Scheduled pushes (Cron Jobs full table)
 
 Sorted by US/Eastern time (agent details in [## Feature Reference](#feature-reference) → Cron Agents). ⚠️ marks current implementation that's simplified or requires data accumulation — see footnote below:
 
-| Time · Frequency | ID | Name | Function | Family · Pushes |
-|---|---|---|---|---|
-| **02:00 UTC** · daily | ⑥ | Archive Cleanup | Purge > 90-day archive rows | infra · 🔇 no push |
-| **08:00 ET** · mon-fri | ⑦ | Earnings Reminders | watchlist + holdings D-3/D-1/D-0 alerts | Earnings · ✅ |
-| **08:30 ET** · mon-fri | ⑬ | ARK Alerts | ARK 4 funds material rebalance (new/exit/±20%) | ARK · ✅ pre-market |
-| **09:00 ET** · mon-fri | ⑮ | Macro Release Scanner | CPI/PCE/NFP/GDP/PPI/FOMC release interpretation (σ ladder) | Macro · ✅ on hit day |
-| **09:30 ET** · **thu** | ⑯ | Macro Initial Claims | ICSA weekly initial unemployment + 4W MA | Macro · ✅ |
-| **16:25 ET** · mon-fri | ⑨b | Positions Snapshot | Daily holdings snapshot (input to ⑩ attribution) | Portfolio · 🔇 archive only |
-| **16:30 ET** · mon-fri | ⑭ | Macro Daily Snapshot | VIX/yields/commodities EOD + 4 anomaly flags | Macro · ✅ |
-| **16:45 ET** · mon-fri | 📋 | P2 Digest | Roll up day's P2 pushes into one card | infra · ✅ rollup |
-| **17:00 ET** · mon-fri | ⑤ | ETF Daily Snapshot | 4 ARK fund holdings CSV persist (⑬ baseline) | Early signals · 🔇 dashboard only |
-| **17:05 ET** · mon-fri | ⑪ | SEC 8-K Scanner | Today's 8-K + 24-item priority + 5.02 LLM NER | SEC · ✅ |
-| **17:30 ET** · mon-fri | ① | Daily Screen | TECH_30 hard-rule screen + sector benchmark | Early signals · ✅ |
-| **17:35 ET** · mon-fri | ② | Anomaly Monitor | Anomaly detect + Tavily multi-source attribution + Verifier | Early signals · ✅ |
-| **17:40 ET** · mon-fri | ⑱ | Money-Flow Divergence | TECH_30 CMF/RSI vs price divergence (吸筹/派发), strong→P1 | Early signals · ✅ |
-| **17:45 ET** · mon-fri | ⑫ | SEC Form 4 Scanner | Insider P/S individual + same-day ≥3 distinct cluster | SEC · ✅ |
-| **18:00 ET** · **mon** | ③ | Lateral Expansion | LLM supply-chain lateral + Tavily co-occurrence verify | Early signals · ✅ |
-| **18:00 ET** · **tue/fri** | ④ | Institutional 13F | 10 manager quarterly holdings + diff (CUSIP-aggregated) | Early signals · ✅ |
-| **18:30 ET** · **sun** | ④b | 13F Backfill | 13F weekly refill + catch amended filings | Early signals · 🔇 maintenance |
-| **18:30 ET** · mon-fri | ⑨ | Portfolio Risk | Portfolio risk (concentration/drawdown/earnings 7d/sector) | Portfolio · ✅ |
-| **19:00 ET** · **fri** | ⑩ | Portfolio Weekly | Weekly review + per-position attribution ⚠️ | Portfolio · ✅ |
-| **19:15 ET** · **fri** | ⑫b | SEC Insider Weekly Digest ⚠️ | Aggregate this week's ⑫ pushes (title-only simplification) | SEC · ✅ |
-| **19:30 ET** · **fri** | ⑰ | Macro Weekly Recap | This week released + next week preview + intraweek yields delta | Macro · ✅ |
-| **21:00 ET** · mon-fri | ⑧ | Earnings Summaries | LLM summary + 10-Q MD&A diff + going_concern → P0 | Earnings · ✅ |
+Only 6 jobs push on a schedule — the highest-value, time-sensitive signals:
 
-**⚠️ Partial implementation / data accumulation required**:
+| Time · Frequency | ID | Name | Function |
+|---|---|---|---|
+| **02:00 ET** · daily | ⑥ | Archive Cleanup | Purge expired archive rows (infra · 🔇 no push) |
+| **08:00 ET** · mon-fri | ⑦ | Earnings Reminders | watchlist + holdings D-3 / D-1 / D-0 alerts |
+| **16:45 ET** · mon-fri | 📋 | P2 Digest | Roll the day's P2 items into one card |
+| **17:35 ET** · mon-fri | ② | Anomaly Monitor | Anomaly detect + Tavily multi-source attribution |
+| **18:30 ET** · mon-fri | ⑨ | Portfolio Risk | Concentration / drawdown / P&L / 7-day earnings risk |
+| **21:00 ET** · mon-fri | ⑧ | Earnings Summaries | LLM summary + 10-Q MD&A diff + going_concern → P0 |
 
-- **⑩ Portfolio Weekly** — per-position attribution uses 3-state gating: ≥5 days of ⑨b snapshots → full best/worst/net; 1–4 days → "归因数据累积中 (N/5 天)" placeholder; 0 days → fully silent. **First complete week after deployment is required for full attribution data.**
-- **⑫b SEC Insider Weekly Digest** — currently **title-only simplification** (⑫ archive `trace_json` doesn't persist per-transaction codes, only push titles are queryable). Full per-A/M/F/G/C breakdown + insider-name dimension aggregation is deferred to **Phase 3.5.5** (see [Roadmap](#roadmap)).
+**Everything else is on-demand** — query the bot when you want it; each fetches live on the call, so nothing depends on a background cron:
 
-**⏳ Planned but not yet implemented cron jobs** (see [## Roadmap](#roadmap)):
-
-| Time · Frequency | ID | Name | Function | Trigger |
-|---|---|---|---|---|
-| **FOMC day +6h** · ad hoc | ⑮b | FOMC Transcript Follow-up | Powell presser transcript scrape supplemental card | Phase 4.5 — after 06-17 FOMC battle test |
-| **16:35 ET** · mon-fri | ⑭b | Market Regime Detection | VIX+yields+breadth composite regime judgment + switch alerts | Phase 5b — after Phase 4 runs ≥ 4 weeks (avoid overfit) |
-
-**Time design**: 17:00–19:30 ET is the dense main push window (post-close data lands fastest); 08:00–09:30 ET is pre-market (earnings reminders + ARK rebalance + macro releases); 16:25–16:45 ET is silent post-close batch; ⑧ runs at 21:00 ET because FD earnings data typically fully lands between 19:30–21:00 ET.
+| Was (cron) | Now (bot) |
+|---|---|
+| ① Daily Screen | `scripts/daily_screen_to_telegram.py` (manual) |
+| ③ Lateral Expansion | `/chain TICKER` |
+| ④ Institutional 13F | `/13f MANAGER` (live EDGAR) |
+| ⑤/⑬ ETF · ARK | `/etf SYMBOL` (live ARK CSV) |
+| ⑩ Portfolio Weekly | `/portfolio` · `/pnl [day\|week\|month]` · `/risk` |
+| ⑪ SEC 8-K | `/8k TICKER` (live SEC) |
+| ⑫ SEC Form 4 | `/insiders TICKER [days]` (live SEC) |
+| ⑭⑮⑯⑰ Macro | `/macro` · `/cpi` · `/fomc` · `/yields` |
+| ⑱ Money-Flow Divergence | `/flow TICKER` (3-panel Price/CMF/RSI chart) |
 
 ### Intraday Streamer
 
@@ -90,7 +76,7 @@ NL classifier: DeepSeek temperature=0 + JSON + **whitelist enum validation** —
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │                     hedge-fund-scheduler.service                 │
-│                       (22 cron jobs · see table below)           │
+│                       (6 scheduled + on-demand bot)              │
 └──────────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────────┐
@@ -143,13 +129,13 @@ Base score + metadata adjustments: held +15, watchlist +10, surprise ≥10% +15,
 
 ## Feature Reference
 
-Deep-dive on the three functional modules: **Cron Agents** (22 jobs organized by family — each section has data sources, trigger logic, priority ladder, output examples, bot interface) + **Intraday Streamer** (A user alerts + B auto-scan) + **Telegram interface** (full slash list + 24 NL examples + manager aliases).
+Deep-dive on the modules. **Note (post-simplification):** only 6 agents push on a schedule (② Anomaly, ⑦/⑧ Earnings, ⑨ Portfolio Risk, 📋 P2 digest, ⑥ cleanup). The other agents described below still exist as **capabilities** but now run **on-demand** via the bot (see the on-demand table under [What it does](#what-it-does)) rather than on a cron. Sections cover: **Agents** (data sources, logic, priority ladder, output, bot interface) + **Intraday Streamer** (A user alerts + B auto-scan) + **Telegram interface** (full slash list + 24 NL examples + manager aliases).
 
-### Six early post-market agents
+### Early-signal agents (② scheduled; ①③④⑤⑱ now on-demand)
 
 - **① Daily Screen (Mon-Fri 17:30 ET)** — TECH_30 hard-rule screen + 9 qualitative tags + LLM Template-Fill narration (numbers Python-injected) + sector-relative chips + Tavily news.
 - **② Anomaly Monitor (Mon-Fri 17:35 ET)** — volume spikes (≥3× 30d) / 52-week extremes / insider clusters. Per anomaly: sector chip + multi-source attribution (Tavily → Verifier tier scoring → Generator with Tier 1+2 only) → persists to ChromaDB with deterministic ID `{ticker}_{date}`.
-- **⑱ Money-Flow Divergence (Mon-Fri 17:40 ET)** — TECH_30 three-axis divergence: price trend vs money flow (Chaikin Money Flow proxy) vs momentum (RSI). Deterministic truth-table verdict — accumulation (疑似吸筹) / distribution (疑似派发) — with LLM filling only the qualitative bull/bear. `strong` → immediate P1; `moderate` → daily digest. Pull twin: `/flow TICKER` + NL (`微软是不是主力吸筹`). Proxy indicator, not tick-level flow — every card carries that disclaimer.
+- **⑱ Money-Flow Divergence (on-demand · `/flow TICKER`)** — three-axis divergence: price trend vs money flow (Chaikin Money Flow proxy) vs momentum (RSI). Deterministic truth-table verdict — accumulation (疑似吸筹) / distribution (疑似派发) — with LLM filling only the qualitative bull/bear, and a 3-panel Price/CMF/RSI chart. Always shows the read even when no verdict fires. NL: `微软是不是主力吸筹`. Proxy indicator, not tick-level flow — every card carries that disclaimer.
 - **③ Lateral Expansion (Mon 18:00 ET)** — anomaly seeds → DeepSeek proposes supply-chain neighbors → Tavily co-occurrence verification → market cap / revenue / margin thresholds.
 - **④ Institutional 13F (Tue/Fri 18:00 ET) + ④b Backfill (Sun 18:30 ET)** — 10 famous managers (Berkshire, Burry, Ackman, Einhorn, Renaissance, Two Sigma, D.E. Shaw, Citadel, Coatue, ARK). QoQ diffs → 新进/加仓/减仓/清仓 → DeepSeek 10-word interpretations. **Tracks $1.29T AUM × 17,329 positions**.
 - **⑤ ETF Daily Snapshot (Mon-Fri 17:00 ET)** — silently fetches 4 ARK funds' (ARKK/ARKW/ARKG/ARKF) daily CSVs to `etf.db.snapshots`. Per-(fund, date, ticker) time series enabling **24-hour rebalance detection** (vs 45-day 13F lag). Underlying data for ⑬.
@@ -396,7 +382,7 @@ v2/
 ├── reporting/                      # formatters + notifier + priority + 8 4-layer shims
 ├── memory/  archive/  bot/  scheduler/  observability/         # ChromaDB + SQLite log + bot + APScheduler + trace SDK
 
-scripts/  (22 cron + 3 service entrypoints — names match the time table above)
+scripts/  (agent launchers — 6 wired into the scheduler, the rest run on-demand/manually + 3 service entrypoints)
 ```
 
 ---
@@ -516,7 +502,8 @@ DigitalOcean 1 GB droplet **$6.00** + financialdatasets.ai cached **~$15** + Dee
 | **Phase 4** | Macro Agent (⑭⑮⑯⑰ + `/macro` + `/cpi` + `/fomc` + `/yields`) + FRED+yfinance hybrid + LLM 4-layer defense |
 | **Phase 4.5-mini** | FD → yfinance daily-prices migration (`PriceSource` Protocol + `V2_PRICE_SOURCE=fd` fallback) |
 | **Phase 5a** | ⑬ ARK Rebalance Alerts (Mon-Fri 08:30 ET) + multi-fund coordination + reuses v2/etf/ |
-| **Phase 6** | ⑱ Money-Flow Divergence (Mon-Fri 17:40 ET + `/flow` + NL) — price/CMF/RSI 3-axis truth-table → accumulation/distribution verdict + LLM Template-Fill narration |
+| **Phase 6a** | ⑱ Money-Flow Divergence (on-demand `/flow` + NL) — price/CMF/RSI 3-axis truth-table → accumulation/distribution verdict + LLM Template-Fill narration + 3-panel chart |
+| **Simplification** | Demoted 16 cron agents → on-demand bot queries; scheduler trimmed to 6 daily-push core jobs (② ⑦ ⑧ ⑨ + P2 digest + cleanup); froze the old dashboard (rebuild planned) |
 | **Cross-cutting** | Web dashboard (FastAPI + React + Tailwind + trace replay); observability SDK |
 
 ### ⏳ Deferred — waiting on real data / trigger conditions
@@ -549,6 +536,6 @@ Migration system audit; GitHub Actions CI (pytest on main); multi-user support; 
 
 ## Credits · License
 
-The repository's outer layout and the original educational `app/` directory come from [virattt/ai-hedge-fund](https://github.com/virattt/ai-hedge-fund), an open-source AI hedge fund concept project. The `v2/` directory — the entire alternative-data agent system described in this README (22 cron jobs, intraday streamer, Telegram bot with 24 NL intents, 5 hallucination-defense mechanisms, push-priority system, all SQLite + ChromaDB stores, all systemd deployment scaffolding) — was built from scratch as a separate project on top of that foundation.
+The repository's outer layout and the original educational `app/` directory come from [virattt/ai-hedge-fund](https://github.com/virattt/ai-hedge-fund), an open-source AI hedge fund concept project. The `v2/` directory — the entire alternative-data agent system described in this README (a 6-job scheduler core + on-demand agents, intraday streamer, Telegram bot with 24 NL intents, 5 hallucination-defense mechanisms, push-priority system, all SQLite + ChromaDB stores, all systemd deployment scaffolding) — was built from scratch as a separate project on top of that foundation.
 
 License: **MIT**, educational project, **not investment advice**.

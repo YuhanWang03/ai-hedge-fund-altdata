@@ -2,6 +2,11 @@
 
 When started, pushes a Telegram message listing each job's next run time
 so you know it's alive.
+
+Scope (post-simplification): only the daily-push CORE runs on a schedule —
+② Anomaly, ⑦/⑧ Earnings, ⑨ Portfolio Risk, plus 📋 P2 digest and ⑥ archive
+cleanup infra. Everything else was demoted to on-demand bot queries; see the
+DEMOTED note at the end of build_scheduler().
 """
 
 from __future__ import annotations
@@ -17,26 +22,10 @@ from apscheduler.triggers.cron import CronTrigger
 from v2.scheduler.jobs import (
     anomaly_monitor_job,
     archive_cleanup_job,
-    ark_alerts_job,
-    daily_screen_job,
     earnings_reminders_job,
     earnings_summaries_job,
-    etf_daily_job,
-    institutional_backfill_job,
-    institutional_job,
-    lateral_expansion_job,
-    moneyflow_job,
     p2_digest_job,
-    macro_claims_job,
-    macro_daily_snapshot_job,
-    macro_release_job,
-    macro_weekly_job,
     portfolio_risk_job,
-    portfolio_weekly_job,
-    positions_snapshot_job,
-    sec_8k_job,
-    sec_form4_job,
-    sec_insider_digest_job,
 )
 
 logger = logging.getLogger(__name__)
@@ -48,26 +37,16 @@ _TZ = ZoneInfo("US/Eastern")
 def build_scheduler() -> BlockingScheduler:
     """Configure jobs without starting. Returns the scheduler ready to .start().
 
-    Default APScheduler ``ThreadPoolExecutor`` uses ``max_workers=10``.
-    With 21 jobs (Phase 5a added ⑬ ARK Alerts pre-market) and Mon-Fri
-    17:00-21:00 ET burst window, a server restart catching up multiple
-    misfires could saturate 10 workers. Bumped to 20 — costs near zero,
-    comfortable headroom.
+    Only the daily-push core is scheduled now (6 jobs). Everything else moved
+    to on-demand bot queries — see the DEMOTED note at the bottom.
     """
     scheduler = BlockingScheduler(
         timezone=_TZ,
-        executors={"default": ThreadPoolExecutor(max_workers=20)},
+        executors={"default": ThreadPoolExecutor(max_workers=8)},
     )
 
-    scheduler.add_job(
-        daily_screen_job,
-        CronTrigger(hour=17, minute=30, day_of_week="mon-fri", timezone=_TZ),
-        id="daily_screen",
-        name="① Daily Screen",
-        misfire_grace_time=3600,
-        coalesce=True,
-    )
-
+    # ② Anomaly Monitor — 17:35 ET Mon-Fri. Post-close anomaly detect +
+    # Tavily multi-source attribution. The highest-signal daily push.
     scheduler.add_job(
         anomaly_monitor_job,
         CronTrigger(hour=17, minute=35, day_of_week="mon-fri", timezone=_TZ),
@@ -77,72 +56,8 @@ def build_scheduler() -> BlockingScheduler:
         coalesce=True,
     )
 
-    # ⑱ Money-flow divergence — 17:40 ET Mon-Fri. Sits after ① (17:30) and
-    # ② (17:35) so post-close bars are settled; 5-min spacing keeps the
-    # scheduler log timeline serial and clears the 18:00 ET ③/④ block.
-    scheduler.add_job(
-        moneyflow_job,
-        CronTrigger(hour=17, minute=40, day_of_week="mon-fri", timezone=_TZ),
-        id="moneyflow",
-        name="⑱ Money-Flow Divergence (Mon-Fri 17:40 ET)",
-        misfire_grace_time=3600,
-        coalesce=True,
-    )
-
-    scheduler.add_job(
-        lateral_expansion_job,
-        CronTrigger(hour=18, minute=0, day_of_week="mon", timezone=_TZ),
-        id="lateral_expansion",
-        name="③ Lateral Expansion (weekly)",
-        misfire_grace_time=7200,
-        coalesce=True,
-    )
-
-    scheduler.add_job(
-        institutional_job,
-        CronTrigger(hour=18, minute=0, day_of_week="tue,fri", timezone=_TZ),
-        id="institutional",
-        name="④ Institutional 13F (Tue/Fri)",
-        misfire_grace_time=7200,
-        coalesce=True,
-    )
-
-    scheduler.add_job(
-        institutional_backfill_job,
-        CronTrigger(hour=18, minute=30, day_of_week="sun", timezone=_TZ),
-        id="institutional_backfill",
-        name="④b 13F Backfill (Sun)",
-        misfire_grace_time=7200,
-        coalesce=True,
-    )
-
-    scheduler.add_job(
-        etf_daily_job,
-        CronTrigger(hour=17, minute=0, day_of_week="mon-fri", timezone=_TZ),
-        id="etf_daily",
-        name="⑤ ETF Daily Snapshot (Mon-Fri)",
-        misfire_grace_time=3600,
-        coalesce=True,
-    )
-
-    # ⑬ ARK Alerts — 08:30 ET Mon-Fri pre-market.
-    # Reads ⑤'s 17:00 ET snapshot (etf.db) as the "yesterday" baseline,
-    # fetches today's ARK CSVs, classifies significant rebalances
-    # (new ≥0.5% / liquidated prior ≥0.5% / increase/decrease ≥20%
-    # relative), and pushes per-alert + overview cards. Quiet days
-    # exit silently. 30-min separation from ⑦ (08:00) and ⑮ (09:00).
-    scheduler.add_job(
-        ark_alerts_job,
-        CronTrigger(hour=8, minute=30, day_of_week="mon-fri", timezone=_TZ),
-        id="ark_alerts",
-        name="⑬ ARK Alerts (Mon-Fri 08:30 ET)",
-        misfire_grace_time=1800,
-        coalesce=True,
-    )
-
-    # ⑦ Earnings reminders — 08:00 ET Mon-Fri. Pulls watchlist + Alpaca
-    # holdings, asks yfinance for the next release per ticker, and pushes
-    # one card for each that lands in D-3 / D-1 / D-0.
+    # ⑦ Earnings reminders — 08:00 ET Mon-Fri. watchlist + holdings that land
+    # in D-3 / D-1 / D-0.
     scheduler.add_job(
         earnings_reminders_job,
         CronTrigger(hour=8, minute=0, day_of_week="mon-fri", timezone=_TZ),
@@ -152,9 +67,8 @@ def build_scheduler() -> BlockingScheduler:
         coalesce=True,
     )
 
-    # ⑧ Earnings summaries — 21:00 ET Mon-Fri. Tickers whose calendar said
-    # "release today" get the post-release card if FD has the actuals; a
-    # short pending placeholder otherwise (retried by the next 21:00 ET run).
+    # ⑧ Earnings summaries — 21:00 ET Mon-Fri. Post-release card if FD has the
+    # actuals; a short pending placeholder otherwise (retried next run).
     scheduler.add_job(
         earnings_summaries_job,
         CronTrigger(hour=21, minute=0, day_of_week="mon-fri", timezone=_TZ),
@@ -164,10 +78,8 @@ def build_scheduler() -> BlockingScheduler:
         coalesce=True,
     )
 
-    # ⑨ Portfolio risk — 18:30 ET Mon-Fri. Daily snapshot:
-    # positions / concentration / sector exposure / P&L / drawdown /
-    # 7-day held-position earnings risk. Computes priority from the
-    # report itself; daily loss ≥ 5% bumps to P0.
+    # ⑨ Portfolio risk — 18:30 ET Mon-Fri. Concentration / sector exposure /
+    # P&L / drawdown / 7-day earnings risk. Daily loss ≥ 5% bumps to P0.
     scheduler.add_job(
         portfolio_risk_job,
         CronTrigger(hour=18, minute=30, day_of_week="mon-fri", timezone=_TZ),
@@ -177,61 +89,8 @@ def build_scheduler() -> BlockingScheduler:
         coalesce=True,
     )
 
-    # ⑩ Portfolio weekly recap — 19:00 ET Fri. Weekly + monthly returns,
-    # 1M drawdown, equity-curve PNG. Always P1 (operator-visibility) —
-    # mid-week P0 risks come from ⑨ instead.
-    scheduler.add_job(
-        portfolio_weekly_job,
-        CronTrigger(hour=19, minute=0, day_of_week="fri", timezone=_TZ),
-        id="portfolio_weekly",
-        name="⑩ Portfolio Weekly (Fri 19:00 ET)",
-        misfire_grace_time=7200,
-        coalesce=True,
-    )
-
-    # ⑪ SEC 8-K scanner — 17:05 ET Mon-Fri. 5 min after ⑤ ETF Daily so
-    # the two HTTP-heavy jobs don't fight for connection pool. Items
-    # classified P0-P3 by Stage-0 priority table; 2.02-only earnings
-    # filings skipped (⑧ Earnings Summaries handles them at 21:00 ET).
-    scheduler.add_job(
-        sec_8k_job,
-        CronTrigger(hour=17, minute=5, day_of_week="mon-fri", timezone=_TZ),
-        id="sec_8k",
-        name="⑪ SEC 8-K Scanner (Mon-Fri 17:05 ET)",
-        misfire_grace_time=3600,
-        coalesce=True,
-    )
-
-    # ⑫ SEC Form 4 scanner — 17:45 ET Mon-Fri. Slotted between
-    # ② Anomaly Monitor (17:35) and ③/④ at 18:00 to avoid collision
-    # with ① Daily Screen (17:30) which the Stage-2 prompt didn't
-    # account for. P/S individual cards + same-day cluster cards;
-    # A/M/F/G/C noise codes archived for Phase 3.5 weekly digest.
-    scheduler.add_job(
-        sec_form4_job,
-        CronTrigger(hour=17, minute=45, day_of_week="mon-fri", timezone=_TZ),
-        id="sec_form4",
-        name="⑫ SEC Form 4 Scanner (Mon-Fri 17:45 ET)",
-        misfire_grace_time=3600,
-        coalesce=True,
-    )
-
-    # ⑫b Weekly insider activity digest — Fri 19:15 ET (Phase 3.5).
-    # Sits between ⑩ Portfolio Weekly (19:00) and ⑰ Macro Weekly (19:30).
-    # Aggregates past Mon-Fri's ⑫ Form 4 cron pushes from archive
-    # (title-only aggregation per Stage 0 Decision 4 — per-A/M/F/G/C
-    # breakdown deferred to Phase 3.5.5).
-    scheduler.add_job(
-        sec_insider_digest_job,
-        CronTrigger(hour=19, minute=15, day_of_week="fri", timezone=_TZ),
-        id="sec_insider_digest",
-        name="⑫b SEC Insider Digest (Fri 19:15 ET)",
-        misfire_grace_time=1800,
-        coalesce=True,
-    )
-
-    # P2 digest — 16:45 ET, just before the 17:00 cron block. Sweeps
-    # the previous day's P2 archive rows into one Telegram message.
+    # 📋 P2 digest — 16:45 ET Mon-Fri. Rolls the day's P2 archive rows from the
+    # core agents into one card so low-priority items don't spam.
     scheduler.add_job(
         p2_digest_job,
         CronTrigger(hour=16, minute=45, day_of_week="mon-fri", timezone=_TZ),
@@ -241,81 +100,8 @@ def build_scheduler() -> BlockingScheduler:
         coalesce=True,
     )
 
-    # ⑨b Positions snapshot — 16:25 ET Mon-Fri. Silent backend job:
-    # writes one row per holding to positions_snapshot table so ⑩ Fri
-    # 19:00 ET can compute per-position weekly attribution. No Telegram
-    # push. 5 min before ⑭ Macro Snapshot — strictly serial under the
-    # scheduler thread pool keeps log timestamps unambiguous when ops
-    # grep. Captures EOD positions after the 16:00 close (Alpaca
-    # account state is final by 16:15 even with after-hours feed lag).
-    scheduler.add_job(
-        positions_snapshot_job,
-        CronTrigger(hour=16, minute=25, day_of_week="mon-fri", timezone=_TZ),
-        id="positions_snapshot",
-        name="⑨b Positions Snapshot (Mon-Fri 16:25 ET)",
-        misfire_grace_time=600,
-        coalesce=True,
-    )
-
-    # ⑭ Macro daily snapshot — 16:30 ET Mon-Fri. Post-close ambient
-    # snapshot: VIX (yfinance) + DXY / WTI / Gold + Fed Funds / 2Y /
-    # 10Y / T10Y2Y (FRED). 4 pinned anomaly flags (vix_spike +20% /
-    # vix_elevated +10% / curve_flip / rates_shocked ≥20bps) bump
-    # priority via the kind enum (macro_vix_spike / macro_curve_flip
-    # / macro_snapshot_p3). 15 min before ⑥ P2 digest so the snapshot
-    # row can be picked up by the digest if it lands at P2.
-    scheduler.add_job(
-        macro_daily_snapshot_job,
-        CronTrigger(hour=16, minute=30, day_of_week="mon-fri", timezone=_TZ),
-        id="macro_snapshot",
-        name="⑭ Macro Daily Snapshot (Mon-Fri 16:30 ET)",
-        misfire_grace_time=3600,
-        coalesce=True,
-    )
-
-    # ⑮ Macro release scanner — 09:00 ET Mon-Fri. Gates internally on
-    # release_calendar.get_release_today(today_iso); non-release days
-    # exit silently with no archive write. On release days routes
-    # CPI/PCE/NFP/GDP/PPI through summarizer (Layer 1+2 defense) and
-    # FOMC through fomc_parser + tavily_consensus (never an LLM
-    # verdict for hawkish/dovish).
-    scheduler.add_job(
-        macro_release_job,
-        CronTrigger(hour=9, minute=0, day_of_week="mon-fri", timezone=_TZ),
-        id="macro_release",
-        name="⑮ Macro Release Scanner (Mon-Fri 09:00 ET)",
-        misfire_grace_time=1800,
-        coalesce=True,
-    )
-
-    # ⑯ Macro Initial Claims — Thu 09:30 ET. Deterministic Thursday
-    # cadence; no calendar lookup. build_claims_event surfaces the
-    # weekly print + 4-week MA smoothed level. Holiday weeks (Thanks-
-    # giving / year-end shift) where ICSA omits a print → silent skip.
-    scheduler.add_job(
-        macro_claims_job,
-        CronTrigger(hour=9, minute=30, day_of_week="thu", timezone=_TZ),
-        id="macro_claims",
-        name="⑯ Macro Initial Claims (Thu 09:30 ET)",
-        misfire_grace_time=3600,
-        coalesce=True,
-    )
-
-    # ⑰ Macro weekly recap — Fri 19:30 ET. Slot pinned by Stage 0
-    # design to clear ⑨ 18:30 / ⑩ 19:00. This-week fired releases
-    # + next-week schedule + 1W deltas on VIX / DGS10 / DGS2 / T10Y2Y.
-    # Always P1 floor (operator visibility — same posture as ⑩).
-    scheduler.add_job(
-        macro_weekly_job,
-        CronTrigger(hour=19, minute=30, day_of_week="fri", timezone=_TZ),
-        id="macro_weekly",
-        name="⑰ Macro Weekly Recap (Fri 19:30 ET)",
-        misfire_grace_time=7200,
-        coalesce=True,
-    )
-
-    # ⑥ Archive cleanup — sweep dashboard-feed rows past their 2-day TTL.
-    # 02:00 UTC chosen to avoid the 17:00–18:30 ET push window.
+    # ⑥ Archive cleanup — 02:00 ET daily. Sweeps dashboard-feed rows past their
+    # 2-day TTL so the archive doesn't grow unbounded.
     scheduler.add_job(
         archive_cleanup_job,
         CronTrigger(hour=2, minute=0, timezone=_TZ),
@@ -325,6 +111,22 @@ def build_scheduler() -> BlockingScheduler:
         coalesce=True,
     )
 
+    # ------------------------------------------------------------------
+    # DEMOTED to on-demand (bot pull) — no scheduled push anymore.
+    # Each fetches live when queried, so nothing here feeds a DB the bot
+    # depends on (/13f hits EDGAR live, /etf pulls the ARK CSV live, etc.).
+    # To re-enable a push, re-add an add_job (git history has the old
+    # schedules); the launcher scripts under scripts/ also still run manually.
+    #   ① Daily Screen           → scripts/daily_screen_to_telegram.py (manual; no bot cmd)
+    #   ③ Lateral Expansion      → /chain TICKER
+    #   ④ Institutional 13F      → /13f MANAGER          (live EDGAR)
+    #   ⑤ ETF Snapshot / ⑬ ARK   → /etf SYMBOL           (live ARK CSV)
+    #   ⑩ Portfolio Weekly / ⑨b  → /portfolio · /pnl · /risk
+    #   ⑪ SEC 8-K                → /8k TICKER            (live SEC)
+    #   ⑫ SEC Form 4 / ⑫b Digest → /insiders TICKER      (live SEC)
+    #   ⑭⑮⑯⑰ Macro              → /macro · /cpi · /fomc · /yields
+    #   ⑱ Money-Flow Divergence  → /flow TICKER
+    # ------------------------------------------------------------------
     return scheduler
 
 
