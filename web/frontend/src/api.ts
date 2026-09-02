@@ -4,7 +4,9 @@ import type {
   HistoryResp,
   MacroResp,
   PortfolioResp,
+  RecommendationsResp,
   RiskResp,
+  TickerTapeResp,
 } from "./types";
 
 const TOKEN_KEY = "ownerToken";
@@ -51,6 +53,14 @@ export function getHistory(period: string): Promise<HistoryResp> {
 
 export function getFlowStatus(tickers: string[]): Promise<FlowStatusResp> {
   return req<FlowStatusResp>(`/api/flow_status?tickers=${encodeURIComponent(tickers.join(","))}`);
+}
+
+export function getTickerTape(): Promise<TickerTapeResp> {
+  return req<TickerTapeResp>("/api/tickertape");
+}
+
+export function getRecommendations(): Promise<RecommendationsResp> {
+  return req<RecommendationsResp>("/api/recommendations");
 }
 
 export function postChat(text: string): Promise<ChatResp> {

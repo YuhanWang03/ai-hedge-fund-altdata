@@ -160,3 +160,87 @@ async def flow_status(tickers: str = Query("")) -> dict:
         return await run_in_threadpool(_fetch_flow, syms)
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc))
+
+
+# --------------------------------------------------------------------------
+# Ticker tape — a curated set of market levels for the scrolling strip.
+# --------------------------------------------------------------------------
+
+# yfinance symbols. Treasury yields deliberately excluded here (Yahoo returns
+# 10× wrong values) — the 10Y is appended from FRED below.
+_TAPE_SYMBOLS = [
+    ("SPY", "标普500"), ("QQQ", "纳指100"), ("DIA", "道指"),
+    ("IWM", "罗素2000"), ("SOXX", "半导体"), ("^VIX", "VIX"),
+    ("GC=F", "黄金"), ("CL=F", "原油"), ("DX-Y.NYB", "美元"),
+    ("BTC-USD", "比特币"),
+]
+
+
+def _fetch_tape() -> dict:
+    from v2.macro.market_client import _safe_quote
+
+    items: list[dict] = []
+    for sym, label in _TAPE_SYMBOLS:
+        q = _safe_quote(sym)
+        if q and q.get("value") is not None:
+            items.append({"label": label, "value": q["value"],
+                          "change_pct": q.get("pct_change_1d"), "unit": ""})
+
+    # 10Y yield from FRED (Yahoo's ^TNX is unreliable).
+    try:
+        from v2.macro.fred_client import get_latest_value
+        y10 = get_latest_value("DGS10")
+        if y10 is not None:
+            items.append({"label": "美债10Y", "value": float(y10),
+                          "change_pct": None, "unit": "%"})
+    except Exception:
+        pass
+
+    return {"items": items}
+
+
+@router.get("/tickertape", dependencies=[Depends(require_owner)])
+async def tickertape() -> dict:
+    try:
+        return await run_in_threadpool(_fetch_tape)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+
+# --------------------------------------------------------------------------
+# Recommendations — TECH_30 money-flow accumulation scan (吸筹榜). Honest
+# labeling: these show accumulation signals, not a buy call.
+# --------------------------------------------------------------------------
+
+def _fetch_recommendations() -> dict:
+    from v2.data import CachedFDClient
+    from v2.moneyflow import DEFAULT_CONFIG, detect_divergence
+    from v2.screening import TECH_30
+
+    today = date.today()
+    start = (today - timedelta(days=120)).isoformat()
+    out: list[dict] = []
+    with CachedFDClient() as fd:
+        for t in TECH_30:
+            try:
+                prices = fd.get_prices(t, start, today.isoformat())
+                sig = detect_divergence(t, prices, DEFAULT_CONFIG)
+            except Exception:
+                continue
+            if sig and sig.kind == "accumulation":
+                out.append({
+                    "ticker": t, "strength": sig.strength,
+                    "cmf": sig.cmf, "rsi": sig.rsi,
+                    "rsi_divergence": sig.rsi_divergence,
+                })
+    # strong first, then by money-flow strength (CMF desc)
+    out.sort(key=lambda x: (x["strength"] != "strong", -(x["cmf"] or 0)))
+    return {"items": out}
+
+
+@router.get("/recommendations", dependencies=[Depends(require_owner)])
+async def recommendations() -> dict:
+    try:
+        return await run_in_threadpool(_fetch_recommendations)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc))

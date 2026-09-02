@@ -3,9 +3,10 @@ import { getFlowStatus, getPortfolio, getRisk } from "../api";
 import type { FlowStatusResp, PortfolioResp, RiskResp } from "../types";
 import EquityCurve from "./EquityCurve";
 import KpiStrip from "./KpiStrip";
-import MacroStrip from "./MacroStrip";
 import PositionsTable from "./PositionsTable";
 import RiskCard from "./RiskCard";
+import Recommendations from "./Recommendations";
+import TickerTape from "./TickerTape";
 
 export default function Dashboard({
   refreshKey,
@@ -36,7 +37,7 @@ export default function Dashboard({
 
   return (
     <div className="p-4 space-y-3 overflow-y-auto h-full">
-      <MacroStrip refreshKey={refreshKey} />
+      <TickerTape refreshKey={refreshKey} />
       <KpiStrip risk={risk} />
       <EquityCurve refreshKey={refreshKey} />
       <RiskCard risk={risk} />
@@ -48,6 +49,7 @@ export default function Dashboard({
       ) : (
         <PositionsTable positions={pf?.positions || []} flow={flow} onPick={onPick} />
       )}
+      <Recommendations refreshKey={refreshKey} onPick={onPick} />
     </div>
   );
 }

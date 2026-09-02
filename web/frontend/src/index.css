@@ -13,3 +13,18 @@
   border-radius: 4px;
   font-size: 0.9em;
 }
+
+/* Scrolling ticker tape — items rendered twice, track translates -50% to loop. */
+@keyframes ticker-scroll {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+.ticker-track {
+  display: inline-flex;
+  white-space: nowrap;
+  animation: ticker-scroll 45s linear infinite;
+  will-change: transform;
+}
+.ticker-mask:hover .ticker-track {
+  animation-play-state: paused;
+}

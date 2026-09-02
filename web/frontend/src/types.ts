@@ -92,3 +92,24 @@ export interface FlowStatus {
   rsi: number | null;
 }
 export type FlowStatusResp = Record<string, FlowStatus>;
+
+export interface TickerItem {
+  label: string;
+  value: number;
+  change_pct: number | null;
+  unit: string;
+}
+export interface TickerTapeResp {
+  items: TickerItem[];
+}
+
+export interface Recommendation {
+  ticker: string;
+  strength: string;
+  cmf: number;
+  rsi: number;
+  rsi_divergence: string;
+}
+export interface RecommendationsResp {
+  items: Recommendation[];
+}
