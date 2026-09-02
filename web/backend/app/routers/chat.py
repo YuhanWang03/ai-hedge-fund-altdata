@@ -7,6 +7,7 @@ a threadpool to keep the event loop free.
 
 from __future__ import annotations
 
+import asyncio
 import html as _html
 import logging
 
@@ -18,6 +19,11 @@ from app.auth import require_owner
 
 router = APIRouter(prefix="/api", tags=["chat"])
 logger = logging.getLogger("web.chat")
+
+# A responder that reaches a slow/unreachable external API (Tavily / OpenAI
+# embeddings) could otherwise hang the request forever. Cap it.
+_CLASSIFY_TIMEOUT = 25
+_DISPATCH_TIMEOUT = 45
 
 
 class ChatIn(BaseModel):
@@ -34,10 +40,24 @@ async def chat(body: ChatIn) -> dict:
         parsed = parse_slash(body.text)
         if parsed is None:
             from v2.bot.intent import classify
-            parsed = await run_in_threadpool(classify, body.text)
+            parsed = await asyncio.wait_for(
+                run_in_threadpool(classify, body.text), timeout=_CLASSIFY_TIMEOUT,
+            )
 
-        result = await run_in_threadpool(dispatch, parsed)
+        result = await asyncio.wait_for(
+            run_in_threadpool(dispatch, parsed), timeout=_DISPATCH_TIMEOUT,
+        )
         return {"intent": parsed.get("intent"), "args": parsed, **result}
+    except asyncio.TimeoutError:
+        logger.warning("chat timed out for %r", body.text)
+        return {
+            "intent": "timeout",
+            "html": (
+                "⏱ 查询超时（某个外部数据源响应过慢）。<br>"
+                "「为什么涨/跌」需要连 Tavily / OpenAI，本机网络可能受阻；"
+                "可改用 <code>/flow</code>、左侧面板，或把网页部署到 VPS。"
+            ),
+        }
     except Exception as exc:
         # Surface the real error instead of an opaque 500 (full traceback
         # goes to the uvicorn console).
