@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { postChat } from "../api";
 import type { ChatResp } from "../types";
 
@@ -10,11 +10,17 @@ interface Msg {
 
 const SUGGESTIONS = ["微软资金流怎么样", "我的当日盈亏", "NVDA 为什么动", "特斯拉最近财报"];
 
-export default function ChatPanel() {
+export default function ChatPanel({ inject }: { inject?: { text: string; nonce: number } | null }) {
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
+
+  // Fire a command injected from the dashboard (e.g. clicking a position).
+  useEffect(() => {
+    if (inject?.text) send(inject.text);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inject?.nonce]);
 
   async function send(q: string) {
     const query = q.trim();

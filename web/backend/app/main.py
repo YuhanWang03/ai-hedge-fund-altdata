@@ -14,7 +14,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import SETTINGS
-from app.routers import chat, health, portfolio
+from app.routers import chat, dashboard, health, portfolio
 
 app = FastAPI(title="AI Hedge Fund · Web", version="0.1.0")
 
@@ -29,3 +29,4 @@ app.add_middleware(
 app.include_router(health.router)
 app.include_router(chat.router)
 app.include_router(portfolio.router)
+app.include_router(dashboard.router)

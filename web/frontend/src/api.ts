@@ -1,4 +1,11 @@
-import type { ChatResp, PortfolioResp } from "./types";
+import type {
+  ChatResp,
+  FlowStatusResp,
+  HistoryResp,
+  MacroResp,
+  PortfolioResp,
+  RiskResp,
+} from "./types";
 
 const TOKEN_KEY = "ownerToken";
 
@@ -28,6 +35,22 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 
 export function getPortfolio(): Promise<PortfolioResp> {
   return req<PortfolioResp>("/api/portfolio");
+}
+
+export function getRisk(): Promise<RiskResp> {
+  return req<RiskResp>("/api/risk");
+}
+
+export function getMacro(): Promise<MacroResp> {
+  return req<MacroResp>("/api/macro");
+}
+
+export function getHistory(period: string): Promise<HistoryResp> {
+  return req<HistoryResp>(`/api/history?period=${encodeURIComponent(period)}`);
+}
+
+export function getFlowStatus(tickers: string[]): Promise<FlowStatusResp> {
+  return req<FlowStatusResp>(`/api/flow_status?tickers=${encodeURIComponent(tickers.join(","))}`);
 }
 
 export function postChat(text: string): Promise<ChatResp> {
