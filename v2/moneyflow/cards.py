@@ -27,8 +27,13 @@ def format_signal_card(signal: MoneyFlowSignal, *, price_window: int = 20) -> st
     kind_zh = _KIND_ZH.get(signal.kind, signal.kind)
     strength_zh = _STRENGTH_ZH.get(signal.strength, signal.strength)
 
+    # Only surface the RSI-divergence chip when it *confirms* the verdict —
+    # a bullish divergence on a distribution card (or vice-versa) would read
+    # as self-contradictory. Such opposing divergences never drive the
+    # strength grade either (see detector), so hiding them here is honest.
+    _confirming = {"accumulation": "bullish", "distribution": "bearish"}
     div_suffix = ""
-    if signal.rsi_divergence in _DIVERGENCE_ZH:
+    if signal.rsi_divergence == _confirming.get(signal.kind):
         div_suffix = f" · {_DIVERGENCE_ZH[signal.rsi_divergence]}"
 
     lines = [
