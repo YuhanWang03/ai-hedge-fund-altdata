@@ -6,13 +6,13 @@ Built as a portfolio project to demonstrate end-to-end ownership of a multi-sour
 
 [中文版 README](./README_zh.md)
 
-**Hero numbers**: 10 phases shipped · 21 cron jobs · 23 NL intents · 5-layer defense · 474 sandbox tests · **~$22/month** total ops cost
+**Hero numbers**: 10 phases shipped · 22 cron jobs · 24 NL intents · 5-layer defense · 490 sandbox tests · **~$22/month** total ops cost
 
 ---
 
 ## What it does
 
-Three concurrent services on a single $6/month VPS — **Scheduler** (21 cron jobs spanning 08:00–21:00 ET) + **Streamer** (minute-level intraday alert + anomaly scan) + **Telegram Bot** (25 slash + 23-intent NL). All three share 7 SQLite databases (WAL) + ChromaDB.
+Three concurrent services on a single $6/month VPS — **Scheduler** (22 cron jobs spanning 08:00–21:00 ET) + **Streamer** (minute-level intraday alert + anomaly scan) + **Telegram Bot** (26 slash + 24-intent NL). All three share 7 SQLite databases (WAL) + ChromaDB.
 
 ### Scheduled pushes (Cron Jobs full table)
 
@@ -32,6 +32,7 @@ Sorted by US/Eastern time (agent details in [## Feature Reference](#feature-refe
 | **17:05 ET** · mon-fri | ⑪ | SEC 8-K Scanner | Today's 8-K + 24-item priority + 5.02 LLM NER | SEC · ✅ |
 | **17:30 ET** · mon-fri | ① | Daily Screen | TECH_30 hard-rule screen + sector benchmark | Early signals · ✅ |
 | **17:35 ET** · mon-fri | ② | Anomaly Monitor | Anomaly detect + Tavily multi-source attribution + Verifier | Early signals · ✅ |
+| **17:40 ET** · mon-fri | ⑱ | Money-Flow Divergence | TECH_30 CMF/RSI vs price divergence (吸筹/派发), strong→P1 | Early signals · ✅ |
 | **17:45 ET** · mon-fri | ⑫ | SEC Form 4 Scanner | Insider P/S individual + same-day ≥3 distinct cluster | SEC · ✅ |
 | **18:00 ET** · **mon** | ③ | Lateral Expansion | LLM supply-chain lateral + Tavily co-occurrence verify | Early signals · ✅ |
 | **18:00 ET** · **tue/fri** | ④ | Institutional 13F | 10 manager quarterly holdings + diff (CUSIP-aggregated) | Early signals · ✅ |
@@ -67,7 +68,7 @@ Runs in parallel to the scheduler. Polls every 60s during 9:30–16:00 ET Mon-Fr
 
 ### Telegram interactive query
 
-24/7 long-polling bot, single-user (chat-ID filter), 25 slash + 23 NL intents + 10 manager aliases. Details: [## Feature Reference → Telegram interface](#telegram-interface-details).
+24/7 long-polling bot, single-user (chat-ID filter), 26 slash + 24 NL intents + 10 manager aliases. Details: [## Feature Reference → Telegram interface](#telegram-interface-details).
 
 | Category | Slash | NL example |
 |---|---|---|
@@ -77,6 +78,7 @@ Runs in parallel to the scheduler. Polls every 60s during 9:30–16:00 ET Mon-Fr
 | Account | `/portfolio`, `/pnl [day\|week\|month]`, `/risk` | `我的当日盈亏`, `组合风险怎么样` |
 | Earnings | `/earnings AAPL`, `/earnings` (calendar) | `苹果什么时候发财报` |
 | SEC | `/8k TICKER`, `/insiders TICKER [days]` | `NVDA 内部人交易` |
+| Money Flow | `/flow TICKER` | `MSFT 资金流怎么样`, `微软是不是主力吸筹` |
 | Macro | `/macro`, `/cpi`, `/fomc`, `/yields` | `宏观怎么样`, `最近 CPI` |
 
 NL classifier: DeepSeek temperature=0 + JSON + **whitelist enum validation** — outside-whitelist → `unknown` (bounded behavior).
@@ -88,7 +90,7 @@ NL classifier: DeepSeek temperature=0 + JSON + **whitelist enum validation** —
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │                     hedge-fund-scheduler.service                 │
-│                       (21 cron jobs · see table below)           │
+│                       (22 cron jobs · see table below)           │
 └──────────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────────┐
@@ -106,7 +108,7 @@ NL classifier: DeepSeek temperature=0 + JSON + **whitelist enum validation** —
                               │
 ┌──────────────────────────────────────────────────────────────────┐
 │                      hedge-fund-bot.service                      │
-│  25 slash commands + 23 NL intents · DeepSeek T=0 · strict-enum  │
+│  26 slash commands + 24 NL intents · DeepSeek T=0 · strict-enum  │
 └──────────────────────────────────────────────────────────────────┘
 
 External: financialdatasets.ai · yfinance · SEC EDGAR · ARK CSV CDN
@@ -141,12 +143,13 @@ Base score + metadata adjustments: held +15, watchlist +10, surprise ≥10% +15,
 
 ## Feature Reference
 
-Deep-dive on the three functional modules: **Cron Agents** (21 jobs organized by family — each section has data sources, trigger logic, priority ladder, output examples, bot interface) + **Intraday Streamer** (A user alerts + B auto-scan) + **Telegram interface** (full slash list + 23 NL examples + manager aliases).
+Deep-dive on the three functional modules: **Cron Agents** (22 jobs organized by family — each section has data sources, trigger logic, priority ladder, output examples, bot interface) + **Intraday Streamer** (A user alerts + B auto-scan) + **Telegram interface** (full slash list + 24 NL examples + manager aliases).
 
-### Five early post-market agents
+### Six early post-market agents
 
 - **① Daily Screen (Mon-Fri 17:30 ET)** — TECH_30 hard-rule screen + 9 qualitative tags + LLM Template-Fill narration (numbers Python-injected) + sector-relative chips + Tavily news.
 - **② Anomaly Monitor (Mon-Fri 17:35 ET)** — volume spikes (≥3× 30d) / 52-week extremes / insider clusters. Per anomaly: sector chip + multi-source attribution (Tavily → Verifier tier scoring → Generator with Tier 1+2 only) → persists to ChromaDB with deterministic ID `{ticker}_{date}`.
+- **⑱ Money-Flow Divergence (Mon-Fri 17:40 ET)** — TECH_30 three-axis divergence: price trend vs money flow (Chaikin Money Flow proxy) vs momentum (RSI). Deterministic truth-table verdict — accumulation (疑似吸筹) / distribution (疑似派发) — with LLM filling only the qualitative bull/bear. `strong` → immediate P1; `moderate` → daily digest. Pull twin: `/flow TICKER` + NL (`微软是不是主力吸筹`). Proxy indicator, not tick-level flow — every card carries that disclaimer.
 - **③ Lateral Expansion (Mon 18:00 ET)** — anomaly seeds → DeepSeek proposes supply-chain neighbors → Tavily co-occurrence verification → market cap / revenue / margin thresholds.
 - **④ Institutional 13F (Tue/Fri 18:00 ET) + ④b Backfill (Sun 18:30 ET)** — 10 famous managers (Berkshire, Burry, Ackman, Einhorn, Renaissance, Two Sigma, D.E. Shaw, Citadel, Coatue, ARK). QoQ diffs → 新进/加仓/减仓/清仓 → DeepSeek 10-word interpretations. **Tracks $1.29T AUM × 17,329 positions**.
 - **⑤ ETF Daily Snapshot (Mon-Fri 17:00 ET)** — silently fetches 4 ARK funds' (ARKK/ARKW/ARKG/ARKF) daily CSVs to `etf.db.snapshots`. Per-(fund, date, ticker) time series enabling **24-hour rebalance detection** (vs 45-day 13F lag). Underlying data for ⑬.
@@ -330,7 +333,7 @@ Typical fire:
 
 ### Telegram interface details
 
-NL layer classifies free-form text into **23 canonical intents** via DeepSeek temperature=0 + JSON output + whitelist enum validation. Outside-whitelist → `unknown` (bounded behavior).
+NL layer classifies free-form text into **24 canonical intents** via DeepSeek temperature=0 + JSON output + whitelist enum validation. Outside-whitelist → `unknown` (bounded behavior).
 
 #### Slash commands (full list)
 
@@ -339,12 +342,13 @@ NL layer classifies free-form text into **23 canonical intents** via DeepSeek te
 - **Alerts**: `/alert NVDA 130 above` · `/alerts` · `/alert_remove ID`
 - **Account**: `/portfolio` · `/pnl [day|week|month]` · `/risk`
 - **SEC**: `/8k TICKER` (8-K + 5.02 NER) · `/insiders TICKER [days]` (bounded 7-365)
+- **Money Flow**: `/flow TICKER` (CMF/RSI vs price divergence — 吸筹/派发; always shows the 3-axis read even when no verdict fires)
 - **Macro**: `/macro` (dashboard) · `/cpi` · `/fomc` · `/yields`
 - **Meta**: `/settings`, `/help`, `/start`
 
-#### Natural-language examples (all 23 intents)
+#### Natural-language examples (all 24 intents)
 
-`NVDA 为什么跌？` → `explain_move` · NVDA; `看看 AAPL 怎么样` → `summary` · AAPL; `找一下 AMD 的产业链` → `chain` · AMD; `巴菲特最近买了什么` → `thirteen_f` · brk; `谁持有 NVDA` → `holders_view` · NVDA; `Cathie 今天买啥` → `etf_view` · ARKK; `提醒我 NVDA 突破 130` → `alert_set` · NVDA · 130 · above; `我设了哪些提醒` → `alert_list`; `看看 Alpaca 持仓` → `portfolio_view`; `我的当日盈亏` → `pnl_view`; `我关注了哪些股票` → `watchlist_view`; `最近有什么异动` → `find_anomalies`; `苹果什么时候发财报` → `earnings_view` · AAPL; `下周谁要发财报` → `earnings_calendar` · days_horizon=7; `组合风险怎么样` → `risk_view`; `这周亏了多少` → `pnl_period` · period=week; `本月赚了多少` → `pnl_period` · period=month; `AAPL 最近 8-K` → `eight_k_view` · AAPL; `NVDA 内部人交易` → `insider_view` · NVDA; `NVDA 过去 30 天 insider` → `insider_view` · NVDA · days_back=30; `宏观怎么样` → `macro_view`; `最近 CPI 数据` → `release_check` · release_type=cpi; `上次 FOMC 怎么说` → `release_check` · release_type=fomc; `NFP data this month` → `release_check` · release_type=nfp; `今天天气怎么样` → `unknown`.
+`NVDA 为什么跌？` → `explain_move` · NVDA; `看看 AAPL 怎么样` → `summary` · AAPL; `找一下 AMD 的产业链` → `chain` · AMD; `巴菲特最近买了什么` → `thirteen_f` · brk; `谁持有 NVDA` → `holders_view` · NVDA; `Cathie 今天买啥` → `etf_view` · ARKK; `提醒我 NVDA 突破 130` → `alert_set` · NVDA · 130 · above; `我设了哪些提醒` → `alert_list`; `看看 Alpaca 持仓` → `portfolio_view`; `我的当日盈亏` → `pnl_view`; `我关注了哪些股票` → `watchlist_view`; `最近有什么异动` → `find_anomalies`; `苹果什么时候发财报` → `earnings_view` · AAPL; `下周谁要发财报` → `earnings_calendar` · days_horizon=7; `组合风险怎么样` → `risk_view`; `这周亏了多少` → `pnl_period` · period=week; `本月赚了多少` → `pnl_period` · period=month; `AAPL 最近 8-K` → `eight_k_view` · AAPL; `NVDA 内部人交易` → `insider_view` · NVDA; `NVDA 过去 30 天 insider` → `insider_view` · NVDA · days_back=30; `宏观怎么样` → `macro_view`; `最近 CPI 数据` → `release_check` · release_type=cpi; `上次 FOMC 怎么说` → `release_check` · release_type=fomc; `NFP data this month` → `release_check` · release_type=nfp; `微软是不是主力吸筹` → `moneyflow_view` · MSFT; `美光资金流入还是流出` → `moneyflow_view` · MU; `今天天气怎么样` → `unknown`.
 
 #### Manager aliases (10 supported)
 
@@ -392,7 +396,7 @@ v2/
 ├── reporting/                      # formatters + notifier + priority + 8 4-layer shims
 ├── memory/  archive/  bot/  scheduler/  observability/         # ChromaDB + SQLite log + bot + APScheduler + trace SDK
 
-scripts/  (21 cron + 3 service entrypoints — names match the time table above)
+scripts/  (22 cron + 3 service entrypoints — names match the time table above)
 ```
 
 ---
@@ -450,7 +454,7 @@ WantedBy=multi-user.target
 
 ## Testing
 
-**474 sandbox unit tests, organized by family**:
+**490 sandbox unit tests, organized by family**:
 
 | Family | Count | Coverage |
 |---|---|---|
@@ -459,13 +463,14 @@ WantedBy=multi-user.target
 | SEC (⑪⑫⑫b + 10-Q) | **131** | smoke 21+20 / priority 21 / byte-equal 15+5 / HTML safety 8 / cron integration 20+10 / bot responder 11 |
 | Macro (⑭⑮⑯⑰) | **112** | smoke 40 / priority 16 / byte-equal 16 / HTML safety 9 / bot responder 9 / cron integration 22 |
 | ARK (⑬) | **35** | smoke 16 / byte-equal + HTML + shim 11 / cron integration 8 |
+| Money Flow (⑱) | **16** | indicators CMF/RSI 7 / detector truth-table 5 / read_axes 2 / view card 2 |
 | Cross-cutting | **60+** | archive migration 9 / intent classify 33 / base priority 18 / observability 13 |
 
 **Architecture guard tests**: regression tests pin `v2/bot/responders.py` + `scripts/*_to_telegram.py` to forbid inline `_format_*` private helpers. All crons must `from v2.reporting import` via public API. Prevents future "convenient inline" rollbacks from undoing the lift-and-shift work.
 
 **Byte-equal pin** (24+ cases across 8 formatter families): every public formatter (`format_earnings_*` / `format_portfolio_*` / `format_sec_*` / `format_macro_*` / `format_ark_*`) is locked byte-equal under multiple fixture × case combos. Cron push == bot response == formatter output.
 
-All 474 tests pass under `pytest` in the sandbox environment with no v2.data deps required (production-only deps are stubbed via sys.modules).
+All 490 tests pass under `pytest` in the sandbox environment with no v2.data deps required (production-only deps are stubbed via sys.modules).
 
 ---
 
@@ -475,7 +480,7 @@ All 474 tests pass under `pytest` in the sandbox environment with no v2.data dep
 
 **CUSIP aggregation in 13F parsing** — Berkshire holds AAPL across three subsidiaries (BHRG, GEICO, National Indemnity) as separate rows with identical CUSIP. Naive `INSERT OR REPLACE` would silently drop two of three. We aggregate at the EDGAR parser layer. **Berkshire's AAPL stake reads $57.8B (22%) instead of the wrong $958M of whichever fragment landed last.**
 
-**Strict-enum intent classification** — 23 intents, JSON output validated against whitelist set, anything else → `unknown`. **The LLM never decides what to *say*, only which tool to *call*.** The point of this system is grounded, multi-source, verified output.
+**Strict-enum intent classification** — 24 intents, JSON output validated against whitelist set, anything else → `unknown`. **The LLM never decides what to *say*, only which tool to *call*.** The point of this system is grounded, multi-source, verified output.
 
 **Atomic alert firing + sector-benchmark moat** — streamer's `alert_fire_check` runs `UPDATE alerts SET fired_at=? WHERE id=? AND fired_at IS NULL`; one-shot semantics enforced at SQL layer. Pre-fetched 3 ETF series (SPY/XLK/SMH) per agent run give every anomaly a relative-strength chip without LLM tokens.
 
@@ -497,7 +502,7 @@ DigitalOcean 1 GB droplet **$6.00** + financialdatasets.ai cached **~$15** + Dee
 
 ## Roadmap
 
-### ✅ Shipped (Phase 0–5a)
+### ✅ Shipped (Phase 0–6)
 
 | Phase | Description |
 |---|---|
@@ -511,6 +516,7 @@ DigitalOcean 1 GB droplet **$6.00** + financialdatasets.ai cached **~$15** + Dee
 | **Phase 4** | Macro Agent (⑭⑮⑯⑰ + `/macro` + `/cpi` + `/fomc` + `/yields`) + FRED+yfinance hybrid + LLM 4-layer defense |
 | **Phase 4.5-mini** | FD → yfinance daily-prices migration (`PriceSource` Protocol + `V2_PRICE_SOURCE=fd` fallback) |
 | **Phase 5a** | ⑬ ARK Rebalance Alerts (Mon-Fri 08:30 ET) + multi-fund coordination + reuses v2/etf/ |
+| **Phase 6** | ⑱ Money-Flow Divergence (Mon-Fri 17:40 ET + `/flow` + NL) — price/CMF/RSI 3-axis truth-table → accumulation/distribution verdict + LLM Template-Fill narration |
 | **Cross-cutting** | Web dashboard (FastAPI + React + Tailwind + trace replay); observability SDK |
 
 ### ⏳ Deferred — waiting on real data / trigger conditions
@@ -543,6 +549,6 @@ Migration system audit; GitHub Actions CI (pytest on main); multi-user support; 
 
 ## Credits · License
 
-The repository's outer layout and the original educational `app/` directory come from [virattt/ai-hedge-fund](https://github.com/virattt/ai-hedge-fund), an open-source AI hedge fund concept project. The `v2/` directory — the entire alternative-data agent system described in this README (21 cron jobs, intraday streamer, Telegram bot with 23 NL intents, 5 hallucination-defense mechanisms, push-priority system, all SQLite + ChromaDB stores, all systemd deployment scaffolding) — was built from scratch as a separate project on top of that foundation.
+The repository's outer layout and the original educational `app/` directory come from [virattt/ai-hedge-fund](https://github.com/virattt/ai-hedge-fund), an open-source AI hedge fund concept project. The `v2/` directory — the entire alternative-data agent system described in this README (22 cron jobs, intraday streamer, Telegram bot with 24 NL intents, 5 hallucination-defense mechanisms, push-priority system, all SQLite + ChromaDB stores, all systemd deployment scaffolding) — was built from scratch as a separate project on top of that foundation.
 
 License: **MIT**, educational project, **not investment advice**.
