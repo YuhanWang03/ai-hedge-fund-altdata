@@ -15,8 +15,8 @@ export default function Recommendations({
 
   useEffect(() => {
     let alive = true;
-    setItems(null);
     setErr("");
+    // Keep the old list visible while re-scanning (no flicker on auto-refresh).
     getRecommendations()
       .then((d) => alive && setItems(d.items))
       .catch((e) => alive && setErr(String(e.message || e)));

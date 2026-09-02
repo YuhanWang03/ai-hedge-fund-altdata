@@ -10,9 +10,11 @@ import TickerTape from "./TickerTape";
 
 export default function Dashboard({
   refreshKey,
+  recoKey,
   onPick,
 }: {
   refreshKey: number;
+  recoKey: number;
   onPick: (ticker: string) => void;
 }) {
   const [pf, setPf] = useState<PortfolioResp | null>(null);
@@ -49,7 +51,7 @@ export default function Dashboard({
       ) : (
         <PositionsTable positions={pf?.positions || []} flow={flow} onPick={onPick} />
       )}
-      <Recommendations refreshKey={refreshKey} onPick={onPick} />
+      <Recommendations refreshKey={recoKey} onPick={onPick} />
     </div>
   );
 }
