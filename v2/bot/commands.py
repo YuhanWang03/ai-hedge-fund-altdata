@@ -462,6 +462,32 @@ async def cmd_8k(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 @authorized_only
+async def cmd_flow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """``/flow TICKER`` — on-demand money-flow divergence (CMF/RSI vs price).
+
+    Always shows the three-axis read; adds an accumulation/distribution
+    verdict + LLM 多空 narration when a divergence fires. ~3-6s (one FD
+    price call + optional DeepSeek narration).
+    """
+    if not context.args:
+        await update.message.reply_html(
+            "用法：<code>/flow TICKER</code>\n例：<code>/flow MSFT</code>"
+        )
+        return
+    ticker = context.args[0].upper()
+    placeholder = await update.message.reply_html(
+        f"📊 分析 <b>{html.escape(ticker)}</b> 资金流背离...\n"
+        "<i>价格 / CMF / RSI 三轴（预计 3-6 秒）</i>"
+    )
+    result = await _run_blocking(
+        responders.moneyflow_view, {"ticker": ticker},
+    )
+    await placeholder.edit_text(
+        result, parse_mode="HTML", disable_web_page_preview=True,
+    )
+
+
+@authorized_only
 async def cmd_macro(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """``/macro`` — real-time macro dashboard.
 
@@ -615,6 +641,7 @@ _INTENT_DISPLAY = {
     "insider_view":     "📥 内部人交易",
     "macro_view":       "🌐 宏观 dashboard",
     "release_check":    "📈 宏观 release",
+    "moneyflow_view":   "📊 资金流背离",
     "unknown":          "❓ 未识别",
 }
 
@@ -871,6 +898,19 @@ async def cmd_nl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if release_type:
                 args_d2["release_type"] = release_type
             result = await _run_blocking(responders.release_check, args_d2)
+            await placeholder.edit_text(routing_chip + result, parse_mode="HTML",
+                                         disable_web_page_preview=True)
+
+        elif name == "moneyflow_view":
+            if not ticker:
+                await placeholder.edit_text(
+                    routing_chip + "❓ 没说要看哪只股票的资金流。",
+                    parse_mode="HTML",
+                )
+                return
+            result = await _run_blocking(
+                responders.moneyflow_view, {"ticker": ticker},
+            )
             await placeholder.edit_text(routing_chip + result, parse_mode="HTML",
                                          disable_web_page_preview=True)
 

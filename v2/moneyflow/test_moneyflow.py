@@ -10,7 +10,8 @@ import types
 
 import pytest
 
-from v2.moneyflow.detector import detect_divergence
+from v2.moneyflow.cards import format_view_card
+from v2.moneyflow.detector import detect_divergence, read_axes
 from v2.moneyflow.indicators import (
     chaikin_money_flow,
     rsi,
@@ -127,3 +128,48 @@ def test_no_divergence_when_price_and_flow_agree():
 def test_none_on_insufficient_history():
     closes = [100.0] * 10
     assert detect_divergence("EEE", _bars(closes, "inflow"), CFG) is None
+
+
+# --------------------------------------------------------------------------
+# read_axes (bot pull path) — always returns a reading when data suffices,
+# even when no verdict fires
+# --------------------------------------------------------------------------
+
+def test_read_axes_returns_reading_even_without_verdict():
+    # steady uptrend + inflow → no divergence verdict, but the raw read
+    # must still be available for the on-demand bot card.
+    closes = [100.0 + 0.5 * i for i in range(60)]
+    reading = read_axes("FFF", _bars(closes, "inflow"), CFG)
+    assert reading is not None
+    assert reading.price_state == "up"
+    assert reading.flow_state == "inflow"
+    assert 0 <= reading.rsi <= 100
+    # and detect_divergence agrees there's no clean verdict here
+    assert detect_divergence("FFF", _bars(closes, "inflow"), CFG) is None
+
+
+def test_read_axes_none_on_short_history():
+    assert read_axes("GGG", _bars([100.0] * 10, "inflow"), CFG) is None
+
+
+# --------------------------------------------------------------------------
+# view card (bot)
+# --------------------------------------------------------------------------
+
+def test_view_card_no_verdict_states_plainly():
+    closes = [100.0 + 0.5 * i for i in range(60)]
+    reading = read_axes("FFF", _bars(closes, "inflow"), CFG)
+    card = format_view_card(reading, None)
+    assert "资金流分析 · FFF" in card
+    assert "无明显量价背离" in card
+    assert "CMF" in card and "RSI" in card
+
+
+def test_view_card_with_verdict_shows_kind_and_narration():
+    closes = [100.0] * 40 + [100.0 + 0.1 * i for i in range(1, 21)]
+    sig = detect_divergence("BBB", _bars(closes, "outflow"), CFG)
+    assert sig is not None
+    sig.bull, sig.bear = "或为获利了结", "高位量能背离，承接乏力"
+    card = format_view_card(sig, sig)
+    assert "疑似派发/出货" in card
+    assert "空头视角" in card

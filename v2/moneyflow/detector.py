@@ -25,7 +25,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from v2.moneyflow.indicators import chaikin_money_flow, rsi_series, window_return
-from v2.moneyflow.models import DivergenceConfig, MoneyFlowSignal
+from v2.moneyflow.models import DivergenceConfig, MoneyFlowReading, MoneyFlowSignal
 
 
 def _rsi_zone(value: float, cfg: DivergenceConfig) -> str:
@@ -63,15 +63,16 @@ def _rsi_divergence(closes: Sequence[float], cfg: DivergenceConfig) -> str:
     return "none"
 
 
-def detect_divergence(
+def read_axes(
     ticker: str,
     prices,
     cfg: DivergenceConfig,
-) -> MoneyFlowSignal | None:
-    """Return a MoneyFlowSignal, or None when there's no clean divergence.
+) -> MoneyFlowReading | None:
+    """Compute the three-axis read (price / CMF / RSI), independent of verdict.
 
-    ``prices`` is a chronological list of OHLCV bars (objects with
-    .high/.low/.close/.volume — e.g. v2.data.models.Price).
+    Returns None only when there isn't enough data to judge. ``prices`` is a
+    chronological list of OHLCV bars (objects with .high/.low/.close/.volume
+    — e.g. v2.data.models.Price).
     """
     if len(prices) < cfg.min_history:
         return None
@@ -88,7 +89,6 @@ def detect_divergence(
         return None
     rsi_val = series[-1]
 
-    # ---- classify the three axes ----
     if price_ret > cfg.flat_band:
         price_state = "up"
     elif price_ret < -cfg.flat_band:
@@ -103,30 +103,7 @@ def detect_divergence(
     else:
         flow_state = "neutral"
 
-    rsi_zone = _rsi_zone(rsi_val, cfg)
-    divergence = _rsi_divergence(closes, cfg)
-
-    # ---- combine via the truth table ----
-    if flow_state == "inflow" and price_state in ("flat", "down"):
-        kind = "accumulation"
-        if rsi_zone in ("oversold", "low") or divergence == "bullish":
-            strength = "strong"
-        elif rsi_zone == "neutral":
-            strength = "moderate"
-        else:  # high / overbought — price weak but momentum hot: contradictory
-            return None
-    elif flow_state == "outflow" and price_state in ("flat", "up"):
-        kind = "distribution"
-        if rsi_zone in ("high", "overbought") or divergence == "bearish":
-            strength = "strong"
-        elif rsi_zone == "neutral":
-            strength = "moderate"
-        else:  # oversold / low — more likely a washout than distribution
-            return None
-    else:
-        return None
-
-    return MoneyFlowSignal(
+    return MoneyFlowReading(
         ticker=ticker,
         price=float(closes[-1]),
         price_return=float(price_ret),
@@ -134,8 +111,39 @@ def detect_divergence(
         cmf=float(cmf),
         flow_state=flow_state,
         rsi=float(rsi_val),
-        rsi_zone=rsi_zone,
-        rsi_divergence=divergence,
-        kind=kind,
-        strength=strength,
+        rsi_zone=_rsi_zone(rsi_val, cfg),
+        rsi_divergence=_rsi_divergence(closes, cfg),
     )
+
+
+def _verdict(reading: MoneyFlowReading, cfg: DivergenceConfig) -> tuple[str, str] | None:
+    """Apply the truth table to a reading → (kind, strength) or None."""
+    if reading.flow_state == "inflow" and reading.price_state in ("flat", "down"):
+        if reading.rsi_zone in ("oversold", "low") or reading.rsi_divergence == "bullish":
+            return "accumulation", "strong"
+        if reading.rsi_zone == "neutral":
+            return "accumulation", "moderate"
+        return None  # high / overbought — price weak but momentum hot: contradictory
+    if reading.flow_state == "outflow" and reading.price_state in ("flat", "up"):
+        if reading.rsi_zone in ("high", "overbought") or reading.rsi_divergence == "bearish":
+            return "distribution", "strong"
+        if reading.rsi_zone == "neutral":
+            return "distribution", "moderate"
+        return None  # oversold / low — more likely a washout than distribution
+    return None
+
+
+def detect_divergence(
+    ticker: str,
+    prices,
+    cfg: DivergenceConfig,
+) -> MoneyFlowSignal | None:
+    """Return a MoneyFlowSignal, or None when there's no clean divergence."""
+    reading = read_axes(ticker, prices, cfg)
+    if reading is None:
+        return None
+    verdict = _verdict(reading, cfg)
+    if verdict is None:
+        return None
+    kind, strength = verdict
+    return MoneyFlowSignal(**reading.model_dump(), kind=kind, strength=strength)

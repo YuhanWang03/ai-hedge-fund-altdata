@@ -47,6 +47,7 @@ IntentName = Literal[
     "insider_view",
     "macro_view",
     "release_check",
+    "moneyflow_view",
     "unknown",
 ]
 
@@ -74,6 +75,7 @@ _VALID_INTENTS = {
     "insider_view",
     "macro_view",
     "release_check",
+    "moneyflow_view",
     "unknown",
 }
 
@@ -132,6 +134,10 @@ _SYSTEM_PROMPT = (
     "- release_check: 用户想看某类宏观 release 的最新数据（CPI / PCE / NFP / GDP / PPI / Claims / FOMC）。"
     "例：「最近 CPI」「上次 FOMC」「NFP 数据」「PCE 通胀」「GDP 怎么样」"
     "「claims 失业」「最近的 Fed 决议」\n"
+    "- moneyflow_view: 用户想看某只股票的资金流入/流出与股价是否背离"
+    "（吸筹 / 派发 / 洗盘 / 出货 / 主力资金 / 量价背离 / CMF / 资金面）。"
+    "例：「MSFT 资金流怎么样」「微软是不是有主力在吸筹」「美光是不是在出货」"
+    "「NVDA 资金流入还是流出」「苹果量价背离吗」「特斯拉资金面」\n"
     "- unknown: 都不匹配 / 含糊不清 / 与股票无关\n"
     "\n"
     "【参数提取规则】\n"

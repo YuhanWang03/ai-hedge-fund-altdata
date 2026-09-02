@@ -78,6 +78,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("risk", commands.cmd_risk))
     app.add_handler(CommandHandler("8k", commands.cmd_8k))
     app.add_handler(CommandHandler("insiders", commands.cmd_insiders))
+    app.add_handler(CommandHandler("flow", commands.cmd_flow))
 
     # Phase 4 macro commands
     app.add_handler(CommandHandler("macro", commands.cmd_macro))

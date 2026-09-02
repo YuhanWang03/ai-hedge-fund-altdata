@@ -39,9 +39,13 @@ class DivergenceConfig(BaseModel):
     min_history: int = 40           # need at least this many bars to judge
 
 
-class MoneyFlowSignal(BaseModel):
-    """One ticker's divergence verdict. Numbers filled by the detector;
-    bull/bear filled by the narrator."""
+class MoneyFlowReading(BaseModel):
+    """The three-axis read for one ticker, independent of any verdict.
+
+    Always populated when there's enough data — used by the bot's on-demand
+    query so a user who asks about a specific ticker sees the raw price /
+    money-flow / momentum picture even when no divergence verdict fires.
+    """
 
     ticker: str
     price: float
@@ -55,6 +59,13 @@ class MoneyFlowSignal(BaseModel):
     rsi: float                      # 0-100
     rsi_zone: str                   # oversold|low|neutral|high|overbought
     rsi_divergence: str             # "none" | "bullish" | "bearish"
+
+
+class MoneyFlowSignal(MoneyFlowReading):
+    """A reading that resolved to an accumulation/distribution verdict.
+
+    Numbers come from the detector; bull/bear come from the narrator.
+    """
 
     kind: str                       # "accumulation" | "distribution"
     strength: str                   # "strong" | "moderate"

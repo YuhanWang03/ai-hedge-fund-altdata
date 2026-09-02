@@ -1003,6 +1003,75 @@ def insider_view(args: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
+# /flow TICKER — on-demand money-flow divergence (⑱ pull interface)
+# ---------------------------------------------------------------------------
+
+
+def moneyflow_view(args: dict) -> str:
+    """Single-ticker money-flow divergence card, computed on demand.
+
+    args: ``{"ticker": "MSFT"}``
+
+    Pull-semantics twin of the ⑱ cron: always shows the three-axis read
+    (price / CMF / RSI) even when no divergence fires, and adds the
+    verdict + LLM 多空 narration when one does. Read-only — never writes
+    archive, never computes priority (bot surface, not push surface).
+    """
+    from datetime import date, timedelta
+
+    from v2.moneyflow import (
+        DEFAULT_CONFIG,
+        detect_divergence,
+        format_view_card,
+        narrate,
+        read_axes,
+    )
+
+    ticker = str(args.get("ticker") or "").strip().upper()
+    if not _is_valid_ticker(ticker):
+        return (
+            f"<b>🚫 无效 ticker: {html.escape(ticker or '(empty)')}</b>\n"
+            "请使用美股 ticker（1-5 大写字母，如 <code>MSFT</code>）"
+        )
+
+    today = date.today()
+    history_start = (today - timedelta(days=120)).isoformat()
+
+    try:
+        with CachedFDClient() as fd:
+            prices = fd.get_prices(ticker, history_start, today.isoformat())
+    except Exception as exc:
+        logger.exception("moneyflow_view: FD fetch failed for %s", ticker)
+        return f"❌ 行情查询失败: <code>{html.escape(str(exc))}</code>"
+
+    reading = read_axes(ticker, prices, DEFAULT_CONFIG)
+    if reading is None:
+        return (
+            f"<b>📊 资金流分析 · {html.escape(ticker)}</b>\n"
+            "数据不足（需要约 60 个交易日的日线），暂无法计算。"
+        )
+
+    signal = detect_divergence(ticker, prices, DEFAULT_CONFIG)
+    if signal is not None:
+        # Fill 多空 narration for the fired verdict (best-effort; the card
+        # renders fine number-only if DeepSeek fails).
+        narrations, _ = narrate([signal])
+        note = narrations.get(ticker) or {}
+        signal.bull = note.get("bull", "")
+        signal.bear = note.get("bear", "")
+
+    emit("render", card="moneyflow_view_card",
+         ticker=ticker,
+         has_divergence=signal is not None,
+         kind=getattr(signal, "kind", None),
+         strength=getattr(signal, "strength", None))
+
+    return format_view_card(
+        reading, signal, price_window=DEFAULT_CONFIG.price_window,
+    )
+
+
+# ---------------------------------------------------------------------------
 # /macro + /cpi + /pce + /nfp + /fomc + /yields — Phase 4 Stage 4
 # ---------------------------------------------------------------------------
 # Read-only contract: no archive write, no priority computed, no LLM
