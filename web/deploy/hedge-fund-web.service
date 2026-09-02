@@ -1,0 +1,29 @@
+[Unit]
+Description=AI Hedge Fund Web (FastAPI — operational panel + chat)
+After=network-online.target hedge-fund-bot.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/hedge-fund
+Environment="PATH=/root/.local/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="PYTHONPATH=/root/hedge-fund/web/backend:/root/hedge-fund"
+Environment="WEB_ARCHIVE_DB=/root/hedge-fund/data/archive.db"
+# .env supplies FD / DeepSeek / Alpaca / Tavily / OpenAI keys + V2_PRICE_SOURCE.
+# web.env supplies WEB_OWNER_TOKEN (kept out of journalctl).
+EnvironmentFile=-/root/hedge-fund/.env
+EnvironmentFile=-/etc/hedge-fund/web.env
+ExecStart=/root/.local/bin/poetry run uvicorn app.main:app \
+    --app-dir web/backend \
+    --host 127.0.0.1 \
+    --port 8100 \
+    --proxy-headers \
+    --forwarded-allow-ips=127.0.0.1
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:/root/hedge-fund/logs/web.log
+StandardError=append:/root/hedge-fund/logs/web.err
+
+[Install]
+WantedBy=multi-user.target
