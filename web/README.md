@@ -15,8 +15,11 @@ not reimplement any trading logic.
 ## Status
 
 - ✅ **Phase 1** — backend skeleton + chat pipe (`/api/chat`)
-- ⬜ **Phase 2** — panel endpoints (portfolio / risk / watchlist / signals feed)
-- ⬜ **Phase 3** — interactive money-flow charts + polish + VPS deploy
+- ✅ **Phase 2 (MVP)** — two-pane React frontend + `/api/portfolio` (equity /
+  intraday P&L / positions / 1M equity sparkline). Chat renders responder
+  cards + money-flow charts inline.
+- ⬜ **Next** — more panel cards (risk / watchlist / signals feed), interactive
+  money-flow charts, VPS deploy (systemd + nginx)
 
 ## Layout
 
@@ -52,6 +55,17 @@ curl -s http://127.0.0.1:8100/api/chat \
   -H 'Content-Type: application/json' -H 'X-Owner-Token: dev' \
   -d '{"text":"微软资金流怎么样"}' | jq
 ```
+
+## Run the frontend (local)
+
+```bash
+cd web/frontend
+npm install
+npm run dev          # → http://127.0.0.1:5173  (proxies /api to :8100)
+```
+
+Open the page, paste your `WEB_OWNER_TOKEN` into the header box (if auth is on),
+click 保存. Left pane = portfolio; right pane = chat.
 
 ## Env
 

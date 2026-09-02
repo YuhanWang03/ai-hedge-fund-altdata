@@ -1,0 +1,15 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Responder cards come back as Telegram-style HTML with \n newlines. */
+.card-html {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.card-html code {
+  background: rgba(148, 163, 184, 0.18);
+  padding: 0 4px;
+  border-radius: 4px;
+  font-size: 0.9em;
+}
