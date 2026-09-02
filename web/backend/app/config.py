@@ -11,8 +11,15 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 # Repo root = .../ai-hedge-fund-v2 (this file is web/backend/app/config.py)
 _REPO_ROOT = Path(__file__).resolve().parents[3]
+
+# Load the repo's .env so the v2 responders / broker see their credentials
+# (FINANCIAL_DATASETS / DEEPSEEK / APCA_* / FRED / TAVILY). uvicorn doesn't
+# do this for us. Existing os.environ values win (override=False).
+load_dotenv(_REPO_ROOT / ".env")
 
 
 @dataclass(frozen=True)
