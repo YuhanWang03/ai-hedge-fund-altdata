@@ -34,9 +34,9 @@ if str(_REPO_ROOT) not in sys.path:
 @dataclass
 class _Price:
     """Sandbox-only Price stub. Field shape mirrors production's
-    v2.data.models.Price (Stage 0 audit confirmed: date / open / high /
-    low / close / volume, all required)."""
-    date: date
+    v2.data.models.Price: time (ISO str) / open / high / low / close /
+    volume."""
+    time: str
     open: float
     high: float
     low: float
@@ -138,10 +138,10 @@ def test_yfinance_price_source_returns_real_data():
                             date(2026, 6, 3), date(2026, 6, 4))
     assert len(prices) == 2
     # Sorted ascending by date
-    assert prices[0].date < prices[1].date
+    assert prices[0].time < prices[1].time
     # Schema check — all 6 fields populated
     p0 = prices[0]
-    assert p0.date == date(2026, 6, 3)
+    assert p0.time == "2026-06-03"
     assert p0.open == 100.0
     assert p0.high == 102.0
     assert p0.low == 99.5
@@ -232,7 +232,7 @@ def test_fd_price_source_delegates_to_client():
     class _FakeFD:
         def get_prices(self, ticker, start, end):
             calls.append((ticker, start, end))
-            return [_Price(date=date(2026, 6, 4),
+            return [_Price(time="2026-06-04",
                            open=100.0, high=101.0, low=99.0,
                            close=100.5, volume=1_000_000)]
 
@@ -240,7 +240,7 @@ def test_fd_price_source_delegates_to_client():
     out = src.get_prices("AAPL", "2026-06-01", "2026-06-04")
     assert calls == [("AAPL", "2026-06-01", "2026-06-04")]
     assert len(out) == 1
-    assert out[0].date == date(2026, 6, 4)
+    assert out[0].time == "2026-06-04"
 
 
 # ---------------------------------------------------------------------------

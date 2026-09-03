@@ -180,8 +180,12 @@ class YFinancePriceSource:
         for idx, row in df.iterrows():
             try:
                 row_date = idx.date() if hasattr(idx, "date") else idx
+                row_time = (
+                    row_date.isoformat() if hasattr(row_date, "isoformat")
+                    else str(row_date)
+                )
                 prices.append(Price(
-                    date=row_date,
+                    time=row_time,   # Price model field is `time` (ISO str), not `date`
                     open=float(row["Open"]),
                     high=float(row["High"]),
                     low=float(row["Low"]),
@@ -195,7 +199,7 @@ class YFinancePriceSource:
                 )
                 continue
 
-        return sorted(prices, key=lambda p: p.date)
+        return sorted(prices, key=lambda p: p.time)
 
 
 def _is_nan(v) -> bool:
