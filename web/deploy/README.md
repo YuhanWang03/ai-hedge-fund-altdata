@@ -20,8 +20,9 @@ git pull
 ## 2. Backend deps + owner token
 
 ```bash
-# fastapi/uvicorn into the project's poetry env (once)
-poetry run pip install fastapi "uvicorn[standard]"
+# fastapi/uvicorn into the project's poetry env (once).
+# Use poetry's full path — a non-login SSH shell doesn't have ~/.local/bin on PATH.
+/root/.local/bin/poetry run pip install fastapi "uvicorn[standard]"
 
 mkdir -p /root/hedge-fund/logs
 sudo mkdir -p /etc/hedge-fund
