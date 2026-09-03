@@ -70,12 +70,28 @@ class FDPriceSource:
     Constructor signature accepts any object with a ``.get_prices``
     method so callers can wire :class:`v2.data.CachedFDClient` or the
     raw :class:`v2.data.FDClient` interchangeably.
+
+    ``max_lookback_days``: FD's ``/prices`` free tier returns at most ~100
+    bars, OLDEST-first, for the requested range — so a long window (e.g.
+    400d) yields the oldest 100 bars and a "latest" close that's *months*
+    stale (the bug that made summary/explain_move show a 9-month-old NVDA
+    price under the escape hatch). When set, the window is clamped to the
+    most-recent slice so the latest bar is actually current. Backtest /
+    event-study construct ``FDPriceSource(fd)`` without it and are unaffected.
     """
 
-    def __init__(self, fd_client) -> None:
+    def __init__(self, fd_client, max_lookback_days: int | None = None) -> None:
         self._fd = fd_client
+        self._max_lookback_days = max_lookback_days
 
     def get_prices(self, ticker: str, start: Any, end: Any) -> list[Price]:
+        if self._max_lookback_days is not None:
+            end_d = _coerce_date(end)
+            start_d = _coerce_date(start)
+            if end_d is not None:
+                floor = end_d - timedelta(days=self._max_lookback_days)
+                if start_d is None or start_d < floor:
+                    start = floor.isoformat()
         return self._fd.get_prices(ticker, start, end)
 
 
@@ -191,6 +207,20 @@ def _is_nan(v) -> bool:
         return False
 
 
+def _coerce_date(d: Any) -> date | None:
+    """Accept ISO str / date / datetime → date, or None if unparseable."""
+    if isinstance(d, datetime):
+        return d.date()
+    if isinstance(d, date):
+        return d
+    if isinstance(d, str):
+        try:
+            return date.fromisoformat(d[:10])
+        except ValueError:
+            return None
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
@@ -206,7 +236,11 @@ def default_price_source() -> PriceSource:
     """
     if os.environ.get("V2_PRICE_SOURCE", "").strip().lower() == "fd":
         from v2.data import CachedFDClient
-        return FDPriceSource(CachedFDClient())
+        # Clamp to the most-recent ~130 calendar days (~90 trading bars, under
+        # FD's 100-bar cap) so the latest bar is current, not the oldest-100 of
+        # a long window. Enough history for volatility / 1w-return / recent
+        # high; the escape hatch trades 52w-high precision for a correct price.
+        return FDPriceSource(CachedFDClient(), max_lookback_days=130)
     return YFinancePriceSource()
 
 
