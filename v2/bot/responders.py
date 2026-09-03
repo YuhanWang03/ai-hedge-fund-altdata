@@ -144,8 +144,8 @@ def summary(ticker: str) -> str:
             # Insider activity (latest 30 days)
             insider_lines = _insider_snippet(ticker, fd, today_str)
 
-            # Recent news (7 days, top 3)
-            headlines = fetch_news_headlines(ticker, max_results=3)
+            # Recent news — FD structured, junk-filtered, dated (Tavily fallback)
+            headlines = _recent_news(ticker, fd, today_str)
     except Exception as exc:
         logger.exception("summary failed for %s", ticker)
         return f"❌ Error: <code>{html.escape(str(exc))}</code>"
@@ -196,14 +196,78 @@ def summary(ticker: str) -> str:
     # News
     if headlines:
         lines.append("")
-        lines.append("<b>📰 近期新闻（7 天）</b>")
+        lines.append("<b>📰 近期新闻（14 天）</b>")
         for h in headlines[:3]:
             title = html.escape((h.get("title") or "")[:90])
-            lines.append(f"   • {title}")
+            d = h.get("date") or ""
+            dstr = f"[{d[5:10]}] " if len(d) >= 10 else ""       # MM-DD
+            src = h.get("source") or ""
+            srcstr = f" · <i>{html.escape(src)}</i>" if src else ""
+            lines.append(f"   • {dstr}{title}{srcstr}")
 
     emit("render", card="summary_card",
          ticker=ticker, num_news=len(headlines or []))
     return "\n".join(lines)
+
+
+def _is_junk_headline(title: str) -> bool:
+    """Heuristics for aggregator/SEO page titles that aren't real stories.
+
+    Filters e.g. 'NVDA News | NVIDIA CORP (NASDAQ:NVDA)' and bare
+    '{ticker} Stock' page titles that FD/Tavily sometimes surface.
+    """
+    t = (title or "").strip()
+    low = t.lower()
+    if len(t) < 25:
+        return True
+    if " | " in t:                       # site/page-title separator, not a headline
+        return True
+    if low.endswith(" news") or low.endswith(" stock") or low.endswith(" quote"):
+        return True
+    return False
+
+
+def _recent_news(ticker: str, fd, today_iso: str, *, days: int = 14, top: int = 3) -> list[dict]:
+    """Recent company news via FD's structured /news (title + date + source),
+    junk-filtered + deduped. Falls back to the Tavily provider if FD is empty."""
+    start = (date.fromisoformat(today_iso) - timedelta(days=days)).isoformat()
+    try:
+        # FD's /news caps limit at 10 (≥20 → 400). 10 most-recent is plenty
+        # after junk-filtering down to the top 3.
+        items = fd.get_news(ticker, end_date=today_iso, start_date=start, limit=10)
+    except Exception:
+        items = []
+
+    out: list[dict] = []
+    seen: set[str] = set()
+    for n in items or []:
+        title = (getattr(n, "title", "") or "").strip()
+        if not title or _is_junk_headline(title):
+            continue
+        src = (getattr(n, "source", "") or "").strip()
+        # Drop a redundant trailing "… - Source" attribution (shown separately).
+        for sep in (" - ", " – ", " — "):
+            if src and title.endswith(sep + src):
+                title = title[: -(len(sep) + len(src))].strip()
+                break
+        key = title.lower()[:60]
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({
+            "title": title[:100],
+            "date": (getattr(n, "date", "") or "")[:10],
+            "source": src[:24],
+        })
+        if len(out) >= top:
+            break
+
+    if not out:  # FD had nothing usable — fall back to the Tavily provider
+        for h in fetch_news_headlines(ticker, max_results=top):
+            title = (h.get("title") or "").strip()
+            if title and not _is_junk_headline(title):
+                out.append({"title": title[:100], "date": "", "source": ""})
+    return out
 
 
 def _insider_snippet(ticker: str, fd, asof: str) -> list[str]:
