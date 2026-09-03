@@ -460,12 +460,17 @@ def format_anomaly_alert(anomaly: Anomaly) -> str:
 
     sources_block: list[str] = []
     if anomaly.sources:
-        sources_block.append("")
-        sources_block.append("<b>来源：</b>")
+        src_lines: list[str] = []
         for s in anomaly.sources:
+            if " | " in (s.title or ""):      # skip aggregator page titles
+                continue
             title = html.escape(s.title)[:55] or "link"
             url = html.escape(s.url)
-            sources_block.append(f'• <a href="{url}">{title}</a>')
+            src_lines.append(f'• <a href="{url}">{title}</a>')
+        if src_lines:
+            sources_block.append("")
+            sources_block.append("<b>来源：</b>")
+            sources_block.extend(src_lines)
 
     footer = (
         f"<i>🔧 Tavily ×{anomaly.tavily_calls} · "

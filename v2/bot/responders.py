@@ -64,6 +64,7 @@ logger = logging.getLogger(__name__)
 def explain_move(ticker: str) -> str:
     """Build an on-demand Anomaly for *ticker* and run the full attribution chain."""
     ticker = ticker.upper()
+    news: list[dict] = []
     try:
         with CachedFDClient() as fd:
             anomaly = _build_query_anomaly(ticker, fd)
@@ -77,11 +78,17 @@ def explain_move(ticker: str) -> str:
             except Exception:
                 memory = None
             attribute(anomaly, fd_client=fd, memory=memory)
+            # Clean FD structured news alongside the Tavily attribution.
+            news = _recent_news(ticker, fd, date.today().isoformat())
     except Exception as exc:
         logger.exception("explain_move failed for %s", ticker)
         return f"❌ Error: <code>{html.escape(str(exc))}</code>"
 
-    return format_anomaly_alert(anomaly)
+    card = format_anomaly_alert(anomaly)
+    news_lines = _news_block(news, header="📰 近期新闻")
+    if news_lines:
+        card += "\n" + "\n".join(news_lines)
+    return card
 
 
 def _build_query_anomaly(ticker: str, fd: CachedFDClient) -> Anomaly | None:
@@ -193,17 +200,8 @@ def summary(ticker: str) -> str:
         lines.append("<b>👥 内部人活动（近 30 日）</b>")
         lines.extend(insider_lines)
 
-    # News
-    if headlines:
-        lines.append("")
-        lines.append("<b>📰 近期新闻（14 天）</b>")
-        for h in headlines[:3]:
-            title = html.escape((h.get("title") or "")[:90])
-            d = h.get("date") or ""
-            dstr = f"[{d[5:10]}] " if len(d) >= 10 else ""       # MM-DD
-            src = h.get("source") or ""
-            srcstr = f" · <i>{html.escape(src)}</i>" if src else ""
-            lines.append(f"   • {dstr}{title}{srcstr}")
+    # News — FD structured, junk-filtered, dated
+    lines.extend(_news_block(headlines))
 
     emit("render", card="summary_card",
          ticker=ticker, num_news=len(headlines or []))
@@ -268,6 +266,21 @@ def _recent_news(ticker: str, fd, today_iso: str, *, days: int = 14, top: int = 
             if title and not _is_junk_headline(title):
                 out.append({"title": title[:100], "date": "", "source": ""})
     return out
+
+
+def _news_block(headlines: list[dict], header: str = "📰 近期新闻（14 天）") -> list[str]:
+    """Render dated/sourced news headlines as HTML lines. Empty if no news."""
+    if not headlines:
+        return []
+    lines = ["", f"<b>{header}</b>"]
+    for h in headlines[:3]:
+        title = html.escape((h.get("title") or "")[:90])
+        d = h.get("date") or ""
+        dstr = f"[{d[5:10]}] " if len(d) >= 10 else ""      # MM-DD
+        src = h.get("source") or ""
+        srcstr = f" · <i>{html.escape(src)}</i>" if src else ""
+        lines.append(f"   • {dstr}{title}{srcstr}")
+    return lines
 
 
 def _insider_snippet(ticker: str, fd, asof: str) -> list[str]:
