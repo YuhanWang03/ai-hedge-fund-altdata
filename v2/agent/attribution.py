@@ -44,11 +44,28 @@ _ENTITY_ARGS = ("ticker", "symbol", "manager")
 _ENTITY_MENTION = re.compile(
     r"\b[A-Z]{2,5}\b|巴菲特|伯克希尔|木头姐|[Bb]uffett|[Bb]urry|BERKSHIRE")
 
-#: Filing identifiers that read as numbers but name a document, not a quantity:
-#: 8-K, 10-Q, 13F, Item 5.02. Masked out before extraction, on both sides, so
-#: "SMCI 的 8-K 查询超时" cannot be read as attributing the value 8 to SMCI.
+#: Text that reads as a number but names something — a document, a date, a
+#: countdown. Masked out before extraction, on both sides.
+#:
+#: Filings first: 8-K, 10-Q, 13F, Item 5.02, so 「SMCI 的 8-K 查询超时」 cannot
+#: be read as attributing the value 8 to SMCI.
+#:
+#: Then dates, which is the expensive one. A hyphen in front of a day of the
+#: month is a *minus sign* to any number extractor, so the earnings calendar
+#:
+#:     · MU：09-30      · LRCX：10-21      · INTC：10-22
+#:
+#: hands MU the value -30, LRCX the value -21, INTC -22 — and the answer's own
+#: correct list then reads as four misattributions against its neighbours.
+#: Seen live, on a list where every single row was right.
+#:
+#: D-74 (days to the next report) is the same shape and the same mistake.
 _FILING_TOKEN = re.compile(
-    r"\b\d{1,2}-[A-Z]\b|\b\d{1,2}[FKQ]\b|(?:[Ii]tem|[Ss]ection)\s*\d+(?:\.\d+)?")
+    r"\b\d{4}-\d{1,2}-\d{1,2}\b"          # 2026-11-17
+    r"|\b\d{1,2}-\d{1,2}\b"                # 10-21, 09-30
+    r"|\b[A-Z]-\d{1,4}\b"                   # D-74
+    r"|\b\d{1,2}-[A-Z]\b|\b\d{1,2}[FKQ]\b"
+    r"|(?:[Ii]tem|[Ss]ection)\s*\d+(?:\.\d+)?")
 
 #: The 13F tool takes an alias while answers use the Chinese name; without
 #: normalising, every figure next to 「巴菲特」 looks misattributed away from
@@ -132,7 +149,8 @@ class AttributionReport:
         if self.misattributed:
             pairs = ", ".join(f"{entity}←{figure}(实为 {'/'.join(owners)})"
                               for entity, figure, owners in self.misattributed[:3])
-            parts.append(f"{len(self.misattributed)} 处张冠李戴：{pairs}")
+            more = "…" if len(self.misattributed) > 3 else ""
+            parts.append(f"{len(self.misattributed)} 处张冠李戴：{pairs}{more}")
         if self.empty_presented:
             pairs = ", ".join(f"{e}←{f}" for e, f in self.empty_presented[:3])
             parts.append(f"{len(self.empty_presented)} 处「无数据主体被写成有数据」：{pairs}")
@@ -247,7 +265,10 @@ def _window_end(text: str, start: int, limit: int) -> int:
 
 
 def _mask_filings(text: str) -> str:
-    """Blank out filing identifiers so they are not read as quantities."""
+    """Blank out filings, dates and countdowns so they are not read as values.
+
+    Equal-length spaces, so every offset downstream still lines up.
+    """
     return _FILING_TOKEN.sub(lambda m: " " * len(m.group(0)), text or "")
 
 
