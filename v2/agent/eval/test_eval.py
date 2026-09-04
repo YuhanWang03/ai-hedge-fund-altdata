@@ -242,6 +242,32 @@ def test_ctrl_c_still_stops_the_sweep():
     raise AssertionError("KeyboardInterrupt 被吞掉了，Ctrl-C 将无法中止长跑")
 
 
+def test_repeats_separate_stable_failures_from_flaky_ones():
+    """Two sweeps of the identical config shared only 9 of 25 failures, so a
+    single run cannot tell 'broken' from 'unlucky'. This is the mechanism."""
+    from v2.agent.eval.scoring import SuiteReport
+
+    case = _CASE_BY_ID["m01"]
+    good = score_case(case, mode="agent", answer="CRWD SMCI 2026-09-06",
+                      tools_called=["earnings_calendar"])
+    bad = score_case(case, mode="agent", answer="没查到",
+                     tools_called=["earnings_calendar"])
+    other = _CASE_BY_ID["m02"]
+    always_bad = score_case(other, mode="agent", answer="", tools_called=[])
+
+    report = SuiteReport(mode="agent", repeat=2,
+                         scores=[good, bad, always_bad, always_bad])
+    assert report.stability() == {"m01": (1, 2), "m02": (0, 2)}
+    assert report.stable_failures() == ["m02"]
+    assert report.flaky() == [("m01", 1, 2)]
+
+
+def test_repeat_is_skipped_for_the_deterministic_baseline():
+    report = runner.run_suite("baseline", llm_factory=lambda: ScriptedLLM([]),
+                              cases=CASES[:5], workers=1, repeat=3)
+    assert report.repeat == 1 and len(report.scores) == 5, "基线是确定性的，重复纯属浪费"
+
+
 def test_suite_runs_every_case_once():
     report = runner.run_suite("baseline", llm_factory=lambda: ScriptedLLM([]),
                               cases=CASES[:10], workers=1)

@@ -39,6 +39,9 @@ OUT = "data/eval.json"
 CATEGORY = None                            # 例如 ["ranking", "multi_hop"] 只跑某几类
 LIMIT = None                               # 例如 10，快速冒烟
 FAILURES = 20                              # 打印多少条失败明细
+REPEAT = 1                                 # 每条跑几次。改代码前建议设 3，
+                                           # 否则分不清真失败和抖动（实测单轮失败
+                                           # 清单里约 2/3 是噪声）
 
 
 def _needs_llm(modes: list[str]) -> bool:
@@ -56,6 +59,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", default=OUT, help="把逐条结果写成 JSON")
     parser.add_argument("--failures", type=int, default=FAILURES,
                         help="打印多少条失败明细")
+    parser.add_argument("--repeat", type=int, default=REPEAT,
+                        help="每条 case 跑几次，用于区分真失败与抖动")
     args = parser.parse_args(argv)
 
     # Load .env the same way the comparison CLI does.
@@ -86,7 +91,9 @@ def main(argv: list[str] | None = None) -> int:
 
     done = 0
     lock = threading.Lock()
-    total_runs = len(cases) * len(modes)
+    agent_modes = sum(1 for m in modes if runner.MODES[m].kind != "baseline")
+    baseline_modes = len(modes) - agent_modes
+    total_runs = len(cases) * (agent_modes * max(args.repeat, 1) + baseline_modes)
 
     def _progress(score) -> None:
         nonlocal done
@@ -101,7 +108,8 @@ def main(argv: list[str] | None = None) -> int:
     for mode in modes:
         workers = 1 if runner.MODES[mode].kind == "baseline" else args.workers
         reports.append(runner.run_suite(mode, llm_factory=build_llm, cases=cases,
-                                        workers=workers, on_case=_progress))
+                                        workers=workers, repeat=args.repeat,
+                                        on_case=_progress))
     print("\r".ljust(70) + f"\r完成，用时 {time.time() - started:.1f}s\n")
 
     print(runner.render_comparison(reports))
@@ -115,6 +123,8 @@ def main(argv: list[str] | None = None) -> int:
         if report.ungrounded_breakdown():
             print()
             print(runner.render_grounding(report))
+    print()
+    print(runner.render_stability(reports[-1]))
     print()
     print(runner.render_overspend(reports[-1]))
     print()

@@ -179,6 +179,26 @@ class SuiteReport:
     def pass_rate(self) -> float:
         return self.passed / self.total if self.total else 0.0
 
+    #: How many times each case was run (1 unless the sweep asked for repeats).
+    repeat: int = 1
+
+    def stability(self) -> dict[str, tuple[int, int]]:
+        """case_id -> (times passed, times run)."""
+        out: dict[str, tuple[int, int]] = {}
+        for score in self.scores:
+            passed, total = out.get(score.case_id, (0, 0))
+            out[score.case_id] = (passed + (1 if score.passed else 0), total + 1)
+        return out
+
+    def stable_failures(self) -> list[str]:
+        """Cases that failed every time — the ones worth acting on."""
+        return sorted(cid for cid, (p, n) in self.stability().items() if p == 0)
+
+    def flaky(self) -> list[tuple[str, int, int]]:
+        """Cases that passed sometimes and failed others."""
+        return sorted((cid, p, n) for cid, (p, n) in self.stability().items()
+                      if 0 < p < n)
+
     def by_category(self) -> dict[str, tuple[int, int]]:
         out: dict[str, tuple[int, int]] = {}
         for category in CATEGORIES:
@@ -210,6 +230,9 @@ class SuiteReport:
             "median_latency_ms": _median(latency),
             # The metric that decides whether a mode is worth its cost.
             "tokens_per_pass": (sum(tokens) / passed) if passed else float("inf"),
+            "repeat": self.repeat,
+            "stable_failures": len(self.stable_failures()),
+            "flaky": len(self.flaky()),
         }
 
     def ungrounded_breakdown(self) -> dict[str, int]:

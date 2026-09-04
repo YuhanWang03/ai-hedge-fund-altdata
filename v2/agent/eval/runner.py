@@ -127,10 +127,24 @@ def run_suite(
     llm_factory: Callable[[], Any],
     cases: tuple[EvalCase, ...] = CASES,
     workers: int = 4,
+    repeat: int = 1,
     on_case: Callable[[CaseScore], None] | None = None,
 ) -> SuiteReport:
+    """Run every case under one mode, optionally several times.
+
+    Repeats exist because two sweeps of the identical configuration scored the
+    same 66/83 while sharing only 9 of 25 distinct failures — roughly two thirds
+    of a single run's failure list is noise. Acting on one run therefore means
+    spending effort on cases that were never broken. Separating a stable failure
+    from a flaky one needs more than one sample, and nothing else can substitute.
+
+    The baseline is deterministic, so repeating it would only cost wall-clock.
+    """
     mode = MODES[mode_name]
-    report = SuiteReport(mode=mode_name)
+    if mode.kind == "baseline":
+        repeat = 1
+    report = SuiteReport(mode=mode_name, repeat=repeat)
+    work = [c for c in cases for _ in range(repeat)]
 
     def _work(case: EvalCase) -> CaseScore:
         score = run_case(case, mode, llm_factory=llm_factory)
@@ -139,10 +153,10 @@ def run_suite(
         return score
 
     if workers <= 1:
-        report.scores = [_work(c) for c in cases]
+        report.scores = [_work(c) for c in work]
     else:
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            report.scores = list(pool.map(_work, cases))
+            report.scores = list(pool.map(_work, work))
     return report
 
 
@@ -194,16 +208,44 @@ def render_categories(reports: list[SuiteReport]) -> str:
     return "\n".join(lines)
 
 
+def render_stability(report: SuiteReport) -> str:
+    """Separate real failures from run-to-run noise."""
+    if report.repeat <= 1:
+        return (_RULE + f"\n【{report.mode} 稳定性】\n" + _RULE +
+                "\n  只跑了一轮 —— 无法区分真失败和抖动。"
+                "\n  同配置两轮实测：分数相同，但 25 条不同的失败里只有 9 条重合（36%）。"
+                "\n  要据此改代码，请用 --repeat 3。")
+    flaky = report.flaky()
+    stable = report.stable_failures()
+    lines = [_RULE, f"【{report.mode} 稳定性】每条跑了 {report.repeat} 次", _RULE,
+             f"  稳定失败（每次都挂，值得改）：{len(stable)} 条  {', '.join(stable) or '无'}",
+             f"  抖动（有时过有时挂，先别急着改）：{len(flaky)} 条"]
+    for case_id, passed, total in flaky:
+        lines.append(f"    · {case_id}  {passed}/{total} 次通过")
+    return "\n".join(lines)
+
+
 def render_failures(report: SuiteReport, limit: int = 20) -> str:
-    failures = report.failures()
-    lines = [_RULE, f"【{report.mode} 的失败清单】共 {len(failures)} 条", _RULE]
+    seen: set[str] = set()
+    failures = []
+    for score in report.failures():
+        if score.case_id not in seen:
+            seen.add(score.case_id)
+            failures.append(score)
+    stability = report.stability()
+    lines = [_RULE,
+             f"【{report.mode} 的失败清单】{len(failures)} 条"
+             + (f"（每条跑 {report.repeat} 次，括号内为通过次数）" if report.repeat > 1 else ""),
+             _RULE]
     if not failures:
         lines.append("  无失败。")
         return "\n".join(lines)
     case_by_id = {c.id: c for c in CASES}
     for score in failures[:limit]:
         case = case_by_id.get(score.case_id)
-        lines.append(f"  ✗ [{score.case_id}] {case.query if case else ''}")
+        passed, total = stability.get(score.case_id, (0, 1))
+        tag = f" [{passed}/{total} 通过]" if report.repeat > 1 else ""
+        lines.append(f"  ✗ [{score.case_id}]{tag} {case.query if case else ''}")
         budget = f" · ⚠️ 超预算（上限 {case.max_tool_calls}）" if score.overspend and case else ""
         lines.append(f"      {score.failure_reason()}"
                      f"   (工具 {score.tool_calls} 次 · {score.tokens} token"
