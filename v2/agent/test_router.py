@@ -403,6 +403,34 @@ def test_hook_hands_a_single_hop_query_back_to_the_existing_dispatch():
     assert llm.calls == []
 
 
+def test_the_hook_discloses_a_rewrite_it_performed_itself():
+    """The hook resolves before routing, then calls handle_nl_sync with the
+    resolved text. Re-resolving there finds nothing left to rewrite and reports
+    rewritten=False, so the disclosure vanishes — which is what production did
+    while the direct-call test kept passing."""
+    store = session.SessionStore()
+    store.record(1, session.Turn(query="我的持仓最近整体在跌还是涨？"))
+    placeholder = _FakePlaceholder()
+    llm = ScriptedLLM([
+        LLMResponse(text="先看盈亏",
+                    tool_calls=[ToolCall("c1", "pnl_view", {}, "{}")]),
+        LLMResponse(text="本周 +0.13%。"),
+        LLMResponse(text="本周 +0.13%。"),
+    ])
+
+    with _Env(V2_AGENT_ROUTING="unknown_only"):
+        handled, _p, text = _run(bot_bridge.telegram_hook(
+            "为什么？", 1, placeholder, classifier=lambda _t: _parsed("unknown"),
+            registry=build_registry(), llm=llm, store=store))
+
+    assert handled is True
+    assert "我的持仓最近整体在跌还是涨" in text, "补全后的问题要交回调用方"
+    assert placeholder.edits, "接手了就该改写占位消息"
+    final = placeholder.edits[-1][0]
+    assert "补全" in final, "改写了用户的问题就必须讲明"
+    assert "本周 +0.13%" in final
+
+
 def test_a_bare_follow_up_restores_the_previous_question():
     """"为什么？" on its own, seen live: no pronoun to substitute, so the
     resolver passed it through, the classifier returned unknown, and the agent

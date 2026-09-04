@@ -174,13 +174,23 @@ def handle_nl_sync(
     store: session.SessionStore | None = None,
     on_progress: Callable[[str], None] | None = None,
     mode: str | None = None,
+    resolution: session.Resolution | None = None,
 ) -> BridgeResult:
-    """Resolve → classify → route → answer. Never raises."""
+    """Resolve → classify → route → answer. Never raises.
+
+    ``resolution`` is accepted for the same reason ``parsed`` is: the caller may
+    have resolved already. ``telegram_hook`` does — it has to, since routing
+    reads the resolved text — and re-resolving here would silently *undo the
+    disclosure*, because the second pass sees the rewritten text, finds no
+    pronoun left in it, and reports rewritten=False. That is exactly what
+    happened live: 「为什么？」 was correctly answered in context and the user
+    was never told the question had been rewritten.
+    """
     started = time.time()
     store = store or session.STORE
     registry = registry or ToolRegistry()
 
-    resolution = store.resolve(chat_id, text)
+    resolution = resolution or store.resolve(chat_id, text)
     query = resolution.text
 
     if parsed is None:
@@ -357,7 +367,7 @@ async def telegram_hook(
     result = await loop.run_in_executor(None, lambda: handle_nl_sync(
         query, chat_id, parsed=parsed, registry=registry, llm=llm,
         config=config or production_config(), store=store, on_progress=progress,
-        mode=decision.mode))
+        mode=decision.mode, resolution=resolution))
 
     if placeholder is not None:
         chip = f"<i>{router.explain(decision)}</i>\n\n"
