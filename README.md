@@ -8,6 +8,8 @@ Built as a portfolio project to demonstrate end-to-end ownership of a multi-sour
 
 **Hero numbers**: 10 phases shipped · 6 scheduled pushes + on-demand bot · 24 NL intents · 5-layer defense · 490 sandbox tests · **~$22/month** total ops cost
 
+**Agent layer** ([`v2/agent/`](./v2/agent/README.md)): a model-driven tool-calling loop over the same 24 responders, plus a router that decides per query whether multi-step planning is worth its cost. Measured on an **83-case labelled evaluation set at 3 samples each**: **52% → 95%** pass rate at **61% of the full loop's tokens**. 159 further tests.
+
 ---
 
 ## What it does
@@ -124,6 +126,73 @@ LLMs **never produce numeric facts directly** — they only classify, write qual
 Every push computes `importance_score` (0–100) → 4 tiers. **P0** (≥80) immediate push + 🚨🚨🚨 + dashboard red frame (price alert, big loss, FOMC, ARK liquidation of held, material 8-K). **P1** (60–79) immediate push (anomaly attribution, watchlist earnings, 13F changes). **P2** (40–59) archive + 16:45 ET digest rollup. **P3** (<40) archive only, dashboard hidden.
 
 Base score + metadata adjustments: held +15, watchlist +10, surprise ≥10% +15, **daily loss ≥5% +30 (→P0)**, multi-factor stack up to +75, **going_concern +20**, material_weakness +15, **ARK multi-fund +15**, ARK large_new_position +10. Pure Python rules; `notifier.send_text` without `priority=` defaults to P1 (backward-compat).
+
+---
+
+## Agent layer · Evaluation
+
+Everything above is a **code-driven** pipeline: `v2/bot/intent.py` maps a sentence to
+one of 24 labels and `commands.py` calls one responder, once. That is the right design
+for scheduled pushes, and it cannot answer "which of my holdings is most at risk" —
+the verdict needs weight, earnings proximity and insider activity, which live in three
+different tools.
+
+[`v2/agent/`](./v2/agent/README.md) adds a **model-driven** loop over those same 24
+responders — the model decides what to call, how many times, in what order — plus a
+router that picks per query which path is worth paying for. Additive throughout:
+`cmd_nl` gained 32 flag-gated lines and nothing else under `v2/bot` changed.
+
+### Measured, not asserted
+
+83 labelled queries in 9 categories, 3 samples each (249 runs). The tool layer is
+recorded, so the model is the only variable.
+
+| | single-hop (current) | **routed** (production shape) | full agent loop |
+|---|---|---|---|
+| **Pass rate** | 52% | **95%** | **95%** |
+| Tool recall / fact recall | 71% / 63% | 99% / 97% | 100% / 99% |
+| Grounding | 100% | 99% | 98% |
+| Tokens per case | 0 | **7,480** | 12,319 |
+| **Tokens per pass** | — | **7,859** | 12,998 |
+
+```
+single_lookup  100 / 100 / 100        multi_hop    29 /  93 /  98
+cost_trap      100 / 100 /  94        ranking      30 /  93 /  80
+honesty         86 / 100 /  95        compound      0 /  92 / 100
+causal          75 / 100 /  92        recovery      0 /  73 / 100
+dead_end         0 /  95 /  90
+```
+
+**The router matches the full loop at 61% of its cost.** Single-hop is perfect on the
+questions it was designed for and near-zero where an answer must span tools; routing
+captures the loop's upside while avoiding its downside on single-card questions —
+where the loop over-explores and then trips its own grounding check.
+
+### What the loop adds, and what constrains it
+
+Budgets with a forced final turn · errors as observations (a failing tool feeds the
+model instead of ending the run) · duplicate-call suppression · recency-weighted
+context compression · **grounding** — every figure must trace to an observation, and a
+derived figure counts only when the answer *shows* the arithmetic over traceable
+inputs · **attribution** — the figure must also belong to the entity it is printed
+against, the "right number, wrong company" failure grounding is blind to.
+
+### Three findings from six evaluation rounds
+
+Three of the six rounds fixed the *evaluation*, not the model:
+
+1. **A rule the verifier does not reward is a rule the model ignores.** Instructing
+   the model to show its arithmetic changed nothing across three rounds; making the
+   check *accept* shown arithmetic changed the behaviour immediately.
+2. **Most of a single run's failure list is noise.** Two sweeps of an identical
+   configuration scored the same and shared only 9 of 25 distinct failures, so the
+   harness samples each case three times and separates stable failures from flaky ones.
+3. **A metric can lie about its own subject.** "18% of answers were ungrounded" read
+   as model invention; broken down, 71% were defects in the check itself — rounding,
+   unit conversion, SEC item numbers.
+
+Per-round table, mechanism write-ups and known limitations:
+[`v2/agent/README.md`](./v2/agent/README.md).
 
 ---
 
@@ -381,6 +450,7 @@ v2/
 ├── streamer/  broker/  universe/   # intraday + Alpaca adapter + TECH_30 + 90-ticker sector mapping
 ├── reporting/                      # formatters + notifier + priority + 8 4-layer shims
 ├── memory/  archive/  bot/  scheduler/  observability/         # ChromaDB + SQLite log + bot + APScheduler + trace SDK
+└── agent/                          # model-driven loop + router + session + grounding/attribution + 83-case eval
 
 scripts/  (agent launchers — 6 wired into the scheduler, the rest run on-demand/manually + 3 service entrypoints)
 ```
@@ -457,6 +527,8 @@ WantedBy=multi-user.target
 **Byte-equal pin** (24+ cases across 8 formatter families): every public formatter (`format_earnings_*` / `format_portfolio_*` / `format_sec_*` / `format_macro_*` / `format_ark_*`) is locked byte-equal under multiple fixture × case combos. Cron push == bot response == formatter output.
 
 All 490 tests pass under `pytest` in the sandbox environment with no v2.data deps required (production-only deps are stubbed via sys.modules).
+
+**Agent layer: 159 further tests** (`python3 -m v2.agent.run_tests`) needing neither pytest nor any third-party package — the loop, router, checks and eval harness import nothing outside the standard library, and the model is scripted so "does a tool failure get recovered from" is an assertion rather than an anecdote.
 
 ---
 
