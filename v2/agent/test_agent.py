@@ -14,6 +14,15 @@ works in a sandbox with no third-party packages installed.
 
 from __future__ import annotations
 
+import pathlib
+import sys
+
+# Running this file directly (IDE green arrow) puts v2/agent/ on sys.path, not the
+# repo root, so `import v2.agent` would fail. Under pytest this is a no-op.
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 from v2.agent import grounding
 from v2.agent.baseline import INTENT_TO_TOOL, ScriptedClassifier, run_baseline
 from v2.agent.context import clip
@@ -432,7 +441,6 @@ def test_fixture_executor_records_calls():
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    import sys
     import traceback
 
     tests = [(name, obj) for name, obj in sorted(globals().items())

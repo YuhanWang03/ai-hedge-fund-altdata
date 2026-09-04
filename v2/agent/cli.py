@@ -146,6 +146,16 @@ def main(argv: list[str] | None = None) -> int:
         allow_mutations=args.allow_mutations,
     )
 
+    if not args.demo:
+        from v2.agent.llm import OpenAICompatLLM
+        if not OpenAICompatLLM().api_key:
+            parser.error(
+                "没有找到 LLM API key。三选一：\n"
+                "  1) 在仓库根目录 .env 里设 DEEPSEEK_API_KEY=sk-...（CLI 会自动读）\n"
+                "  2) 设环境变量 AGENT_LLM_API_KEY / DEEPSEEK_API_KEY / OPENAI_API_KEY\n"
+                "  3) 不想配 key 就跑 --demo（PyCharm 里运行 v2/agent/run_demo.py）"
+            )
+
     print(f"问题: {args.query}")
     if args.demo:
         print("模型: scripted（回放录制轨迹，零 API key）   工具层: fixture")
