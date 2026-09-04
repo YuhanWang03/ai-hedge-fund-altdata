@@ -125,7 +125,11 @@ _THRESHOLD_BEFORE = re.compile(
 #: *against*, which is often named in an earlier sentence: 「NVDA 的 EPS 绝对值
 #: 更高（$1.31 vs $0.71），超预期幅度也更大（+5.6% vs +2.9%）」 — every second
 #: number there is AMD's, and no name on that line says so.
-_VS_OPERAND = re.compile(r"(?:\bvs\.?|对比|相比|较之)\s*[+\-±$￥¥]?\s*$", re.IGNORECASE)
+#: 「（-5.58pp 对 -3.14pp）」 uses a bare 对 as the operator. Requiring a figure
+#: in front of it keeps the far more common uses of 对 (对…来说, 对手, 面对)
+#: from swallowing the numbers after them.
+_VS_OPERAND = re.compile(
+    r"(?:\bvs\.?|对比|相比|较之|[\d%pp）)]\s*对)\s*[+\-±$￥¥]?\s*$", re.IGNORECASE)
 
 #: A benchmark named as a comparison point is not the subject of the figures
 #: around it. 「同期 SPY +0.40% → 相对强度 -3.14pp ★ 逆势」 is a sentence about
@@ -489,8 +493,16 @@ def check(
                                        position + start]):
                 continue                    # 「x vs y」 — y is the other subject
 
-            clause_entities = {name for name, _ in
-                               _mentions(_clause_at(body, position + start))}
+            clause = _clause_at(body, position + start)
+            if _ACKNOWLEDGES_GAP.search(clause):
+                # 「ARKQ 的工具返回里没有任何数据，那些数字（TSLA 9.80%、PATH
+                # 22.4%）都不是 ARKQ 的」 is the answer *disclaiming* the
+                # figures — the exact behaviour h04 asks for. Flagging it
+                # punishes the honest write-up, and the empty-entity pass has
+                # trusted this same phrase list since the beginning.
+                continue
+
+            clause_entities = {name for name, _ in _mentions(clause)}
             if len(clause_entities) >= 2 and (holders & clause_entities):
                 continue
             # 「占仓 66.3% 的 IVV」: the figure modifies what comes after it.

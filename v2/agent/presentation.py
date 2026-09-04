@@ -39,8 +39,22 @@ _HEADING = re.compile(r"^[ \t]*#{1,6}[ \t]+\S", re.M)
 #: First-person process talk. 让我们 is excluded on purpose — "让我们看看这几只"
 #: is a normal way to open an answer, while 让我 alone is the model narrating.
 _DELIBERATION = re.compile(
-    r"让我(?!们)|我需要|我应该|我先|我来看|用户(?:问|想问|说|的问题)|你说得对"
+    r"让我(?!们)|我需要|我应该|我先|我来|用户(?:问|想问|说|的问题)|你说得对"
     r"|我犯了|我此前|我不该|重新核对|直接询问|澄清一下|让我直接")
+
+#: A single opening sentence of process narration, with no rule or heading after
+#: it. The marked case is handled above; this is the unmarked one, and it kept
+#: arriving anyway — 「你说得对，我犯了把 ARKK 的数据安到 ARKQ 头上的错误。」 and
+#: 「我来对照你的持仓和 NVDA 供应链信息。」 both reached users.
+#:
+#: Bounded hard: one sentence, short, and only when substantial content follows.
+#: Guessing where an unmarked answer begins would eventually eat a real
+#: paragraph, so this only ever removes the first clause of the first line.
+MAX_OPENER = 60
+#: There must be a real answer left behind. A short opener followed by a short
+#: remainder is more likely one sentence of substance than narration plus body.
+MIN_REMAINDER = 40
+_OPENER_END = re.compile(r"[。！？\n]")
 
 #: How much text may be discarded as preamble. A bound rather than a judgment:
 #: if the marker sits this far in, whatever precedes it is too substantial to
@@ -66,6 +80,13 @@ def strip_deliberation(text: str) -> str:
                 and len(preamble) <= MAX_PREAMBLE
                 and _DELIBERATION.search(preamble)):
             return remainder
+
+    match = _OPENER_END.search(body)
+    if match:
+        opener, rest = body[: match.end()], body[match.end():].strip()
+        if (len(opener) <= MAX_OPENER and _DELIBERATION.search(opener)
+                and len(rest) >= MIN_REMAINDER):
+            return rest
     return body.strip()
 
 

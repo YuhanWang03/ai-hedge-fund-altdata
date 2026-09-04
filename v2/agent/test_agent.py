@@ -506,6 +506,36 @@ def test_a_clause_naming_several_entities_cannot_be_paired_by_proximity():
         _records(("holders", {"ticker": "MU"}, "MU Vanguard 8.94%"))).ok
 
 
+def test_a_bare_comparison_operator_counts_too():
+    """「（-5.58pp 对 -3.14pp）」 — 对 is the operator. A figure has to sit in
+    front of it, or the far commoner uses (对…来说, 面对) would swallow whatever
+    follows them."""
+    from v2.agent import attribution
+
+    assert attribution.check(
+        "PLTR 跑输大盘的幅度更大（-5.58pp 对 -3.14pp）。",
+        _records(("explain_move", {"ticker": "TSLA"}, "相对强度 -3.14pp"),
+                 ("explain_move", {"ticker": "PLTR"}, "相对强度 -5.58pp"))).ok
+
+    assert not attribution.check(
+        "对 NVDA 来说 18.2% 偏高。",
+        _records(("portfolio_view", {"ticker": "ARM"}, "ARM 18.2%"))).ok
+
+
+def test_a_clause_that_disclaims_the_data_is_not_claiming_it():
+    """h04's own correct answer: 「ARKQ 的工具返回里没有任何数据，那些数字
+    （TSLA 9.80%、PATH 22.4%）都不是 ARKQ 的」. Flagging that punishes exactly
+    the write-up the case asks for; the empty-entity pass has trusted this same
+    phrase list from the start."""
+    from v2.agent import attribution
+
+    assert attribution.check(
+        "ARKQ 的工具返回里没有任何数据，那些数字（TSLA 9.80%、PATH 22.4%）都不是 ARKQ 的。",
+        _records(("etf_view", {"symbol": "ARKQ"}, "ARKQ 未记录"),
+                 ("etf_view", {"symbol": "ARKK"}, "TSLA 9.80%"),
+                 ("portfolio_view", {}, "CRWD 22.4%"))).ok
+
+
 def test_a_comparison_operand_belongs_to_the_other_side():
     """「NVDA 的 EPS 更高（$1.31 vs $0.71），超预期也更大（+5.6% vs +2.9%）」 —
     every second number is AMD's, and nothing in that clause says so."""
@@ -707,12 +737,22 @@ def test_the_answer_drops_the_models_narration_of_its_own_process():
     # A real answer that merely uses headings keeps every word.
     intact = "CRWD 占仓 22.4%，是第一大持仓。\n\n## 依据\n\n集中度 54.7%。"
     assert presentation.strip_deliberation(intact) == intact
-    # Nothing is dropped without a marker, however much it sounds like thinking.
-    unmarked = "让我看看持仓。CRWD 占仓 22.4%。"
-    assert presentation.strip_deliberation(unmarked) == unmarked
-    # A preamble too long to discard on a heuristic is left in place.
+    # An unmarked opener is dropped only when a real answer follows it — this is
+    # the narrower second rule, added after the apology reached users twice.
+    assert presentation.strip_deliberation(
+        "你说得对，我犯了把 ARKK 的数据安到 ARKQ 头上的错误。"
+        "ARKQ 的工具返回里没有任何数据，那些数字都不是 ARKQ 的，下面逐条说明来源。"
+    ).startswith("ARKQ 的工具返回里")
+    # …and never when what follows is too short to be one: dropping the opener
+    # there would more likely be discarding the answer itself.
+    short = "让我看看持仓。CRWD 22.4%。"
+    assert presentation.strip_deliberation(short) == short
+    # 让我们 is ordinary phrasing, not narration.
+    plural = "让我们看看这几只半导体。NVDA +17.8%，MU +5.1%，ARM -35.9%，分化明显。"
+    assert presentation.strip_deliberation(plural) == plural
+    # A long marked preamble is still never discarded wholesale.
     long_one = "让我重新核对。" + "数" * presentation.MAX_PREAMBLE + "\n\n## 结论\n\nARM。"
-    assert presentation.strip_deliberation(long_one) == long_one
+    assert "数" * 100 in presentation.strip_deliberation(long_one)
 
 
 def test_markdown_becomes_the_html_telegram_renders():
