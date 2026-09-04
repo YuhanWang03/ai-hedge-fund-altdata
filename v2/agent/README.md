@@ -12,10 +12,16 @@
 |---|---|
 | `v2/agent/run_demo.py` | 什么都不需要，回放录制轨迹 |
 | `v2/agent/run_compare.py` | 一个 LLM key（`.env` 里的 `DEEPSEEK_API_KEY` 即可） |
-| `v2/agent/test_agent.py` | 什么都不需要，31 个测试 |
+| `v2/agent/run_tests.py` | 什么都不需要，35 个测试（不走 pytest） |
 
 这三个文件都会自己把仓库根目录补进 `sys.path`，所以不依赖任何 IDE 配置
 （不用改 Working directory，也不用把根目录标成 Sources Root）。
+
+跑测试用 `run_tests.py` 而不是直接运行 `test_agent.py`：PyCharm 见到 `test_` 开头的
+文件名会自动切到 pytest runner，而 pytest 插件依赖 `setuptools`、项目的
+`v2/conftest.py` 依赖 `python-dotenv`——干净环境里两样都没有，还没跑到测试就
+collection error。想走 pytest 的话先 `pip install setuptools pytest python-dotenv`，
+并把运行配置的 **Working directory 设为仓库根目录**。
 
 ### 命令行
 
