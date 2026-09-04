@@ -112,9 +112,13 @@ def run_case(case: EvalCase, mode: Mode, *, llm_factory: Callable[[], Any]) -> C
             ungrounded_kinds=(grounding.diagnose(result.grounding,
                                                  trajectory.observations_text())
                               if not result.grounding.ok else None),
+            # The finding *and* the line it came from: a verdict with no
+            # evidence is a verdict nobody can act on.
             misattributed=tuple(
-                f"{entity}←{figure}(实为 {'/'.join(owners)})"
-                for entity, figure, owners in result.attribution.misattributed),
+                f"{entity}←{figure}(实为 {'/'.join(owners)})｜{evidence}"
+                for (entity, figure, owners), evidence in zip(
+                    result.attribution.misattributed,
+                    list(result.attribution.evidence) + [""] * 8)),
             tool_calls=trajectory.tool_calls, llm_calls=trajectory.llm_calls,
             tokens=trajectory.prompt_tokens + trajectory.completion_tokens,
             elapsed_ms=result.elapsed_ms, path=path,
@@ -278,7 +282,11 @@ def render_attribution(report: SuiteReport) -> str:
         lines.append("  无 —— 正确的回答没有被打上张冠李戴的标记。")
         return "\n".join(lines)
     for case_id, pairs in findings[:12]:
-        lines.append(f"  {case_id:<6}{', '.join(pairs[:3])}")
+        for pair in pairs[:2]:
+            finding, _, evidence = pair.partition("｜")
+            lines.append(f"  {case_id:<6}{finding}")
+            if evidence:
+                lines.append(f"        ↳ {evidence[:110]}")
     if len(findings) > 12:
         lines.append(f"  …另有 {len(findings) - 12} 条")
     lines.append("")
@@ -365,6 +373,7 @@ def to_json(reports: list[SuiteReport]) -> dict:
                 "missing_facts": list(s.missing_facts),
                 "violations": list(s.violations), "forbidden": list(s.forbidden_hit),
                 "ungrounded": list(s.ungrounded), "overspend": s.overspend,
+                "misattributed": list(s.misattributed),
                 "ungrounded_kinds": s.ungrounded_kinds,
                 "tool_calls": s.tool_calls, "llm_calls": s.llm_calls,
                 "tokens": s.tokens, "elapsed_ms": s.elapsed_ms,
