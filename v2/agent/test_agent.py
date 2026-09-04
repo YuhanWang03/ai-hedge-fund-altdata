@@ -443,6 +443,25 @@ def test_attribution_does_not_flag_a_correct_multi_ticker_answer():
                  ("earnings_view", {"ticker": "SMCI"}, "EPS miss -23.6%"))).ok
 
 
+def test_attribution_window_stops_at_a_line_or_bullet():
+    """The demo's own false positive: a benchmark named at the end of one
+    bullet is not the subject of the next bullet's numbers.
+
+    SMH is the last entity mentioned on its line, so with the window bounded
+    only by the next entity mention it reached into the following bullet and
+    reported SMCI's earnings history as SMH's."""
+    from v2.agent import attribution
+
+    answer = ("<b>SMCI</b>\n"
+              "· 今日 -5.40%，相对 SMH 逆势 -8.30pp\n"
+              "· 上次 EPS miss -23.6%、财报后次日 -14.20%")
+    assert attribution.check(answer, _records(
+        ("explain_move", {"ticker": "SMCI"},
+         "今日 -5.40% · 同期 SMH +2.90% → 相对强度 -8.30pp"),
+        ("earnings_view", {"ticker": "SMCI"},
+         "上次 EPS miss -23.6% · 财报后次日 -14.20%"))).ok
+
+
 def test_attribution_allows_a_constituent_to_own_its_weight():
     """ARKK's card prints "TSLA 9.80%"; that weight is TSLA's as well as ARKK's."""
     from v2.agent import attribution
