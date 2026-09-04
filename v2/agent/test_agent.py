@@ -443,6 +443,32 @@ def test_attribution_does_not_flag_a_correct_multi_ticker_answer():
                  ("earnings_view", {"ticker": "SMCI"}, "EPS miss -23.6%"))).ok
 
 
+def test_a_figure_can_belong_to_the_entity_that_follows_it():
+    """Chinese puts the modifier before its head, so reading left to right
+    misreads 「但被占仓 66.3% 的 IVV 微跌」 as NVDA's 66.3 — seen live, on a
+    correct answer. Both directions matter: the figure is *reattributed*, not
+    excused, so a genuinely wrong one is still caught."""
+    from v2.agent import attribution
+
+    assert attribution.check(
+        "靠 MU 大涨 +4.72% 和 NVDA 微涨拉动，但被占仓 66.3% 的 IVV 微跌 -0.47% 抵消。",
+        _records(("risk_view", {}, "BROAD 大盘 ETF 66.3% · Top1 IVV 66.3%"),
+                 ("explain_move", {"ticker": "IVV"}, "IVV -0.47%"),
+                 ("explain_move", {"ticker": "MU"}, "MU +4.72%"))).ok
+
+    # The same construction with the wrong ticker attached is a real finding,
+    # and no forward window covers it — the figure precedes the only mention.
+    report = attribution.check(
+        "被浮亏 -35.9% 的 NVDA 拖累。",
+        _records(("portfolio_view", {"ticker": "ARM"}, "ARM -35.9%")))
+    assert report.misattributed == [("NVDA", "-35.9", ("ARM",))]
+
+    # A comma between the figure and the next ticker is not that construction.
+    assert not attribution.check(
+        "NVDA 占仓 18.2%，CRWD 占仓 22.4%。",
+        _records(("portfolio_view", {}, "CRWD 22.4% NVDA 18.2%"))).misattributed
+
+
 def test_ordinals_and_counts_are_not_attribution_findings():
     """The check's own feedback loop, seen live: it complained that IVV was
     given a "1", the repair round wrote 「risk_view 里没有 IVV 的「1」这个数据」,
@@ -499,6 +525,25 @@ def test_markdown_becomes_the_html_telegram_renders():
     assert pres.to_telegram_html("a < b & c") == "a &lt; b &amp; c"
     # Arithmetic is not italics.
     assert pres.to_telegram_html("3*4 与 5*6") == "3*4 与 5*6"
+
+
+def test_a_table_too_wide_to_align_wraps_instead_of_scrolling():
+    """<pre> preserves columns and preserves them off the side of the screen.
+    Live, a two-column table whose second cell held nine tickers came out 140
+    characters wide — text that wraps beats a grid you have to drag."""
+    from v2.agent import presentation as pres
+
+    wide = ("| 状态 | 标的 | 累计 P/L |\n|---|---|---|\n"
+            "| 🟢 盈利 | IVV +2.39%、NVDA +17.78%、MU +5.09% | — |")
+    rendered = pres.to_telegram_html(wide)
+    assert "<pre>" not in rendered, "太宽就不该再用等宽块"
+    assert "🟢 盈利" in rendered and "NVDA +17.78%" in rendered
+    assert "—" not in rendered, "空单元格不该被读出来"
+
+    narrow = pres.to_telegram_html("| 指标 | 数值 |\n|---|---|\n| 今日 | +0.21% |")
+    assert narrow.startswith("<pre>") and "指标  数值" in narrow
+    assert all(pres._display_width(line) <= pres.MAX_PRE_WIDTH
+               for line in pres.to_plain_text(narrow).split("\n"))
 
 
 def test_the_plain_text_fallback_removes_markup_rather_than_showing_it():
