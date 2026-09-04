@@ -100,12 +100,43 @@ def test_every_target_resolves_in_the_real_source():
         if module_path not in cache:
             source = root / (module_path.replace(".", "/") + ".py")
             assert source.exists(), f"{spec.target}: no such module {source}"
-            tree = ast.parse(source.read_text())
+            tree = ast.parse(source.read_text(encoding="utf-8"))
             cache[module_path] = {
                 node.name for node in tree.body
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
             }
         assert attribute in cache[module_path], f"{spec.target} not found in {module_path}"
+
+
+def test_source_reads_always_declare_utf8():
+    """No file read in this package may rely on the platform's default encoding.
+
+    Python picks the locale codec when `encoding` is omitted, which is GBK on a
+    Chinese Windows install. Reading v2/bot/responders.py — full of curly quotes
+    and emoji — then dies with UnicodeDecodeError on a contributor's machine and
+    passes on CI. Declaring utf-8 is the only portable option, so this asserts it
+    rather than trusting review to catch the next one.
+    """
+    import ast
+    import pathlib
+
+    package = pathlib.Path(__file__).resolve().parent
+    offenders: list[str] = []
+    for module in sorted(package.glob("*.py")):
+        tree = ast.parse(module.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            if name not in ("read_text", "write_text", "open"):
+                continue
+            if name == "open" and isinstance(func, ast.Attribute):
+                pass  # Path.open — same rule
+            if not any(kw.arg == "encoding" for kw in node.keywords):
+                offenders.append(f"{module.name}:{node.lineno} {name}()")
+
+    assert not offenders, "file access without explicit encoding: " + ", ".join(offenders)
 
 
 def test_unknown_tool_returns_observation_not_exception():
