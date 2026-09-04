@@ -28,6 +28,7 @@ Two details that matter for correctness rather than style:
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -41,6 +42,34 @@ from v2.agent.registry import ToolRegistry
 def enabled() -> bool:
     """True when routing is switched on. Default off — merging is not enabling."""
     return router.routing_mode() != "off"
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    try:
+        return int(raw) if raw else default
+    except ValueError:
+        return default
+
+
+def production_config() -> AgentConfig:
+    """Budgets for the live bot, tighter than the evaluation's by default.
+
+    The evaluation runs against recorded observations, so a tool call there is
+    free and instant. In production it is not, and the gap is larger than it
+    looks: ``explain_move`` calls ``v2.monitoring.attribute`` internally, which
+    spends a Tavily search plus a Generator and a Verifier LLM call *per
+    invocation*. A fan-out over five tickers is five searches and ten model
+    calls the loop's own token count never sees.
+
+    So the live ceiling is lower than the harness's, and tunable without a
+    deploy:  V2_AGENT_MAX_STEPS · V2_AGENT_MAX_TOOL_CALLS · V2_AGENT_MAX_SECONDS
+    """
+    return AgentConfig(
+        max_steps=_env_int("V2_AGENT_MAX_STEPS", 5),
+        max_tool_calls=_env_int("V2_AGENT_MAX_TOOL_CALLS", 8),
+        max_seconds=float(_env_int("V2_AGENT_MAX_SECONDS", 90)),
+    )
 
 
 @dataclass
@@ -323,7 +352,7 @@ async def telegram_hook(
 
     result = await loop.run_in_executor(None, lambda: handle_nl_sync(
         query, chat_id, parsed=parsed, registry=registry, llm=llm,
-        config=config, store=store, on_progress=progress,
+        config=config or production_config(), store=store, on_progress=progress,
         mode=decision.mode))
 
     if placeholder is not None:

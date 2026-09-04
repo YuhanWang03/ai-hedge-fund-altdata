@@ -483,6 +483,26 @@ def test_hook_survives_a_dead_classifier():
     assert handled is True and parsed["intent"] == "unknown"
 
 
+def test_production_budgets_are_tighter_than_the_harness_defaults():
+    """A tool call is free in the eval and expensive live — explain_move alone
+    spends a Tavily search and two internal LLM calls per invocation."""
+    from v2.agent.loop import AgentConfig
+
+    default = AgentConfig()
+    live = bot_bridge.production_config()
+    assert live.max_tool_calls < default.max_tool_calls
+    assert live.max_steps <= default.max_steps
+
+
+def test_production_budgets_are_tunable_without_a_deploy():
+    with _Env(V2_AGENT_MAX_TOOL_CALLS="3", V2_AGENT_MAX_STEPS="2",
+              V2_AGENT_MAX_SECONDS="30"):
+        live = bot_bridge.production_config()
+        assert (live.max_tool_calls, live.max_steps, live.max_seconds) == (3, 2, 30.0)
+    with _Env(V2_AGENT_MAX_TOOL_CALLS="abc"):
+        assert bot_bridge.production_config().max_tool_calls == 8, "写错的值降级为默认"
+
+
 def test_progress_updates_are_throttled():
     sent: list[str] = []
     throttled = bot_bridge._Throttled(sent.append, interval=10.0)

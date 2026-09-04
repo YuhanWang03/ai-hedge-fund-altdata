@@ -65,6 +65,13 @@ dead_end         0% /  95% /  90%
 - **97% 的路由准确率是开发集分数**：规则是对着这 83 条调出来的，真实泛化能力需要
   没见过的 query。
 - **fixture 是手写合成数据**，形状与真实 responder 一致，但不是真实录制。
+- **评测没有测到工具自身的成本**，而这个缺口比看上去大：录制观测是瞬时且免费的，
+  但线上 `explain_move` 内部会调 `v2.monitoring.attribute`，**每次调用**要花一次
+  Tavily 搜索加 Generator / Verifier 两次 LLM。扇出 5 个标的就是 5 次搜索、
+  10 次模型调用 —— 这些完全不出现在循环自己的 token 统计里。
+  因此生产预算（`bot_bridge.production_config()`）比评测默认值更紧：
+  5 步 / 8 次工具 / 90 秒，可用 `V2_AGENT_MAX_STEPS` · `V2_AGENT_MAX_TOOL_CALLS` ·
+  `V2_AGENT_MAX_SECONDS` 免部署调整。
 - **超预算率 30%**：agent 经常调用远超必要的工具数（m07 用过 26 次，上限 8）。
   这不判失败（成本不是正确性），但说明循环仍偏向「探索」而非「决策」。
 
