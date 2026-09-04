@@ -103,8 +103,20 @@ def _display_width(text: str) -> int:
     return sum(2 if ord(ch) > 0x2E7F else 1 for ch in text)
 
 
+#: How wide a <pre> block may get before it stops being readable. A phone shows
+#: roughly this many monospace cells; past it the block scrolls sideways and the
+#: reader has to drag a 140-character row across the screen to see its last
+#: column. Seen live, on a two-column table whose second cell held nine tickers.
+MAX_PRE_WIDTH = 46
+
+
 def _render_table(rows: list[str]) -> str:
-    """A Markdown table as a padded <pre> block — Telegram has no table tag."""
+    """A Markdown table as a padded <pre> block — Telegram has no table tag.
+
+    Padding only works while the widest row still fits the screen. When it does
+    not, columns are abandoned for one wrapped line per row: text that wraps is
+    always more readable on a phone than a grid that scrolls.
+    """
     cells = [[c.strip() for c in row.strip().strip("|").split("|")]
              for row in rows if not _TABLE_RULE.match(row)]
     if not cells:
@@ -112,12 +124,34 @@ def _render_table(rows: list[str]) -> str:
     columns = max(len(r) for r in cells)
     cells = [r + [""] * (columns - len(r)) for r in cells]
     widths = [max(_display_width(r[i]) for r in cells) for i in range(columns)]
+
+    if sum(widths) + 2 * (columns - 1) > MAX_PRE_WIDTH:
+        return _render_table_as_lines(cells)
+
     lines = [
         "  ".join(cell + " " * (widths[i] - _display_width(cell))
                   for i, cell in enumerate(row)).rstrip()
         for row in cells
     ]
     return "<pre>" + "\n".join(lines) + "</pre>"
+
+
+#: Cells that carry no information and should not be read out in the line form.
+_EMPTY_CELL = frozenset({"", "—", "-", "–", "n/a", "N/A", "无"})
+
+
+def _render_table_as_lines(cells: list[list[str]]) -> str:
+    """A table too wide to align, as one wrapping bullet per row."""
+    header, *rows = cells
+    if not rows:
+        rows, header = [header], [""] * len(header)
+    out: list[str] = []
+    for row in rows:
+        rest = [f"{header[i]} {row[i]}".strip()
+                for i in range(1, len(row)) if row[i] not in _EMPTY_CELL]
+        lead = row[0] if row[0] not in _EMPTY_CELL else ""
+        out.append("· " + " · ".join([p for p in [lead, *rest] if p]))
+    return "\n".join(out)
 
 
 def to_telegram_html(text: str) -> str:

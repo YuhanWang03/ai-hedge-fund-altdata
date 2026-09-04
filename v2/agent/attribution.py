@@ -29,7 +29,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
-from v2.agent.grounding import _normalise, extract_numbers
+from v2.agent.grounding import (_normalise, extract_numbers,
+                                extract_numbers_with_context)
 
 #: Arguments that name the subject a tool result is about.
 _ENTITY_ARGS = ("ticker", "symbol", "manager")
@@ -82,6 +83,13 @@ WINDOW = 60
 #: generous about who owns a figure is the conservative direction there.
 _LAYOUT_BREAK = re.compile(r"[\n·•]")
 
+
+#: Chinese puts a modifier before its head, so a figure can belong to the entity
+#: that *follows* it: 「但被占仓 66.3% 的 IVV 微跌 -0.47% 抵消了大半」. Reading
+#: left to right, 66.3 sits after NVDA and was reported as NVDA's — a correct
+#: sentence, rejected. When a figure is joined to the next entity by a short
+#: 「…的」, that entity is its subject, not the one before it.
+_POSTPOSED = re.compile(r"^[^，。；、,;\n]{0,10}的\s*$")
 
 #: Sentence boundaries, plus phrases that acknowledge missing data.
 _SENTENCE = re.compile(r"[。！？；;\n]")
@@ -136,6 +144,14 @@ def _is_structural(token: str, *, exempt_below: int = 13,
     if value.is_integer() and abs(value) < exempt_below:
         return True
     return tolerate_years and value.is_integer() and 1900 <= value <= 2100
+
+
+def _record(report: "AttributionReport", entity: str, token: str,
+            holders: set[str]) -> None:
+    report.checked += 1
+    finding = (entity, token, tuple(sorted(holders)))
+    if entity not in holders and finding not in report.misattributed:
+        report.misattributed.append(finding)
 
 
 def _window_end(text: str, start: int, limit: int) -> int:
@@ -253,17 +269,43 @@ def check(
             limit = min(limit, next_start)
         limit = _window_end(body, position, limit)
         window = body[position: max(limit, position)]
-        for token in extract_numbers(window):
+        next_entity, next_start = "", len(body)
+        if index + 1 < len(mentions):
+            next_entity, next_end = mentions[index + 1]
+            next_start = next_end - len(next_entity)
+
+        for token, _before, start, end in extract_numbers_with_context(window):
             key = _normalise(token)
             if not key or key in neutral or _is_structural(key):
                 continue
             holders = owners.get(key)
             if not holders:
                 continue                    # nobody owns it — grounding's problem
-            report.checked += 1
-            finding = (entity, token, tuple(sorted(holders)))
-            if entity not in holders and finding not in report.misattributed:
-                report.misattributed.append(finding)
+            # 「占仓 66.3% 的 IVV」: the figure modifies what comes after it.
+            # The backward pass below checks it against that entity, so skipping
+            # here reattributes rather than excuses.
+            if next_entity and _POSTPOSED.match(body[position + end: next_start]):
+                continue
+            _record(report, entity, token, holders)
+
+    # Backward pass: a figure joined to a mention by 「…的」 belongs to it, and
+    # the forward windows cannot see it — they start *after* each mention, so a
+    # figure in front of the first entity in a sentence is checked by nobody.
+    for entity, end_pos in mentions:
+        start_pos = end_pos - len(entity)
+        prefix = body[max(0, start_pos - WINDOW): start_pos]
+        figures = extract_numbers_with_context(prefix)
+        if not figures:
+            continue
+        token, _before, _start, end = figures[-1]
+        if not _POSTPOSED.match(prefix[end:]):
+            continue
+        key = _normalise(token)
+        if not key or key in neutral or _is_structural(key):
+            continue
+        holders = owners.get(key)
+        if holders:
+            _record(report, entity, token, holders)
     return report
 
 
