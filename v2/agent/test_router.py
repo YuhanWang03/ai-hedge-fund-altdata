@@ -10,6 +10,7 @@ returns the whole set.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import pathlib
 import sys
@@ -370,16 +371,31 @@ def test_bridge_records_the_turn_for_the_next_question():
 # ---------------------------------------------------------------------------
 
 class _FakePlaceholder:
-    """Stands in for the Telegram message cmd_nl edits in place."""
+    """Stands in for the Telegram message cmd_nl edits in place.
 
-    def __init__(self, fail_html: bool = False) -> None:
+    ``limit`` mirrors Telegram's real 4096-character cap, which the bridge used
+    to fail silently against; ``replies`` collects the follow-up messages a long
+    answer is continued in.
+    """
+
+    def __init__(self, fail_html: bool = False,
+                 limit: int = bot_bridge.TELEGRAM_LIMIT) -> None:
         self.edits: list[tuple[str, bool]] = []
+        self.replies: list[str] = []
         self.fail_html = fail_html
+        self.limit = limit
 
     async def edit_text(self, text, parse_mode=None, disable_web_page_preview=None):
         if self.fail_html and parse_mode == "HTML":
             raise RuntimeError("Bad Request: can't parse entities")
+        if len(text) > self.limit:
+            raise RuntimeError("Bad Request: message is too long")
         self.edits.append((text, parse_mode == "HTML"))
+
+    async def reply_text(self, text, parse_mode=None, disable_web_page_preview=None):
+        if len(text) > self.limit:
+            raise RuntimeError("Bad Request: message is too long")
+        self.replies.append(text)
 
 
 def _run(coro):
@@ -401,6 +417,52 @@ def test_hook_hands_a_single_hop_query_back_to_the_existing_dispatch():
     assert text == "组合风险怎么样"
     assert placeholder.edits == [], "未接手就不该改动那条占位消息"
     assert llm.calls == []
+
+
+def test_an_answer_longer_than_telegram_allows_still_arrives():
+    """Seen live: a finished run left the placeholder saying 「分析中…」 for
+    five minutes. editMessageText rejects anything over 4096 characters, and
+    the except branch — whose own comment said "too long" — passed."""
+    placeholder = _FakePlaceholder()
+    long_answer = "\n\n".join(f"第 {i} 段：ARM 浮亏 -35.74%。" * 20 for i in range(30))
+    assert len(long_answer) > bot_bridge.TELEGRAM_LIMIT
+
+    _run(bot_bridge._deliver(placeholder, long_answer))
+
+    assert placeholder.edits, "第一段必须写进占位消息"
+    delivered = placeholder.edits[-1][0] + "".join(placeholder.replies)
+    assert "第 0 段" in delivered and "第 29 段" in delivered, "整条回答都要送到"
+    assert all(len(t) <= bot_bridge.TELEGRAM_LIMIT
+               for t in [placeholder.edits[-1][0]] + placeholder.replies)
+
+
+def test_a_short_answer_is_still_one_message():
+    placeholder = _FakePlaceholder()
+    _run(bot_bridge._deliver(placeholder, "CRWD 占仓 22.4%。"))
+    assert placeholder.replies == [], "没超长就不该拆成两条"
+    assert placeholder.edits[-1][0] == "CRWD 占仓 22.4%。"
+
+
+def test_a_late_progress_line_cannot_overwrite_the_answer():
+    """The other way a finished run looks hung: the last progress update is
+    still in flight at Telegram when the answer is written, lands after it, and
+    puts 「分析中…」 back on the screen for good."""
+    placeholder = _FakePlaceholder()
+
+    async def scenario():
+        channel = bot_bridge.ProgressChannel(
+            asyncio.get_running_loop(),
+            lambda t: bot_bridge._edit(placeholder, t))
+        channel("🤔 分析中…")
+        channel("✅ 已生成回答")
+        await channel.close()
+        channel("✅ 迟到的进度")          # dropped: the channel is closed
+        await bot_bridge._deliver(placeholder, "结论：ARM 最危险。")
+        await asyncio.sleep(0)            # let anything still queued run
+        return placeholder.edits[-1][0]
+
+    assert _run(scenario()) == "结论：ARM 最危险。"
+    assert "迟到" not in "".join(t for t, _ in placeholder.edits)
 
 
 def test_the_hook_discloses_a_rewrite_it_performed_itself():
