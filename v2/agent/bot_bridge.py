@@ -34,7 +34,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from v2.agent import router, session
+from v2.agent import presentation, router, session
 from v2.agent.baseline import BaselineResult, resolve_classifier, run_baseline
 from v2.agent.loop import AgentConfig, AgentResult, StepEvent, run_agent
 from v2.agent.registry import ToolRegistry
@@ -248,7 +248,11 @@ def handle_nl_sync(
     if decision.is_agent:
         agent_result = run_agent(query, llm=llm, registry=registry,
                                  config=config, on_step=reporter)
-        answer = agent_result.answer
+        # Rendered here, not at delivery: the warnings and the disclosure below
+        # are hand-built HTML, and running them through the Markdown renderer
+        # would escape their own tags into view. Baseline answers are responder
+        # cards — already HTML — and are never rendered.
+        answer = presentation.to_telegram_html(agent_result.answer)
         tools_used = tuple(agent_result.trajectory.distinct_tools())
     else:
         baseline_result = run_baseline(query, classifier=lambda _t: parsed,
@@ -375,7 +379,8 @@ async def _deliver(placeholder: Any, text: str) -> None:
             await reply(marked, parse_mode="HTML", disable_web_page_preview=True)
         except Exception:  # noqa: BLE001
             try:
-                await reply(chunk, disable_web_page_preview=True)
+                await reply(presentation.to_plain_text(chunk),
+                            disable_web_page_preview=True)
             except Exception:  # noqa: BLE001
                 logger.warning("续段 %d/%d 发送失败", index, len(chunks))
                 break
@@ -396,7 +401,10 @@ async def _edit(placeholder: Any, text: str) -> None:
                                     disable_web_page_preview=True)
     except Exception:  # noqa: BLE001 — telegram.error.BadRequest and friends
         try:
-            await placeholder.edit_text(text, disable_web_page_preview=True)
+            # Plain text, with the markup removed rather than shown: a reader
+            # who gets "<b>结论</b>" is worse off than one who gets "结论".
+            await placeholder.edit_text(presentation.to_plain_text(text),
+                                        disable_web_page_preview=True)
         except Exception:  # noqa: BLE001 — message unchanged / deleted / gone
             # Never silent again: this is how a finished run ends up looking
             # like a hung one, and the log is the only place it can be seen.

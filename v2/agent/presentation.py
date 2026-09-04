@@ -67,3 +67,109 @@ def strip_deliberation(text: str) -> str:
                 and _DELIBERATION.search(preamble)):
             return remainder
     return body.strip()
+
+
+# ---------------------------------------------------------------------------
+# Markdown → Telegram HTML
+# ---------------------------------------------------------------------------
+#
+# The bot sends with parse_mode="HTML" because every existing responder card is
+# hand-built HTML. The agent's answer is not: it is written by a model, and
+# models write Markdown. So the first live answers arrived with their markup
+# showing — "# 结论：", "## 一、整体表现", "**小幅上涨**", and pipe tables drawn
+# character by character.
+#
+# Telegram's HTML is a short list — b, i, u, s, code, pre, a, blockquote — with
+# no headings and no tables, so this is a translation, not a pass-through:
+# headings become bold lines and tables become padded <pre>, which is the only
+# way columns stay lined up in a chat client.
+
+import html as _html
+
+_FENCE = re.compile(r"```[^\n]*\n(.*?)```", re.S)
+_TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$")
+_TABLE_RULE = re.compile(r"^\s*\|[\s:|-]+\|\s*$")
+_HEADING = re.compile(r"^[ \t]*(#{1,6})[ \t]+(.+?)[ \t]*#*$", re.M)
+_BULLET = re.compile(r"^([ \t]*)[-*+][ \t]+", re.M)
+_BOLD = re.compile(r"\*\*(?=\S)(.+?)(?<=\S)\*\*|__(?=\S)(.+?)(?<=\S)__", re.S)
+_CODE = re.compile(r"`([^`\n]+)`")
+#: Single-asterisk italics only between non-word characters — a bare * inside a
+#: figure or a footnote marker must not turn half the answer sideways.
+_ITALIC = re.compile(r"(?<![\w*])\*(?=\S)([^*\n]+?)(?<=\S)\*(?![\w*])")
+
+
+def _display_width(text: str) -> int:
+    """CJK glyphs occupy two cells; column padding is wrong without this."""
+    return sum(2 if ord(ch) > 0x2E7F else 1 for ch in text)
+
+
+def _render_table(rows: list[str]) -> str:
+    """A Markdown table as a padded <pre> block — Telegram has no table tag."""
+    cells = [[c.strip() for c in row.strip().strip("|").split("|")]
+             for row in rows if not _TABLE_RULE.match(row)]
+    if not cells:
+        return ""
+    columns = max(len(r) for r in cells)
+    cells = [r + [""] * (columns - len(r)) for r in cells]
+    widths = [max(_display_width(r[i]) for r in cells) for i in range(columns)]
+    lines = [
+        "  ".join(cell + " " * (widths[i] - _display_width(cell))
+                  for i, cell in enumerate(row)).rstrip()
+        for row in cells
+    ]
+    return "<pre>" + "\n".join(lines) + "</pre>"
+
+
+def to_telegram_html(text: str) -> str:
+    """Translate the model's Markdown into the subset Telegram renders."""
+    body = (text or "").strip()
+    if not body:
+        return ""
+
+    blocks: list[str] = []
+
+    def _stash(rendered: str) -> str:
+        blocks.append(rendered)
+        return f"\x00{len(blocks) - 1}\x00"
+
+    body = _FENCE.sub(
+        lambda m: _stash("<pre>" + _html.escape(m.group(1).strip()) + "</pre>"), body)
+
+    # Tables are consumed line-block by line-block before anything is escaped,
+    # so the padding is computed on the text the reader will actually see.
+    out: list[str] = []
+    pending: list[str] = []
+    for line in body.split("\n"):
+        if _TABLE_ROW.match(line):
+            pending.append(_html.escape(line))
+            continue
+        if pending:
+            out.append(_stash(_render_table(pending)))
+            pending = []
+        out.append(line)
+    if pending:
+        out.append(_stash(_render_table(pending)))
+    body = "\n".join(out)
+
+    body = _html.escape(body)
+    body = _BULLET.sub(r"\1· ", body)
+    body = _CODE.sub(lambda m: f"<code>{m.group(1)}</code>", body)
+    body = _BOLD.sub(lambda m: f"<b>{m.group(1) or m.group(2)}</b>", body)
+    body = _ITALIC.sub(lambda m: f"<i>{m.group(1)}</i>", body)
+    # Headings last, and any bold inside one is dropped rather than nested:
+    # "# 结论：整体在**小幅上涨**" would otherwise emit <b>…<b>…</b></b>.
+    body = _HEADING.sub(
+        lambda m: "<b>" + m.group(2).replace("<b>", "").replace("</b>", "") + "</b>",
+        body)
+
+    for index, rendered in enumerate(blocks):
+        body = body.replace(f"\x00{index}\x00", rendered)
+    return body
+
+
+_TAG = re.compile(r"<[^>]+>")
+
+
+def to_plain_text(text: str) -> str:
+    """Last resort when Telegram rejects the markup: readable, not raw tags."""
+    return _html.unescape(_TAG.sub("", text or "")).strip()
