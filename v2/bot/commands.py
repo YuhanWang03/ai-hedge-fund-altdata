@@ -692,6 +692,15 @@ async def cmd_nl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # dispatched earlier. It also returns `parsed`, so a routed query is never
     # classified twice, and a rewritten `text` when a pronoun was resolved.
     agent_parsed = None
+    if text.lower().startswith("/ask") and (
+        agent_bridge is None or not agent_bridge.enabled()
+    ):
+        # Registered as a command, so it arrives even when the layer is off.
+        # Saying so beats handing "/ask …" to the classifier as a question.
+        await placeholder.edit_text(
+            "多步分析当前未启用（V2_AGENT_ROUTING=off），/ask 暂不可用。"
+            "\n直接问就行，我会按现有路径回答。")
+        return
     if agent_bridge is not None and agent_bridge.enabled():
         try:
             handled, agent_parsed, text = await agent_bridge.telegram_hook(

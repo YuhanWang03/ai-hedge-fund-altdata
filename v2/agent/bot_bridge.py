@@ -324,6 +324,10 @@ async def telegram_hook(
     store = store or session.STORE
     loop = asyncio.get_running_loop()
 
+    # "/ask …" forces the agent. Strip it here so neither the classifier nor the
+    # agent ever sees the slash command as part of the question.
+    text, forced = router.strip_ask_prefix(text)
+
     resolution = store.resolve(chat_id, text)
     query = resolution.text
 
@@ -341,7 +345,7 @@ async def telegram_hook(
         or ((parsed.get("ticker"),) if parsed.get("ticker") else ()),
     ))
 
-    decision = router.route(query, parsed)
+    decision = router.route(query, parsed, forced=forced)
     if not decision.is_agent:
         return False, parsed, query
 
