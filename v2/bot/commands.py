@@ -21,6 +21,14 @@ from telegram.ext import ContextTypes
 
 from v2.bot import intent, responders, state
 
+try:
+    # Agent layer (v2/agent). Import-time cost is nil — it pulls no third-party
+    # packages and resolves its tools lazily — but a failure here must never
+    # stop the bot from starting, so it degrades to "not installed".
+    from v2.agent import bot_bridge as agent_bridge
+except Exception:  # noqa: BLE001
+    agent_bridge = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -673,7 +681,30 @@ async def cmd_nl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     placeholder = await update.message.reply_html("🤔 理解中...")
 
-    parsed = await _run_blocking(intent.classify, text)
+    # --- agent layer -------------------------------------------------------
+    # Inert unless V2_AGENT_ROUTING is set: with the flag unset nothing below
+    # changes, and the dispatch chain runs exactly as it always has.
+    #
+    # This sits *before* the chain, not inside its `else: # unknown` branch.
+    # That branch is only reached when the classifier gives up, so wiring there
+    # would leave the router's other signals unreachable — comparison,
+    # collection and multi-topic queries all classify to *some* intent and get
+    # dispatched earlier. It also returns `parsed`, so a routed query is never
+    # classified twice, and a rewritten `text` when a pronoun was resolved.
+    agent_parsed = None
+    if agent_bridge is not None and agent_bridge.enabled():
+        try:
+            handled, agent_parsed, text = await agent_bridge.telegram_hook(
+                text, update.effective_chat.id, placeholder,
+            )
+            if handled:
+                return
+        except Exception:  # noqa: BLE001 — fall back to the existing path
+            logger.exception("agent layer failed for %r; falling back", text)
+            agent_parsed = None
+    # -----------------------------------------------------------------------
+
+    parsed = agent_parsed or await _run_blocking(intent.classify, text)
     name = parsed["intent"]
     ticker = parsed["ticker"]
     manager = parsed["manager"]

@@ -223,3 +223,111 @@ async def handle_nl(text: str, chat_id: int = 0, **kwargs: Any) -> BridgeResult:
     """Async wrapper — runs the synchronous pipeline off the bot's event loop."""
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, lambda: handle_nl_sync(text, chat_id, **kwargs))
+
+
+# ---------------------------------------------------------------------------
+# Telegram entry point
+# ---------------------------------------------------------------------------
+
+#: Telegram rate-limits message edits; a 5-step run would otherwise fire five
+#: edits in a couple of seconds and start getting 429s.
+_PROGRESS_MIN_INTERVAL = 1.5
+
+
+class _Throttled:
+    """Drops progress updates that arrive faster than Telegram tolerates."""
+
+    def __init__(self, send: Callable[[str], Any], interval: float = _PROGRESS_MIN_INTERVAL):
+        self.send = send
+        self.interval = interval
+        self.last = 0.0
+
+    def __call__(self, text: str) -> None:
+        now = time.time()
+        if now - self.last < self.interval:
+            return
+        self.last = now
+        self.send(text)
+
+
+async def _edit(placeholder: Any, text: str) -> None:
+    """Edit a Telegram message, falling back to plain text on malformed HTML.
+
+    Responder cards are hand-built HTML and safe; an agent's answer is written by
+    the model and can contain a stray '<'. The bot has been bitten by exactly
+    this before (see main._error_handler), and losing a correct answer to a
+    parse error is the worst possible outcome, so the fallback is unconditional.
+    """
+    try:
+        await placeholder.edit_text(text, parse_mode="HTML",
+                                    disable_web_page_preview=True)
+    except Exception:  # noqa: BLE001 — telegram.error.BadRequest and friends
+        try:
+            await placeholder.edit_text(text, disable_web_page_preview=True)
+        except Exception:  # noqa: BLE001 — message unchanged / deleted / too long
+            pass
+
+
+async def telegram_hook(
+    text: str,
+    chat_id: int,
+    placeholder: Any = None,
+    *,
+    store: session.SessionStore | None = None,
+    registry: ToolRegistry | None = None,
+    llm: Any = None,
+    config: AgentConfig | None = None,
+    classifier: Callable[[str], dict[str, Any]] | None = None,
+) -> tuple[bool, dict[str, Any] | None, str]:
+    """The single call ``cmd_nl`` makes. Returns (handled, parsed, resolved_text).
+
+    ``handled`` False means "not an agent query — carry on with the existing
+    dispatch", and ``parsed`` is handed back so the caller never pays for a
+    second classification. ``resolved_text`` is the query after pronoun
+    resolution, which the caller should use from then on.
+
+    Placement matters: this must run **before** ``cmd_nl``'s if/elif chain, not
+    inside its ``else: # unknown`` branch. That branch is only reached when the
+    classifier gives up, so wiring there would make the router's other signals
+    (comparison, collection, multi-topic …) unreachable — every query they are
+    meant to catch classifies to *some* intent and gets dispatched earlier.
+    """
+    store = store or session.STORE
+    loop = asyncio.get_running_loop()
+
+    resolution = store.resolve(chat_id, text)
+    query = resolution.text
+
+    classify = classifier or resolve_classifier()[0]
+    try:
+        parsed = await loop.run_in_executor(None, lambda: classify(query))
+    except Exception as exc:  # noqa: BLE001 — mirrors intent.classify's own guard
+        parsed = {"intent": "unknown", "ticker": "", "raw": query[:80],
+                  "_error": f"{type(exc).__name__}: {exc}"}
+
+    # Remembered whichever path answers, so the *next* turn can resolve "它".
+    store.record(chat_id, session.Turn(
+        query=query,
+        tickers=tuple(session.extract_tickers(query))
+        or ((parsed.get("ticker"),) if parsed.get("ticker") else ()),
+    ))
+
+    decision = router.route(query, parsed)
+    if not decision.is_agent:
+        return False, parsed, query
+
+    progress: Callable[[str], None] | None = None
+    if placeholder is not None:
+        sender = make_threadsafe_progress(loop, lambda t: _edit(placeholder, t))
+        progress = _Throttled(sender)
+
+    result = await loop.run_in_executor(None, lambda: handle_nl_sync(
+        query, chat_id, parsed=parsed, registry=registry, llm=llm,
+        config=config, store=store, on_progress=progress,
+        mode=decision.mode))
+
+    if placeholder is not None:
+        chip = f"<i>{router.explain(decision)}</i>\n\n"
+        await _edit(placeholder, chip + result.answer)
+
+    return True, parsed, query

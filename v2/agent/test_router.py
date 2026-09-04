@@ -365,6 +365,133 @@ def test_bridge_records_the_turn_for_the_next_question():
     assert store.last_ticker(7) == "NVDA"
 
 
+# ---------------------------------------------------------------------------
+# telegram_hook — the single call cmd_nl makes
+# ---------------------------------------------------------------------------
+
+class _FakePlaceholder:
+    """Stands in for the Telegram message cmd_nl edits in place."""
+
+    def __init__(self, fail_html: bool = False) -> None:
+        self.edits: list[tuple[str, bool]] = []
+        self.fail_html = fail_html
+
+    async def edit_text(self, text, parse_mode=None, disable_web_page_preview=None):
+        if self.fail_html and parse_mode == "HTML":
+            raise RuntimeError("Bad Request: can't parse entities")
+        self.edits.append((text, parse_mode == "HTML"))
+
+
+def _run(coro):
+    import asyncio
+    return asyncio.run(coro)
+
+
+def test_hook_hands_a_single_hop_query_back_to_the_existing_dispatch():
+    """False means 'not mine' — and parsed comes back so nothing reclassifies."""
+    placeholder = _FakePlaceholder()
+    llm = ScriptedLLM([])
+    handled, parsed, text = _run(bot_bridge.telegram_hook(
+        "组合风险怎么样", 1, placeholder,
+        classifier=lambda _t: _parsed("risk_view"),
+        registry=build_registry(), llm=llm, store=session.SessionStore()))
+
+    assert handled is False
+    assert parsed["intent"] == "risk_view"
+    assert text == "组合风险怎么样"
+    assert placeholder.edits == [], "未接手就不该改动那条占位消息"
+    assert llm.calls == []
+
+
+def test_hook_answers_a_multi_hop_query_and_edits_the_placeholder():
+    placeholder = _FakePlaceholder()
+    llm = ScriptedLLM([
+        LLMResponse(text="先看持仓",
+                    tool_calls=[ToolCall("c1", "portfolio_view", {}, "{}")]),
+        LLMResponse(text="CRWD 占仓 22.4%，是第一大持仓。"),
+    ])
+    with _Env(V2_AGENT_ROUTING="heuristic"):
+        handled, _parsed_out, _text = _run(bot_bridge.telegram_hook(
+            "我持仓里哪只最危险", 1, placeholder,
+            classifier=lambda _t: _parsed("risk_view"),
+            registry=build_registry(), llm=llm, store=session.SessionStore()))
+
+    assert handled is True
+    assert placeholder.edits, "应当把答案写回占位消息"
+    final = placeholder.edits[-1][0]
+    assert "CRWD" in final and "多步分析" in final
+
+
+def test_hook_resolves_a_pronoun_before_classifying():
+    """The rewrite has to happen first — that is what lets the *fast* path answer."""
+    store = session.SessionStore()
+    store.record(1, session.Turn(query="NVDA 怎么样", tickers=("NVDA",)))
+    seen: list[str] = []
+
+    def classifier(text):
+        seen.append(text)
+        return _parsed("earnings_view", "NVDA")
+
+    handled, _p, text = _run(bot_bridge.telegram_hook(
+        "那它财报呢", 1, _FakePlaceholder(), classifier=classifier,
+        registry=build_registry(), store=store))
+
+    assert seen == ["NVDA财报呢"], "分类器看到的应当是补全后的问题"
+    assert handled is False and text == "NVDA财报呢"
+
+
+def test_hook_remembers_the_turn_for_the_next_question():
+    store = session.SessionStore()
+    _run(bot_bridge.telegram_hook(
+        "NVDA 怎么样", 7, _FakePlaceholder(),
+        classifier=lambda _t: _parsed("summary", "NVDA"),
+        registry=build_registry(), store=store))
+    assert store.last_ticker(7) == "NVDA", "快路径答完也要记住，否则下一轮指代不了"
+
+
+def test_hook_falls_back_to_plain_text_when_html_fails():
+    """A model-written answer can contain a stray '<'; losing it to a parse
+    error is worse than losing the formatting."""
+    placeholder = _FakePlaceholder(fail_html=True)
+    llm = ScriptedLLM([
+        LLMResponse(tool_calls=[ToolCall("c1", "portfolio_view", {}, "{}")]),
+        LLMResponse(text="CRWD 占仓 22.4% <未闭合"),
+    ])
+    with _Env(V2_AGENT_ROUTING="heuristic"):
+        handled, _p, _t = _run(bot_bridge.telegram_hook(
+            "我持仓里哪只最危险", 1, placeholder,
+            classifier=lambda _t: _parsed("risk_view"),
+            registry=build_registry(), llm=llm, store=session.SessionStore()))
+
+    assert handled is True
+    assert placeholder.edits and placeholder.edits[-1][1] is False, "应退回纯文本发送"
+    assert "CRWD" in placeholder.edits[-1][0]
+
+
+def test_hook_survives_a_dead_classifier():
+    placeholder = _FakePlaceholder()
+    llm = ScriptedLLM([LLMResponse(text="分类器不可用，已直接回答。")])
+
+    def broken(_text):
+        raise RuntimeError("classifier down")
+
+    with _Env(V2_AGENT_ROUTING="unknown_only"):
+        handled, parsed, _t = _run(bot_bridge.telegram_hook(
+            "随便问点什么", 1, placeholder, classifier=broken,
+            registry=build_registry(), llm=llm, store=session.SessionStore()))
+
+    assert handled is True and parsed["intent"] == "unknown"
+
+
+def test_progress_updates_are_throttled():
+    sent: list[str] = []
+    throttled = bot_bridge._Throttled(sent.append, interval=10.0)
+    throttled("第一条")
+    throttled("第二条")
+    throttled("第三条")
+    assert sent == ["第一条"], "Telegram 编辑有频率限制，密集进度必须丢弃"
+
+
 if __name__ == "__main__":
     import traceback
 

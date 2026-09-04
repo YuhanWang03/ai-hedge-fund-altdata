@@ -321,20 +321,33 @@ python3 -m v2.agent.run_router     # 零 key
 
 ## 9. 接到 bot：两行
 
-`bot_bridge.py` 是 bot 唯一需要知道的文件。改动点是
-`v2/bot/commands.py:934` 那个 `else: # "unknown"` 死胡同：
+**已接入**（`v2/bot/commands.py:cmd_nl`，+32 行）。`bot_bridge.telegram_hook` 是
+bot 唯一需要知道的接口：
 
 ```python
-else:  # "unknown"
-    if bot_bridge.enabled():
-        reply = await bot_bridge.handle_nl(text, chat_id, parsed=parsed,
-                                           on_progress=progress)
-        await placeholder.edit_text(reply.answer, parse_mode="HTML")
-    else:
-        ...现有的「❓ 没听懂」...
+agent_parsed = None
+if agent_bridge is not None and agent_bridge.enabled():
+    handled, agent_parsed, text = await agent_bridge.telegram_hook(
+        text, update.effective_chat.id, placeholder)
+    if handled:
+        return
+
+parsed = agent_parsed or await _run_blocking(intent.classify, text)   # 原有一行
 ```
 
-`enabled()` 默认 `False`，**合并这段代码不改变任何线上行为**，之后靠环境变量灰度。
+**接入点在 if/elif 分发链之前，不是在它的 `else: # unknown` 分支里。** 我最初的
+方案写在那个分支，是错的：那里只有分类器放弃时才到得了，而路由的比较 / 集合 /
+多主题信号所针对的问题**都会归类到某个 intent**、在更早的分支被分发掉，
+因此永远走不到 else。
+
+四个细节：
+
+- `enabled()` 默认 `False` —— **合上这段代码不改变任何线上行为**，靠环境变量灰度。
+- hook 把 `parsed` 交还给调用方，**被路由的问题不会被分类两次**。
+- 指代消解发生在分类**之前**，所以补全后的问题可能由快路径答掉；无论谁答，
+  这一轮都会被记入会话，下一轮才能解析「它」。
+- import 与调用都包了 `try/except`：agent 层出任何问题都不能让 bot 起不来或
+  让一条消息没有回复，失败一律退回原有路径。
 
 两个设计细节：
 - `parsed` 由调用方传入。bot 走到这个分支时已经付过一次分类的钱，桥接层再分类一次
