@@ -119,7 +119,10 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         description=(
             "List every current position in the user's Alpaca account: ticker, "
             "quantity, market value, weight, unrealized P&L. Start here for any "
-            "question about what the user actually holds."
+            "question about what the user actually holds. No sector or industry "
+            "column: which ticker belongs to which sector is NOT in this card, "
+            "so sector weights cannot be built by adding position weights — "
+            "risk_view is the only source for that."
         ),
         parameters=_EMPTY,
         target="v2.bot.responders.portfolio_view",
@@ -150,10 +153,12 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         name="risk_view",
         description=(
-            "Portfolio-level risk panorama: concentration, sector exposure, "
-            "drawdown, and which holdings report earnings within 7 days. Returns "
-            "aggregate risk for the whole book — it does NOT rank individual "
-            "positions, so combine it with per-ticker tools for that."
+            "Portfolio-level risk panorama: concentration, sector/industry "
+            "exposure, drawdown, and which holdings report earnings within 7 "
+            "days. THE source for how much of the book sits in each sector — "
+            "no other tool records sector membership. Returns aggregate risk "
+            "for the whole book, and it does NOT rank individual positions, so "
+            "combine it with per-ticker tools for that."
         ),
         parameters=_EMPTY,
         target="v2.bot.responders.risk_view",
@@ -327,7 +332,12 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
     # --- watchlist / alerts / settings ---------------------------------------
     ToolSpec(
         name="watchlist_view",
-        description="The user's watchlist (tickers they track but may not hold).",
+        description=(
+            "The user's watchlist — a list of ticker symbols they track but may "
+            "not hold. Names only: no prices, no moves, no fundamentals. A "
+            "question about how the members are *doing* needs one per-ticker "
+            "call for each name this returns."
+        ),
         parameters=_EMPTY,
         target="v2.bot.state.watchlist_list",
         invoke_style="none",

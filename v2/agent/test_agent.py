@@ -82,6 +82,27 @@ def test_specs_are_well_formed():
                 assert key in spec.parameters["properties"]
 
 
+def test_the_collection_tools_say_what_they_lack_and_what_comes_next():
+    """Three descriptions carry a routing fact that was added from measurement,
+    not taste, and a later tidy-up would silently undo it.
+
+    k06 「我组合里半导体和软件各占多少」 failed 0/3: the model took
+    portfolio_view (whose description says "start here for any question about
+    what the user actually holds"), and the sector weights happen to be
+    reachable by summing position weights — but which ticker is a semiconductor
+    is in no tool's output, so the answer was right by world knowledge and
+    ungrounded by construction.
+
+    m07 / r07 spent 14–20 tool calls on the watchlist, whose description said
+    only what it is and nothing about the per-member lookups its members need.
+    """
+    described = {spec.name: spec.description for spec in TOOL_SPECS}
+
+    assert "risk_view" in described["portfolio_view"], "要指出板块归属不在这张卡里"
+    assert "sector membership" in described["risk_view"], "要声明自己是唯一来源"
+    assert "per-ticker call" in described["watchlist_view"], "要说清下一步是逐个查"
+
+
 def test_every_target_resolves_in_the_real_source():
     """The 24 dotted paths must exist in v2/bot — checked by parsing, not importing.
 
