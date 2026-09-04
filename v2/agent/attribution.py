@@ -152,6 +152,14 @@ class AttributionReport:
     #: Entities that were queried, returned nothing, and are still presented
     #: as having data. (entity, the figure it was given)
     empty_presented: list[tuple[str, str]] = field(default_factory=list)
+    #: The answer line behind each misattribution, in the same order.
+    #:
+    #: 「MSFT←18.2(实为 NVDA)」 says what the check concluded and nothing about
+    #: why. Five plausible reconstructions of the sentence failed to reproduce
+    #: it, which is the same unactionable verdict this package rejects
+    #: elsewhere ("数字无法溯源" without naming the figure). The sentence is the
+    #: evidence; without it the next fix is a guess.
+    evidence: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -264,11 +272,12 @@ def _line_at(text: str, position: int) -> str:
 
 
 def _record(report: "AttributionReport", entity: str, token: str,
-            holders: set[str]) -> None:
+            holders: set[str], context: str = "") -> None:
     report.checked += 1
     finding = (entity, token, tuple(sorted(holders)))
     if entity not in holders and finding not in report.misattributed:
         report.misattributed.append(finding)
+        report.evidence.append(" ".join((context or "").split())[:160])
 
 
 def _window_end(text: str, start: int, limit: int) -> int:
@@ -423,7 +432,8 @@ def check(
             # here reattributes rather than excuses.
             if next_entity and _POSTPOSED.match(body[position + end: next_start]):
                 continue
-            _record(report, entity, token, holders)
+            _record(report, entity, token, holders,
+                    _line_at(body, position + start))
 
     # Backward pass: a figure joined to a mention by 「…的」 belongs to it, and
     # the forward windows cannot see it — they start *after* each mention, so a
@@ -442,7 +452,7 @@ def check(
             continue
         holders = owners.get(key)
         if holders:
-            _record(report, entity, token, holders)
+            _record(report, entity, token, holders, _line_at(body, start_pos))
     return report
 
 

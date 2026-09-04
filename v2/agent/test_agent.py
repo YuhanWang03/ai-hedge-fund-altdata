@@ -477,6 +477,22 @@ def test_a_figure_can_belong_to_the_entity_that_follows_it():
         _records(("portfolio_view", {}, "CRWD 22.4% NVDA 18.2%"))).misattributed
 
 
+def test_a_finding_carries_the_line_it_came_from():
+    """「MSFT←18.2(实为 NVDA)」 says what the check concluded and nothing about
+    why. Five plausible reconstructions of that sentence failed to reproduce it,
+    which left the next fix a guess — the same unactionable verdict this package
+    rejects for grounding ("数字无法溯源" without naming the figure)."""
+    from v2.agent import attribution
+
+    report = attribution.check(
+        "组合概览：\nNVDA 权重 18.2%。\nMSFT 浮亏 -35.9%，仓位偏小。",
+        _records(("portfolio_view", {"ticker": "ARM"}, "ARM -35.9%"),
+                 ("portfolio_view", {"ticker": "NVDA"}, "NVDA 18.2%")))
+    assert report.misattributed and len(report.evidence) == len(report.misattributed)
+    assert "MSFT 浮亏 -35.9%" in report.evidence[0]
+    assert "NVDA 权重" not in report.evidence[0], "证据要是出问题的那一行"
+
+
 def test_a_benchmark_is_not_the_subject():
     """「同期 SPY +0.40% → 相对强度 -3.14pp」 is a sentence about TSLA. SPY is
     what TSLA is measured against, so the delivery figure two clauses later is
