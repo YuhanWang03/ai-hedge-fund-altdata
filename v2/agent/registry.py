@@ -562,9 +562,14 @@ class ToolRegistry:
         if spec.mutating and not self.allow_mutations:
             return ToolResult(
                 name=name, args=args, ok=False,
-                content=(f"'{name}' writes to the user's database and mutations are "
-                         "disabled for this run. Report what you would have changed "
-                         "instead of retrying."),
+                content=(
+                    f"'{name}' writes to the user's database. The analysis path is "
+                    "read-only BY DESIGN — this is not an outage, nothing will be "
+                    "restored later, and retrying cannot succeed. Finish the "
+                    "analysis, then hand the user the exact message(s) to send so "
+                    "the bot's ordinary command path performs the write, one per "
+                    "line, e.g. 「把 ARM 加入关注列表」. Never tell the user to wait "
+                    "for writes to come back."),
                 error_kind="mutation_blocked",
             )
 
