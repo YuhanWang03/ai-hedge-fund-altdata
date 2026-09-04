@@ -111,6 +111,21 @@ WINDOW = 60
 _LAYOUT_BREAK = re.compile(r"[\n·•]")
 
 
+#: A benchmark named as a comparison point is not the subject of the figures
+#: around it. 「同期 SPY +0.40% → 相对强度 -3.14pp ★ 逆势」 is a sentence about
+#: TSLA; SPY is what TSLA is being measured against, and the delivery figure two
+#: clauses later is TSLA's.
+#:
+#: This is the shape that produced the very first false positive of the whole
+#: series (「相对 SMH 逆势 -8.30pp」) and, twelve fixes later, the last two on the
+#: evaluation set. Recognising the *construction* rather than listing SPY, SMH,
+#: XLK … is what makes it stop recurring: the benchmark of the day is whatever
+#: card was fetched, and one of them (IVV) is a position this user actually
+#: holds, so a stoplist would both miss cases and break a real one.
+_BENCHMARK_LEAD = re.compile(
+    r"(?:同期|相对|相比|对比|较之?|跑输|跑赢|基准|参照|落后于|领先于|\bvs\.?|versus)"
+    r"[\s，,：:的]*$", re.IGNORECASE)
+
 #: A figure followed by a time unit is the *size of a window*, not a quantity
 #: belonging to anyone: 「52 周高点」「200 日均线」「过去 30 天」. Live, the 52 in
 #: MU's 「接近 52 周高点」 was reported as belonging to INTC/MU and flagged
@@ -373,6 +388,9 @@ def check(
                 if (entity, figure) not in report.empty_presented:
                     report.empty_presented.append((entity, figure))
     for index, (entity, position) in enumerate(mentions):
+        if _BENCHMARK_LEAD.search(body[max(0, position - len(entity) - 12):
+                                       position - len(entity)]):
+            continue                        # a yardstick, not a subject
         # A figure belongs to the nearest entity named before it, so the window
         # stops at the next mention. Without this, "NVDA 占仓 18.2%，CRWD 占仓
         # 22.4%" reads CRWD's weight as NVDA's and flags a correct sentence.

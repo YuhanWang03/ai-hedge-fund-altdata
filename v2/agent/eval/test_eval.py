@@ -293,8 +293,8 @@ def test_suite_runs_every_case_once():
 # the answer key itself
 # ---------------------------------------------------------------------------
 
-def _fixture_corpus() -> str:
-    """Everything the recorded tool layer can ever say."""
+def _fixture_corpus(tools: tuple[str, ...] | None = None) -> str:
+    """What the recorded tool layer can say — all of it, or just these tools."""
     chunks: list[str] = []
 
     def walk(value) -> None:
@@ -311,8 +311,40 @@ def _fixture_corpus() -> str:
                 except Exception:
                     pass          # SMCI's simulated timeout is intentional
 
-    walk(EVAL_FIXTURES)
+    if tools is None:
+        walk(EVAL_FIXTURES)
+    else:
+        for name in tools:
+            walk(EVAL_FIXTURES.get(name))
     return normalise("\n".join(chunks))
+
+
+def test_every_asserted_fact_comes_from_a_tool_the_case_requires():
+    """Stricter than the corpus check below, and it had to be.
+
+    「NVDA 和 AMD 上次财报各自超预期多少」 asserted 27.3% — which is NVDA's
+    *unrealised holding gain* in the positions card, not its earnings surprise
+    (+5.6%). The corpus check passed it, because 27.3% does exist somewhere in
+    the fixtures; the case was unpassable anyway, because nothing the question's
+    own tool returns will ever say it. That is the h07 trap this suite already
+    documents, made a second time by the person who documented it.
+
+    So a fact must be quotable from a tool the case actually requires. When it
+    is not, either the label is wrong or ``must_call`` is missing a tool — r07
+    was the second kind, asserting a figure only ``explain_move`` produces.
+    """
+    unreachable = []
+    for case in CASES:
+        if not case.must_call:
+            continue
+        corpus = _fixture_corpus(case.must_call)
+        for fact in case.facts:
+            if not any(normalise(form) in corpus for form in fact):
+                unreachable.append(
+                    f"{case.id} [{'+'.join(case.must_call)}]: {fact[0]}")
+    assert not unreachable, (
+        "这些事实不在该用例 must_call 的卡片里 —— 要么标注错了，"
+        "要么 must_call 少了一个工具：\n" + "\n".join(unreachable))
 
 
 def test_every_asserted_fact_exists_in_the_fixtures():
