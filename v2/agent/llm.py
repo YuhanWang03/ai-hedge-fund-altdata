@@ -1,0 +1,220 @@
+"""LLM client for the agent loop — OpenAI-compatible, stdlib only.
+
+Why not LangChain
+-----------------
+The bot uses ``ChatDeepSeek`` for a single classification call, which is a fine
+fit for one-shot work. An agent loop needs the opposite of an abstraction: exact
+control over the message list, the tool-call payloads, and the token accounting,
+because those three things *are* the engineering problem. So this speaks the
+OpenAI ``/chat/completions`` wire format directly over ``urllib`` — no new
+dependency, no framework upgrade risk, and every byte on the wire is inspectable.
+
+That choice also buys provider portability for free. Anything OpenAI-compatible
+works by pointing ``AGENT_LLM_BASE_URL`` at it:
+
+    DeepSeek   https://api.deepseek.com/v1          (default)
+    Groq       https://api.groq.com/openai/v1       (free tier)
+    Gemini     https://generativelanguage.googleapis.com/v1beta/openai
+    Ollama     http://localhost:11434/v1            (local, zero cost)
+    OpenAI     https://api.openai.com/v1
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import time
+import urllib.error
+import urllib.request
+from dataclasses import dataclass, field
+from typing import Any, Protocol
+
+
+@dataclass
+class ToolCall:
+    """One tool invocation requested by the model."""
+
+    id: str
+    name: str
+    arguments: dict[str, Any]
+    raw_arguments: str = ""
+    parse_error: str = ""
+
+
+@dataclass
+class LLMResponse:
+    """One assistant turn: prose, tool calls, or both."""
+
+    text: str = ""
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    finish_reason: str = ""
+    latency_ms: int = 0
+
+    @property
+    def total_tokens(self) -> int:
+        return self.prompt_tokens + self.completion_tokens
+
+
+class LLMClient(Protocol):
+    """Everything the loop needs from a model."""
+
+    def complete(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+    ) -> LLMResponse: ...
+
+
+class LLMError(RuntimeError):
+    """Transport or protocol failure the loop cannot turn into an observation."""
+
+
+def _parse_arguments(raw: str) -> tuple[dict[str, Any], str]:
+    """Parse a tool-call argument blob, tolerating the usual model output quirks."""
+    text = (raw or "").strip()
+    if not text:
+        return {}, ""
+    if text.startswith("```"):
+        lines = text.split("\n")[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        return {}, f"invalid JSON arguments ({exc.msg})"
+    if not isinstance(parsed, dict):
+        return {}, "arguments must be a JSON object"
+    return parsed, ""
+
+
+class OpenAICompatLLM:
+    """Chat-completions client with tool calling, retries and token accounting."""
+
+    def __init__(
+        self,
+        model: str | None = None,
+        base_url: str | None = None,
+        api_key: str | None = None,
+        temperature: float = 0.0,
+        timeout: float = 90.0,
+        max_retries: int = 3,
+    ) -> None:
+        self.model = model or os.environ.get("AGENT_LLM_MODEL", "deepseek-chat")
+        self.base_url = (base_url or os.environ.get("AGENT_LLM_BASE_URL")
+                         or "https://api.deepseek.com/v1").rstrip("/")
+        self.api_key = (api_key or os.environ.get("AGENT_LLM_API_KEY")
+                        or os.environ.get("DEEPSEEK_API_KEY")
+                        or os.environ.get("OPENAI_API_KEY") or "")
+        self.temperature = temperature
+        self.timeout = timeout
+        self.max_retries = max_retries
+
+    def complete(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+    ) -> LLMResponse:
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self.temperature,
+        }
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
+
+        body = json.dumps(payload).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
+        started = time.time()
+        last_error: Exception | None = None
+        for attempt in range(self.max_retries):
+            try:
+                request = urllib.request.Request(
+                    f"{self.base_url}/chat/completions",
+                    data=body, headers=headers, method="POST",
+                )
+                with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                    data = json.loads(response.read().decode("utf-8"))
+                return self._to_response(data, int((time.time() - started) * 1000))
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode("utf-8", "replace")[:400]
+                last_error = LLMError(f"HTTP {exc.code} from {self.base_url}: {detail}")
+                # 4xx other than rate-limit will not fix themselves on retry.
+                if exc.code < 500 and exc.code != 429:
+                    raise last_error from exc
+            except Exception as exc:  # noqa: BLE001 — network flakiness
+                last_error = exc
+            if attempt < self.max_retries - 1:
+                time.sleep(2 ** attempt)
+
+        raise LLMError(f"LLM call failed after {self.max_retries} attempts: {last_error}")
+
+    @staticmethod
+    def _to_response(data: dict[str, Any], latency_ms: int) -> LLMResponse:
+        choices = data.get("choices") or []
+        if not choices:
+            raise LLMError(f"no choices in response: {str(data)[:300]}")
+        message = choices[0].get("message") or {}
+        usage = data.get("usage") or {}
+
+        calls: list[ToolCall] = []
+        for index, item in enumerate(message.get("tool_calls") or []):
+            function = item.get("function") or {}
+            raw = function.get("arguments", "") or ""
+            parsed, error = _parse_arguments(raw)
+            calls.append(ToolCall(
+                id=item.get("id") or f"call_{index}",
+                name=function.get("name", ""),
+                arguments=parsed,
+                raw_arguments=raw,
+                parse_error=error,
+            ))
+
+        return LLMResponse(
+            text=(message.get("content") or "").strip(),
+            tool_calls=calls,
+            prompt_tokens=int(usage.get("prompt_tokens", 0) or 0),
+            completion_tokens=int(usage.get("completion_tokens", 0) or 0),
+            finish_reason=choices[0].get("finish_reason", "") or "",
+            latency_ms=latency_ms,
+        )
+
+
+class ScriptedLLM:
+    """Deterministic stand-in that replays a fixed list of responses.
+
+    Tests for an agent loop must not depend on a model's mood. Scripting the
+    model turns 'does the loop recover from a tool error' into an assertion
+    instead of an anecdote.
+    """
+
+    def __init__(self, responses: list[LLMResponse]) -> None:
+        self.responses = list(responses)
+        self.calls: list[list[dict[str, Any]]] = []
+
+    def complete(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+    ) -> LLMResponse:
+        self.calls.append(list(messages))
+        if not self.responses:
+            return LLMResponse(text="(scripted LLM exhausted)", finish_reason="stop")
+        return self.responses.pop(0)
+
+
+def build_llm(**kwargs: Any) -> LLMClient:
+    """Construct the configured client. Env-driven so ops can swap providers."""
+    return OpenAICompatLLM(**kwargs)
+
+
+def describe_provider() -> str:
+    client = OpenAICompatLLM()
+    key_state = "set" if client.api_key else "MISSING"
+    return f"{client.model} @ {client.base_url} (api key: {key_state})"
