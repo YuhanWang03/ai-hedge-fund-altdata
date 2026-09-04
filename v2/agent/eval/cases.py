@@ -235,10 +235,14 @@ CASES: tuple[EvalCase, ...] = (
       expected_path="single_hop", max_tool_calls=3),
     C("c07", "为什么我的半导体仓位表现分化这么大", "causal", "unknown", "",
       ("portfolio_view",), (), (("SMCI",), ("NVDA",)), max_tool_calls=10),
-    C("c08", "我上周亏的钱这周补回来了吗", "causal", "pnl_period", "",
+    C("c08", "我这周亏的钱今天补回来了吗", "causal", "pnl_period", "",
       ("pnl_period", "pnl_view"), (),
       (("3,880.12", "3880.12"), ("1,204.33", "1204.33")), max_tool_calls=6,
-      note="要对比两个周期，一张卡答不了 —— 初版把两个数写成同一条事实的备选，被单跳蒙混过关"),
+      note="要对比两个周期，一张卡答不了 —— 初版把两个数写成同一条事实的备选，"
+           "被单跳蒙混过关。问句原本写的是「上周…这周」,而 pnl_period 只有 "
+           "day/week/month,根本取不到上周:断言要的 3,880.12 是本周、1,204.33 "
+           "是今日,正确回答「没有上周的数据」反而会挂掉两条事实。0/3 稳定失败,"
+           "查下来又是标注和 fixture 对不上,不是模型不会规划。"),
 
     # =======================================================================
     # 5. compound — two asks in one message (8)
@@ -422,7 +426,11 @@ CASES: tuple[EvalCase, ...] = (
       ("risk_view",), (),
       (("38.1%", "38.1"), ("36.5%", "36.5")),
       expected_path="single_hop", max_tool_calls=3,
-      note="行业标签（BROAD/半导体）不是 ticker，却会被大写词模式收成实体"),
+      note="行业标签（BROAD/半导体）不是 ticker，却会被大写词模式收成实体。"
+           "另外它意外成了一条工具选择的硬用例：权重恰好凑得出答案"
+           "（NVDA 18.2 + AMD 11.3 + SMCI 8.6 = 38.1），但「哪只属于哪个行业」"
+           "不在任何工具返回里，只有 risk_view 说得出。模型用 portfolio_view "
+           "自己算，数字对、来源不可溯 —— grounding 独立地也拒了它。"),
 )
 
 
