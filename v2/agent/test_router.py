@@ -403,6 +403,27 @@ def test_hook_hands_a_single_hop_query_back_to_the_existing_dispatch():
     assert llm.calls == []
 
 
+def test_a_bare_follow_up_restores_the_previous_question():
+    """"为什么？" on its own, seen live: no pronoun to substitute, so the
+    resolver passed it through, the classifier returned unknown, and the agent
+    spent a full budget concluding it should ask what the user meant."""
+    store = session.SessionStore()
+    store.record(1, session.Turn(query="我的持仓最近整体在跌还是涨？"))
+
+    resolution = store.resolve(1, "为什么？")
+    assert resolution.rewritten
+    assert "我的持仓最近整体在跌还是涨" in resolution.text
+    assert resolution.text.endswith("为什么？")
+    assert "补全" in resolution.note, "改写过就要对用户讲明"
+
+    # A question that carries its own subject is not a follow-up.
+    assert store.resolve(1, "为什么 NVDA 涨").rewritten is False
+    # Nothing to restore, and two bare follow-ups in a row restore nothing.
+    assert session.SessionStore().resolve(9, "为什么？").rewritten is False
+    store.record(2, session.Turn(query="为什么？"))
+    assert store.resolve(2, "为什么？").rewritten is False
+
+
 def test_ask_prefix_is_stripped_before_anything_sees_it():
     """The prefix must not reach the classifier or the agent as part of the
     question, and a bare /ask forces nothing — there is no query to route."""
