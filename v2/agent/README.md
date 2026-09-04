@@ -12,9 +12,10 @@
 |---|---|
 | `v2/agent/run_demo.py` | 什么都不需要，回放录制轨迹 |
 | `v2/agent/run_compare.py` | 一个 LLM key（`.env` 里的 `DEEPSEEK_API_KEY` 即可） |
-| `v2/agent/run_tests.py` | 什么都不需要，84 个测试（不走 pytest） |
+| `v2/agent/run_tests.py` | 什么都不需要，103 个测试（不走 pytest） |
 | `v2/agent/run_router.py` | 什么都不需要，路由层打分 |
 | `v2/agent/run_anomaly_assist.py` | 什么都不需要，B1 异动补齐打分 |
+| `v2/agent/run_mda_reader.py` | 什么都不需要，B2 MD&A 解读打分 |
 
 这三个文件都会自己把仓库根目录补进 `sys.path`，所以不依赖任何 IDE 配置
 （不用改 Working directory，也不用把根目录标成 Sources Root）。
@@ -323,7 +324,71 @@ print(assistant.summary())                    # 新增：本轮花了多少、�
 V2_AGENT_ANOMALY_ASSIST=true    # 默认关闭
 ```
 
-## 11. 目前还没有的（下一步）
+## 11. B2：10-Q MD&A 措辞解读（`mda_reader.py`）
+
+`v2/sec/ten_q_parser.py` 已经回答了**变了什么**：哪些 MD&A 段落相对上季是新增的、
+新增了几条风险因素、有没有 going concern / 重大缺陷。这些是 diff 和正则的确定性事实，
+自己就能升 P0，**这一层不能改动也不能抑制它们中的任何一条**。
+
+管线答不了的是**这个变化意味着什么**。一段关于「客户验收周期拉长」的新增措辞，
+读者要么认得要么划过去。这个判断是开放的，所以模型该在这儿——而且只做加法。
+
+### 为什么这一层没有工具
+
+本包前面几块是工具循环，因为它们的问题只能靠取数回答。这个问题不用：文本已经在
+手里了，业绩数字也随卡片一起进来。为了「让 B2 看起来也像 agent」而接几个工具，
+只会增加延迟、token 和失败面，换不到任何东西。**它就是一次受约束的调用**，
+工程含量在输出之后发生的事情上。
+
+### 校验比本包其他任何地方都严
+
+别处的判据是「数字能溯源」。这里模型读的是散文，风险不在数字而在**转述**——
+把一段披露悄悄说得比原文更好或更坏，才是财报推送里真正致命的失败。
+
+所以每条解读必须附一段**逐字引用**，按空白归一化后做子串匹配，且
+**只对照模型实际看到的那份语料**（段落发送前会截断，校验就对着截断后的文本做）——
+否则引用可能"验证通过"于模型从未见过、只能靠猜的正文。引用找不到就丢弃，
+不重写不软化。方向是闭合枚举，解读里的数字照样过数值溯源。
+
+### 打分
+
+```bash
+python3 -m v2.agent.run_mda_reader     # 零 key
+```
+
+```
+  ✅ CRWD   ok                [确定性部分：新增段落 3 · 新增风险因素 2]
+       🔻 「extended customer acceptance cycles」
+            → 企业客户签约到确认收入的周期在拉长，对后续收入确认节奏是压力
+       🔻 「a charge of $18.4 million related to the restructuring of」
+            → EMEA 销售组织重组已计提 $18.4M，后续还有最多 $6.0M
+  🟡 AAPL   no_finding        新增段落全是会计政策模板，如实返回空
+  ❌ BADCO  unquoted          引用不在原文中：management expects liquidity to normaliz
+  ⚪ MSFT   nothing_to_read   本季无新增段落，一次调用都没发生（0 token）
+
+  产出解读 2 条 · 拒绝 1 条 · 零成本跳过 1 个 · 代价 4140 token
+```
+
+BADCO 那条是这层存在的理由：一家 going concern 的公司，模型编了一句
+「管理层预计年底流动性恢复正常」并标成利好。引用逐字查不到，整条被拒。
+
+### 接到 cron
+
+`v2/earnings/pipeline.py:run_summaries` 已经把 `ten_q_delta` 挂在 `EarningsSummary`
+上了，所以接入发生在渲染侧，管线一行不动：
+
+```python
+reading = mda_reader.read_if_enabled(summary.ten_q_delta)   # 未启用时返回 None
+card = format_earnings_summary(summary)                     # 现状，一行不改
+if reading and reading.ok:
+    card += "\n\n" + reading.render()                       # 纯追加
+```
+
+```bash
+V2_AGENT_EARNINGS_READ=true    # 默认关闭
+```
+
+## 12. 目前还没有的（下一步）
 
 - **评测集**：80–120 条标注了期望工具序列和期望事实的 query，指标为工具选择准确率、
   多跳完成率、溯源率、步数/token/延迟。有了它，`--mode both` 的单例对比才能变成

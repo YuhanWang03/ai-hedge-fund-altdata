@@ -155,3 +155,66 @@ ANOMALY_CASES: tuple[SimpleAnomaly, ...] = (
     SimpleAnomaly("AMD", -0.0132, 1.1, [], False,
                   [SimpleReason("跟随半导体板块", "低")]),
 )
+
+
+# ---------------------------------------------------------------------------
+# B2 — 10-Q MD&A reading layer
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SimpleTenQDelta:
+    """Structural stand-in for v2.sec.ten_q_parser.TenQDelta.
+
+    Paragraphs are English because real MD&A is; readings come back in Chinese.
+    That split is deliberate in the samples — a verbatim-quote check is easy to
+    fake when the quote and the reading share a language, and much less so when
+    the model has to carry the source wording across untouched.
+    """
+
+    ticker: str
+    period: str
+    mda_added_paragraphs: list[str] = field(default_factory=list)
+    new_risk_factor_count: int = 0
+    has_going_concern: bool = False
+    has_material_weakness: bool = False
+
+
+#: Four scenarios: real signal, pure boilerplate, a fabricated quote, and a
+#: quarter with no new paragraphs at all (which must cost nothing).
+MDA_CASES: dict[str, SimpleTenQDelta] = {
+    "CRWD": SimpleTenQDelta(
+        ticker="CRWD", period="Q2 2027", new_risk_factor_count=2,
+        mda_added_paragraphs=[
+            "During the quarter, we observed extended customer acceptance cycles "
+            "in our enterprise segment, particularly among customers in the "
+            "financial services vertical, which lengthened the average time from "
+            "contract signature to revenue recognition relative to prior periods.",
+            "We recorded a charge of $18.4 million related to the restructuring of "
+            "our EMEA sales organization, and we expect to incur additional charges "
+            "of up to $6.0 million through the remainder of fiscal 2027.",
+            "This Quarterly Report contains forward-looking statements within the "
+            "meaning of the Private Securities Litigation Reform Act of 1995. "
+            "Actual results could differ materially from those projected.",
+        ],
+    ),
+    "AAPL": SimpleTenQDelta(
+        ticker="AAPL", period="Q3 2026",
+        mda_added_paragraphs=[
+            "In the first quarter of 2026, the Company adopted ASU 2024-03, which "
+            "requires disaggregated disclosure of certain income statement expense "
+            "captions. Adoption did not have a material impact on the Company's "
+            "condensed consolidated financial statements.",
+        ],
+    ),
+    "BADCO": SimpleTenQDelta(
+        ticker="BADCO", period="Q2 2026", new_risk_factor_count=4,
+        has_going_concern=True,
+        mda_added_paragraphs=[
+            "Our cash and cash equivalents declined to $41.2 million as of the end "
+            "of the period. Management has concluded that there is substantial "
+            "doubt about the Company's ability to continue as a going concern.",
+        ],
+    ),
+    "MSFT": SimpleTenQDelta(ticker="MSFT", period="Q1 2027", mda_added_paragraphs=[]),
+}
