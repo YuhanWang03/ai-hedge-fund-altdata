@@ -22,6 +22,22 @@ from v2.agent.registry import ToolRegistry
 _RULE = "─" * 72
 
 
+def _load_dotenv() -> None:
+    """Load the repo's .env when python-dotenv is available.
+
+    Matches how the web backend bootstraps itself. Optional on purpose: the demo
+    and the test suite must keep working in an environment with no third-party
+    packages installed, so a missing dotenv is not an error.
+    """
+    try:
+        import pathlib
+
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+    load_dotenv(pathlib.Path(__file__).resolve().parents[2] / ".env")
+
+
 def _wrap(text: str, indent: str = "    ", width: int = 96) -> str:
     lines: list[str] = []
     for raw in (text or "").splitlines():
@@ -109,6 +125,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-parallel", action="store_true")
     parser.add_argument("--json", action="store_true", help="emit machine-readable stats")
     args = parser.parse_args(argv)
+    _load_dotenv()
 
     if args.demo:
         from v2.agent.demo import DEMO_QUERY

@@ -4,17 +4,19 @@
 模型可调用的工具，让模型自己决定调什么、调几次、按什么顺序调，从而与生产环境
 现有的单跳意图路由形成可测量的对比。
 
+全部命令都在**仓库根目录**执行。
+
 ```bash
 # 零 API key，回放录制轨迹
-PYTHONPATH=. python3 -m v2.agent.cli --demo
+python3 -m v2.agent.cli --demo
 
 # 只花 LLM 的钱（工具层用录制观测，不需要 FD / Alpaca key）
-PYTHONPATH=. python3 -m v2.agent.cli "我持仓里哪只最危险" --mode both --tools fixture
+python3 -m v2.agent.cli "我持仓里哪只最危险" --mode both --tools fixture
 
 # 全真实（需要现有 .env 里的数据源 key）
-PYTHONPATH=. python3 -m v2.agent.cli "我这周为什么亏钱" --mode agent --tools live
+python3 -m v2.agent.cli "我这周为什么亏钱" --mode agent --tools live
 
-PYTHONPATH=. python3 v2/agent/test_agent.py     # 30 tests，无需 pytest
+python3 -m v2.agent.test_agent               # 31 tests，无需 pytest
 ```
 
 ---
