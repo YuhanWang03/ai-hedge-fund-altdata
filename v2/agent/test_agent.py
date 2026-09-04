@@ -174,6 +174,14 @@ def test_mutations_are_blocked_by_default_and_openable():
     blocked = _registry().call("watchlist_add", {"ticker": "ARM"})
     assert not blocked.ok and blocked.error_kind == "mutation_blocked"
 
+    # The refusal has to say *why*, or the model guesses — and it guessed
+    # wrong live: 「本次运行中写入操作被禁用…请在写入功能恢复后重新执行」,
+    # inventing an outage that will never end. Read-only is a property of this
+    # path, and the useful thing to hand back is the command that does work.
+    assert "BY DESIGN" in blocked.content
+    assert "not an outage" in blocked.content
+    assert "加入关注列表" in blocked.content, "要给出用户照抄就能执行的那句话"
+
     allowed = ToolRegistry(executor=lambda spec, args: "added",
                            allow_mutations=True).call("watchlist_add", {"ticker": "ARM"})
     assert allowed.ok
