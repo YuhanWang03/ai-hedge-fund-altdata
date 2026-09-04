@@ -8,7 +8,7 @@ Built as a portfolio project to demonstrate end-to-end ownership of a multi-sour
 
 **Hero numbers**: 10 phases shipped · 6 scheduled pushes + on-demand bot · 24 NL intents · 5-layer defense · 490 sandbox tests · **~$22/month** total ops cost
 
-**Agent layer** ([`v2/agent/`](./v2/agent/README.md)): a model-driven tool-calling loop over the same 24 responders, plus a router that decides per query whether multi-step planning is worth its cost. Measured on an **89-case labelled evaluation set at 3 samples each**: **53% → 94%** pass rate at **54% of the full loop's tokens**, with **0 attribution false positives in 267 runs**. 194 further tests.
+**Agent layer** ([`v2/agent/`](./v2/agent/README.md)): a model-driven tool-calling loop over the same 24 responders, plus a router that decides per query whether multi-step planning is worth its cost. Measured on an **89-case labelled evaluation set at 3 samples each**: **53% → 94%** pass rate at **55% of the full loop's tokens**, with **1 attribution false positive in 267 runs** and **0 stable failures**. 197 further tests.
 
 ---
 
@@ -149,19 +149,20 @@ recorded, so the model is the only variable.
 
 | | single-hop (current) | **routed** (production shape) | full agent loop |
 |---|---|---|---|
-| **Pass rate** | 53% | **94%** | 92% |
-| Tool recall / fact recall | 70% / 63% | 99% / 96% | 98% / 98% |
-| Grounding | 100% | 99% | 97% |
-| **Attribution false positives** | — | **0 / 267** | 2 / 267 |
-| Tokens per case | 0 | **5,493** | 10,045 |
-| **Tokens per pass** | — | **5,867** | 10,903 |
+| **Pass rate** | 53% | **94%** | 93% |
+| Tool recall / fact recall | 70% / 63% | 98% / 96% | 99% / 98% |
+| Grounding | 100% | 99% | 98% |
+| **Attribution false positives** | — | **1 / 267** | 2 / 267 |
+| Tokens per case | 0 | **5,270** | 9,604 |
+| **Tokens per pass** | — | **5,629** | 10,298 |
+| Stable failures | — | — | **0** |
 
 ```
-single_lookup  100 / 100 /  98        multi_hop    29 /  88 /  98
-cost_trap      100 / 100 / 100        ranking      30 /  80 /  80
-honesty         86 / 100 /  95        compound      0 /  96 /  96
-causal          75 /  96 /  79        recovery      0 /  80 / 100
-dead_end         0 /  95 /  95        checker_stress 67 / 100 /  72
+single_lookup  100 / 100 /  98        multi_hop    29 /  88 /  93
+cost_trap      100 / 100 / 100        ranking      30 /  83 /  90
+honesty         86 / 100 / 100        compound      0 /  96 / 100
+causal          75 / 100 /  92        recovery      0 /  73 /  93
+dead_end         0 /  90 /  71        checker_stress 67 / 100 /  89
 ```
 
 **The router wins on both axes: 2pp higher pass rate at 54% of the cost.** Single-hop is perfect on the
@@ -529,7 +530,7 @@ WantedBy=multi-user.target
 
 All 490 tests pass under `pytest` in the sandbox environment with no v2.data deps required (production-only deps are stubbed via sys.modules).
 
-**Agent layer: 194 further tests** (`python3 -m v2.agent.run_tests`) needing neither pytest nor any third-party package — the loop, router, checks and eval harness import nothing outside the standard library, and the model is scripted so "does a tool failure get recovered from" is an assertion rather than an anecdote.
+**Agent layer: 197 further tests** (`python3 -m v2.agent.run_tests`) needing neither pytest nor any third-party package — the loop, router, checks and eval harness import nothing outside the standard library, and the model is scripted so "does a tool failure get recovered from" is an assertion rather than an anecdote.
 
 ---
 
