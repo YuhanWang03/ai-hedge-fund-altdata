@@ -37,6 +37,14 @@ _ENTITY_ARGS = ("ticker", "symbol", "manager")
 #: Uppercase tickers plus the manager aliases the 13F tool accepts.
 _ENTITY_MENTION = re.compile(r"\b[A-Z]{2,5}\b|巴菲特|buffett|burry|ark", re.IGNORECASE)
 
+#: The 13F tool takes an alias while answers use the Chinese name; without
+#: normalising, every figure next to 「巴菲特」 looks misattributed away from
+#: the "BUFFETT" that owns it.
+_ALIASES = {
+    "巴菲特": "BUFFETT", "伯克希尔": "BUFFETT", "BERKSHIRE": "BUFFETT",
+    "BURRY": "BURRY", "木头姐": "ARK", "ARKK": "ARKK",
+}
+
 _NOT_ENTITIES = frozenset({
     "AI", "US", "USD", "CEO", "CFO", "COO", "CTO", "SEC", "ETF", "IPO", "EPS",
     "PE", "PB", "ROE", "GDP", "CPI", "PCE", "NFP", "PPI", "FOMC", "FED", "RSI",
@@ -83,7 +91,8 @@ def _entity_of(args: dict[str, Any]) -> str:
     for key in _ENTITY_ARGS:
         value = str((args or {}).get(key, "")).strip()
         if value:
-            return value.upper()
+            upper = value.upper()
+            return _ALIASES.get(upper, upper)
     return ""
 
 
@@ -91,6 +100,7 @@ def _mentions(text: str) -> list[tuple[str, int]]:
     out: list[tuple[str, int]] = []
     for match in _ENTITY_MENTION.finditer(text or ""):
         token = match.group(0).upper()
+        token = _ALIASES.get(token, token)
         if token not in _NOT_ENTITIES:
             out.append((token, match.end()))
     return out

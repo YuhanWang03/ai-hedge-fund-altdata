@@ -344,6 +344,29 @@ def test_no_case_can_pass_without_asserting_anything():
     assert not vacuous, "这些 case 没有任何断言，必然空过：" + ", ".join(vacuous)
 
 
+def test_forbidden_strings_belong_to_a_different_entity():
+    """A forbidden string is only valid if no *correct* answer could contain it.
+
+    h07 ("我持仓里每只的机构持股比例") forbade "Vanguard 8.94%" — which is NVDA's
+    real institutional holding. Any correct answer reporting NVDA necessarily
+    contains it, so the case was unpassable by construction, and two rounds of
+    prompt work were spent blaming the model for it.
+
+    The rule that would have caught it: a forbidden string needs a *specific*
+    subject the case is about, so that the string can be shown to belong to
+    someone else. A book-wide question has no such subject, and must express its
+    requirement as a behaviour ("did it admit the gap") instead.
+    """
+    offenders = []
+    for case in CASES:
+        if not case.forbidden:
+            continue
+        entity = case.ticker or case.extra.get("etf") or case.extra.get("manager")
+        if not entity:
+            offenders.append(f"{case.id}（无特定主体，却用禁止字符串表达要求）")
+    assert not offenders, "禁止字符串用错了地方：" + ", ".join(offenders)
+
+
 def test_every_required_tool_exists():
     unknown = []
     for case in CASES:
