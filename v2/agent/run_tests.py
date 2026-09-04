@@ -23,10 +23,14 @@ import traceback  # noqa: E402
 
 
 def _test_modules() -> list:
-    """Discover every test_*.py in this package, so a new one needs no wiring."""
+    """Discover every test_*.py in this package and its subpackages."""
     package = pathlib.Path(__file__).resolve().parent
-    names = sorted(p.stem for p in package.glob("test_*.py"))
-    return [importlib.import_module(f"v2.agent.{name}") for name in names]
+    paths = sorted(package.glob("test_*.py")) + sorted(package.glob("*/test_*.py"))
+    modules = []
+    for path in paths:
+        dotted = ".".join(path.relative_to(package).with_suffix("").parts)
+        modules.append(importlib.import_module(f"v2.agent.{dotted}"))
+    return modules
 
 
 def main() -> int:

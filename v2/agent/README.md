@@ -12,10 +12,11 @@
 |---|---|
 | `v2/agent/run_demo.py` | 什么都不需要，回放录制轨迹 |
 | `v2/agent/run_compare.py` | 一个 LLM key（`.env` 里的 `DEEPSEEK_API_KEY` 即可） |
-| `v2/agent/run_tests.py` | 什么都不需要，103 个测试（不走 pytest） |
+| `v2/agent/run_tests.py` | 什么都不需要，125 个测试（不走 pytest） |
 | `v2/agent/run_router.py` | 什么都不需要，路由层打分 |
 | `v2/agent/run_anomaly_assist.py` | 什么都不需要，B1 异动补齐打分 |
 | `v2/agent/run_mda_reader.py` | 什么都不需要，B2 MD&A 解读打分 |
+| `v2/agent/run_eval.py` | baseline 档零 key；跑 agent 需 LLM key |
 
 这三个文件都会自己把仓库根目录补进 `sys.path`，所以不依赖任何 IDE 配置
 （不用改 Working directory，也不用把根目录标成 Sources Root）。
@@ -388,7 +389,72 @@ if reading and reading.ok:
 V2_AGENT_EARNINGS_READ=true    # 默认关闭
 ```
 
-## 12. 目前还没有的（下一步）
+## 12. 评测集（`v2/agent/eval/`）
+
+83 条标注 query，9 个类别。每条说清三件事：答案**需要**哪些工具、哪些事实必须活到
+回复里、允许花多少。这个三元组把「答案看起来不错」变成一个数字。
+
+```bash
+python3 -m v2.agent.run_eval --modes baseline          # 零 key
+python3 -m v2.agent.run_eval                           # baseline / routed / agent
+python3 -m v2.agent.run_eval --modes baseline routed agent agent_no_repair \
+                             --workers 8 --out eval.json
+```
+
+**基线那一档完全不需要 API key**——它用样例标注的 intent 直接分发，工具层是录制观测。
+所以任何人 clone 下来立刻能看到「现有系统得几分」，这就是对比的起点：
+
+```
+  mode          通过    通过率   工具召回  事实召回  溯源率  越界  超预算  工具/例
+  baseline     47/83     57%     69%      72%    100%   0%    0%     0.8
+
+  single_lookup  18/18 (100%)      multi_hop    2/14 (14%)
+  cost_trap       6/6 (100%)       compound      0/8  (0%)
+  causal          7/8  (88%)       recovery      1/5 (20%)
+  honesty         6/7  (86%)       dead_end      2/7 (29%)
+  ranking         5/10 (50%)
+```
+
+单跳在它设计要解决的问题上是满分，在需要跨工具组合的地方掉到 0–20%。
+**这正是它的设计，不是它的缺陷**——数字只是把边界画出来了。
+
+### 四个正交判据
+
+一个 pass/fail 对改进几乎没用：工具调错和事实丢失长得一模一样，但要反着修。
+所以每条按四个轴独立打分，`passed` 是它们的合取：
+
+| 判据 | 说明 |
+|---|---|
+| 工具召回 | 需要的工具调到了吗。**多调不扣分**——多调是成本问题，计入成本指标 |
+| 事实召回 | 该出现的事实活到回复里了吗。每个事实是一组可接受表述（`2026-09-06` / `9月6日` 都算） |
+| 纪律 | 有没有调不该调的工具、有没有输出禁止内容（典型：这只没数据，就把另一只的数字搬过来） |
+| 溯源 | 数字能否追到观测。**编数字的答案不是正确答案**，所以它在 `passed` 里而不是脚注里 |
+
+### 消融
+
+```
+baseline           单跳（要打败的对象）
+agent              完整循环
+routed             路由逐条决定（生产形态）
+agent_no_parallel  关并行 → 分离延迟收益
+agent_no_repair    关溯源重写 → 分离该机制的价值
+agent_tight        3 步 / 4 次工具 → 预算到底重不重要
+```
+
+`routed` 是最值得看的一行：它应该在通过率上贴近 `agent`，成本上贴近 `baseline`。
+**如果没有，就说明路由的信号表是错的。**
+
+### 评测集自己也要被测
+
+评测代码是判别别人的代码，它的 bug 比被测代码的 bug 更坏——会产出一个看起来
+权威的错数字。所以 `test_eval.py` 里除了打分器和执行器，还机械校验**答案键本身**：
+
+> 每条 case 断言的事实，必须真的能在录制观测里找到。
+
+否则那条 case 从构造上就不可能通过，套件会对所有模式**等量地**低报——这是最难
+察觉的一类评测 bug。这条检查在写 case 的过程中就抓出过我自己标注的错误。
+
+## 13. 目前还没有的（下一步）
 
 - **评测集**：80–120 条标注了期望工具序列和期望事实的 query，指标为工具选择准确率、
   多跳完成率、溯源率、步数/token/延迟。有了它，`--mode both` 的单例对比才能变成
