@@ -481,6 +481,32 @@ def test_the_answer_drops_the_models_narration_of_its_own_process():
     assert presentation.strip_deliberation(long_one) == long_one
 
 
+def test_markdown_becomes_the_html_telegram_renders():
+    """The bot sends parse_mode=HTML because every responder card is HTML; the
+    model writes Markdown. Live, that meant answers arrived with their markup
+    showing — "# 结论：", "**小幅上涨**", pipe tables drawn by hand."""
+    from v2.agent import presentation as pres
+
+    assert pres.to_telegram_html("# 结论：整体**小幅上涨**") == "<b>结论：整体小幅上涨</b>"
+    assert pres.to_telegram_html("- 今日 +0.28%") == "· 今日 +0.28%"
+    assert pres.to_telegram_html("看 `pnl_view`") == "看 <code>pnl_view</code>"
+    # Telegram has no table tag, so columns only survive inside <pre>, padded
+    # by display width — CJK glyphs take two cells.
+    table = pres.to_telegram_html("| 个股 | P/L |\n|---|---|\n| ARM | -35.4% |")
+    assert table.startswith("<pre>") and "个股  P/L" in table
+    assert "ARM   -35.4%" in table
+    # A stray angle bracket must be escaped, not shipped as a broken tag.
+    assert pres.to_telegram_html("a < b & c") == "a &lt; b &amp; c"
+    # Arithmetic is not italics.
+    assert pres.to_telegram_html("3*4 与 5*6") == "3*4 与 5*6"
+
+
+def test_the_plain_text_fallback_removes_markup_rather_than_showing_it():
+    from v2.agent import presentation as pres
+
+    assert pres.to_plain_text("<b>结论</b>：a &lt; b") == "结论：a < b"
+
+
 def test_attribution_window_stops_at_a_line_or_bullet():
     """The demo's own false positive: a benchmark named at the end of one
     bullet is not the subject of the next bullet's numbers.
