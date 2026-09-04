@@ -156,6 +156,13 @@ def main(argv: list[str] | None = None) -> int:
         if report.ungrounded_breakdown():
             print()
             print(runner.render_grounding(report))
+    # Printed unconditionally: "no false positives" is the result worth seeing,
+    # and a section that only appears when something is wrong trains you to stop
+    # looking for it.
+    for report in reports:
+        if report.mode != "baseline":
+            print()
+            print(runner.render_attribution(report))
     print()
     print(runner.render_stability(reports[-1]))
     print()

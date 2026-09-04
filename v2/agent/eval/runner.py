@@ -112,6 +112,9 @@ def run_case(case: EvalCase, mode: Mode, *, llm_factory: Callable[[], Any]) -> C
             ungrounded_kinds=(grounding.diagnose(result.grounding,
                                                  trajectory.observations_text())
                               if not result.grounding.ok else None),
+            misattributed=tuple(
+                f"{entity}←{figure}(实为 {'/'.join(owners)})"
+                for entity, figure, owners in result.attribution.misattributed),
             tool_calls=trajectory.tool_calls, llm_calls=trajectory.llm_calls,
             tokens=trajectory.prompt_tokens + trajectory.completion_tokens,
             elapsed_ms=result.elapsed_ms, path=path,
@@ -255,6 +258,31 @@ def render_failures(report: SuiteReport, limit: int = 20) -> str:
             lines.append(f"      标注说明：{case.note}")
     if len(failures) > limit:
         lines.append(f"  …另有 {len(failures) - limit} 条，完整清单见 JSON 输出")
+    return "\n".join(lines)
+
+
+def render_attribution(report: SuiteReport) -> str:
+    """Every misattribution warning raised on an answer the case says is correct.
+
+    Read this as the *checker's* error rate, not the model's: the case's own
+    assertions already decided the answer was right, so anything listed here is
+    the check rejecting good work. The axis exists because for nine rounds it
+    did not: seven false positives shipped, each found by a human reading a
+    Telegram message rather than by this suite.
+    """
+    findings = report.false_misattributions()
+    lines = [_RULE,
+             f"【{report.mode} 归属检查的误报】{len(findings)} / {report.total} 条用例",
+             _RULE]
+    if not findings:
+        lines.append("  无 —— 正确的回答没有被打上张冠李戴的标记。")
+        return "\n".join(lines)
+    for case_id, pairs in findings[:12]:
+        lines.append(f"  {case_id:<6}{', '.join(pairs[:3])}")
+    if len(findings) > 12:
+        lines.append(f"  …另有 {len(findings) - 12} 条")
+    lines.append("")
+    lines.append("  这些回答通过了自己全部的事实与禁词断言,警告是检查器的错,不是模型的。")
     return "\n".join(lines)
 
 

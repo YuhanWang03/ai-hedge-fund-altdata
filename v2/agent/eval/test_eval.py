@@ -331,6 +331,59 @@ def test_every_asserted_fact_exists_in_the_fixtures():
     assert not unreachable, "标注了 fixture 里根本不存在的事实：\n" + "\n".join(unreachable)
 
 
+def _answer_for(case) -> str:
+    """An answer that satisfies every fact the case asserts."""
+    return " ".join(forms[0] for forms in tuple(case.facts) + tuple(case.behaviors))
+
+
+def test_a_warning_on_a_correct_answer_fails_the_case():
+    """The axis that did not exist for nine rounds.
+
+    A case whose facts, tools and forbidden strings all check out has, by the
+    suite's own definition, put the right numbers against the right companies.
+    An attribution warning on top of that is the checker being wrong — and while
+    it went unscored, seven such warnings reached production and were found by a
+    human reading Telegram instead of by this file.
+    """
+    case = CASES[0]
+    clean = score_case(case, mode="agent", answer=_answer_for(case),
+                       tools_called=case.must_call)
+    assert clean.passed and not clean.false_misattribution
+
+    flagged = score_case(case, mode="agent", answer=_answer_for(case),
+                         tools_called=case.must_call,
+                         misattributed=("SMH←-23.6(实为 SMCI)",))
+    assert flagged.answer_correct, "回答本身没变"
+    assert flagged.false_misattribution, "正确回答上的警告 = 检查器误报"
+    assert not flagged.passed, "误报必须让用例失败，否则没人会去看它"
+
+    # A warning on an answer that was already wrong is not the checker's fault,
+    # so it must not be counted against the checker's error rate.
+    wrong = score_case(case, mode="agent", answer="（空）",
+                       tools_called=(), misattributed=("A←1(实为 B)",))
+    assert not wrong.answer_correct and not wrong.false_misattribution
+
+
+def test_checker_stress_cases_aim_at_the_shapes_that_broke_it():
+    """These cases exist to be *hard on the checker*, so each one must actually
+    reach the fixture region that defeated it — a date column, a threshold, a
+    window length. A case whose fixtures lost the awkward shape would pass
+    forever while measuring nothing."""
+    from v2.agent.eval.fixtures import EVAL_FIXTURES
+
+    stress = [c for c in CASES if c.category == "checker_stress"]
+    assert len(stress) >= 6
+
+    calendar = EVAL_FIXTURES["earnings_calendar"]
+    assert "10-21" in calendar and "09-30" in calendar, "日期列被改成了不刁钻的形状"
+    assert "(D-" in calendar, "倒计时也是同一类陷阱"
+    assert "52 周高点" in EVAL_FIXTURES["moneyflow_view"]["MSFT"]
+    assert "阈值" in EVAL_FIXTURES["risk_view"], "阈值数字不归任何主体所有"
+
+    for case in stress:
+        assert case.note, f"{case.id}: 要写清它针对的是哪一种形状"
+
+
 def test_no_case_can_pass_without_asserting_anything():
     """A case with no facts and no forbidden strings passes by construction.
 

@@ -86,6 +86,21 @@ class CaseScore:
     ungrounded_kinds: dict[str, list[str]] = field(default_factory=dict)
     #: Figures accepted because the answer showed the arithmetic behind them.
     derived: int = 0
+    #: Misattribution findings raised against this answer, as
+    #: "entity←figure(实为 owners)" strings.
+    #:
+    #: These are scored as **failures of the checker, not of the model**. Every
+    #: other assertion on the case already decides whether the answer put the
+    #: right number against the right company: ``facts`` require the correct
+    #: pairings and ``forbidden`` names the borrowed ones. So when a case's own
+    #: assertions all pass and attribution still fires, the finding is a false
+    #: positive by construction — the check rejecting a correct answer.
+    #:
+    #: This axis did not exist for the first nine rounds. Seven false positives
+    #: reached production, each found by a human reading a Telegram message, and
+    #: every one of them was invisible here: the case passed, the warning was
+    #: never looked at.
+    misattributed: tuple[str, ...] = ()
 
     tool_calls: int = 0
     llm_calls: int = 0
@@ -99,13 +114,23 @@ class CaseScore:
     error: str = ""
 
     @property
-    def passed(self) -> bool:
+    def answer_correct(self) -> bool:
+        """Everything the case asserts about the answer itself."""
         return (self.tool_recall >= 1.0
                 and self.fact_recall >= 1.0
                 and not self.violations
                 and not self.forbidden_hit
                 and self.grounded
                 and not self.error)
+
+    @property
+    def false_misattribution(self) -> bool:
+        """A misattribution warning on an answer the case says is correct."""
+        return self.answer_correct and bool(self.misattributed)
+
+    @property
+    def passed(self) -> bool:
+        return self.answer_correct and not self.misattributed
 
     def failure_reason(self) -> str:
         """The single most actionable reason, for the per-case failure list."""
@@ -135,6 +160,7 @@ def score_case(
     ungrounded: Iterable[str] = (),
     ungrounded_kinds: dict[str, list[str]] | None = None,
     derived: int = 0,
+    misattributed: Iterable[str] = (),
     tool_calls: int = 0,
     llm_calls: int = 0,
     tokens: int = 0,
@@ -166,6 +192,7 @@ def score_case(
         waste=tuple(sorted(called & set(case.wasteful_tools))),
         forbidden_hit=forbidden_hit, ungrounded=tuple(ungrounded),
         ungrounded_kinds=dict(ungrounded_kinds or {}), derived=derived,
+        misattributed=tuple(misattributed),
         tool_calls=tool_calls, llm_calls=llm_calls, tokens=tokens,
         elapsed_ms=elapsed_ms, overspend=tool_calls > case.max_tool_calls,
         path=path, path_correct=(not path or path == case.expected_path),
@@ -244,6 +271,11 @@ class SuiteReport:
             "routing_accuracy": _mean([1.0 if s.path_correct else 0.0 for s in self.scores]),
             "ungrounded_kinds": self.ungrounded_breakdown(),
             "derived_figures": sum(sc.derived for sc in self.scores),
+            # A warning raised on an answer the case says is correct. This is
+            # the check's own error rate, and the number that should have been
+            # on the table for the last nine rounds.
+            "false_misattribution_rate": _mean(
+                [1.0 if s.false_misattribution else 0.0 for s in self.scores]),
             "mean_tool_calls": _mean([float(s.tool_calls) for s in self.scores]),
             "mean_llm_calls": _mean([float(s.llm_calls) for s in self.scores]),
             "total_tokens": int(sum(tokens)),
@@ -266,3 +298,8 @@ class SuiteReport:
 
     def failures(self) -> list[CaseScore]:
         return [s for s in self.scores if not s.passed]
+
+    def false_misattributions(self) -> list[tuple[str, tuple[str, ...]]]:
+        """(case id, findings) for every warning raised on a correct answer."""
+        return [(s.case_id, s.misattributed)
+                for s in self.scores if s.false_misattribution]

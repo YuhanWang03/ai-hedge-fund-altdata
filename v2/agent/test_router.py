@@ -493,6 +493,20 @@ def test_the_hook_discloses_a_rewrite_it_performed_itself():
     assert "本周 +0.13%" in final
 
 
+def test_a_fixed_phrase_is_not_a_conjunction():
+    """「还有多远」「还有几天」 are one question. Found while building the
+    checker-stress cases: 「MSFT 离 52 周高点还有多远」 escalated on the compound
+    signal. Third member of the family that already cost this router 最近／最新
+    (superlative) and 这个月 (pronoun resolution)."""
+    for query in ("MSFT 离 52 周高点还有多远", "还有几天发财报", "还有多少现金"):
+        assert router.route(query, _parsed("moneyflow_view", "MSFT"),
+                            mode="heuristic").signal != "compound", query
+
+    # A real conjunction still fires.
+    assert router.route("看一下 NVDA，另外 CPI 怎么样", _parsed("summary", "NVDA"),
+                        mode="heuristic").signal == "compound"
+
+
 def test_a_demonstrative_inside_a_time_word_is_not_a_pronoun():
     """「我这个月比上个月表现好还是差？」 came back as 「我NVDA月比上个月表现好
     还是差？」 — 这个 matched, the ticker went in, the question was destroyed and
