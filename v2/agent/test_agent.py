@@ -469,6 +469,38 @@ def test_a_figure_can_belong_to_the_entity_that_follows_it():
         _records(("portfolio_view", {}, "CRWD 22.4% NVDA 18.2%"))).misattributed
 
 
+def test_its_own_figure_written_shorter_is_still_its_own():
+    """「QCOM …虽然浮亏 30%」 is QCOM's own -30.39% rounded to whole percent.
+    The literal "30" also sits in the risk card's threshold («单票 IVV > 30%»),
+    so ownership by exact string called it IVV's and flagged a correct line.
+
+    Tolerance is half of the last written digit — what "rounded to this
+    precision" means — so it cannot swallow a figure that is merely nearby."""
+    from v2.agent import attribution
+
+    assert attribution.check(
+        "QCOM：近 20 日上涨 +5.1%，虽然浮亏 30%，但资金在流入。",
+        _records(("risk_view", {}, "单票 IVV > 30% / BROAD 行业 > 30%"),
+                 ("portfolio_view", {}, "QCOM -30.39%"))).ok
+
+    # Nothing of QCOM's rounds to 30, so borrowing ARM's is still caught.
+    assert attribution.check(
+        "QCOM 浮亏 30%。",
+        _records(("insider_view", {"ticker": "ARM"}, "ARM 合计 30"))
+    ).misattributed == [("QCOM", "30", ("ARM",))]
+
+
+def test_the_account_mode_label_is_not_a_holding():
+    """「📝 PAPER」 is the account mode the card prints, not a position. It owned
+    the portfolio total, which then read as misattributed to ARM."""
+    from v2.agent import attribution
+
+    assert attribution.check(
+        "ARM 市值仅 $1,260，占组合约 1.2%（$1,260 / $100,750）。",
+        _records(("portfolio_view", {},
+                  "📝 PAPER · 组合价值 $100,750 · ARM $1,260"))).ok
+
+
 def test_a_window_size_and_a_shown_derivation_are_not_misattributions():
     """Two live false positives, from the same run.
 
