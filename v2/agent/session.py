@@ -31,6 +31,21 @@ _PRONOUN = re.compile(
     re.IGNORECASE,
 )
 
+#: A whole message that is nothing but a follow-up question — no subject at all,
+#: not even a pronoun to substitute. "我的持仓最近整体在跌还是涨？" then "为什么？"
+#: is the natural way to ask, and it arrived on the first live session: the
+#: classifier saw a contextless "为什么？", returned unknown, and the agent spent
+#: a full multi-step budget concluding it needed to ask what the user meant.
+#:
+#: The whole message must match, so "为什么 NVDA 涨" is untouched — this fires
+#: only when there is genuinely nothing else in the message to go on.
+_ELLIPTICAL = re.compile(
+    r"^(?:那|所以|然后|但)?\s*(?:这是?)?\s*"
+    r"(?:为什么|为啥|为何|怎么会|怎么回事|什么原因|原因呢|原因是什么|why)"
+    r"[\s?？。.!！~～]*$",
+    re.IGNORECASE,
+)
+
 _TICKER_LIKE = re.compile(r"\b[A-Z]{2,5}\b")
 _NOT_TICKERS = frozenset({
     "AI", "US", "USD", "CEO", "CFO", "SEC", "ETF", "IPO", "EPS", "GDP", "CPI",
@@ -111,6 +126,11 @@ class SessionStore:
                 return turn.tickers[0]
         return ""
 
+    def last_query(self, chat_id: int) -> str:
+        """The previous question, for a follow-up that carries no subject."""
+        turns = self.recent(chat_id, n=self.max_turns)
+        return turns[-1].query if turns else ""
+
     def resolve(self, chat_id: int, text: str) -> Resolution:
         """Substitute a pronoun with the most recently discussed ticker.
 
@@ -120,7 +140,24 @@ class SessionStore:
         untouched, and the query fails the same way it does today.
         """
         raw = (text or "").strip()
-        if not raw or not _PRONOUN.search(raw):
+        if not raw:
+            return Resolution(raw)
+
+        # A bare follow-up has no pronoun to substitute — the *question* is what
+        # is missing, so the previous one is restored in front of it.
+        if _ELLIPTICAL.match(raw):
+            previous = self.last_query(chat_id)
+            if not previous or _ELLIPTICAL.match(previous):
+                return Resolution(raw)
+            rewritten = f"{previous.rstrip('？?。. ')}——{raw}"
+            return Resolution(
+                text=rewritten,
+                rewritten=True,
+                antecedent=previous,
+                note=f"「{raw}」按上文补全为「{rewritten}」",
+            )
+
+        if not _PRONOUN.search(raw):
             return Resolution(raw)
         if extract_tickers(raw):
             return Resolution(raw)

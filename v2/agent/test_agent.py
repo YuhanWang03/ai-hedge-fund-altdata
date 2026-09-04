@@ -443,6 +443,44 @@ def test_attribution_does_not_flag_a_correct_multi_ticker_answer():
                  ("earnings_view", {"ticker": "SMCI"}, "EPS miss -23.6%"))).ok
 
 
+def test_ordinals_and_counts_are_not_attribution_findings():
+    """The check's own feedback loop, seen live: it complained that IVV was
+    given a "1", the repair round wrote 「risk_view 里没有 IVV 的「1」这个数据」,
+    and that sentence puts a 1 right after IVV — so it complained again about
+    the apology it had caused. Grounding exempted these from the start."""
+    from v2.agent import attribution
+
+    assert attribution.check(
+        'risk_view 里没有 IVV 的"1"这个数据。Top 1 是 IVV。',
+        _records(("portfolio_view", {"ticker": "ARM"}, "ARM 1 笔"),
+                 ("risk_view", {"ticker": "XLV"}, "XLV 1 只"))).ok
+    # …but a real figure is still caught, and reported once, not per repetition.
+    report = attribution.check(
+        "IVV 浮亏 -35.71%，IVV 浮亏 -35.71%。",
+        _records(("portfolio_view", {"ticker": "ARM"}, "ARM -35.71%")))
+    assert len(report.misattributed) == 1
+
+
+def test_the_answer_drops_the_models_narration_of_its_own_process():
+    from v2.agent import presentation
+
+    assert presentation.strip_deliberation(
+        "你说得对，我犯了张冠李戴的错误。让我重新核对。\n\n## 结论：ARM\n\nARM -35.71%。"
+    ) == "## 结论：ARM\n\nARM -35.71%。"
+    assert presentation.strip_deliberation(
+        '用户问"为什么"，没有上下文。让我直接询问澄清。\n\n---\n\n请补充你想问的对象。'
+    ) == "请补充你想问的对象。"
+    # A real answer that merely uses headings keeps every word.
+    intact = "CRWD 占仓 22.4%，是第一大持仓。\n\n## 依据\n\n集中度 54.7%。"
+    assert presentation.strip_deliberation(intact) == intact
+    # Nothing is dropped without a marker, however much it sounds like thinking.
+    unmarked = "让我看看持仓。CRWD 占仓 22.4%。"
+    assert presentation.strip_deliberation(unmarked) == unmarked
+    # A preamble too long to discard on a heuristic is left in place.
+    long_one = "让我重新核对。" + "数" * presentation.MAX_PREAMBLE + "\n\n## 结论\n\nARM。"
+    assert presentation.strip_deliberation(long_one) == long_one
+
+
 def test_attribution_window_stops_at_a_line_or_bullet():
     """The demo's own false positive: a benchmark named at the end of one
     bullet is not the subject of the next bullet's numbers.

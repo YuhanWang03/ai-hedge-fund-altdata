@@ -43,7 +43,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
 
-from v2.agent import attribution, grounding
+from v2.agent import attribution, grounding, presentation
 from v2.agent.context import Step, Trajectory, extract_note
 from v2.agent.llm import LLMClient, LLMError, LLMResponse, ToolCall, build_llm
 from v2.agent.prompts import FORCE_FINAL_SUFFIX, SYSTEM_PROMPT
@@ -279,7 +279,12 @@ def run_agent(
 
         # -- the model chose to answer -------------------------------------
         if not response.tool_calls:
-            answer = response.text
+            # Strip the model's process narration *before* checking, not after:
+            # the checks should verify the text the user is shown, and a repair
+            # round that apologises in prose ("没有 IVV 的「1」这个数据") would
+            # otherwise put figures into the answer that only exist because a
+            # check complained about them.
+            answer = presentation.strip_deliberation(response.text)
             report = grounding.check(answer, trajectory.observations_text())
             attribution_report = (attribution.check(answer, trajectory.tool_records())
                                   if config.attribution_check

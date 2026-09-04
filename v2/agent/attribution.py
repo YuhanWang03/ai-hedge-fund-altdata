@@ -115,6 +115,29 @@ class AttributionReport:
         return "；".join(parts)
 
 
+def _is_structural(token: str, *, exempt_below: int = 13,
+                   tolerate_years: bool = True) -> bool:
+    """Ordinals, small counts and years carry no attribution risk.
+
+    Grounding has exempted these from the start — "Top 1" and "过去 4 次" are
+    labels, not measurements — but the attribution check did not, and the gap
+    showed up live in the ugliest possible way. The check complained that IVV
+    was given a "1"; the repair round dutifully wrote *「risk_view 里没有 IVV
+    的「1」这个数据」*; that sentence puts a 1 right after IVV, so the check
+    complained again about the apology it had just caused.
+
+    Same thresholds as grounding, for the same reason: two checks disagreeing
+    about what counts as a figure is a bug generator.
+    """
+    try:
+        value = float(token)
+    except ValueError:
+        return False
+    if value.is_integer() and abs(value) < exempt_below:
+        return True
+    return tolerate_years and value.is_integer() and 1900 <= value <= 2100
+
+
 def _window_end(text: str, start: int, limit: int) -> int:
     """Where an entity's window really ends: the first layout boundary in it."""
     if limit <= start:
@@ -218,7 +241,8 @@ def check(
         figures = extract_numbers(sentence)
         for entity in sorted(present):
             for figure in figures[:3]:
-                report.empty_presented.append((entity, figure))
+                if (entity, figure) not in report.empty_presented:
+                    report.empty_presented.append((entity, figure))
     for index, (entity, position) in enumerate(mentions):
         # A figure belongs to the nearest entity named before it, so the window
         # stops at the next mention. Without this, "NVDA 占仓 18.2%，CRWD 占仓
@@ -231,14 +255,15 @@ def check(
         window = body[position: max(limit, position)]
         for token in extract_numbers(window):
             key = _normalise(token)
-            if not key or key in neutral:
+            if not key or key in neutral or _is_structural(key):
                 continue
             holders = owners.get(key)
             if not holders:
                 continue                    # nobody owns it — grounding's problem
             report.checked += 1
-            if entity not in holders:
-                report.misattributed.append((entity, token, tuple(sorted(holders))))
+            finding = (entity, token, tuple(sorted(holders)))
+            if entity not in holders and finding not in report.misattributed:
+                report.misattributed.append(finding)
     return report
 
 
