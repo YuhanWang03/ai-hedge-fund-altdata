@@ -28,19 +28,34 @@ from v2.agent.eval.cases import CASES, CATEGORIES  # noqa: E402
 from v2.agent.llm import OpenAICompatLLM, build_llm, describe_provider  # noqa: E402
 
 
+# ---------------------------------------------------------------------------
+# 在 PyCharm 里点绿三角时用下面这些；命令行传参会覆盖它们
+# ---------------------------------------------------------------------------
+
+MODES = ["baseline", "routed", "agent"]   # 想看消融就加 agent_no_repair 等
+WORKERS = 4                                # 并发数；83 条 × 4 并发约 4 分钟一档
+# 写到 data/ 下 —— 该目录已在 .gitignore:31，评测产物不会被误提交
+OUT = "data/eval.json"
+CATEGORY = None                            # 例如 ["ranking", "multi_hop"] 只跑某几类
+LIMIT = None                               # 例如 10，快速冒烟
+FAILURES = 20                              # 打印多少条失败明细
+
+
 def _needs_llm(modes: list[str]) -> bool:
     return any(runner.MODES[m].kind != "baseline" for m in modes)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m v2.agent.run_eval")
-    parser.add_argument("--modes", nargs="+", default=list(runner.DEFAULT_MODES),
+    parser.add_argument("--modes", nargs="+", default=list(MODES),
                         choices=sorted(runner.MODES))
-    parser.add_argument("--category", nargs="+", choices=sorted(CATEGORIES))
-    parser.add_argument("--limit", type=int, help="只跑前 N 条（快速冒烟）")
-    parser.add_argument("--workers", type=int, default=4)
-    parser.add_argument("--out", help="把逐条结果写成 JSON")
-    parser.add_argument("--failures", type=int, default=20, help="打印多少条失败明细")
+    parser.add_argument("--category", nargs="+", default=CATEGORY,
+                        choices=sorted(CATEGORIES))
+    parser.add_argument("--limit", type=int, default=LIMIT, help="只跑前 N 条（快速冒烟）")
+    parser.add_argument("--workers", type=int, default=WORKERS)
+    parser.add_argument("--out", default=OUT, help="把逐条结果写成 JSON")
+    parser.add_argument("--failures", type=int, default=FAILURES,
+                        help="打印多少条失败明细")
     args = parser.parse_args(argv)
 
     # Load .env the same way the comparison CLI does.
@@ -100,10 +115,14 @@ def main(argv: list[str] | None = None) -> int:
     print(runner.render_failures(reports[-1], limit=args.failures))
 
     if args.out:
-        pathlib.Path(args.out).write_text(
+        out_path = pathlib.Path(args.out)
+        if not out_path.is_absolute():
+            out_path = _REPO_ROOT / out_path
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(
             json.dumps(runner.to_json(reports), ensure_ascii=False, indent=2),
             encoding="utf-8")
-        print(f"\n逐条结果已写入 {args.out}")
+        print(f"\n逐条结果已写入 {out_path}")
 
     return 0
 
