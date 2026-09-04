@@ -18,27 +18,38 @@ _REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+import importlib  # noqa: E402
 import traceback  # noqa: E402
 
-from v2.agent import test_agent  # noqa: E402
+
+def _test_modules() -> list:
+    """Discover every test_*.py in this package, so a new one needs no wiring."""
+    package = pathlib.Path(__file__).resolve().parent
+    names = sorted(p.stem for p in package.glob("test_*.py"))
+    return [importlib.import_module(f"v2.agent.{name}") for name in names]
 
 
 def main() -> int:
-    tests = [(name, obj) for name, obj in sorted(vars(test_agent).items())
-             if name.startswith("test_") and callable(obj)]
+    modules = _test_modules()
+    total = 0
     failures: list[str] = []
 
-    print(f"运行 {len(tests)} 个测试 — {test_agent.__file__}\n")
-    for name, fn in tests:
-        try:
-            fn()
-            print(f"  ✓ {name}")
-        except Exception:
-            failures.append(name)
-            print(f"  ✗ {name}")
-            traceback.print_exc()
+    for module in modules:
+        tests = [(name, obj) for name, obj in sorted(vars(module).items())
+                 if name.startswith("test_") and callable(obj)
+                 and getattr(obj, "__module__", "") == module.__name__]
+        print(f"\n{module.__name__}  ({len(tests)} 个)")
+        total += len(tests)
+        for name, fn in tests:
+            try:
+                fn()
+                print(f"  ✓ {name}")
+            except Exception:
+                failures.append(f"{module.__name__}.{name}")
+                print(f"  ✗ {name}")
+                traceback.print_exc()
 
-    print(f"\n{len(tests) - len(failures)}/{len(tests)} passed")
+    print(f"\n{total - len(failures)}/{total} passed")
     if failures:
         print("失败：" + ", ".join(failures))
     return 1 if failures else 0

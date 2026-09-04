@@ -41,13 +41,40 @@ from __future__ import annotations
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable, Literal
 
 from v2.agent import grounding
 from v2.agent.context import Step, Trajectory, extract_note
 from v2.agent.llm import LLMClient, LLMError, LLMResponse, ToolCall, build_llm
 from v2.agent.prompts import FORCE_FINAL_SUFFIX, SYSTEM_PROMPT
 from v2.agent.registry import ToolRegistry, ToolResult
+
+
+@dataclass
+class StepEvent:
+    """Progress signal emitted as the loop runs.
+
+    A multi-step run takes ~11s against these tools. A chat UI that shows a
+    frozen "thinking…" for that long reads as broken, and — more useful — the
+    step-by-step trail is what lets a user see *where* a wrong answer went wrong.
+    Delivered synchronously from the loop thread; the callback must not block.
+    """
+
+    phase: Literal["plan", "tools", "observation", "repair", "final"]
+    step: int
+    message: str
+    tools: tuple[str, ...] = ()
+    ok: bool = True
+
+
+def _notify(on_step: "Callable[[StepEvent], None] | None", event: StepEvent) -> None:
+    """Progress reporting is never allowed to break a run."""
+    if on_step is None:
+        return
+    try:
+        on_step(event)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 @dataclass
@@ -182,8 +209,13 @@ def run_agent(
     llm: LLMClient | None = None,
     registry: ToolRegistry | None = None,
     config: AgentConfig | None = None,
+    on_step: Callable[[StepEvent], None] | None = None,
 ) -> AgentResult:
-    """Answer ``query`` by letting the model drive the tool calls."""
+    """Answer ``query`` by letting the model drive the tool calls.
+
+    ``on_step`` receives a :class:`StepEvent` as each phase completes; pass it to
+    stream progress into a chat client. Optional and side-effect free.
+    """
     config = config or AgentConfig()
     llm = llm or build_llm()
     registry = registry or ToolRegistry(allow_mutations=config.allow_mutations)
@@ -248,6 +280,10 @@ def run_agent(
                 break
             repairs += 1
             repaired_figures.extend(report.ungrounded)
+            _notify(on_step, StepEvent(
+                "repair", step_index,
+                f"初稿有 {len(report.ungrounded)} 个数字无法溯源，正在重写",
+                ok=False))
             directives.append(grounding.repair_instruction(report))
             _emit("agent_grounding_repair", ungrounded=len(report.ungrounded))
             continue
@@ -259,10 +295,23 @@ def run_agent(
                 trajectory.notes.append(note)
         _emit("agent_step", step=step_index,
               tools=[c.name for c in response.tool_calls])
+        tool_names = tuple(c.name for c in response.tool_calls)
+        _notify(on_step, StepEvent(
+            "tools", step_index,
+            (response.text or "").strip()[:160] or f"调用 {len(tool_names)} 个工具",
+            tools=tool_names))
 
         results, deduped = _execute_calls(response.tool_calls, registry, trajectory, config)
         step.results = results
         deduped_total += deduped
+
+        failed = [r.name for r in results if not r.ok]
+        _notify(on_step, StepEvent(
+            "observation", step_index,
+            (f"{len(results) - len(failed)}/{len(results)} 个工具返回成功"
+             + (f"；{', '.join(failed)} 失败，将改用其他工具" if failed else "")),
+            tools=tuple(r.name for r in results),
+            ok=not failed))
 
         if budget_spent:
             stop_reason = "budget_exhausted"
@@ -272,6 +321,9 @@ def run_agent(
     if not answer and stop_reason not in ("llm_error",):
         answer = ("（未能在预算内给出结论）已收集的观测："
                   + ", ".join(trajectory.distinct_tools()))
+
+    _notify(on_step, StepEvent("final", len(trajectory.steps), "已生成回答",
+                               ok=stop_reason.startswith("final_answer")))
 
     result = AgentResult(
         query=query,

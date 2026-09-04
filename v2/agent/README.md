@@ -12,7 +12,8 @@
 |---|---|
 | `v2/agent/run_demo.py` | 什么都不需要，回放录制轨迹 |
 | `v2/agent/run_compare.py` | 一个 LLM key（`.env` 里的 `DEEPSEEK_API_KEY` 即可） |
-| `v2/agent/run_tests.py` | 什么都不需要，35 个测试（不走 pytest） |
+| `v2/agent/run_tests.py` | 什么都不需要，60 个测试（不走 pytest） |
+| `v2/agent/run_router.py` | 什么都不需要，路由层打分 |
 
 这三个文件都会自己把仓库根目录补进 `sys.path`，所以不依赖任何 IDE 配置
 （不用改 Working directory，也不用把根目录标成 Sources Root）。
@@ -182,7 +183,86 @@ conda env），基线那半边会 `ModuleNotFoundError`，对比只剩一半。
 prompt，基线跟着改；常量被重命名则显式报错，而不是默默测一份过期副本。CLI 会打印
 本次用的是哪一个。
 
-## 7. 目前还没有的（下一步）
+## 7. 路由层：什么时候才值得花 10 倍成本
+
+实测（CLI 对比表）：单跳 1 次 LLM 调用 / ~1.2s；agent 4–5 次 / ~11s / ~14k token。
+**10 倍成本只在单跳答不了的问题上才划算**，所以需要一个路由层决定走哪条。
+
+`router.py` 的硬约束：**路由本身不调 LLM**。用「分类器已经产出的 intent」+ 正则，
+边际成本为零——否则为了省钱先花一次钱，逻辑不成立。
+
+三种 mode 就是灰度顺序：
+
+```bash
+V2_AGENT_ROUTING=off           # 默认。全走现状，合并代码不改变任何线上行为
+V2_AGENT_ROUTING=unknown_only  # 只接分类器的死胡同（现在回「❓ 没听懂」那些）
+V2_AGENT_ROUTING=heuristic     # 全部信号
+```
+
+信号表（命中即进 agent，按置信度排序，先命中者胜）：
+
+| 信号 | 判据 | 例子 |
+|---|---|---|
+| `superlative` | 最(排除最近/最新/最后) · 哪只 · 对比 · 谁更 | 我持仓里哪只最危险 |
+| `collection` | 持仓里/关注的/watchlist + 无单一 ticker | 我持仓里有哪些快发财报了 |
+| `multi_ticker` | ≥2 个非缩写的大写代码 | NVDA 和 AMD 对比一下 |
+| `causal_portfolio` | 为什么 + 盈亏/组合词 + 无 ticker | 我这周为什么亏钱 |
+| `compound` | 并且/还有/另外 或 ≥2 个问号 | AAPL 财报怎么样，另外内部人在卖吗 |
+| `unknown_intent` | 分类器归类失败 | 今天有什么值得注意的 |
+| `explicit_ask` | `/ask <问题>` | 用户强制，任何 mode 下生效 |
+
+两个容易写错、已用测试钉死的细节：
+
+- **`最近`/`最新`/`最后` 不是比较级**。「AMD 最近有什么 8-K」必须走快路径。
+- **枚举类 intent 豁免**。「我关注了哪些股票」提到集合，但 `watchlist_view`
+  一跳就返回整个集合；除非同时要求排序（「watchlist 里哪只最值得关注」），
+  那时比较级信号优先。
+
+### 打分
+
+```bash
+python3 -m v2.agent.run_router     # 零 key
+```
+
+36 条标注样例（`samples.py`），三种 mode 全部 100%，指代消解 5/5。
+
+> **这个 100% 不值得高兴**：规则和样例都是同一个人写的，它测的是内部自洽性，
+> 不是真实准确率。它的作用是**回归护栏**——改信号表时立刻知道碰坏了什么。
+> 真实准确率要等真实用户 query 进来标注之后才有意义。`samples.py` 是那个集合的种子。
+
+## 8. 会话状态：让快路径能答更多问题
+
+`session.py` 保留每个 chat 最近 6 轮（TTL 30 分钟，内存，重启丢失可接受）。
+
+关键在于**指代消解发生在分类之前**：「那它财报呢」补全成「NVDA 财报呢」之后，
+**单跳路径就能答**，根本不用进 agent。会话记忆在这里不是 agent 功能，
+它是给 agent 减负的。改写对用户可见（回复顶部显示补全前后）。
+
+## 9. 接到 bot：两行
+
+`bot_bridge.py` 是 bot 唯一需要知道的文件。改动点是
+`v2/bot/commands.py:934` 那个 `else: # "unknown"` 死胡同：
+
+```python
+else:  # "unknown"
+    if bot_bridge.enabled():
+        reply = await bot_bridge.handle_nl(text, chat_id, parsed=parsed,
+                                           on_progress=progress)
+        await placeholder.edit_text(reply.answer, parse_mode="HTML")
+    else:
+        ...现有的「❓ 没听懂」...
+```
+
+`enabled()` 默认 `False`，**合并这段代码不改变任何线上行为**，之后靠环境变量灰度。
+
+两个设计细节：
+- `parsed` 由调用方传入。bot 走到这个分支时已经付过一次分类的钱，桥接层再分类一次
+  就是每条消息双倍成本。
+- 进度回调用 `make_threadsafe_progress()` 跨线程边界（`run_agent` 是同步的、跑在
+  executor 线程，`edit_text` 是 bot 事件循环的协程），fire-and-forget：
+  掉一条进度绝不能把答案带下去。
+
+## 10. 目前还没有的（下一步）
 
 - **评测集**：80–120 条标注了期望工具序列和期望事实的 query，指标为工具选择准确率、
   多跳完成率、溯源率、步数/token/延迟。有了它，`--mode both` 的单例对比才能变成
