@@ -58,10 +58,20 @@ _ALIASES = {
     "BURRY": "BURRY", "木头姐": "ARK", "ARKK": "ARKK",
 }
 
+#: Uppercase tokens that are not subjects. Two live findings came from names
+#: this system prints itself: "FD" is the data provider, named in tool messages
+#: («FD 未覆盖该 ticker»), and "HBM" is a memory technology the model wrote in
+#: its own prose — 「存储/HBM」 became an entity, and a neighbouring 52 was
+#: reported as belonging to it.
 _NOT_ENTITIES = frozenset({
     "AI", "US", "USD", "CEO", "CFO", "COO", "CTO", "SEC", "ETF", "IPO", "EPS",
     "PE", "PB", "ROE", "GDP", "CPI", "PCE", "NFP", "PPI", "FOMC", "FED", "RSI",
     "CMF", "OK", "VS", "AND", "THE", "FOR", "NL", "LLM", "API", "MD", "P&L",
+    # data provider and vendor names that appear inside tool output
+    "FD", "EDGAR", "ARK",
+    # technology / metric acronyms the model writes in its own prose
+    "HBM", "EUV", "CPU", "GPU", "DRAM", "NAND", "SOC", "HHI", "PEG", "TTM",
+    "YOY", "QOQ", "IP", "D",
 })
 
 #: How far after an entity mention a figure is still "about" that entity.
@@ -83,6 +93,12 @@ WINDOW = 60
 #: generous about who owns a figure is the conservative direction there.
 _LAYOUT_BREAK = re.compile(r"[\n·•]")
 
+
+#: A figure followed by a time unit is the *size of a window*, not a quantity
+#: belonging to anyone: 「52 周高点」「200 日均线」「过去 30 天」. Live, the 52 in
+#: MU's 「接近 52 周高点」 was reported as belonging to INTC/MU and flagged
+#: against a neighbouring name.
+_WINDOW_UNIT = re.compile(r"^\s*(?:个)?\s*(?:周|日|天|月|年|季|季度|小时)")
 
 #: Chinese puts a modifier before its head, so a figure can belong to the entity
 #: that *follows* it: 「但被占仓 66.3% 的 IVV 微跌 -0.47% 抵消了大半」. Reading
@@ -144,6 +160,53 @@ def _is_structural(token: str, *, exempt_below: int = 13,
     if value.is_integer() and abs(value) < exempt_below:
         return True
     return tolerate_years and value.is_integer() and 1900 <= value <= 2100
+
+
+#: Tolerance for recognising a figure as the arithmetic of its neighbours.
+_DERIVED_TOLERANCE = 0.01
+
+
+def _derived_from_neighbours(target: str, line: str) -> bool:
+    """True when the line displays the arithmetic that produces ``target``.
+
+    「NVDA … EPS $2.46 vs $1.85（+33.0%）」 — the 33.0 is NVDA's surprise,
+    computed by the model, and no card owns it. It happened to appear verbatim
+    in AMD's card, so ownership said it was AMD's and flagged a correct line.
+
+    Grounding deliberately refuses ratios, because there accepting one lets a
+    fabrication through. Here the asymmetry is the other way round: a false
+    positive rejects a correct answer, and a figure the line derives in front of
+    the reader is not borrowed from anybody. Same evidence, opposite risk, so
+    opposite rule.
+    """
+    try:
+        value = abs(float(target))
+    except ValueError:
+        return False
+    numbers: list[float] = []
+    for token in extract_numbers(line):
+        try:
+            other = float(_normalise(token))
+        except ValueError:
+            continue
+        if other and abs(other) != value and abs(other) not in numbers:
+            numbers.append(abs(other))
+    for i, a_val in enumerate(numbers[:8]):
+        for b_val in numbers[i + 1: 8]:
+            candidates = [a_val + b_val, abs(a_val - b_val)]
+            for x, y in ((a_val, b_val), (b_val, a_val)):
+                if y:
+                    candidates += [abs(x / y - 1) * 100, abs((x - y) / y) * 100]
+            if any(abs(value - c) <= max(_DERIVED_TOLERANCE * value, 0.005)
+                   for c in candidates):
+                return True
+    return False
+
+
+def _line_at(text: str, position: int) -> str:
+    start = text.rfind("\n", 0, position) + 1
+    end = text.find("\n", position)
+    return text[start: end if end != -1 else len(text)]
 
 
 def _record(report: "AttributionReport", entity: str, token: str,
@@ -281,6 +344,10 @@ def check(
             holders = owners.get(key)
             if not holders:
                 continue                    # nobody owns it — grounding's problem
+            if _WINDOW_UNIT.match(window[end:]):
+                continue                    # 「52 周高点」 — a window, not a value
+            if _derived_from_neighbours(key, _line_at(body, position + start)):
+                continue                    # the line shows where it came from
             # 「占仓 66.3% 的 IVV」: the figure modifies what comes after it.
             # The backward pass below checks it against that entity, so skipping
             # here reattributes rather than excuses.

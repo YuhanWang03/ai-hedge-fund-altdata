@@ -469,6 +469,36 @@ def test_a_figure_can_belong_to_the_entity_that_follows_it():
         _records(("portfolio_view", {}, "CRWD 22.4% NVDA 18.2%"))).misattributed
 
 
+def test_a_window_size_and_a_shown_derivation_are_not_misattributions():
+    """Two live false positives, from the same run.
+
+    「接近 52 周高点」 — 52 is the size of a window, not a quantity belonging to
+    anyone, and it was reported against the neighbouring name.
+
+    「EPS $2.46 vs $1.85（+33.0%）」 — the model computed NVDA's surprise, so no
+    card owns 33; it appeared verbatim in AMD's card and was called AMD's.
+    Grounding refuses ratios because accepting one there lets a fabrication
+    through; here a false positive rejects a correct answer, so the same
+    evidence gets the opposite rule.
+    """
+    from v2.agent import attribution
+
+    # 52 is owned only by INTC's card, and MU is the name in front of it.
+    assert attribution.check(
+        "MU 接近 52 周高点、高于 200 日均线。",
+        _records(("summary", {"ticker": "INTC"}, "INTC 52 周区间 · 200 日均线"))).ok
+
+    # 33.0 is owned only by AMD's card; NVDA's line computes it in the open.
+    assert attribution.check(
+        "NVDA：营收 $96.22B vs 预期 $83.67B（+15.0%），EPS $2.46 vs $1.85（+33.0%）",
+        _records(("earnings_view", {"ticker": "AMD"}, "AMD 净利率 33.0% · 15.0%"))).ok
+
+    # A figure with no arithmetic behind it is still checked.
+    assert not attribution.check(
+        "NVDA 浮亏 -35.9%。",
+        _records(("portfolio_view", {"ticker": "ARM"}, "ARM -35.9%"))).ok
+
+
 def test_ordinals_and_counts_are_not_attribution_findings():
     """The check's own feedback loop, seen live: it complained that IVV was
     given a "1", the repair round wrote 「risk_view 里没有 IVV 的「1」这个数据」,

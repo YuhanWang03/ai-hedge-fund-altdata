@@ -493,6 +493,22 @@ def test_the_hook_discloses_a_rewrite_it_performed_itself():
     assert "本周 +0.13%" in final
 
 
+def test_a_demonstrative_inside_a_time_word_is_not_a_pronoun():
+    """「我这个月比上个月表现好还是差？」 came back as 「我NVDA月比上个月表现好
+    还是差？」 — 这个 matched, the ticker went in, the question was destroyed and
+    the agent answered about NVDA. Same shape as 最近／最新 in the router: a
+    substring that looks like the thing but belongs to a time expression."""
+    store = session.SessionStore()
+    store.record(1, session.Turn(query="NVDA 为什么涨？", tickers=("NVDA",)))
+
+    for query in ("我这个月比上个月表现好还是差？", "这个季度的回撤",
+                  "这周怎么样", "那个月的盈亏"):
+        assert store.resolve(1, query).text == query, query
+
+    # …and a real demonstrative still resolves.
+    assert store.resolve(1, "这只怎么样").text == "NVDA怎么样"
+
+
 def test_a_write_never_escalates():
     """The agent runs with allow_mutations=False, so escalating a write means
     researching for ten seconds and then not doing the one thing that was asked.

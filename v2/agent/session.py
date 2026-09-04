@@ -26,8 +26,16 @@ from dataclasses import dataclass, field
 #: Leading 这/那 is absorbed so "那它财报呢" becomes "NVDA 财报呢" rather than
 #: "那NVDA财报呢" — the classifier tolerates the latter, but the rewritten text
 #: is shown to the user, so it needs to read naturally.
+#: The measure word must not be followed by a time unit. 「这个月」 is not a
+#: demonstrative pointing at a ticker, and substituting one destroys the
+#: question: 「我这个月比上个月表现好还是差？」 came back as 「我NVDA月比上个月
+#: 表现好还是差？」 and the agent dutifully answered about NVDA. Same class of
+#: bug as 最近／最新 in the router's superlative signal — a substring that looks
+#: like the thing but is part of a time expression.
+_TIME_UNIT = "月周年天日季星礼小分"
+
 _PRONOUN = re.compile(
-    r"[这那]?(?:它|他|她)|这[只支家个]|那[只支家个]|\bit\b|\bthey\b",
+    rf"[这那]?(?:它|他|她)|[这那][只支家个](?![{_TIME_UNIT}])|\bit\b|\bthey\b",
     re.IGNORECASE,
 )
 
