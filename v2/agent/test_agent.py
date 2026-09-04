@@ -477,6 +477,33 @@ def test_a_figure_can_belong_to_the_entity_that_follows_it():
         _records(("portfolio_view", {}, "CRWD 22.4% NVDA 18.2%"))).misattributed
 
 
+def test_a_benchmark_is_not_the_subject():
+    """「同期 SPY +0.40% → 相对强度 -3.14pp」 is a sentence about TSLA. SPY is
+    what TSLA is measured against, so the delivery figure two clauses later is
+    TSLA's — not SPY's.
+
+    This shape produced the first false positive of the series (「相对 SMH 逆势
+    -8.30pp」) and, twelve fixes later, the last two on the evaluation set. The
+    rule matches the *construction* rather than listing SPY / SMH / XLK: the
+    benchmark is whatever card was fetched, and one of them (IVV) is a position
+    this user actually holds, so a stoplist would miss cases and break a real
+    one.
+    """
+    from v2.agent import attribution
+
+    card = ("📈 <b>TSLA 为什么动</b>\n· 同期 SPY +0.40% → 相对强度 -3.14pp ★ 逆势\n"
+            "· Tier-1 归因：Reuters「欧洲 8 月交付量同比 -14%」")
+    assert attribution.check(
+        "TSLA 今日下跌，同期 SPY +0.40%，相对强度 -3.14pp；欧洲交付量同比 -14% 是主因。",
+        _records(("explain_move", {"ticker": "TSLA"}, card))).ok
+
+    # The same ticker as a *subject* is checked as usual.
+    assert attribution.check(
+        "SPY 交付量同比 -14%。",
+        _records(("explain_move", {"ticker": "TSLA"}, card))
+    ).misattributed == [("SPY", "-14", ("TSLA",))]
+
+
 def test_a_date_is_not_a_negative_number():
     """A hyphen in front of a day of the month is a minus sign to any number
     extractor. The earnings calendar is a column of them, one ticker per row, so
