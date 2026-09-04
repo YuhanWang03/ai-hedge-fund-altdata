@@ -48,6 +48,13 @@ def test_matching_is_case_insensitive_and_whitespace_tolerant():
     assert normalise("a   b\nc") == "a b c"
 
 
+def test_chinese_date_spacing_does_not_decide_correctness():
+    """A model writing 「9月6日」 must not be scored against the label's spacing."""
+    assert fact_present(("2026-09-06", "9 月 6"), "财报在 9月6日 盘后")
+    assert fact_present(("9 月 6",), "9月6日")
+    assert not fact_present(("9 月 6",), "9月9日")
+
+
 def test_any_acceptable_form_counts():
     forms = ("2026-09-06", "9月6日", "9/6")
     assert fact_present(forms, "财报在 9月6日")

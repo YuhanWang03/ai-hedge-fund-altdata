@@ -314,6 +314,29 @@ def test_grounding_exempts_small_integers_and_years():
     assert report.total == 0 and report.exempt == 2 and report.ok
 
 
+def test_grounding_accepts_a_rounded_value():
+    """15,851.57 written as 15,852 is the card's number, not a new one."""
+    assert grounding.check("SMCI 市值 15,852 美元", "· SMCI $15,851.57 · 8.6%").ok
+
+
+def test_grounding_accepts_a_unit_conversion():
+    """$57.80B and 578 亿 are the same quantity; only the scale word differs."""
+    assert grounding.check("AAPL 持仓 578 亿", "AAPL $57.80B（22.0%）").ok
+    assert grounding.check("COO 卖出 919 万", "卖出 41,000 股（$9.19M）").ok
+
+
+def test_grounding_exempts_identifiers():
+    """8-K Item 5.02 names a section — demanding it trace to data is incoherent."""
+    report = grounding.check("披露了 Item 5.02 与 Item 1.01", "无关观测")
+    assert report.ok and report.exempt == 2
+
+
+def test_grounding_still_rejects_unshown_arithmetic_and_invention():
+    observations = "CRWD 22.4% · NVDA 18.2% · MSFT 14.1%"
+    assert not grounding.check("前三合计 54.7%", observations).ok, "不写算式的和仍要拒"
+    assert not grounding.check("年化波动率 63.8%", observations).ok
+
+
 def test_grounding_matches_across_comma_formatting():
     report = grounding.check("总市值 184320.55 美元。", "总市值 $184,320.55")
     assert report.ok and report.grounded == 1

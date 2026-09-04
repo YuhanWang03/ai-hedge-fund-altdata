@@ -46,9 +46,22 @@ def normalise(text: str) -> str:
 
 
 def fact_present(forms: Iterable[str], answer: str) -> bool:
-    """True when any acceptable surface form of one fact appears."""
+    """True when any acceptable surface form of one fact appears.
+
+    Matching is also tried with all whitespace removed, because Chinese answers
+    space dates differently from the labels — a model writing 「9月6日」 was
+    being scored as a miss against the form "9 月 6". That measured the label's
+    spacing, not the answer's correctness.
+    """
     haystack = normalise(answer)
-    return any(normalise(form) in haystack for form in forms if form)
+    tight = haystack.replace(" ", "")
+    for form in forms:
+        if not form:
+            continue
+        needle = normalise(form)
+        if needle in haystack or needle.replace(" ", "") in tight:
+            return True
+    return False
 
 
 @dataclass

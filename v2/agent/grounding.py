@@ -27,13 +27,38 @@ from dataclasses import dataclass, field
 # Matches 1,234.56 / 22.3% / $1.2B / -3.6 — the shapes that appear in the cards.
 _NUMBER = re.compile(r"-?\d[\d,]*(?:\.\d+)?")
 
+#: SEC item numbers and similar identifiers look like decimals but are labels.
+#: "8-K Item 5.02" is not a quantity, and demanding it trace to an observation
+#: rejects an answer for correctly naming the section it is talking about.
+_IDENTIFIER_CONTEXT = re.compile(
+    r"(?:item|section|条款|项)\s*$", re.IGNORECASE)
+
 
 def _normalise(token: str) -> str:
     return token.replace(",", "").lstrip("-").rstrip(".")
 
 
+def _digit_signature(value: str) -> str:
+    """Significant digits, ignoring the decimal point and trailing zeros.
+
+    This is what makes a unit conversion traceable. A card printing ``$57.80B``
+    and an answer writing ``578 亿`` describe the same quantity; only the scale
+    word differs, and the scale word is not a figure the check can verify. Both
+    reduce to ``578``. Same for ``$9.19M`` written as ``919 万``.
+    """
+    digits = _normalise(value).replace(".", "").lstrip("0")
+    return digits.rstrip("0") or digits
+
+
 def extract_numbers(text: str) -> list[str]:
-    return [_NUMBER.sub(lambda m: m.group(0), m.group(0)) for m in _NUMBER.finditer(text or "")]
+    return [m.group(0) for m in _NUMBER.finditer(text or "")]
+
+
+def extract_numbers_with_context(text: str) -> list[tuple[str, str]]:
+    """Each figure plus the ~12 characters before it, for identifier detection."""
+    body = text or ""
+    return [(m.group(0), body[max(0, m.start() - 12): m.start()])
+            for m in _NUMBER.finditer(body)]
 
 
 @dataclass
@@ -66,17 +91,37 @@ def check(
     *,
     exempt_below: int = 13,
     tolerate_years: bool = True,
+    rounding_tolerance: float = 0.005,
 ) -> GroundingReport:
-    """Verify every figure in ``answer`` traces back to ``observations``."""
+    """Verify every figure in ``answer`` traces back to ``observations``.
+
+    Four ways a figure can trace, all of them meaning "this number came from the
+    data" rather than "this number was written identically to the data". The
+    first version only implemented the last one, and an evaluation sweep showed
+    it rejecting mostly *correct* answers: 42% of its rejections were values it
+    had rounded, and several more were unit conversions and SEC item numbers.
+    Those were bugs in the check, not laxity in the model, and fixing them is
+    not the same as relaxing the rule — a figure derived by arithmetic the
+    answer does not show is still rejected.
+    """
     haystack = (observations or "").replace(",", "")
+    values: list[float] = []
+    signatures: set[str] = set()
+    for token in extract_numbers(observations):
+        signatures.add(_digit_signature(token))
+        try:
+            values.append(abs(float(_normalise(token))))
+        except ValueError:
+            continue
+
     report = GroundingReport()
 
-    for raw in extract_numbers(answer):
+    for raw, before in extract_numbers_with_context(answer):
         token = _normalise(raw)
         if not token:
             continue
 
-        # Structural exemptions: ordinals, counts, years.
+        # Structural exemptions: ordinals, counts, years, identifiers.
         try:
             as_float = float(token)
         except ValueError:
@@ -87,16 +132,27 @@ def check(
         if tolerate_years and as_float.is_integer() and 1900 <= as_float <= 2100:
             report.exempt += 1
             continue
+        if _IDENTIFIER_CONTEXT.search(before):
+            report.exempt += 1
+            continue
 
         report.total += 1
-        # Substring match against the de-comma'd corpus: an answer quoting
-        # "22.3%" from a card that printed "22.3%" matches; an invented "27.8%"
-        # does not. Trailing-zero variants are checked too (3.60 vs 3.6).
+        target = abs(as_float)
+
+        # 1. Written the same way the card wrote it.
         variants = {token, token.rstrip("0").rstrip("."), f"{as_float:g}"}
         if any(v and v in haystack for v in variants):
             report.grounded += 1
-        else:
-            report.ungrounded.append(raw)
+            continue
+        # 2. The same quantity at a different scale (57.80B -> 578 亿).
+        if _digit_signature(raw) in signatures:
+            report.grounded += 1
+            continue
+        # 3. The card's value, rounded (15,851.57 -> 15,852).
+        if any(abs(target - v) <= max(rounding_tolerance * v, 0.005) for v in values):
+            report.grounded += 1
+            continue
+        report.ungrounded.append(raw)
 
     return report
 
