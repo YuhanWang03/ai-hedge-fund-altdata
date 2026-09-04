@@ -477,6 +477,71 @@ def test_a_figure_can_belong_to_the_entity_that_follows_it():
         _records(("portfolio_view", {}, "CRWD 22.4% NVDA 18.2%"))).misattributed
 
 
+def test_a_clause_naming_several_entities_cannot_be_paired_by_proximity():
+    """The shape behind twelve of the fourteen false positives in one sweep.
+
+    「22.4%（CRWD）+ 18.2%（NVDA）+ 14.1%（MSFT）= 54.7%」 and
+    「CRWD + NVDA + MSFT 合计 22.4% + 18.2% + 14.1%」 pair figure to name
+    *structurally*; "nearest name before" reads every pair off by one and
+    reports the whole sum as misattributed.
+
+    So the rule became: proximity carries information only while a clause names
+    one entity. Where several share it, the check abstains — but only if one of
+    them owns the figure. When none does, the finding stands, which is what
+    keeps h07 detectable.
+    """
+    from v2.agent import attribution
+
+    card = "CRWD 22.4% · NVDA 18.2% · MSFT 14.1% · 前三合计 54.7%"
+    for answer in (
+        "- 前三大持仓 CRWD + NVDA + MSFT 合计 22.4% + 18.2% + 14.1% = 54.7%。",
+        "前三大为 CRWD（22.4%）、NVDA（18.2%）、MSFT（14.1%），合计 54.7%。",
+        "前 3 大合计 22.4%（CRWD）+ 18.2%（NVDA）+ 14.1%（MSFT）= 54.7%。",
+    ):
+        assert attribution.check(answer, _records(("risk_view", {}, card))).ok, answer
+
+    # Several names, none of which owns it — still a finding.
+    assert not attribution.check(
+        "CRWD 和 NVDA 的机构比例都是 8.94%。",
+        _records(("holders", {"ticker": "MU"}, "MU Vanguard 8.94%"))).ok
+
+
+def test_a_comparison_operand_belongs_to_the_other_side():
+    """「NVDA 的 EPS 更高（$1.31 vs $0.71），超预期也更大（+5.6% vs +2.9%）」 —
+    every second number is AMD's, and nothing in that clause says so."""
+    from v2.agent import attribution
+
+    assert attribution.check(
+        "NVDA 的 EPS 绝对值更高（$1.31 vs $0.71），超预期幅度也更大（+5.6% vs +2.9%）。",
+        _records(("earnings_view", {"ticker": "NVDA"}, "EPS $1.31 · beat +5.6%"),
+                 ("earnings_view", {"ticker": "AMD"}, "EPS $0.71 · beat +2.9%"))).ok
+
+
+def test_a_level_is_not_a_measurement():
+    """「VIX 18.40…仍处于 20 以下的舒适区」 — 20 is a line being compared against,
+    and it happened to be CRWD's concentration threshold in the risk card."""
+    from v2.agent import attribution
+
+    assert attribution.check(
+        "VIX 18.40，仍处于 20 以下的相对舒适区。",
+        _records(("macro_view", {}, "VIX 18.40"),
+                 ("risk_view", {}, "最大单一持仓 CRWD 22.4%（阈值 20%）"))).ok
+
+
+def test_a_card_row_does_not_own_the_next_rows_figures():
+    """The observation side was deliberately left unbounded, on the reasoning
+    that extra owners can only *reduce* false positives. The reasoning was
+    wrong: a ticker at the end of one card line went on owning the next line's
+    portfolio-level figures, so 「组合当前回撤 -4.20%」 became MSFT's."""
+    from v2.agent import attribution
+
+    card = ("<b>行业暴露</b>\n· 软件/安全 36.5%（CRWD + MSFT）\n"
+            "<b>回撤</b>\n· 组合当前回撤 -4.20%（峰值 2026-08-14）")
+    report = attribution.check("SMCI 深亏，而组合整体回撤为 -4.20%。",
+                               _records(("risk_view", {}, card)))
+    assert report.ok, report.summary()
+
+
 def test_a_finding_carries_the_line_it_came_from():
     """「MSFT←18.2(实为 NVDA)」 says what the check concluded and nothing about
     why. Five plausible reconstructions of that sentence failed to reproduce it,

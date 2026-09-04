@@ -94,22 +94,38 @@ _NOT_ENTITIES = frozenset({
 #: How far after an entity mention a figure is still "about" that entity.
 WINDOW = 60
 
-#: Boundaries a figure never reaches back across. The window used to stop only
-#: at the next entity mention, so the last entity on a line swallowed whatever
-#: came after it:
+#: Boundaries a figure never reaches back across, and the unit a subject
+#: governs. The window used to stop only at the next entity mention, so the last
+#: entity on a line swallowed whatever came after it:
 #:
 #:     · 已浮亏 -21.5%，今日 -5.40%，相对 SMH 逆势 -8.30pp
 #:     · 2026-09-09 财报，上次 EPS miss -23.6%、财报后次日 -14.20%
 #:
 #: No entity follows SMH, so its 60 characters ran into the next bullet and
-#: reported SMCI's earnings history as SMH's — a correct answer, rejected. A new
-#: line or bullet starts a new subject.
+#: reported SMCI's earnings history as SMH's — a correct answer, rejected.
 #:
-#: Only applied to the answer. On the observation side a narrower window would
-#: record *fewer* owners, and fewer owners means more false positives; being
-#: generous about who owns a figure is the conservative direction there.
-_LAYOUT_BREAK = re.compile(r"[\n·•]")
+#: Sentence enders belong here for the same reason a newline does, and for a
+#: while they were missing: 「…TSLA、AMD 次之。三者合计 -$4,332.61 + -$2,013.77」
+#: gave AMD both totals, one clause after AMD had stopped being the subject.
+#:
+#: Only applied to the answer for the *window*; the observation side bounds at
+#: line ends only (see the inner loop), because a card's rows are lines.
+_LAYOUT_BREAK = re.compile(r"[\n·•。！？；;]")
 
+
+#: A figure used as a *boundary* rather than a measurement: 「VIX 18.40…仍处于
+#: 20 以下的舒适区」. The 20 is a level being compared against; it belongs to
+#: nobody, and it happened to appear in the risk card as CRWD's concentration
+#: threshold, so it was reported as CRWD's.
+_THRESHOLD_AFTER = re.compile(r"^\s*[%％]?\s*(?:以[下上]|阈值|关口|上方|下方|一线)")
+_THRESHOLD_BEFORE = re.compile(
+    r"(?:低于|高于|超过|不足|突破|跌破|超出|站上|回落至|阈值)\s*[^\s，。]{0,4}$")
+
+#: The second operand of a comparison belongs to whatever is being compared
+#: *against*, which is often named in an earlier sentence: 「NVDA 的 EPS 绝对值
+#: 更高（$1.31 vs $0.71），超预期幅度也更大（+5.6% vs +2.9%）」 — every second
+#: number there is AMD's, and no name on that line says so.
+_VS_OPERAND = re.compile(r"(?:\bvs\.?|对比|相比|较之)\s*[+\-±$￥¥]?\s*$", re.IGNORECASE)
 
 #: A benchmark named as a comparison point is not the subject of the figures
 #: around it. 「同期 SPY +0.40% → 相对强度 -3.14pp ★ 逆势」 is a sentence about
@@ -265,10 +281,29 @@ def _rounds_to_own_figure(token: str, values: list[float]) -> bool:
     return any(abs(target - value) < tolerance for value in values)
 
 
+def _offset_in(line: str, text: str, position: int) -> int:
+    """Where ``position`` falls inside the line that contains it."""
+    return position - (text.rfind("\n", 0, position) + 1)
+
+
 def _line_at(text: str, position: int) -> str:
     start = text.rfind("\n", 0, position) + 1
     end = text.find("\n", position)
     return text[start: end if end != -1 else len(text)]
+
+
+#: The unit a subject governs. The whole line was too coarse: 「NVDA Vanguard
+#: 8.94%；AMD Vanguard 8.94%。」 is two statements sharing a line, and the h07
+#: failure this check exists for lives entirely in the second one.
+_CLAUSE_BREAK = _LAYOUT_BREAK
+
+
+def _clause_at(text: str, position: int) -> str:
+    start = 0
+    for match in _CLAUSE_BREAK.finditer(text, 0, position):
+        start = match.end()
+    end = _CLAUSE_BREAK.search(text, position)
+    return text[start: end.start() if end else len(text)]
 
 
 def _record(report: "AttributionReport", entity: str, token: str,
@@ -347,6 +382,15 @@ def check(
             if index + 1 < len(inner_mentions):
                 nxt = inner_mentions[index + 1]
                 limit = min(limit, nxt[1] - len(nxt[0]))
+            # Bounded at the line end here too. This was deliberately *not*
+            # done — the reasoning was that extra owners on the observation
+            # side can only reduce false positives — and the reasoning was
+            # wrong. A ticker at the end of one card line went on owning the
+            # next line's portfolio-level figures, so 「组合当前回撤 -4.20%」
+            # became MSFT's and 「软件/安全 36.5%」 became SMCI's, and correct
+            # answers quoting them were flagged. Unbounded generosity does not
+            # add owners, it adds *wrong* owners.
+            limit = _window_end(content, position, limit)
             for token in extract_numbers(content[position: max(limit, position)]):
                 key = _normalise(token)
                 if key:
@@ -427,6 +471,28 @@ def check(
                 continue                    # the line shows where it came from
             if _rounds_to_own_figure(key, owned_values.get(entity, [])):
                 continue                    # its own number, written shorter
+
+            line = _line_at(body, position + start)
+            if _THRESHOLD_AFTER.match(line[_offset_in(line, body, position + end):]) \
+                    or _THRESHOLD_BEFORE.search(body[max(0, position + start - 8):
+                                                     position + start]):
+                continue                    # 「20 以下」 — a level, not a value
+
+            # Proximity only carries information when the clause names one
+            # entity. 「22.4%（CRWD）+ 18.2%（NVDA）+ 14.1%（MSFT）= 54.7%」 and
+            # 「NVDA 超预期 +5.6% vs +2.9% …领先 AMD」 pair their figures
+            # structurally, and "nearest name before" reads every pair off by
+            # one. When several names share a line the check cannot resolve the
+            # pairing, so it abstains — provided one of those names does own
+            # the figure. If none of them does, that is still a real finding.
+            if _VS_OPERAND.search(body[max(0, position + start - 10):
+                                       position + start]):
+                continue                    # 「x vs y」 — y is the other subject
+
+            clause_entities = {name for name, _ in
+                               _mentions(_clause_at(body, position + start))}
+            if len(clause_entities) >= 2 and (holders & clause_entities):
+                continue
             # 「占仓 66.3% 的 IVV」: the figure modifies what comes after it.
             # The backward pass below checks it against that entity, so skipping
             # here reattributes rather than excuses.
