@@ -82,6 +82,8 @@ class CaseScore:
     ungrounded: tuple[str, ...] = ()
     #: {kind: [figures]} — why each rejected figure failed to trace.
     ungrounded_kinds: dict[str, list[str]] = field(default_factory=dict)
+    #: Figures accepted because the answer showed the arithmetic behind them.
+    derived: int = 0
 
     tool_calls: int = 0
     llm_calls: int = 0
@@ -130,6 +132,7 @@ def score_case(
     grounded: bool = True,
     ungrounded: Iterable[str] = (),
     ungrounded_kinds: dict[str, list[str]] | None = None,
+    derived: int = 0,
     tool_calls: int = 0,
     llm_calls: int = 0,
     tokens: int = 0,
@@ -159,7 +162,7 @@ def score_case(
         missing_tools=missing_tools, missing_facts=missing_facts,
         violations=tuple(sorted(called & set(case.must_not_call))),
         forbidden_hit=forbidden_hit, ungrounded=tuple(ungrounded),
-        ungrounded_kinds=dict(ungrounded_kinds or {}),
+        ungrounded_kinds=dict(ungrounded_kinds or {}), derived=derived,
         tool_calls=tool_calls, llm_calls=llm_calls, tokens=tokens,
         elapsed_ms=elapsed_ms, overspend=tool_calls > case.max_tool_calls,
         path=path, path_correct=(not path or path == case.expected_path),
@@ -236,6 +239,7 @@ class SuiteReport:
             "overspend_rate": _mean([1.0 if s.overspend else 0.0 for s in self.scores]),
             "routing_accuracy": _mean([1.0 if s.path_correct else 0.0 for s in self.scores]),
             "ungrounded_kinds": self.ungrounded_breakdown(),
+            "derived_figures": sum(sc.derived for sc in self.scores),
             "mean_tool_calls": _mean([float(s.tool_calls) for s in self.scores]),
             "mean_llm_calls": _mean([float(s.llm_calls) for s in self.scores]),
             "total_tokens": int(sum(tokens)),

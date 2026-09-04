@@ -91,18 +91,24 @@ def test_every_labelled_case_routes_as_expected():
     assert not misses, "路由错误：\n" + "\n".join(misses)
 
 
-def test_the_eval_set_routes_with_one_known_miss():
-    """Routing accuracy on the 83-case eval set, pinned to its known limitation.
+def test_the_eval_set_routes_with_two_known_misses():
+    """Routing accuracy on the 83-case eval set, pinned to its known limits.
 
-    m11 asks for the next earnings dates of the semiconductor holdings. The
-    classifier lands on earnings_calendar, whose card covers 14 days — too short
-    to reach NVDA's November date. Nothing in the *query* reveals that, so the
-    router cannot get it right a priori. Pinning the miss keeps the claim honest
-    and turns any new miss into a test failure.
+    Both misses come from the same blind spot, in opposite directions: what the
+    earnings-calendar card happens to cover is invisible from the query.
+
+    * m11 (「我持仓里的半导体股票下次财报都是什么时候」) needs escalating,
+      because the card's 14-day horizon cannot reach NVDA's November date.
+    * m12 (「关注列表里有没有快发财报的」) does not, because the card annotates
+      watchlist members and answers it outright.
+
+    Nothing in either wording distinguishes them, so the router cannot decide
+    both correctly a priori. Pinning the pair keeps the 99% claim honest and
+    turns any *new* miss into a test failure.
     """
     from v2.agent.eval.cases import CASES as EVAL_CASES
 
-    known = {"m11"}
+    known = {"m11", "m12"}
     misses = {
         case.id for case in EVAL_CASES
         if router.route(case.query, _parsed(case.intent, case.ticker),

@@ -337,6 +337,26 @@ def test_grounding_still_rejects_unshown_arithmetic_and_invention():
     assert not grounding.check("年化波动率 63.8%", observations).ok
 
 
+def test_shown_arithmetic_over_traceable_inputs_is_accepted():
+    """Three sweeps showed the model would not comply with 'show your work', and
+    accepting bare sums would gut the guarantee. Requiring the derivation to be
+    *visible* keeps both properties."""
+    observations = "CRWD 22.4% · NVDA 18.2% · MSFT 14.1%"
+    report = grounding.check("前三合计 22.4% + 18.2% + 14.1% = 54.7%", observations)
+    assert report.ok and report.derived == 1
+
+
+def test_a_shown_derivation_that_does_not_add_up_is_still_rejected():
+    observations = "CRWD 22.4% · NVDA 18.2%"
+    assert not grounding.check("22.4% 与 18.2% 相加得 99.9%", observations).ok
+
+
+def test_a_derivation_over_invented_inputs_is_rejected():
+    """Faking this needs addends that each trace *and* sum to the target."""
+    observations = "CRWD 22.4%"
+    assert not grounding.check("31.5% + 32.3% = 63.8%", observations).ok
+
+
 def test_grounding_matches_across_comma_formatting():
     report = grounding.check("总市值 184320.55 美元。", "总市值 $184,320.55")
     assert report.ok and report.grounded == 1

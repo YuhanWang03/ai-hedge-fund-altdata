@@ -108,6 +108,7 @@ def run_case(case: EvalCase, mode: Mode, *, llm_factory: Callable[[], Any]) -> C
             tools_called=trajectory.distinct_tools(),
             grounded=result.grounding.ok,
             ungrounded=result.grounding.ungrounded,
+            derived=result.grounding.derived,
             ungrounded_kinds=(grounding.diagnose(result.grounding,
                                                  trajectory.observations_text())
                               if not result.grounding.ok else None),
@@ -279,7 +280,10 @@ def render_grounding(report: SuiteReport) -> str:
         count = counts.get(kind, 0)
         if count:
             lines.append(f"  {labels[kind]:<38}{count:>4}  ({count / total:.0%})")
-    lines.append("\n  注：sum/difference 只说明「存在一个算术解释」，不等于模型真做了该运算；"
+    derived = report.summary()["derived_figures"]
+    lines.append(f"\n  另有 {derived} 个数字是靠答案里**写出的算式**被接受的"
+                 "（输入本身可溯源 + 算式显式给出）。")
+    lines.append("  注：sum/difference 只说明「存在一个算术解释」，不等于模型真做了该运算；"
                  "\n      观测里数字一多就可能巧合命中。只有 unknown 可以放心当作编造处理。")
     return "\n".join(lines)
 

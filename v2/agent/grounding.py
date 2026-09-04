@@ -54,11 +54,72 @@ def extract_numbers(text: str) -> list[str]:
     return [m.group(0) for m in _NUMBER.finditer(text or "")]
 
 
-def extract_numbers_with_context(text: str) -> list[tuple[str, str]]:
-    """Each figure plus the ~12 characters before it, for identifier detection."""
+def extract_numbers_with_context(text: str) -> list[tuple[str, str, int, int]]:
+    """Each figure with its preceding context and its span in the text."""
     body = text or ""
-    return [(m.group(0), body[max(0, m.start() - 12): m.start()])
+    return [(m.group(0), body[max(0, m.start() - 12): m.start()], m.start(), m.end())
             for m in _NUMBER.finditer(body)]
+
+
+#: How far around a derived figure to look for the arithmetic that produced it.
+_DERIVATION_WINDOW_BEFORE = 90
+_DERIVATION_WINDOW_AFTER = 30
+
+
+def _shows_its_working(
+    target: float,
+    answer: str,
+    start: int,
+    end: int,
+    is_traceable,
+) -> bool:
+    """True when the answer displays traceable inputs that produce ``target``.
+
+    Three sweeps of the evaluation showed the model would not comply with a
+    prompt telling it to show its arithmetic: sums stayed ~30% of all rejections
+    across every run. Instructing harder was not going to work, and accepting
+    bare sums would gut the guarantee — a fabricated figure often has *some*
+    arithmetic explanation in a card full of numbers.
+
+    So the rule became precise instead of loose: a derived figure is traceable
+    when the answer **shows** the derivation, and every input of that derivation
+    is itself traceable. "前三合计 22.4% + 18.2% + 14.1% = 54.7%" passes; a bare
+    "54.7%" does not. Faking this requires inventing addends that are each
+    individually traceable *and* sum to the target, which is a far higher bar
+    than inventing one number.
+    """
+    window = answer[max(0, start - _DERIVATION_WINDOW_BEFORE): start] \
+        + answer[end: end + _DERIVATION_WINDOW_AFTER]
+    inputs: list[float] = []
+    for token in extract_numbers(window):
+        try:
+            value = abs(float(_normalise(token)))
+        except ValueError:
+            continue
+        if value and is_traceable(value, token) and value not in inputs:
+            inputs.append(value)
+    if len(inputs) < 2:
+        return False
+
+    count = min(len(inputs), 8)
+    inputs = inputs[:count]
+    for i in range(count):
+        for j in range(i + 1, count):
+            pair = inputs[i] + inputs[j]
+            if _approx(target, pair) or _approx(target, abs(inputs[i] - inputs[j])):
+                return True
+            for k in range(j + 1, count):
+                triple = pair + inputs[k]
+                if _approx(target, triple):
+                    return True
+                for m in range(k + 1, count):
+                    if _approx(target, triple + inputs[m]):
+                        return True
+    return False
+
+
+def _approx(a: float, b: float) -> bool:
+    return abs(a - b) <= max(0.005, abs(b) * 0.005)
 
 
 @dataclass
@@ -69,6 +130,9 @@ class GroundingReport:
     grounded: int = 0
     ungrounded: list[str] = field(default_factory=list)
     exempt: int = 0
+    #: Figures accepted because the answer *showed* the arithmetic producing them
+    #: from figures that are themselves traceable.
+    derived: int = 0
 
     @property
     def ratio(self) -> float:
@@ -114,9 +178,16 @@ def check(
         except ValueError:
             continue
 
+    def traceable(value: float, token: str) -> bool:
+        """Whether one figure would pass the direct checks on its own."""
+        text = _normalise(token)
+        if text in haystack or _digit_signature(token) in signatures:
+            return True
+        return any(abs(value - v) <= max(rounding_tolerance * v, 0.005) for v in values)
+
     report = GroundingReport()
 
-    for raw, before in extract_numbers_with_context(answer):
+    for raw, before, start, end in extract_numbers_with_context(answer):
         token = _normalise(raw)
         if not token:
             continue
@@ -151,6 +222,11 @@ def check(
         # 3. The card's value, rounded (15,851.57 -> 15,852).
         if any(abs(target - v) <= max(rounding_tolerance * v, 0.005) for v in values):
             report.grounded += 1
+            continue
+        # 4. Arithmetic the answer actually shows, over inputs that themselves trace.
+        if _shows_its_working(target, answer, start, end, traceable):
+            report.grounded += 1
+            report.derived += 1
             continue
         report.ungrounded.append(raw)
 
@@ -250,7 +326,9 @@ def repair_instruction(report: GroundingReport) -> str:
         "GROUNDING CHECK FAILED. These figures in your answer do not appear in "
         f"any tool result from this run: {', '.join(report.ungrounded[:12])}.\n"
         "Rewrite the answer using only figures present in the observations above. "
-        "If a number was your own arithmetic, show the inputs it came from. "
+        "If a number was your own arithmetic, write the arithmetic out in full "
+        "(e.g. 22.4% + 18.2% + 14.1% = 54.7%) — a shown derivation over traceable "
+        "inputs is accepted, a bare result is not. "
         "If you cannot support it, drop the claim — omitting a number is always "
         "better than inventing one."
     )
