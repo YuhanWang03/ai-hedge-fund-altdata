@@ -477,6 +477,36 @@ def test_a_figure_can_belong_to_the_entity_that_follows_it():
         _records(("portfolio_view", {}, "CRWD 22.4% NVDA 18.2%"))).misattributed
 
 
+def test_a_date_is_not_a_negative_number():
+    """A hyphen in front of a day of the month is a minus sign to any number
+    extractor. The earnings calendar is a column of them, one ticker per row, so
+    a list where every single entry was correct came back as four
+    misattributions: 「LRCX←-21(实为 MU)」, 「INTC←-22(实为 LRCX)」…
+    """
+    from v2.agent import attribution
+
+    # The card lists the date first and the ticker after it, so each day lands in
+    # the *previous* row's window — which is what shifted every entry by one.
+    answer = "· MU：09-30\n· LRCX：10-21\n· INTC：10-22\n· UNH：10-27"
+    card = ("09-30 (D-26) MU\n10-21 (D-47) LRCX\n"
+            "10-22 (D-48) INTC\n10-27 (D-53) UNH")
+    assert attribution.check(answer, _records(("earnings_calendar", {}, card))).ok
+
+    # …and a real quantity that merely looks adjacent is still checked.
+    assert not attribution.check(
+        "LRCX 浮亏 -21.4%。",
+        _records(("portfolio_view", {"ticker": "MU"}, "MU -21.4%"))).ok
+
+
+def test_the_summary_says_when_it_stopped_listing():
+    """「4 处张冠李戴：A, B, C」 reads as a complete list of three."""
+    from v2.agent.attribution import AttributionReport
+
+    report = AttributionReport(
+        misattributed=[(f"T{i}", "1.5", ("X",)) for i in range(4)])
+    assert report.summary().endswith("…")
+
+
 def test_its_own_figure_written_shorter_is_still_its_own():
     """「QCOM …虽然浮亏 30%」 is QCOM's own -30.39% rounded to whole percent.
     The literal "30" also sits in the risk card's threshold («单票 IVV > 30%»),
