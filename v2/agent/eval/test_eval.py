@@ -101,7 +101,16 @@ def test_ungrounded_answers_are_not_correct_answers():
                        answer="CRWD SMCI 2026-09-06",
                        tools_called=["portfolio_view"], grounded=False)
     assert score.tool_recall == 1.0 and score.fact_recall == 1.0
-    assert not score.passed and score.failure_reason() == "数字无法溯源"
+    assert not score.passed and score.failure_reason().startswith("数字无法溯源")
+
+
+def test_ungrounded_figures_are_named_in_the_failure_reason():
+    """'数字无法溯源' without saying which number is not an actionable verdict."""
+    score = score_case(_case("m01"), mode="agent", answer="CRWD SMCI 2026-09-06",
+                       tools_called=["portfolio_view"], grounded=False,
+                       ungrounded=("37.9", "12.4"))
+    reason = score.failure_reason()
+    assert "37.9" in reason and "12.4" in reason
 
 
 def test_overspend_is_tracked_without_failing_the_case():

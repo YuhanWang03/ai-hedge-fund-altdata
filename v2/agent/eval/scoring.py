@@ -64,6 +64,9 @@ class CaseScore:
     missing_facts: tuple[str, ...] = ()
     violations: tuple[str, ...] = ()
     forbidden_hit: tuple[str, ...] = ()
+    #: The figures that failed to trace. "数字无法溯源" without naming them is
+    #: the same unactionable verdict this package criticises elsewhere.
+    ungrounded: tuple[str, ...] = ()
 
     tool_calls: int = 0
     llm_calls: int = 0
@@ -96,7 +99,8 @@ class CaseScore:
         if self.forbidden_hit:
             return f"输出了禁止内容：{', '.join(self.forbidden_hit)}"
         if not self.grounded:
-            return "数字无法溯源"
+            figures = ", ".join(self.ungrounded[:6]) if self.ungrounded else "未记录"
+            return f"数字无法溯源：{figures}"
         if self.fact_recall < 1.0:
             return f"事实缺失：{', '.join(self.missing_facts)}"
         return ""
@@ -109,6 +113,7 @@ def score_case(
     answer: str,
     tools_called: Iterable[str],
     grounded: bool = True,
+    ungrounded: Iterable[str] = (),
     tool_calls: int = 0,
     llm_calls: int = 0,
     tokens: int = 0,
@@ -133,7 +138,7 @@ def score_case(
         tool_recall=tool_recall, fact_recall=fact_recall, grounded=grounded,
         missing_tools=missing_tools, missing_facts=missing_facts,
         violations=tuple(sorted(called & set(case.must_not_call))),
-        forbidden_hit=forbidden_hit,
+        forbidden_hit=forbidden_hit, ungrounded=tuple(ungrounded),
         tool_calls=tool_calls, llm_calls=llm_calls, tokens=tokens,
         elapsed_ms=elapsed_ms, overspend=tool_calls > case.max_tool_calls,
         path=path, path_correct=(not path or path == case.expected_path),

@@ -179,6 +179,15 @@ def handle_nl_sync(
         answer = baseline_result.answer
         tools_used = (baseline_result.tool,) if baseline_result.tool else ()
 
+    # An answer the system already knows it cannot fully verify must say so.
+    # Shipping it unmarked would quietly undo the grounding guarantee: the loop
+    # checked, found unsupported figures, failed to repair them — and then the
+    # user reads it as if it had passed.
+    if agent_result is not None and not agent_result.grounding.ok:
+        figures = ", ".join(agent_result.grounding.ungrounded[:5])
+        answer = (f"⚠️ <i>以下回答中有数字未能追溯到任何工具返回"
+                  f"（{figures}），请以原始数据为准。</i>\n\n{answer}")
+
     if resolution.rewritten:
         answer = f"<i>{resolution.note}</i>\n\n{answer}"
 

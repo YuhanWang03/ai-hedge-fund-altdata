@@ -107,6 +107,7 @@ def run_case(case: EvalCase, mode: Mode, *, llm_factory: Callable[[], Any]) -> C
             case, mode=mode.name, answer=result.answer,
             tools_called=trajectory.distinct_tools(),
             grounded=result.grounding.ok,
+            ungrounded=result.grounding.ungrounded,
             tool_calls=trajectory.tool_calls, llm_calls=trajectory.llm_calls,
             tokens=trajectory.prompt_tokens + trajectory.completion_tokens,
             elapsed_ms=result.elapsed_ms, path=path,
@@ -200,13 +201,37 @@ def render_failures(report: SuiteReport, limit: int = 20) -> str:
     for score in failures[:limit]:
         case = case_by_id.get(score.case_id)
         lines.append(f"  ✗ [{score.case_id}] {case.query if case else ''}")
+        budget = f" · ⚠️ 超预算（上限 {case.max_tool_calls}）" if score.overspend and case else ""
         lines.append(f"      {score.failure_reason()}"
                      f"   (工具 {score.tool_calls} 次 · {score.tokens} token"
-                     f" · {score.stop_reason})")
+                     f" · {score.stop_reason}{budget})")
         if case and case.note:
             lines.append(f"      标注说明：{case.note}")
     if len(failures) > limit:
         lines.append(f"  …另有 {len(failures) - limit} 条，完整清单见 JSON 输出")
+    return "\n".join(lines)
+
+
+def render_overspend(report: SuiteReport, limit: int = 10) -> str:
+    """Cases that blew their tool budget, whether or not they answered correctly.
+
+    Over-calling does not fail a case — it is a cost problem, not a correctness
+    one — so it would otherwise vanish into a mean. It is also the clearest
+    signal of where the loop explores instead of deciding.
+    """
+    over = sorted([s for s in report.scores if s.overspend],
+                  key=lambda s: s.tool_calls, reverse=True)
+    lines = [_RULE, f"【{report.mode} 超预算的 case】共 {len(over)} 条", _RULE]
+    if not over:
+        lines.append("  无。")
+        return "\n".join(lines)
+    case_by_id = {c.id: c for c in CASES}
+    for score in over[:limit]:
+        case = case_by_id.get(score.case_id)
+        lines.append(f"  · [{score.case_id}] {case.query if case else ''}"
+                     f"  {score.tool_calls} 次 / 上限 {case.max_tool_calls if case else '?'}"
+                     f" · {score.tokens} token"
+                     f" · {'通过' if score.passed else '未通过'}")
     return "\n".join(lines)
 
 
@@ -235,6 +260,7 @@ def to_json(reports: list[SuiteReport]) -> dict:
                 "grounded": s.grounded, "missing_tools": list(s.missing_tools),
                 "missing_facts": list(s.missing_facts),
                 "violations": list(s.violations), "forbidden": list(s.forbidden_hit),
+                "ungrounded": list(s.ungrounded), "overspend": s.overspend,
                 "tool_calls": s.tool_calls, "llm_calls": s.llm_calls,
                 "tokens": s.tokens, "elapsed_ms": s.elapsed_ms,
                 "path": s.path, "path_correct": s.path_correct,

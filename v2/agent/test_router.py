@@ -279,6 +279,35 @@ def test_bridge_resolves_pronouns_and_discloses_the_rewrite():
     assert "补全为" in result.answer, "改写必须对用户可见"
 
 
+def test_an_unverifiable_answer_is_labelled_as_such():
+    """The loop knew it could not ground these figures; the user must know too."""
+    llm = ScriptedLLM([
+        LLMResponse(tool_calls=[ToolCall("c1", "portfolio_view", {}, "{}")]),
+        LLMResponse(text="组合年化波动率 37.9%。"),      # invented
+        LLMResponse(text="组合年化波动率 41.2%。"),      # repair also invented
+    ])
+    result = bot_bridge.handle_nl_sync(
+        "我持仓里哪只最危险", chat_id=1, parsed=_parsed("risk_view"),
+        registry=build_registry(), llm=llm, store=session.SessionStore(),
+        mode="heuristic")
+
+    assert result.agent.stop_reason == "final_answer_ungrounded"
+    assert result.answer.startswith("⚠️")
+    assert "41.2" in result.answer, "要点名是哪个数字站不住"
+
+
+def test_a_grounded_answer_carries_no_warning():
+    llm = ScriptedLLM([
+        LLMResponse(tool_calls=[ToolCall("c1", "portfolio_view", {}, "{}")]),
+        LLMResponse(text="CRWD 占仓 22.4%。"),
+    ])
+    result = bot_bridge.handle_nl_sync(
+        "我持仓里哪只最危险", chat_id=1, parsed=_parsed("risk_view"),
+        registry=build_registry(), llm=llm, store=session.SessionStore(),
+        mode="heuristic")
+    assert not result.answer.startswith("⚠️")
+
+
 def test_bridge_survives_a_failing_classifier():
     def broken(text):
         raise RuntimeError("classifier down")

@@ -112,6 +112,8 @@ def main(argv: list[str] | None = None) -> int:
             print()
             print(runner.render_routing(report))
     print()
+    print(runner.render_overspend(reports[-1]))
+    print()
     print(runner.render_failures(reports[-1], limit=args.failures))
 
     if args.out:
