@@ -67,8 +67,8 @@ _NOT_ENTITIES = frozenset({
     "AI", "US", "USD", "CEO", "CFO", "COO", "CTO", "SEC", "ETF", "IPO", "EPS",
     "PE", "PB", "ROE", "GDP", "CPI", "PCE", "NFP", "PPI", "FOMC", "FED", "RSI",
     "CMF", "OK", "VS", "AND", "THE", "FOR", "NL", "LLM", "API", "MD", "P&L",
-    # data provider and vendor names that appear inside tool output
-    "FD", "EDGAR", "ARK",
+    # data provider, vendor and account-mode labels printed inside tool output
+    "FD", "EDGAR", "ARK", "PAPER", "LIVE", "BROAD", "TOP", "HHI",
     # technology / metric acronyms the model writes in its own prose
     "HBM", "EUV", "CPU", "GPU", "DRAM", "NAND", "SOC", "HHI", "PEG", "TTM",
     "YOY", "QOQ", "IP", "D",
@@ -203,6 +203,27 @@ def _derived_from_neighbours(target: str, line: str) -> bool:
     return False
 
 
+def _rounds_to_own_figure(token: str, values: list[float]) -> bool:
+    """True when the answer's figure is this entity's own, written shorter.
+
+    「QCOM …虽然浮亏 30%」 is QCOM's own -30.39% rounded to whole percent. The
+    literal string "30" also appears in the risk card's threshold («单票 IVV >
+    30%»), so ownership by exact string said it was IVV's and flagged a correct
+    sentence.
+
+    The tolerance is half of the last written digit — exactly what "rounded to
+    this precision" means — rather than a relative fudge factor: "30" admits
+    anything in [29.5, 30.5), "30.4" only [30.35, 30.45).
+    """
+    try:
+        target = abs(float(token))
+    except ValueError:
+        return False
+    decimals = len(token.partition(".")[2])
+    tolerance = 0.5 * (10 ** -decimals)
+    return any(abs(target - value) < tolerance for value in values)
+
+
 def _line_at(text: str, position: int) -> str:
     start = text.rfind("\n", 0, position) + 1
     end = text.find("\n", position)
@@ -260,6 +281,8 @@ def check(
         results: (tool name, arguments, content, ok) for each tool call made.
     """
     owners: dict[str, set[str]] = {}
+    #: entity -> the numeric values it owns, for the rounding check below.
+    owned_values: dict[str, list[float]] = {}
     neutral: set[str] = set()
 
     for _tool, args, raw_content, ok in results:
@@ -293,6 +316,12 @@ def check(
                 holders = holders | {entity}
             if holders:
                 owners.setdefault(key, set()).update(holders)
+                try:
+                    value = abs(float(key))
+                except ValueError:
+                    continue
+                for holder in holders:
+                    owned_values.setdefault(holder, []).append(value)
             else:
                 neutral.add(key)
 
@@ -348,6 +377,8 @@ def check(
                 continue                    # 「52 周高点」 — a window, not a value
             if _derived_from_neighbours(key, _line_at(body, position + start)):
                 continue                    # the line shows where it came from
+            if _rounds_to_own_figure(key, owned_values.get(entity, [])):
+                continue                    # its own number, written shorter
             # 「占仓 66.3% 的 IVV」: the figure modifies what comes after it.
             # The backward pass below checks it against that entity, so skipping
             # here reattributes rather than excuses.
