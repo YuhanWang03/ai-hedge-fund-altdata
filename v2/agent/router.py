@@ -108,7 +108,11 @@ _COLLECTION = re.compile(
 _PER_ITEM_STATE = re.compile(r"怎么样|表现|情况|如何|怎样")
 
 # Several asks welded into one message.
-_COMPOUND = re.compile(r"并且|还有|另外|顺便|同时|以及|,\s*还|，还|;|；")
+#: 「还有」 is a conjunction in 「NVDA 财报，还有 CPI 呢」 and a *quantity* in
+#: 「离 52 周高点还有多远」「还有几天发财报」 — one question, not two. Third
+#: member of the family that already cost this router 最近／最新 and 这个月: a
+#: substring that looks like the marker but belongs to a fixed phrase.
+_COMPOUND = re.compile(r"并且|还有(?![多几])|另外|顺便|同时|以及|,\s*还|，还|;|；")
 
 # Causal questions that span the book rather than one ticker.
 _CAUSAL = re.compile(r"为什么|为啥|怎么回事|原因是|什么导致|怎么来的|谁拖|拖累")

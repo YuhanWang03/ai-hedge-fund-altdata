@@ -74,7 +74,8 @@ _MONEYFLOW_EXTRA: dict[str, str] = {
     "AMD": "💧 <b>AMD 资金流</b>\n· CMF(20) -0.09 → 小幅流出\n· RSI(14) 46.8",
     "TSLA": "💧 <b>TSLA 资金流</b>\n· CMF(20) -0.21 → 资金流出\n· RSI(14) 38.9",
     "AAPL": "💧 <b>AAPL 资金流</b>\n· CMF(20) +0.11 → 小幅流入\n· RSI(14) 55.2",
-    "MSFT": "💧 <b>MSFT 资金流</b>\n· CMF(20) +0.14 → 资金流入\n· RSI(14) 58.4",
+    "MSFT": ("💧 <b>MSFT 资金流</b>\n· CMF(20) +0.14 → 资金流入\n· RSI(14) 58.4\n"
+             "· 距 52 周高点 -3.10%，位于 200 日均线上方"),
 }
 
 _EIGHT_K: dict[str, str] = {
@@ -169,10 +170,17 @@ EVAL_FIXTURES: dict[str, Any] = {
     "chain": _CHAIN,
     "release_check": _RELEASES,
     "pnl_period": _PNL,
+    # Date first, ticker after — the layout the live card uses, and the reason a
+    # calendar in which every row was correct came back as four
+    # misattributions: each day-of-month parses as a negative number and lands
+    # in the *previous* row's ownership window. A fixture that avoids the
+    # awkward shape cannot measure whether the check survives it.
     "earnings_calendar": ("📅 <b>未来 14 天财报</b>\n"
-                          "· 2026-09-06 CRWD（持仓 22.4%）\n"
-                          "· 2026-09-09 SMCI（持仓 8.6%）\n"
-                          "· 2026-09-11 AVGO（关注列表）"),
+                          "· 2026-09-06 (D-3) CRWD（持仓 22.4%）\n"
+                          "· 2026-09-09 (D-6) SMCI（持仓 8.6%）\n"
+                          "· 2026-09-11 (D-8) AVGO（关注列表）\n"
+                          "· 09-30 (D-27) MSFT（持仓 14.1%）\n"
+                          "· 10-21 (D-48) AMD（持仓 11.3%）"),
 }
 
 

@@ -368,6 +368,61 @@ CASES: tuple[EvalCase, ...] = (
       ("holders",), ("portfolio_view", "institutional_13f"),
       (("Vanguard",), ("8.94%", "8.94")),
       expected_path="single_hop", max_tool_calls=2),
+
+    # =======================================================================
+    # 10. checker_stress — answer shapes that broke the checks, not the model (6)
+    # =======================================================================
+    #
+    # Every case here was a production incident. Nine rounds of live testing
+    # produced seven attribution false positives, and not one of them was
+    # visible to this suite: the cases passed, the ⚠️ banner nobody scored sat
+    # on top of a correct answer, and a human found it by reading Telegram.
+    #
+    # So these do not test the model. They aim questions at the fixture regions
+    # whose *shape* defeated the checker — a column of dates, a threshold, a
+    # window length, a percentage the answer computes — and the attribution axis
+    # scores whatever the model writes about them. A warning raised here on an
+    # otherwise-correct answer is a false positive by construction.
+    #
+    # Phrasing cannot be forced, which is the point: the shapes recur, the
+    # wording will not, and a fixed list of remembered sentences would only
+    # re-detect the seven bugs already fixed.
+    C("k01", "接下来两周谁要发财报，分别是什么时候",
+      "checker_stress", "earnings_calendar", "",
+      ("earnings_calendar",), (),
+      (("09-30", "9-30", "9 月 30"), ("10-21", "10 月 21"), ("MSFT",), ("AMD",)),
+      expected_path="single_hop", max_tool_calls=3,
+      note="日期列：每个日子都会被数字提取器读成负数，落进上一行标的的窗口"),
+    C("k02", "NVDA 和 AMD 上次财报各自超预期多少，谁的幅度更大",
+      "checker_stress", "unknown", "",
+      ("earnings_view",), (),
+      (("27.3%", "27.3", "+27.3"), ("AMD",)),
+      max_tool_calls=4,
+      note="「实际 vs 预期（+X%）」：X 是模型当场算的比值，没有卡片拥有它"),
+    C("k03", "MSFT 离 52 周高点还有多远",
+      "checker_stress", "moneyflow_view", "MSFT",
+      ("moneyflow_view",), (),
+      (("0.14",), ("58.4",), ("3.10%", "3.1%")),
+      expected_path="single_hop", max_tool_calls=3,
+      note="「52 周高点」「200 日均线」：52 和 200 是窗口长度，不是谁的量"),
+    C("k04", "CRWD 占仓多少，超没超过集中度阈值",
+      "checker_stress", "risk_view", "CRWD",
+      ("risk_view",), (),
+      (("22.4%", "22.4"), ("20%", "20.0%")),
+      expected_path="single_hop", max_tool_calls=3,
+      note="阈值数字不归任何主体所有，却紧挨着 CRWD 出现"),
+    C("k05", "把我持仓里亏损的几只按浮亏排个序，用整数百分比说",
+      "checker_stress", "unknown", "",
+      ("portfolio_view",), (),
+      (("SMCI",), ("TSLA",), ("AMD",)),
+      max_tool_calls=4,
+      note="要求整数百分比，逼出「-21.5% 写成 21%」这类舍入表述"),
+    C("k06", "我组合里半导体和软件各占多少",
+      "checker_stress", "risk_view", "",
+      ("risk_view",), (),
+      (("38.1%", "38.1"), ("36.5%", "36.5")),
+      expected_path="single_hop", max_tool_calls=3,
+      note="行业标签（BROAD/半导体）不是 ticker，却会被大写词模式收成实体"),
 )
 
 
@@ -400,6 +455,7 @@ CASES = tuple(
 CATEGORIES: tuple[str, ...] = (
     "single_lookup", "multi_hop", "ranking", "causal",
     "compound", "recovery", "honesty", "dead_end", "cost_trap",
+    "checker_stress",
 )
 
 
