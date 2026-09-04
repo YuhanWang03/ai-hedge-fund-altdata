@@ -10,11 +10,17 @@ old dashboard/ is frozen. Run:
 
 from __future__ import annotations
 
+import sys
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import SETTINGS
-from app.routers import chat, dashboard, health, portfolio
+from app.routers import chat, dashboard, health, portfolio, workspace
+
+repo_root = str(SETTINGS.repo_root.resolve())
+if repo_root not in sys.path:
+    sys.path.insert(0, repo_root)
 
 app = FastAPI(title="AI Hedge Fund · Web", version="0.1.0")
 
@@ -30,3 +36,4 @@ app.include_router(health.router)
 app.include_router(chat.router)
 app.include_router(portfolio.router)
 app.include_router(dashboard.router)
+app.include_router(workspace.router)

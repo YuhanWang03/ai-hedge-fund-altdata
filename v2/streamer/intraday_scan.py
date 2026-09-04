@@ -152,7 +152,11 @@ def scan_universe(notifier: TelegramNotifier) -> int:
                 trace.emit("chat_message", role="bot", text=text[:500])
             # Dedicated Archive agent so the dashboard's AGENT_TO_INTENT
             # routes intraday cards to the intraday_anomaly pipeline.
-            intraday_notifier = TelegramNotifier(archive=Archive("intraday_anomaly"))
+            intraday_notifier = TelegramNotifier(
+                archive=Archive("intraday_anomaly"),
+                archive_after_send=True,
+                retention_trading_days=2,
+            )
             # Surface contrarian / sector-relative flags so the scorer
             # can promote noteworthy moves vs market-beta noise.
             flags = list(signal.get("flags") or [])

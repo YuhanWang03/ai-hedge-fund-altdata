@@ -198,11 +198,11 @@ def p2_digest_job() -> None:
 
 
 def archive_cleanup_job() -> None:
-    """Daily sweep — remove archive rows past their expires_at watermark.
+    """Daily sweep of expired pushes and the two-session real-time feed.
 
-    The dashboard auto-push feed retains 2 calendar days of pushes (set by
-    TelegramNotifier when it writes the row). Without this sweep the
-    archive grows unbounded. Runs at 02:00 UTC so we never collide with
+    Real-time anomaly and price-alert rows retain the current/latest US
+    trading day plus the preceding trading day. Other pushes continue to use
+    their expires_at watermark. Runs at 02:00 UTC so it does not collide with
     the 17:00–18:30 ET cron block.
     """
     import sqlite3
@@ -211,15 +211,39 @@ def archive_cleanup_job() -> None:
     if not db.exists():
         logger.info("archive_cleanup: no archive.db yet, skipping")
         return
+    from v2.archive.store import recent_trading_day_cutoff_iso
+
     now_iso = datetime.now(timezone.utc).isoformat()
+    realtime_cutoff = recent_trading_day_cutoff_iso(2)
     conn = sqlite3.connect(str(db), timeout=10.0)
     try:
+        has_p2_queue = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='p2_digest_pending'"
+        ).fetchone()
+        if has_p2_queue:
+            conn.execute(
+                """DELETE FROM p2_digest_pending
+                   WHERE push_id IN (
+                       SELECT id FROM pushes
+                       WHERE (expires_at IS NOT NULL AND expires_at < ?)
+                          OR ((agent IN ('intraday_anomaly', 'alert', 'anomaly')
+                               OR msg_type = 'intraday_anomaly') AND ts < ?)
+                   )""",
+                (now_iso, realtime_cutoff),
+            )
         cur = conn.execute(
             "DELETE FROM pushes WHERE expires_at IS NOT NULL AND expires_at < ?",
             (now_iso,),
         )
+        realtime_cur = conn.execute(
+            """DELETE FROM pushes
+               WHERE (agent IN ('intraday_anomaly', 'alert', 'anomaly')
+                      OR msg_type = 'intraday_anomaly')
+                 AND ts < ?""",
+            (realtime_cutoff,),
+        )
         conn.commit()
-        deleted = cur.rowcount
+        deleted = cur.rowcount + realtime_cur.rowcount
     finally:
         conn.close()
     logger.info("archive_cleanup: deleted %d expired rows", deleted)

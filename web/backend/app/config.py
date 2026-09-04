@@ -35,7 +35,10 @@ def _env(name: str, default: str = "") -> str:
 
 
 def load_settings() -> Settings:
-    origins = _env("WEB_CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173")
+    origins = _env(
+        "WEB_CORS_ORIGINS",
+        "http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173",
+    )
     return Settings(
         owner_token=_env("WEB_OWNER_TOKEN"),
         archive_db_path=Path(_env("WEB_ARCHIVE_DB", str(_REPO_ROOT / "data" / "archive.db"))),

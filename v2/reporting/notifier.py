@@ -20,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from typing import Iterable, Protocol, runtime_checkable
 
+from v2.archive.store import trading_day_expiry_iso
 from v2.reporting.priority import (
     PriorityResult,
     compute_importance,
@@ -74,8 +75,8 @@ class TelegramNotifier:
     Uses HTML parse mode (simpler escaping than MarkdownV2).
 
     If an *archive* is given, every send_* call also writes a row to the
-    local archive DB before pushing to Telegram (so failed pushes still
-    leave a paper trail).
+    local archive DB. Real-time callers may request Telegram-first ordering,
+    so only successfully delivered alerts become visible in the web feed.
     """
 
     def __init__(
@@ -84,10 +85,14 @@ class TelegramNotifier:
         chat_id: str | None = None,
         *,
         archive=None,
+        archive_after_send: bool = False,
+        retention_trading_days: int | None = None,
     ) -> None:
         self._token = token or os.environ["TELEGRAM_BOT_TOKEN"]
         self._chat_id = chat_id or os.environ["TELEGRAM_CHAT_ID"]
         self._archive = archive
+        self._archive_after_send = archive_after_send
+        self._retention_trading_days = retention_trading_days
 
     def send_text(
         self,
@@ -112,14 +117,27 @@ class TelegramNotifier:
         """
         priority = priority or _default_p1()
         decorated = tier_emoji_prefix(priority.tier) + text
-        self._archive_with_priority(
-            kind="text",
-            text=text, image=None, caption=None,
-            trace=trace, title=title, tickers=tickers, priority=priority,
-        )
         if priority.tier in ("P2", "P3"):
+            self._archive_with_priority(
+                kind="text",
+                text=text, image=None, caption=None,
+                trace=trace, title=title, tickers=tickers, priority=priority,
+            )
             return    # archive-only; no Telegram
-        asyncio.run(self._send_text(decorated))
+        if self._archive_after_send:
+            asyncio.run(self._send_text(decorated))
+            self._archive_with_priority(
+                kind="text",
+                text=text, image=None, caption=None,
+                trace=trace, title=title, tickers=tickers, priority=priority,
+            )
+        else:
+            self._archive_with_priority(
+                kind="text",
+                text=text, image=None, caption=None,
+                trace=trace, title=title, tickers=tickers, priority=priority,
+            )
+            asyncio.run(self._send_text(decorated))
 
     def send_photo(
         self,
@@ -133,14 +151,27 @@ class TelegramNotifier:
     ) -> None:
         priority = priority or _default_p1()
         decorated = tier_emoji_prefix(priority.tier) + caption
-        self._archive_with_priority(
-            kind="photo",
-            text=None, image=image, caption=caption,
-            trace=trace, title=title, tickers=tickers, priority=priority,
-        )
         if priority.tier in ("P2", "P3"):
+            self._archive_with_priority(
+                kind="photo",
+                text=None, image=image, caption=caption,
+                trace=trace, title=title, tickers=tickers, priority=priority,
+            )
             return
-        asyncio.run(self._send_photo(image, decorated))
+        if self._archive_after_send:
+            asyncio.run(self._send_photo(image, decorated))
+            self._archive_with_priority(
+                kind="photo",
+                text=None, image=image, caption=caption,
+                trace=trace, title=title, tickers=tickers, priority=priority,
+            )
+        else:
+            self._archive_with_priority(
+                kind="photo",
+                text=None, image=image, caption=caption,
+                trace=trace, title=title, tickers=tickers, priority=priority,
+            )
+            asyncio.run(self._send_photo(image, decorated))
 
     def _archive_with_priority(
         self, *, kind: str, text, image, caption,
@@ -154,7 +185,10 @@ class TelegramNotifier:
             tickers=tickers,
             trace_json=_trace_to_json(trace),
             title=title,
-            expires_at=_expires_at(),
+            expires_at=(
+                trading_day_expiry_iso(self._retention_trading_days)
+                if self._retention_trading_days else _expires_at()
+            ),
             importance_score=priority.score,
             priority_tier=priority.tier,
             priority_reasons=",".join(priority.reasons),
@@ -163,6 +197,8 @@ class TelegramNotifier:
             self._archive.save_text(text, **common)
         else:
             self._archive.save_photo(image, caption or "", **common)
+        if self._retention_trading_days:
+            self._archive.prune_realtime(self._retention_trading_days)
 
     async def _send_text(self, text: str) -> None:
         from telegram import Bot

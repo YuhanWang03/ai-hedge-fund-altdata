@@ -87,7 +87,10 @@ def dispatch(parsed: dict) -> dict:
         if intent == "summary":
             return _err("无法识别 ticker") if not ticker else {"html": responders.summary(ticker)}
         if intent == "chain":
-            return _err("无法识别 ticker") if not ticker else {"html": responders.chain(ticker)}
+            if not ticker:
+                return _err("无法识别 ticker")
+            formatted, data = responders.chain_payload(ticker)
+            return {"html": formatted, "data": data}
         if intent == "thirteen_f":
             if not manager:
                 return _err("无法识别 manager 名称")

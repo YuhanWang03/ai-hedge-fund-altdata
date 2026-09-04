@@ -312,7 +312,13 @@ def _insider_snippet(ticker: str, fd, asof: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def chain(ticker: str) -> str:
+def chain_payload(ticker: str) -> tuple[str, dict | None]:
+    """Run lateral research once and return both display HTML and raw data.
+
+    Telegram continues to consume the formatted HTML, while the web workbench
+    can use the structured payload to render ticker-specific relationship
+    summaries without scraping the formatted message.
+    """
     ticker = ticker.upper()
     universe = set(TECH_30)
     try:
@@ -325,9 +331,15 @@ def chain(ticker: str) -> str:
             )
     except Exception as exc:
         logger.exception("chain failed for %s", ticker)
-        return f"❌ Error: <code>{html.escape(str(exc))}</code>"
+        return f"❌ Error: <code>{html.escape(str(exc))}</code>", None
 
-    return format_lateral_result(result)
+    return format_lateral_result(result), result.model_dump(mode="json")
+
+
+def chain(ticker: str) -> str:
+    """Formatted /chain response used by Telegram and other text clients."""
+    formatted, _ = chain_payload(ticker)
+    return formatted
 
 
 # ---------------------------------------------------------------------------

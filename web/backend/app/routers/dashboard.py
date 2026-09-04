@@ -6,6 +6,7 @@ never blanks the others (matches v2's degrade-gracefully philosophy).
 
 from __future__ import annotations
 
+import math
 from datetime import date, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -176,22 +177,33 @@ _TAPE_SYMBOLS = [
 ]
 
 
+def _finite_number(value) -> float | None:
+    """Normalize provider scalars and reject NaN/Infinity before JSON output."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
 def _fetch_tape() -> dict:
     from v2.macro.market_client import _safe_quote
 
     items: list[dict] = []
     for sym, label in _TAPE_SYMBOLS:
         q = _safe_quote(sym)
-        if q and q.get("value") is not None:
-            items.append({"label": label, "value": q["value"],
-                          "change_pct": q.get("pct_change_1d"), "unit": ""})
+        value = _finite_number(q.get("value")) if q else None
+        if value is not None:
+            items.append({"label": label, "value": value,
+                          "change_pct": _finite_number(q.get("pct_change_1d")),
+                          "unit": ""})
 
     # 10Y yield from FRED (Yahoo's ^TNX is unreliable).
     try:
         from v2.macro.fred_client import get_latest_value
-        y10 = get_latest_value("DGS10")
+        y10 = _finite_number(get_latest_value("DGS10"))
         if y10 is not None:
-            items.append({"label": "美债10Y", "value": float(y10),
+            items.append({"label": "美债10Y", "value": y10,
                           "change_pct": None, "unit": "%"})
     except Exception:
         pass

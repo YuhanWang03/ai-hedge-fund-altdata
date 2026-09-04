@@ -1,9 +1,8 @@
-"""SQLite-backed archive of all Telegram pushes.
+"""SQLite-backed archive of Telegram pushes.
 
-Every message + image gets stored locally before being sent to Telegram, so:
-- We never lose data even if a Telegram push fails
-- We can query history offline ("when did we last mention NVDA?")
-- Phase C's RAG memory will index this DB for semantic retrieval
+Most messages are stored before delivery so failed pushes leave a diagnostic
+record. Real-time anomaly and price-alert callers can instead opt into
+Telegram-first persistence: only successfully delivered alerts enter the feed.
 
 Image files live alongside the DB under data/images/YYYY-MM-DD/.
 """
@@ -15,15 +14,114 @@ import re
 import sqlite3
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
+from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _DB_PATH = _PROJECT_ROOT / "data" / "archive.db"
 _IMG_ROOT = _PROJECT_ROOT / "data" / "images"
+_ET = ZoneInfo("US/Eastern")
+_REALTIME_AGENTS = ("intraday_anomaly", "alert", "anomaly")
+
+
+def _observed(day: date) -> date:
+    if day.weekday() == 5:
+        return day - timedelta(days=1)
+    if day.weekday() == 6:
+        return day + timedelta(days=1)
+    return day
+
+
+def _nth_weekday(year: int, month: int, weekday: int, occurrence: int) -> date:
+    day = date(year, month, 1)
+    return day + timedelta(days=(weekday - day.weekday()) % 7 + 7 * (occurrence - 1))
+
+
+def _last_weekday(year: int, month: int, weekday: int) -> date:
+    if month == 12:
+        day = date(year + 1, 1, 1) - timedelta(days=1)
+    else:
+        day = date(year, month + 1, 1) - timedelta(days=1)
+    return day - timedelta(days=(day.weekday() - weekday) % 7)
+
+
+def _easter_sunday(year: int) -> date:
+    """Gregorian Easter, used for NYSE Good Friday closures."""
+    a = year % 19
+    b, c = divmod(year, 100)
+    d, e = divmod(b, 4)
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i, k = divmod(c, 4)
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    month = (h + l - 7 * m + 114) // 31
+    day = (h + l - 7 * m + 114) % 31 + 1
+    return date(year, month, day)
+
+
+def _us_market_holidays(year: int) -> set[date]:
+    holidays = {
+        _observed(date(year, 1, 1)),
+        _nth_weekday(year, 1, 0, 3),       # Martin Luther King Jr. Day
+        _nth_weekday(year, 2, 0, 3),       # Washington's Birthday
+        _easter_sunday(year) - timedelta(days=2),
+        _last_weekday(year, 5, 0),         # Memorial Day
+        _observed(date(year, 7, 4)),
+        _nth_weekday(year, 9, 0, 1),       # Labor Day
+        _nth_weekday(year, 11, 3, 4),      # Thanksgiving
+        _observed(date(year, 12, 25)),
+    }
+    if year >= 2022:
+        holidays.add(_observed(date(year, 6, 19)))
+    # When next New Year's Day is Saturday, its observed closure is Dec 31.
+    next_new_year = _observed(date(year + 1, 1, 1))
+    if next_new_year.year == year:
+        holidays.add(next_new_year)
+    return holidays
+
+
+def is_us_trading_day(day: date) -> bool:
+    return day.weekday() < 5 and day not in _us_market_holidays(day.year)
+
+
+def recent_trading_day_cutoff_iso(
+    trading_days: int = 2,
+    *,
+    now: datetime | None = None,
+) -> str:
+    """UTC timestamp at the start of the earliest retained US trading day."""
+    if trading_days < 1:
+        raise ValueError("trading_days must be at least 1")
+    cursor = (now or datetime.now(timezone.utc)).astimezone(_ET).date()
+    while not is_us_trading_day(cursor):
+        cursor -= timedelta(days=1)
+    for _ in range(trading_days - 1):
+        cursor -= timedelta(days=1)
+        while not is_us_trading_day(cursor):
+            cursor -= timedelta(days=1)
+    return datetime.combine(cursor, dtime.min, tzinfo=_ET).astimezone(timezone.utc).isoformat()
+
+
+def trading_day_expiry_iso(
+    trading_days: int = 2,
+    *,
+    now: datetime | None = None,
+) -> str:
+    """Expire after a message has belonged to ``trading_days`` sessions."""
+    if trading_days < 1:
+        raise ValueError("trading_days must be at least 1")
+    cursor = (now or datetime.now(timezone.utc)).astimezone(_ET).date()
+    for _ in range(trading_days):
+        cursor += timedelta(days=1)
+        while not is_us_trading_day(cursor):
+            cursor += timedelta(days=1)
+    return datetime.combine(cursor, dtime.min, tzinfo=_ET).astimezone(timezone.utc).isoformat()
 
 # Tickers appear inside <b>…</b> blocks. The old anchor `<b>TICKER</b>` only
 # matched bare-ticker headers (e.g. screening cards). Anomaly cards have
@@ -208,6 +306,28 @@ class Archive:
             conn.commit()
         finally:
             conn.close()
+
+    def prune_realtime(self, trading_days: int = 2) -> int:
+        """Delete real-time feed rows older than the retained trading window."""
+        cutoff = recent_trading_day_cutoff_iso(trading_days)
+        placeholders = ",".join("?" for _ in _REALTIME_AGENTS)
+        predicate = (
+            f"(agent IN ({placeholders}) OR msg_type = 'intraday_anomaly') "
+            "AND ts < ?"
+        )
+        try:
+            with self._conn() as conn:
+                params = (*_REALTIME_AGENTS, cutoff)
+                conn.execute(
+                    f"DELETE FROM p2_digest_pending WHERE push_id IN "
+                    f"(SELECT id FROM pushes WHERE {predicate})",
+                    params,
+                )
+                cur = conn.execute(f"DELETE FROM pushes WHERE {predicate}", params)
+                return max(cur.rowcount, 0)
+        except sqlite3.Error as exc:
+            logger.warning("Real-time archive pruning failed: %s", exc)
+            return 0
 
     # ------------------------------------------------------------------
     # Write side

@@ -161,7 +161,11 @@ def _push_alert(notifier: TelegramNotifier, fired: dict) -> None:
             trace.emit("chat_message", role="bot", text=text[:500])
         # Dedicated Archive agent "alert" so the dashboard's
         # AGENT_TO_INTENT maps to the alert_fire pipeline.
-        alert_notifier = TelegramNotifier(archive=Archive("alert"))
+        alert_notifier = TelegramNotifier(
+            archive=Archive("alert"),
+            archive_after_send=True,
+            retention_trading_days=2,
+        )
         priority = compute_importance("alert_fire", {})  # always P0
         alert_notifier.send_text(
             text,
