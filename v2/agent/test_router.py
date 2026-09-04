@@ -493,6 +493,24 @@ def test_the_hook_discloses_a_rewrite_it_performed_itself():
     assert "本周 +0.13%" in final
 
 
+def test_a_write_never_escalates():
+    """The agent runs with allow_mutations=False, so escalating a write means
+    researching for ten seconds and then not doing the one thing that was asked.
+    「把我持仓里跌超过 30% 的都加进关注列表」 hit the collection signal and did
+    exactly that."""
+    for query, intent in (("把我持仓里跌超过 30% 的都加进关注列表", "watchlist_add"),
+                          ("给我持仓里最危险的那只设个提醒", "alert_set"),
+                          ("把关注列表里没持仓的都删了", "watchlist_remove")):
+        decision = router.route(query, _parsed(intent), mode="heuristic")
+        assert decision.path == "single_hop", f"{query} 不该升级"
+
+    # Derived from the registry, so a new mutating tool cannot slip past.
+    from v2.agent.registry import ToolRegistry
+    assert router.WRITE_INTENTS == frozenset(
+        spec.name for spec in ToolRegistry().specs if spec.mutating)
+    assert router.WRITE_INTENTS, "写意图集合为空说明取的地方错了"
+
+
 def test_a_bare_follow_up_restores_the_previous_question():
     """"为什么？" on its own, seen live: no pronoun to substitute, so the
     resolver passed it through, the classifier returned unknown, and the agent

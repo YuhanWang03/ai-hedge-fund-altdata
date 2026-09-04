@@ -156,6 +156,21 @@ _INTENT_OWN_TOPIC: dict[str, str] = {
 }
 AGGREGATE_INTENTS = frozenset(_INTENT_OWN_TOPIC)
 
+
+def _write_intents() -> frozenset[str]:
+    """Intents that ask the bot to *change* something, taken from the registry
+    rather than retyped, so a new mutating tool cannot quietly slip past."""
+    from v2.agent.registry import ToolRegistry
+    return frozenset(spec.name for spec in ToolRegistry().specs if spec.mutating)
+
+
+#: A write must never escalate. The agent runs with ``allow_mutations=False``,
+#: so 「把我持仓里跌超过 30% 的都加进关注列表」 routed to it would research the
+#: portfolio for ten seconds and then be unable to do the one thing that was
+#: asked. The fast path cannot fulfil an under-specified write either — but it
+#: says so immediately, which is the honest failure of the two.
+WRITE_INTENTS = _write_intents()
+
 # Rough ticker detector: 2-5 uppercase letters, minus common English words that
 # appear in bilingual queries. Deliberately loose — it only feeds a signal, and
 # a false positive costs one unnecessary agent run, not a wrong answer.
@@ -296,6 +311,9 @@ def route(text: str, parsed: dict | None = None, *, mode: str | None = None,
 
     if mode == "unknown_only":
         return RouteDecision("single_hop", "", "已命中 intent，按现有单跳路径处理", mode)
+
+    if str(parsed.get("intent", "")) in WRITE_INTENTS:
+        return RouteDecision("single_hop", "", "写操作不升级：agent 无写权限", mode)
 
     for name, predicate, reason in HEURISTIC_SIGNALS:
         try:
