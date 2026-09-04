@@ -101,6 +101,93 @@ def check(
     return report
 
 
+# ---------------------------------------------------------------------------
+# Diagnosis — what is the check actually rejecting?
+# ---------------------------------------------------------------------------
+
+#: Classification of one rejected figure, ordered from most benign to least.
+#: Ratios were tried and removed: with dozens of numbers in the observations,
+#: some a/b×100 lands within tolerance of almost any target by chance, which
+#: launders fabricated figures into "legitimate arithmetic" — the exact error
+#: this diagnosis exists to prevent.
+FIGURE_KINDS = ("rounding", "sum", "difference", "unknown")
+
+
+def _observation_numbers(observations: str, limit: int = 80) -> list[float]:
+    """Distinct numeric values appearing in the observations."""
+    seen: list[float] = []
+    for token in extract_numbers(observations):
+        try:
+            value = abs(float(_normalise(token)))
+        except ValueError:
+            continue
+        if value and value not in seen:
+            seen.append(value)
+        if len(seen) >= limit:
+            break
+    return seen
+
+
+def _close(a: float, b: float, rel: float = 0.002, abs_tol: float = 0.005) -> bool:
+    return abs(a - b) <= max(abs_tol, abs(b) * rel)
+
+
+def classify_figure(figure: str, values: list[float]) -> str:
+    """Explain *why* a figure failed to trace, rather than only that it did.
+
+    "18% of answers were ungrounded" is not actionable: a model that invented a
+    statistic and one that added two published numbers without showing its work
+    look identical in that statistic, and they call for opposite responses —
+    tighten the prompt, or relax the check. This splits them.
+
+    The classification is a **hypothesis, not proof**. With dozens of numbers in
+    the observations some combination will match by coincidence, so a "sum"
+    label means "there exists an arithmetic explanation", not "the model did
+    that arithmetic". Only ``unknown`` is safe to act on hard: nothing in the
+    observations produces that figure by any of these routes, so it was almost
+    certainly invented. Tolerances are tight and ratios are not attempted, both
+    to keep coincidental matches down.
+    """
+    try:
+        target = abs(float(_normalise(figure)))
+    except ValueError:
+        return "unknown"
+    if not target:
+        return "unknown"
+
+    for value in values:
+        if _close(target, value, rel=0.02, abs_tol=0.051):
+            return "rounding"
+
+    count = len(values)
+    for i in range(count):
+        for j in range(i + 1, count):
+            if _close(target, values[i] + values[j]):
+                return "sum"
+            if _close(target, abs(values[i] - values[j])):
+                return "difference"
+
+    # Triples are common in "top three combined" style claims but quadratic ×
+    # linear gets slow, so only try them on a small observation set.
+    if count <= 45:
+        for i in range(count):
+            for j in range(i + 1, count):
+                partial = values[i] + values[j]
+                for k in range(j + 1, count):
+                    if _close(target, partial + values[k]):
+                        return "sum"
+    return "unknown"
+
+
+def diagnose(report: GroundingReport, observations: str) -> dict[str, list[str]]:
+    """Group a report's rejected figures by why they failed."""
+    values = _observation_numbers(observations)
+    grouped: dict[str, list[str]] = {kind: [] for kind in FIGURE_KINDS}
+    for figure in report.ungrounded:
+        grouped[classify_figure(figure, values)].append(figure)
+    return {kind: figures for kind, figures in grouped.items() if figures}
+
+
 def repair_instruction(report: GroundingReport) -> str:
     """Message appended for the one repair round when figures don't trace."""
     return (

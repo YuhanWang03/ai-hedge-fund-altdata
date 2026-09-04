@@ -394,6 +394,13 @@ V2_AGENT_EARNINGS_READ=true    # 默认关闭
 83 条标注 query，9 个类别。每条说清三件事：答案**需要**哪些工具、哪些事实必须活到
 回复里、允许花多少。这个三元组把「答案看起来不错」变成一个数字。
 
+> **第一版标注错了 17 条。** 首轮真实运行后用一条机械规则复核：
+> **baseline 能通过的 case，按定义就是单跳能答的**。据此把 13 条从 agent 改回
+> single_hop，另外 3 条是断言太弱被单跳蒙混过关（例如「NVDA 和 AMD 谁的财报更好」
+> 只断言了 NVDA 的数字），补强后才真正需要多跳。还有 6 条**既没断言事实也没禁止
+> 内容，必然空过** —— 这类 case 会对所有模式等量送分，是最难察觉的评测 bug，
+> 现在有守卫测试拦着。
+
 ```bash
 python3 -m v2.agent.run_eval --modes baseline          # 零 key
 python3 -m v2.agent.run_eval                           # baseline / routed / agent
@@ -406,13 +413,13 @@ python3 -m v2.agent.run_eval --modes baseline routed agent agent_no_repair \
 
 ```
   mode          通过    通过率   工具召回  事实召回  溯源率  越界  超预算  工具/例
-  baseline     47/83     57%     69%      72%    100%   0%    0%     0.8
+  baseline     42/83     51%     70%      64%    100%   0%    0%     0.8
 
-  single_lookup  18/18 (100%)      multi_hop    2/14 (14%)
+  single_lookup  18/18 (100%)      multi_hop    3/14 (21%)
   cost_trap       6/6 (100%)       compound      0/8  (0%)
-  causal          7/8  (88%)       recovery      1/5 (20%)
-  honesty         6/7  (86%)       dead_end      2/7 (29%)
-  ranking         5/10 (50%)
+  causal          6/8  (75%)       recovery      0/5  (0%)
+  honesty         6/7  (86%)       dead_end      0/7  (0%)
+  ranking         3/10 (30%)
 ```
 
 单跳在它设计要解决的问题上是满分，在需要跨工具组合的地方掉到 0–20%。
@@ -443,6 +450,19 @@ agent_tight        3 步 / 4 次工具 → 预算到底重不重要
 
 `routed` 是最值得看的一行：它应该在通过率上贴近 `agent`，成本上贴近 `baseline`。
 **如果没有，就说明路由的信号表是错的。**
+
+### 溯源失败要能拆开看
+
+首轮全量运行里，agent 的 17 条失败有 14 条是「数字无法溯源」。这个统计本身不可行动：
+**模型编了一个数**和**模型把观测里两个数加起来但没写算式**在这个指标里长得一模一样，
+而它们要反着修（前者收紧 prompt，后者考虑放宽校验）。
+
+所以 `grounding.diagnose()` 把每个被拒的数字分类：`rounding`（观测里有近似值）、
+`sum` / `difference`（存在算术解释）、`unknown`（找不到任何来源）。
+
+比率（a/b×100）试过但**删掉了**：观测里数字一多，几乎任何目标都能被某个比率巧合命中，
+那会把编造的统计洗白成「合法运算」，正好背离这个诊断的目的。同理，`sum` 只说明
+「存在一个算术解释」，不等于模型真做了该运算 —— **只有 `unknown` 可以放心当作编造处理**。
 
 ### 评测集自己也要被测
 

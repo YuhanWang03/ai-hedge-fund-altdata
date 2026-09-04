@@ -27,7 +27,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from v2.agent import router
+from v2.agent import grounding, router
 from v2.agent.baseline import run_baseline
 from v2.agent.eval.cases import CASES, EvalCase
 from v2.agent.eval.fixtures import build_eval_registry
@@ -108,6 +108,9 @@ def run_case(case: EvalCase, mode: Mode, *, llm_factory: Callable[[], Any]) -> C
             tools_called=trajectory.distinct_tools(),
             grounded=result.grounding.ok,
             ungrounded=result.grounding.ungrounded,
+            ungrounded_kinds=(grounding.diagnose(result.grounding,
+                                                 trajectory.observations_text())
+                              if not result.grounding.ok else None),
             tool_calls=trajectory.tool_calls, llm_calls=trajectory.llm_calls,
             tokens=trajectory.prompt_tokens + trajectory.completion_tokens,
             elapsed_ms=result.elapsed_ms, path=path,
@@ -212,6 +215,33 @@ def render_failures(report: SuiteReport, limit: int = 20) -> str:
     return "\n".join(lines)
 
 
+def render_grounding(report: SuiteReport) -> str:
+    """Split the rejected figures by why they failed.
+
+    This is the difference between "tighten the prompt" and "relax the check":
+    figures that some sum in the observations reproduces are the model failing to
+    show its arithmetic, while ``unknown`` figures have no arithmetic explanation
+    at all and are the ones actually worth calling fabrication.
+    """
+    counts = report.ungrounded_breakdown()
+    total = sum(counts.values())
+    lines = [_RULE, f"【{report.mode} 溯源失败的数字来自哪里】共 {total} 个", _RULE]
+    if not total:
+        lines.append("  无。")
+        return "\n".join(lines)
+    labels = {"rounding": "四舍五入/位数不同（观测里有近似值）",
+              "sum": "是观测中若干数字之和（模型没写清算式）",
+              "difference": "是观测中两数之差（同上）",
+              "unknown": "观测里找不到任何算术来源 —— 这些才是真正的编造"}
+    for kind in grounding.FIGURE_KINDS:
+        count = counts.get(kind, 0)
+        if count:
+            lines.append(f"  {labels[kind]:<38}{count:>4}  ({count / total:.0%})")
+    lines.append("\n  注：sum/difference 只说明「存在一个算术解释」，不等于模型真做了该运算；"
+                 "\n      观测里数字一多就可能巧合命中。只有 unknown 可以放心当作编造处理。")
+    return "\n".join(lines)
+
+
 def render_overspend(report: SuiteReport, limit: int = 10) -> str:
     """Cases that blew their tool budget, whether or not they answered correctly.
 
@@ -261,6 +291,7 @@ def to_json(reports: list[SuiteReport]) -> dict:
                 "missing_facts": list(s.missing_facts),
                 "violations": list(s.violations), "forbidden": list(s.forbidden_hit),
                 "ungrounded": list(s.ungrounded), "overspend": s.overspend,
+                "ungrounded_kinds": s.ungrounded_kinds,
                 "tool_calls": s.tool_calls, "llm_calls": s.llm_calls,
                 "tokens": s.tokens, "elapsed_ms": s.elapsed_ms,
                 "path": s.path, "path_correct": s.path_correct,

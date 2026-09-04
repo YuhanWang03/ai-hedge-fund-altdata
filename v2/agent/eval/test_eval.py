@@ -65,7 +65,7 @@ def _case(cid: str = "m01"):
 def test_extra_tools_do_not_hurt_recall_but_show_up_as_cost():
     case = _case("m01")
     score = score_case(case, mode="agent", answer="CRWD SMCI 2026-09-06",
-                       tools_called=["portfolio_view", "macro_view", "risk_view"],
+                       tools_called=["earnings_calendar", "macro_view", "risk_view"],
                        tool_calls=3)
     assert score.tool_recall == 1.0, "多调工具不扣召回"
     assert score.tool_calls == 3
@@ -99,7 +99,7 @@ def test_borrowing_another_tickers_number_is_caught():
 def test_ungrounded_answers_are_not_correct_answers():
     score = score_case(_case("m01"), mode="agent",
                        answer="CRWD SMCI 2026-09-06",
-                       tools_called=["portfolio_view"], grounded=False)
+                       tools_called=["earnings_calendar"], grounded=False)
     assert score.tool_recall == 1.0 and score.fact_recall == 1.0
     assert not score.passed and score.failure_reason().startswith("数字无法溯源")
 
@@ -107,10 +107,31 @@ def test_ungrounded_answers_are_not_correct_answers():
 def test_ungrounded_figures_are_named_in_the_failure_reason():
     """'数字无法溯源' without saying which number is not an actionable verdict."""
     score = score_case(_case("m01"), mode="agent", answer="CRWD SMCI 2026-09-06",
-                       tools_called=["portfolio_view"], grounded=False,
+                       tools_called=["earnings_calendar"], grounded=False,
                        ungrounded=("37.9", "12.4"))
     reason = score.failure_reason()
     assert "37.9" in reason and "12.4" in reason
+
+
+def test_ungrounded_figures_are_classified_by_why_they_failed():
+    """Distinguishes 'did not show its arithmetic' from 'made it up'."""
+    from v2.agent import grounding
+
+    observations = "CRWD 22.4% · NVDA 18.2% · MSFT 14.1% · 内部人 7.96M / 10.97M"
+    report = grounding.GroundingReport(total=3, grounded=0,
+                                       ungrounded=["54.7", "22.40", "88.6"])
+    kinds = grounding.diagnose(report, observations)
+
+    assert "54.7" in kinds.get("sum", []), "22.4+18.2+14.1"
+    assert "22.40" in kinds.get("rounding", [])
+    assert "88.6" in kinds.get("unknown", []), "没有任何算术来源 = 编造"
+
+
+def test_the_diagnoser_does_not_launder_fabrications_as_ratios():
+    """Ratios match by coincidence far too easily; attempting them would turn
+    invented statistics into 'legitimate arithmetic' and defeat the purpose."""
+    from v2.agent import grounding
+    assert "ratio" not in grounding.FIGURE_KINDS
 
 
 def test_overspend_is_tracked_without_failing_the_case():
@@ -123,7 +144,7 @@ def test_overspend_is_tracked_without_failing_the_case():
 def test_report_aggregates_and_prices_each_pass():
     report = SuiteReport(mode="x", scores=[
         score_case(_case("m01"), mode="x", answer="CRWD SMCI 2026-09-06",
-                   tools_called=["portfolio_view"], tokens=1000),
+                   tools_called=["earnings_calendar"], tokens=1000),
         score_case(_case("m02"), mode="x", answer="没查到",
                    tools_called=[], tokens=3000),
     ])
@@ -172,16 +193,29 @@ def test_routed_mode_sends_a_single_hop_case_down_the_cheap_path():
     assert score.passed
 
 
-def test_routed_mode_escalates_a_ranking_case():
+def test_routed_mode_escalates_a_composite_judgment():
+    """r01 asks which holding is most dangerous — a verdict no single card gives."""
     def factory():
         return ScriptedLLM([
-            LLMResponse(tool_calls=[ToolCall("c1", "portfolio_view", {}, "{}")]),
-            LLMResponse(text="SMCI 亏 21.5% 最多。"),
+            LLMResponse(tool_calls=[ToolCall("c1", "portfolio_view", {}, "{}"),
+                                    ToolCall("c2", "earnings_view",
+                                             {"ticker": "CRWD"},
+                                             '{"ticker": "CRWD"}')]),
+            LLMResponse(text="CRWD 最危险：占仓 22.4%，2026-09-06 财报。"),
         ])
 
-    score = runner.run_case(_CASE_BY_ID["r02"], runner.MODES["routed"],
+    score = runner.run_case(_CASE_BY_ID["r01"], runner.MODES["routed"],
                             llm_factory=factory)
     assert score.path == "agent" and score.passed
+
+
+def test_routed_mode_keeps_a_single_column_ranking_cheap():
+    """r02 ranks on a column the positions card already prints."""
+    llm = ScriptedLLM([])
+    score = runner.run_case(_CASE_BY_ID["r02"], runner.MODES["routed"],
+                            llm_factory=lambda: llm)
+    assert score.path == "single_hop" and score.passed
+    assert llm.calls == []
 
 
 def test_a_crashing_case_is_a_failure_not_a_dead_sweep():
@@ -242,7 +276,12 @@ def _fixture_corpus() -> str:
 
 
 def test_every_asserted_fact_exists_in_the_fixtures():
-    """A case asserting a fact no tool can produce is unpassable by construction."""
+    """A data fact no tool can produce makes the case unpassable by construction.
+
+    Behavioural assertions are exempt by design: "承认这里取不到数据" is a
+    property of the answer, not of the fixtures, so requiring it to appear in a
+    recorded card would be incoherent.
+    """
     corpus = _fixture_corpus()
     unreachable = []
     for case in CASES:
@@ -250,6 +289,19 @@ def test_every_asserted_fact_exists_in_the_fixtures():
             if not any(normalise(form) in corpus for form in fact):
                 unreachable.append(f"{case.id}: {fact[0]}")
     assert not unreachable, "标注了 fixture 里根本不存在的事实：\n" + "\n".join(unreachable)
+
+
+def test_no_case_can_pass_without_asserting_anything():
+    """A case with no facts and no forbidden strings passes by construction.
+
+    That is worse than a missing case: it silently inflates *every* mode by the
+    same amount, so the comparison still looks coherent while being wrong. Six
+    of these survived the first draft and were only caught when the baseline
+    scored suspiciously well on questions it cannot answer.
+    """
+    vacuous = [c.id for c in CASES
+               if not c.facts and not c.behaviors and not c.forbidden]
+    assert not vacuous, "这些 case 没有任何断言，必然空过：" + ", ".join(vacuous)
 
 
 def test_every_required_tool_exists():

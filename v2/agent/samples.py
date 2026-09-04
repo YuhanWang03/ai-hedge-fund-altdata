@@ -65,7 +65,8 @@ CASES: tuple[RoutingCase, ...] = (
     # -- ranking / comparison -------------------------------------------------
     RoutingCase("我持仓里哪只最危险", "risk_view", "agent", "",
                 "实测分类为 risk_view，但该卡不排序个股"),
-    RoutingCase("我持仓里哪只跌得最多", "portfolio_view", "agent", ""),
+    RoutingCase("我持仓里哪只跌得最多", "portfolio_view", "single_hop", "",
+                "持仓卡本身就印着每只的盈亏，排序不需要额外工具"),
     RoutingCase("AAPL 和 MSFT 谁的财报更好", "earnings_view", "agent", "AAPL"),
     RoutingCase("NVDA 和 AMD 对比一下", "summary", "agent", "NVDA"),
     RoutingCase("我的持仓里哪些风险最大，为什么", "risk_view", "agent", ""),
@@ -73,12 +74,14 @@ CASES: tuple[RoutingCase, ...] = (
                 "枚举 intent + 比较级 → 比较级信号优先，必须进 agent"),
 
     # -- collection needing enumeration then per-item lookups -----------------
-    RoutingCase("我持仓里有哪些快发财报了", "earnings_calendar", "agent", ""),
+    RoutingCase("我持仓里有哪些快发财报了", "earnings_calendar", "single_hop", "",
+                "财报日历卡自带持仓标注，一张卡即可回答"),
     RoutingCase("我关注的股票里有没有内部人在卖", "insider_view", "agent", ""),
     RoutingCase("我的持仓里有没有踩雷的", "risk_view", "agent", ""),
 
     # -- portfolio-level causal ----------------------------------------------
-    RoutingCase("我这周为什么亏钱", "pnl_period", "agent", ""),
+    RoutingCase("我这周为什么亏钱", "pnl_period", "single_hop", "",
+                "周度 P&L 卡自带逐仓贡献分解 —— 评测集证明快路径答得了"),
     RoutingCase("组合最近为什么回撤这么大", "risk_view", "agent", ""),
 
     # -- compound -------------------------------------------------------------

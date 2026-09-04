@@ -91,6 +91,26 @@ def test_every_labelled_case_routes_as_expected():
     assert not misses, "路由错误：\n" + "\n".join(misses)
 
 
+def test_the_eval_set_routes_with_one_known_miss():
+    """Routing accuracy on the 83-case eval set, pinned to its known limitation.
+
+    m11 asks for the next earnings dates of the semiconductor holdings. The
+    classifier lands on earnings_calendar, whose card covers 14 days — too short
+    to reach NVDA's November date. Nothing in the *query* reveals that, so the
+    router cannot get it right a priori. Pinning the miss keeps the claim honest
+    and turns any new miss into a test failure.
+    """
+    from v2.agent.eval.cases import CASES as EVAL_CASES
+
+    known = {"m11"}
+    misses = {
+        case.id for case in EVAL_CASES
+        if router.route(case.query, _parsed(case.intent, case.ticker),
+                        mode="heuristic").path != case.expected_path
+    }
+    assert misses == known, f"路由偏差变了：新增 {misses - known}，修复 {known - misses}"
+
+
 # ---------------------------------------------------------------------------
 # router — individual signals
 # ---------------------------------------------------------------------------
@@ -120,16 +140,27 @@ def test_named_subject_keeps_a_collection_query_on_the_fast_path():
 def test_multi_ticker_and_acronym_stoplist():
     assert router.route("NVDA 和 AMD 谁强", _parsed("summary", "NVDA"),
                         mode="heuristic").path == "agent"
-    # CEO / SEC / ETF are not tickers; this must not look like a multi-subject ask
+    # CEO / SEC / ETF are not tickers — the multi_ticker signal must not fire.
+    # (The query does raise two topics, so it still escalates; the assertion is
+    # about which signal fired, not about the path.)
     decision = router.route("SEC 对 CEO 的 ETF 规定", _parsed("summary", ""),
                             mode="heuristic")
-    assert decision.path == "single_hop"
+    assert decision.signal != "multi_ticker"
 
 
-def test_causal_needs_to_be_about_the_book_not_one_ticker():
+def test_causal_needs_to_be_about_the_book_and_outside_its_own_card():
+    """A causal question is only expensive when its own card cannot answer it.
+
+    "我这周为什么亏钱" reads like multi-hop attribution, but the weekly P&L card
+    already prints per-position contributions — the evaluation set proved the
+    fast path answers it. So the signal stands down when the classifier landed
+    on a card that already aggregates the book.
+    """
     assert router.route("NVDA 为什么涨", _parsed("explain_move", "NVDA"),
                         mode="heuristic").path == "single_hop"
     assert router.route("我这周为什么亏钱", _parsed("pnl_period"),
+                        mode="heuristic").path == "single_hop"
+    assert router.route("为什么我的半导体仓位表现分化这么大", _parsed("unknown"),
                         mode="heuristic").path == "agent"
 
 

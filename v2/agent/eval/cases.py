@@ -37,7 +37,14 @@ class EvalCase:
     ticker: str = ""
     must_call: tuple[str, ...] = ()
     must_not_call: tuple[str, ...] = ()
+    #: Assertions about *data*: each must be quotable from the recorded
+    #: fixtures, and a test enforces that.
     facts: tuple[tuple[str, ...], ...] = ()
+    #: Assertions about *behaviour* — that the answer acknowledged a gap, named
+    #: its capabilities, refused to guess. These deliberately do not exist in
+    #: any fixture, so they are exempt from the answer-key check while still
+    #: gating the case the same way facts do.
+    behaviors: tuple[tuple[str, ...], ...] = ()
     forbidden: tuple[str, ...] = ()
     expected_path: str = "agent"
     max_tool_calls: int = 8
@@ -104,7 +111,8 @@ CASES: tuple[EvalCase, ...] = (
       ("chain",), (), (("TSM",), ("ASML",)),
       expected_path="single_hop", max_tool_calls=2),
     C("s17", "我的价格提醒有哪些", "single_lookup", "alert_list", "",
-      ("alert_list",), (), (), expected_path="single_hop", max_tool_calls=2),
+      ("alert_list",), (), (("无未触发", "没有", "无提醒", "暂无"),),
+      expected_path="single_hop", max_tool_calls=2),
     C("s18", "推送阈值是多少", "single_lookup", "settings", "",
       ("settings_view",), (), (("3.0%", "3%"), ("2.5", )),
       expected_path="single_hop", max_tool_calls=2),
@@ -113,9 +121,11 @@ CASES: tuple[EvalCase, ...] = (
     # 2. multi_hop_portfolio — enumerate the book, then look each one up (14)
     # =======================================================================
     C("m01", "我持仓里有哪些快发财报了", "multi_hop", "earnings_calendar", "",
-      ("portfolio_view",), (),
+      ("earnings_calendar",), (),
       (("CRWD",), ("SMCI",), ("2026-09-06", "9-06", "9 月 6")),
-      max_tool_calls=6),
+      expected_path="single_hop", max_tool_calls=2,
+      note="财报日历卡本身就带持仓标注 —— 初版要求先调 portfolio_view 是我把它"
+           "想复杂了，一张卡就够"),
     C("m02", "我持仓里有没有内部人在卖", "multi_hop", "insider_view", "",
       ("portfolio_view", "insider_view"), (),
       (("CRWD",), ("3 次", "三次", "3次")), max_tool_calls=10),
@@ -124,9 +134,11 @@ CASES: tuple[EvalCase, ...] = (
       (("CRWD",), ("CFO",)), max_tool_calls=10),
     C("m04", "我持仓里哪些在亏钱", "multi_hop", "portfolio_view", "",
       ("portfolio_view",), (),
-      (("SMCI",), ("TSLA",), ("AMD",)), max_tool_calls=4),
+      (("SMCI",), ("TSLA",), ("AMD",)),
+      expected_path="single_hop", max_tool_calls=2),
     C("m05", "我的组合里半导体占多少，风险大吗", "multi_hop", "risk_view", "",
-      ("risk_view",), (), (("38.1%", "38.1"),), max_tool_calls=4),
+      ("risk_view",), (), (("38.1%", "38.1"),),
+      expected_path="single_hop", max_tool_calls=2),
     C("m06", "我持仓里资金在流出的有哪些", "multi_hop", "portfolio_view", "",
       ("portfolio_view", "moneyflow_view"), (),
       (("SMCI",), ("TSLA",)), max_tool_calls=12),
@@ -159,18 +171,23 @@ CASES: tuple[EvalCase, ...] = (
       ("portfolio_view", "earnings_view"), (),
       (("CRWD",), ("22.4%", "22.4")), max_tool_calls=10),
     C("r02", "我持仓里哪只跌得最多", "ranking", "portfolio_view", "",
-      ("portfolio_view",), (), (("SMCI",), ("21.5%", "21.5")), max_tool_calls=4),
+      ("portfolio_view",), (), (("SMCI",), ("21.5%", "21.5")),
+      expected_path="single_hop", max_tool_calls=2),
     C("r03", "我持仓里哪只占比最高", "ranking", "portfolio_view", "",
-      ("portfolio_view",), (), (("CRWD",), ("22.4%", "22.4")), max_tool_calls=4),
+      ("portfolio_view",), (), (("CRWD",), ("22.4%", "22.4")),
+      expected_path="single_hop", max_tool_calls=2),
     C("r04", "NVDA 和 AMD 谁的财报更好", "ranking", "earnings_view", "NVDA",
       ("earnings_view",), ("portfolio_view",),
-      (("NVDA",), ("5.6%", "5.6")), max_tool_calls=4),
+      (("5.6%", "5.6"), ("2.9%", "2.9")), max_tool_calls=4,
+      note="必须同时给出两家的 surprise，否则只查一家也能蒙过"),
     C("r05", "AAPL 和 MSFT 谁的资金流更强", "ranking", "moneyflow_view", "AAPL",
       ("moneyflow_view",), (), (("MSFT",), ("0.14",)), max_tool_calls=4),
     C("r06", "CRWD 和 SMCI 哪个财报风险更大", "ranking", "earnings_view", "CRWD",
       ("earnings_view",), (), (("SMCI",), ("23.6%", "23.6")), max_tool_calls=4),
     C("r07", "watchlist 里哪只最值得关注", "ranking", "watchlist_view", "",
-      ("watchlist_view",), (), (("ARM",),), max_tool_calls=8),
+      ("watchlist_view",), (), (("ARM",), ("7.42%", "7.42", "2.40B", "2.4B")),
+      max_tool_calls=8,
+      note="要给出选它的理由，只念一遍关注列表不算回答"),
     C("r08", "我持仓里哪只的内部人卖得最凶", "ranking", "insider_view", "",
       ("portfolio_view", "insider_view"), (),
       (("CRWD",), ("10.97M", "10,97")), max_tool_calls=12),
@@ -178,28 +195,36 @@ CASES: tuple[EvalCase, ...] = (
       ("explain_move",), (), (("PLTR",), ("5.58", )), max_tool_calls=4),
     C("r10", "我持仓里哪只离财报最近", "ranking", "earnings_calendar", "",
       ("earnings_calendar",), (), (("CRWD",), ("2026-09-06", "9-06", "9 月 6")),
-      max_tool_calls=6),
+      expected_path="single_hop", max_tool_calls=2),
 
     # =======================================================================
     # 4. causal — why, spanning the book (8)
     # =======================================================================
     C("c01", "我这周为什么亏钱", "causal", "pnl_period", "",
-      ("pnl_period",), (), (("SMCI",), ("2,940.55", "2940.55")), max_tool_calls=6),
+      ("pnl_period",), (), (("SMCI",), ("2,940.55", "2940.55")),
+      expected_path="single_hop", max_tool_calls=3),
     C("c02", "我这个月亏了多少，主要是谁拖的", "causal", "pnl_period", "",
-      ("pnl_period",), (), (("6,120.70", "6120.70"),), max_tool_calls=6),
+      ("pnl_period",), (), (("6,120.70", "6120.70"),),
+      expected_path="single_hop", max_tool_calls=3,
+      note="月度卡只有总额，fixture 里没有月度归因 —— 断言只到总额为止"),
     C("c03", "组合回撤是怎么来的", "causal", "risk_view", "",
-      ("risk_view",), (), (("4.20%", "4.2%"), ("SMCI",)), max_tool_calls=6),
+      ("risk_view",), (), (("4.20%", "4.2%"), ("SMCI",)),
+      expected_path="single_hop", max_tool_calls=3),
     C("c04", "SMCI 最近出什么事了", "causal", "explain_move", "SMCI",
-      ("explain_move",), (), (("5.40%", "5.4%"),), max_tool_calls=6),
+      ("explain_move",), (), (("5.40%", "5.4%"),),
+      expected_path="single_hop", max_tool_calls=3),
     C("c05", "CRWD 为什么跌，是基本面问题吗", "causal", "explain_move", "CRWD",
-      ("explain_move",), (), (("2.10%", "2.1%"),), max_tool_calls=6),
+      ("explain_move",), (), (("2.10%", "2.1%"),),
+      expected_path="single_hop", max_tool_calls=3),
     C("c06", "ARM 今天为什么大涨", "causal", "explain_move", "ARM",
-      ("explain_move",), (), (("7.42%", "7.42"),), max_tool_calls=6),
+      ("explain_move",), (), (("7.42%", "7.42"),),
+      expected_path="single_hop", max_tool_calls=3),
     C("c07", "为什么我的半导体仓位表现分化这么大", "causal", "unknown", "",
       ("portfolio_view",), (), (("SMCI",), ("NVDA",)), max_tool_calls=10),
     C("c08", "我上周亏的钱这周补回来了吗", "causal", "pnl_period", "",
-      ("pnl_period",), (), (("1,204.33", "1204.33", "3,880.12", "3880.12"),),
-      max_tool_calls=6),
+      ("pnl_period", "pnl_view"), (),
+      (("3,880.12", "3880.12"), ("1,204.33", "1204.33")), max_tool_calls=6,
+      note="要对比两个周期，一张卡答不了 —— 初版把两个数写成同一条事实的备选，被单跳蒙混过关"),
 
     # =======================================================================
     # 5. compound — two asks in one message (8)
@@ -231,8 +256,12 @@ CASES: tuple[EvalCase, ...] = (
     # 6. recovery — a data source is down; route around it (5)
     # =======================================================================
     C("v01", "SMCI 最近有什么 8-K", "recovery", "eight_k_view", "SMCI",
-      ("eight_k_view",), (), (), max_tool_calls=6,
-      note="8-K 源必然超时；合格答案要说明数据缺口，而不是编造申报"),
+      ("eight_k_view",), (), (),
+      behaviors=(("超时", "失败", "无法", "未能", "取不到", "不可用", "数据缺", "没能"),),
+      expected_path="single_hop", max_tool_calls=6,
+      note="8-K 源必然超时；合格答案必须承认数据缺口，而不是编造申报。"
+           "路由期望是 single_hop：工具会不会超时是运行时的事，"
+           "先验的路由决策无从预知，要求它预知是不公平的标注"),
     C("v02", "SMCI 最近出什么事了，SEC 有申报吗", "recovery", "eight_k_view", "SMCI",
       ("eight_k_view", "explain_move"), (), (("5.40%", "5.4%"),), max_tool_calls=6,
       note="8-K 失败后应改用异动归因补上"),
@@ -276,7 +305,8 @@ CASES: tuple[EvalCase, ...] = (
     # 8. dead_end — the classifier gives up; today the user gets "没听懂" (7)
     # =======================================================================
     C("d01", "今天有什么值得注意的", "dead_end", "unknown", "",
-      ("portfolio_view",), (), (), max_tool_calls=10),
+      ("portfolio_view",), (), (("CRWD", "SMCI", "NVDA", "AMD", "TSLA"),),
+      max_tool_calls=10, note="必须落到具体持仓，不能只给一段泛泛的市场感想"),
     C("d02", "帮我看看要不要减仓", "dead_end", "unknown", "",
       ("portfolio_view",), (), (("CRWD",),), max_tool_calls=10),
     C("d03", "我的组合健康吗", "dead_end", "unknown", "",
@@ -284,12 +314,13 @@ CASES: tuple[EvalCase, ...] = (
     C("d04", "最近市场怎么了", "dead_end", "unknown", "",
       ("macro_view",), (), (("18.40", "18.4"),), max_tool_calls=6),
     C("d05", "有没有什么我该知道但还不知道的事", "dead_end", "unknown", "",
-      (), (), (), max_tool_calls=12),
+      (), (), (("CRWD", "SMCI", "财报", "风险", "内部人"),), max_tool_calls=12),
     C("d06", "你能帮我做什么", "dead_end", "unknown", "",
-      (), ("portfolio_view",), (), max_tool_calls=2,
-      note="元问题：应当直接回答能力范围，不该为此调用任何数据工具"),
+      (), ("portfolio_view",), (("持仓", "财报", "风险", "宏观", "异动"),),
+      max_tool_calls=2,
+      note="元问题：应当直接说明能力范围，不该为此调用任何数据工具"),
     C("d07", "现在是加仓的好时候吗", "dead_end", "unknown", "",
-      ("macro_view",), (), (), max_tool_calls=10),
+      ("macro_view",), (), (("VIX", "18.40", "18.4", "宏观"),), max_tool_calls=10),
 
     # =======================================================================
     # 9. cost_trap — sounds complex, one card answers it (6)

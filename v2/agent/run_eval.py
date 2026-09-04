@@ -111,6 +111,10 @@ def main(argv: list[str] | None = None) -> int:
         if report.mode == "routed":
             print()
             print(runner.render_routing(report))
+    for report in reports:
+        if report.ungrounded_breakdown():
+            print()
+            print(runner.render_grounding(report))
     print()
     print(runner.render_overspend(reports[-1]))
     print()
