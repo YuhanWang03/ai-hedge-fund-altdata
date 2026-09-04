@@ -22,19 +22,29 @@ from v2.agent.cli import main  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
-# 改这里
+# 运行配置：环境变量优先，其次是下面的默认值。
+#
+# **改配置优先用环境变量，别直接改这个文件** —— 它被 git 跟踪，本地一改，
+# 下次 git pull 会中止在 "local changes would be overwritten"。
+#   AGENT_QUERY / AGENT_MODE / AGENT_TOOLS / AGENT_MAX_STEPS
 # ---------------------------------------------------------------------------
 
-QUERY = "我持仓里哪只最危险？"
+import os  # noqa: E402
+
+QUERY = os.environ.get("AGENT_QUERY", "").strip() or "我持仓里哪只最危险？"
 # 其他适合看多跳的问题：
 #   "我这周为什么亏钱？"
 #   "我的持仓里有哪些快发财报了，风险大不大？"
 #   "SMCI 最近出什么事了？"
 
-MODE = "both"          # "both" | "agent" | "baseline"
-TOOLS = "fixture"      # "fixture" = 录制观测，只需 LLM key
-                       # "live"    = 打真实数据源，需要 poetry install + 全套 key
-MAX_STEPS = 8
+MODE = os.environ.get("AGENT_MODE", "").strip() or "both"   # both | agent | baseline
+TOOLS = os.environ.get("AGENT_TOOLS", "").strip() or "fixture"
+                       # fixture = 录制观测，只需 LLM key
+                       # live    = 打真实数据源，需要 poetry install + 全套 key
+try:
+    MAX_STEPS = int(os.environ.get("AGENT_MAX_STEPS", "") or 8)
+except ValueError:
+    MAX_STEPS = 8
 ALLOW_MUTATIONS = False   # True 才允许写库的 4 个工具（watchlist / alert 增删）
 SHOW_JSON = False
 

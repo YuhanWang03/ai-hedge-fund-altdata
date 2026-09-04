@@ -29,6 +29,18 @@ collection error。想走 pytest 的话先 `pip install setuptools pytest python
 
 ### 命令行
 
+> **配置运行请用环境变量或命令行参数，不要改这些文件里的常量。**
+> 它们被 git 跟踪，本地一改，下次 `git pull` 会以
+> `local changes would be overwritten by merge` 中止 —— 而这个中止很容易被忽略，
+> 后果是你以为在跑新代码、其实跑的是旧的。
+>
+> ```bash
+> EVAL_REPEAT=3 EVAL_WORKERS=8 python3 -m v2.agent.run_eval
+> AGENT_QUERY="我这周为什么亏钱" python3 -m v2.agent.run_compare
+> ```
+> PyCharm：Run → Edit Configurations → Environment variables，
+> 填 `EVAL_REPEAT=3;EVAL_WORKERS=8`。
+
 全部命令都在**仓库根目录**执行。
 
 ```bash

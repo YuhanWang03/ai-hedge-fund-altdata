@@ -20,6 +20,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 import argparse  # noqa: E402
 import json  # noqa: E402
+import os  # noqa: E402
 import threading  # noqa: E402
 import time  # noqa: E402
 
@@ -29,19 +30,51 @@ from v2.agent.llm import OpenAICompatLLM, build_llm, describe_provider  # noqa: 
 
 
 # ---------------------------------------------------------------------------
-# 在 PyCharm 里点绿三角时用下面这些；命令行传参会覆盖它们
+# 运行配置
+#
+# 优先级：命令行参数 > 环境变量 > 下面的默认值。
+#
+# **想改配置请用环境变量或命令行，不要直接改这个文件** —— 它被 git 跟踪，本地一改，
+# 下次 git pull 就会以 "local changes would be overwritten by merge" 中止。这个
+# 中止很容易被忽略，后果是你以为在跑新代码、其实跑的是旧的（这件事真实发生过）。
+#
+# PyCharm 里设环境变量：Run → Edit Configurations → Environment variables，
+# 填分号分隔的串，例如 EVAL_REPEAT=3;EVAL_WORKERS=8
+#
+#   EVAL_MODES=baseline routed agent   跑哪几档
+#   EVAL_REPEAT=3                      每条跑几次（区分真失败与抖动）
+#   EVAL_WORKERS=8                     并发数
+#   EVAL_LIMIT=10                      只跑前 N 条，快速冒烟
+#   EVAL_CATEGORY=ranking multi_hop    只跑某几类
+#   EVAL_OUT=data/eval.json            JSON 输出路径
 # ---------------------------------------------------------------------------
 
-MODES = ["baseline", "routed", "agent"]   # 想看消融就加 agent_no_repair 等
-WORKERS = 4                                # 并发数；83 条 × 4 并发约 4 分钟一档
-# 写到 data/ 下 —— 该目录已在 .gitignore:31，评测产物不会被误提交
-OUT = "data/eval.json"
-CATEGORY = None                            # 例如 ["ranking", "multi_hop"] 只跑某几类
-LIMIT = None                               # 例如 10，快速冒烟
-FAILURES = 20                              # 打印多少条失败明细
-REPEAT = 1                                 # 每条跑几次。改代码前建议设 3，
-                                           # 否则分不清真失败和抖动（实测单轮失败
-                                           # 清单里约 2/3 是噪声）
+
+def _env_str(name: str, default):
+    return os.environ.get(name, "").strip() or default
+
+
+def _env_int(name: str, default):
+    raw = os.environ.get(name, "").strip()
+    try:
+        return int(raw) if raw else default
+    except ValueError:
+        return default
+
+
+def _env_list(name: str, default):
+    raw = os.environ.get(name, "").strip()
+    return raw.replace(",", " ").split() if raw else default
+
+
+MODES = _env_list("EVAL_MODES", ["baseline", "routed", "agent"])
+WORKERS = _env_int("EVAL_WORKERS", 4)
+# data/ 已在 .gitignore:31 —— 评测产物不会被误提交
+OUT = _env_str("EVAL_OUT", "data/eval.json")
+CATEGORY = _env_list("EVAL_CATEGORY", None)
+LIMIT = _env_int("EVAL_LIMIT", None)
+FAILURES = _env_int("EVAL_FAILURES", 20)
+REPEAT = _env_int("EVAL_REPEAT", 1)
 
 
 def _needs_llm(modes: list[str]) -> bool:
