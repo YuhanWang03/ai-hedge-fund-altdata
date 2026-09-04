@@ -102,10 +102,14 @@ def _print_comparison(baseline, agent) -> None:
         ("上下文压缩(字符)", "—",                   a.get("context_chars_saved", 0)),
         ("终止原因",        b["stop_reason"],      a["stop_reason"]),
     ]
+    # Size the value columns to their contents instead of a fixed 16: a stop
+    # reason like "final_answer_misattributed" is 26 characters and used to run
+    # straight into the neighbouring cell ("single_hopfinal_answer_…").
+    width = max([16] + [max(len(str(left)), len(str(right))) for _, left, right in rows])
     print(f"\n{_RULE}\n【对比】\n{_RULE}")
-    print(f"  {'指标':<18}{'基线(单跳)':>16}{'Agent(多步)':>16}")
+    print(f"  {'指标':<18}{'基线(单跳)':>{width}}  {'Agent(多步)':>{width}}")
     for label, left, right in rows:
-        print(f"  {label:<18}{str(left):>16}{str(right):>16}")
+        print(f"  {label:<18}{str(left):>{width}}  {str(right):>{width}}")
     print("\n  注：基线的溯源率恒为 100%，因为它原样返回工具输出、LLM 不撰写任何文字。")
     print("      代价是它只能回答单个工具就能回答的问题。")
     if not a.get("context_chars_saved"):

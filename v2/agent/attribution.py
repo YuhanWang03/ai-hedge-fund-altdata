@@ -35,7 +35,19 @@ from v2.agent.grounding import _normalise, extract_numbers
 _ENTITY_ARGS = ("ticker", "symbol", "manager")
 
 #: Uppercase tickers plus the manager aliases the 13F tool accepts.
-_ENTITY_MENTION = re.compile(r"\b[A-Z]{2,5}\b|巴菲特|buffett|burry|ark", re.IGNORECASE)
+#:
+#: **No global IGNORECASE.** It was there for the aliases and silently applied to
+#: the ticker alternative too, so every 2-5 letter word became an entity — "Form",
+#: "Item", "paper" and "Tier" all showed up as owners in the first live run, and
+#: correct answers were flagged. The aliases carry their own case variants instead.
+_ENTITY_MENTION = re.compile(
+    r"\b[A-Z]{2,5}\b|巴菲特|伯克希尔|木头姐|[Bb]uffett|[Bb]urry|BERKSHIRE")
+
+#: Filing identifiers that read as numbers but name a document, not a quantity:
+#: 8-K, 10-Q, 13F, Item 5.02. Masked out before extraction, on both sides, so
+#: "SMCI 的 8-K 查询超时" cannot be read as attributing the value 8 to SMCI.
+_FILING_TOKEN = re.compile(
+    r"\b\d{1,2}-[A-Z]\b|\b\d{1,2}[FKQ]\b|(?:[Ii]tem|[Ss]ection)\s*\d+(?:\.\d+)?")
 
 #: The 13F tool takes an alias while answers use the Chinese name; without
 #: normalising, every figure next to 「巴菲特」 looks misattributed away from
@@ -53,6 +65,22 @@ _NOT_ENTITIES = frozenset({
 
 #: How far after an entity mention a figure is still "about" that entity.
 WINDOW = 60
+
+#: Boundaries a figure never reaches back across. The window used to stop only
+#: at the next entity mention, so the last entity on a line swallowed whatever
+#: came after it:
+#:
+#:     · 已浮亏 -21.5%，今日 -5.40%，相对 SMH 逆势 -8.30pp
+#:     · 2026-09-09 财报，上次 EPS miss -23.6%、财报后次日 -14.20%
+#:
+#: No entity follows SMH, so its 60 characters ran into the next bullet and
+#: reported SMCI's earnings history as SMH's — a correct answer, rejected. A new
+#: line or bullet starts a new subject.
+#:
+#: Only applied to the answer. On the observation side a narrower window would
+#: record *fewer* owners, and fewer owners means more false positives; being
+#: generous about who owns a figure is the conservative direction there.
+_LAYOUT_BREAK = re.compile(r"[\n·•]")
 
 
 #: Sentence boundaries, plus phrases that acknowledge missing data.
@@ -87,6 +115,19 @@ class AttributionReport:
         return "；".join(parts)
 
 
+def _window_end(text: str, start: int, limit: int) -> int:
+    """Where an entity's window really ends: the first layout boundary in it."""
+    if limit <= start:
+        return start
+    brk = _LAYOUT_BREAK.search(text, start, limit)
+    return brk.start() if brk else limit
+
+
+def _mask_filings(text: str) -> str:
+    """Blank out filing identifiers so they are not read as quantities."""
+    return _FILING_TOKEN.sub(lambda m: " " * len(m.group(0)), text or "")
+
+
 def _entity_of(args: dict[str, Any]) -> str:
     for key in _ENTITY_ARGS:
         value = str((args or {}).get(key, "")).strip()
@@ -119,9 +160,10 @@ def check(
     owners: dict[str, set[str]] = {}
     neutral: set[str] = set()
 
-    for _tool, args, content, ok in results:
+    for _tool, args, raw_content, ok in results:
         if not ok:
             continue
+        content = _mask_filings(raw_content)
         entity = _entity_of(args)
         # Entities named *inside* a result own the figures beside them too.
         # ARKK's holdings card prints "TSLA 9.80%": that weight belongs to ARKK
@@ -164,7 +206,7 @@ def check(
     } - set(owners) - {""}
 
     report = AttributionReport()
-    body = answer or ""
+    body = _mask_filings(answer or "")
     mentions = _mentions(body)
 
     for sentence in _SENTENCE.split(body):
@@ -185,6 +227,7 @@ def check(
         if index + 1 < len(mentions):
             next_start = mentions[index + 1][1] - len(mentions[index + 1][0])
             limit = min(limit, next_start)
+        limit = _window_end(body, position, limit)
         window = body[position: max(limit, position)]
         for token in extract_numbers(window):
             key = _normalise(token)
