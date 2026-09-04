@@ -22,7 +22,7 @@ that only contains easy cases reports a flattering number and tunes nothing.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
@@ -107,4 +107,51 @@ PRONOUN_CASES: tuple[tuple[str, str, str], ...] = (
     ("AMD 为什么跌", "这只还能拿吗", "AMD"),
     ("我的持仓", "它怎么样", ""),          # 无先行词，不改写
     ("NVDA 怎么样", "AAPL 呢", "" ),      # 已含 ticker，不改写
+)
+
+
+# ---------------------------------------------------------------------------
+# B1 — anomaly evidence top-up
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SimpleReason:
+    """Stand-in for v2.monitoring.models.ScoredReason without the pydantic import."""
+
+    text: str
+    confidence: str = "中"
+    note: str = ""
+
+
+@dataclass
+class SimpleAnomaly:
+    """Structural stand-in for v2.monitoring.models.Anomaly.
+
+    Only the fields the top-up reads. Keeping this dependency-free is what lets
+    the whole B1 path be tested and scored in a bare environment.
+    """
+
+    ticker: str
+    price_change_pct: float
+    volume_ratio: float
+    flags: list[str] = field(default_factory=list)
+    contrarian: bool = False
+    reasons: list = field(default_factory=list)
+
+
+#: Scenarios covering every branch: already explained (must be skipped), all-低,
+#: no reasons at all, and more unexplained items than the per-run cap allows.
+ANOMALY_CASES: tuple[SimpleAnomaly, ...] = (
+    SimpleAnomaly("NVDA", 0.0385, 1.8, ["volume_spike"], False,
+                  [SimpleReason("与两家主权 AI 基金签署供货框架", "高")]),
+    SimpleAnomaly("MSFT", 0.0121, 1.2, ["volume_spike"], False,
+                  [SimpleReason("大盘普涨带动", "中")]),
+    SimpleAnomaly("ARM", 0.0742, 3.4, ["volume_spike", "52w_high"], True, []),
+    SimpleAnomaly("PLTR", -0.0518, 2.9, ["volume_spike"], True,
+                  [SimpleReason("板块回调", "低"), SimpleReason("市场传闻", "低")]),
+    SimpleAnomaly("SMCI", -0.0540, 3.1, ["volume_spike", "52w_low"], True,
+                  [SimpleReason("渠道调研称订单递延", "低")]),
+    SimpleAnomaly("AMD", -0.0132, 1.1, [], False,
+                  [SimpleReason("跟随半导体板块", "低")]),
 )

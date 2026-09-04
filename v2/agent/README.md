@@ -12,8 +12,9 @@
 |---|---|
 | `v2/agent/run_demo.py` | 什么都不需要，回放录制轨迹 |
 | `v2/agent/run_compare.py` | 一个 LLM key（`.env` 里的 `DEEPSEEK_API_KEY` 即可） |
-| `v2/agent/run_tests.py` | 什么都不需要，60 个测试（不走 pytest） |
+| `v2/agent/run_tests.py` | 什么都不需要，84 个测试（不走 pytest） |
 | `v2/agent/run_router.py` | 什么都不需要，路由层打分 |
+| `v2/agent/run_anomaly_assist.py` | 什么都不需要，B1 异动补齐打分 |
 
 这三个文件都会自己把仓库根目录补进 `sys.path`，所以不依赖任何 IDE 配置
 （不用改 Working directory，也不用把根目录标成 Sources Root）。
@@ -262,7 +263,67 @@ else:  # "unknown"
   executor 线程，`edit_text` 是 bot 事件循环的协程），fire-and-forget：
   掉一条进度绝不能把答案带下去。
 
-## 10. 目前还没有的（下一步）
+## 10. B1：异动归因的低置信补齐（`anomaly_assist.py`）
+
+`attributor.py` 的流程止于 Verifier：如果每条理由都被打成 低，或者实体过滤把新闻
+全滤光了，卡片就这么推出去——读者得到的是「涨了但不知道为什么」。新闻搜索只有
+一次机会，管线没有换个问法再试的能力。
+
+B1 给它**恰好一次**补救机会。约束全部来自「这是无人值守的 cron」这一个事实：
+
+| 约束 | 值 | 防的是什么 |
+|---|---|---|
+| 只在失败分支触发 | 已有 高/中 理由的异动完全不进这段代码 | 正常路径零成本 |
+| 只读工具，4 个 | 8-K / Form 4 / 财报 / 资金流 | 新闻搜不到时，原因通常藏在申报里 |
+| 每轮上限 | 默认 3 条，按涨跌幅+量比+信号数+逆势排序 | 某天 20 只票异动不能变成 20 次 agent 运行 |
+| 硬截止 | daemon 线程 + 超时放弃 worker | 卡住的 HTTP 调用绝不能让 cron 无法退出 |
+| 结构化输出 | JSON + 高/中/低 白名单校验 | 无人值守的输出必须可解析、可校验，不能是散文 |
+| 溯源失败即丢弃 | 不重写、不协商 | 没人盯着的时候，沉默优于自信的猜测 |
+
+**任何一步失败都返回 `None`，调用方原样推送既有卡片。** 确定性路径永远只被追加，
+不被替换。
+
+### 打分
+
+```bash
+python3 -m v2.agent.run_anomaly_assist    # 零 key
+```
+
+6 条样例异动，三个被选中的刻意覆盖三种结局：
+
+```
+  ARM   ✅ ok           8-K 里有 $2.40B 合同，量级能解释 +7.42% —— 补齐成功
+  SMCI  🟡 no_finding   8-K 源超时，改查财报后如实报告「找不到」
+  PLTR  ❌ ungrounded   产出「机构持仓下降 31.5%」，无任何工具来源 —— 整条丢弃
+
+  无有效归因占比   4/6 = 67%   →   3/6 = 50%
+  代价             3 次 agent 运行 · 8645 token
+  丢弃             1 条未溯源，1 条如实报告找不到
+```
+
+被丢弃和「找不到」的条目原样推送现有卡片。**3 条里只有 1 条成功——这个数字不好看，
+但它是诚实的**：另外两条本来就该失败，而系统正确地让它们失败了。
+
+### 接到 cron
+
+`scripts/anomaly_to_telegram.py` 是「归因 + 推送」单趟循环。不需要改成两趟：
+资格要归因后才知道，但**排序键在归因前就有**，所以先排序、再按顺序花预算，
+选出的集合与事后排序完全等价（有测试钉住这个等价性）。
+
+```python
+assistant = BudgetedAssistant()               # 读 V2_AGENT_ANOMALY_ASSIST，默认关
+for anomaly in assistant.order(anomalies):    # 改：预排序
+    attribute(anomaly, fd_client=fd, memory=memory)
+    assistant.maybe_assist(anomaly)           # 新增：未启用时是 no-op
+    ...现有的 chart / caption / push 一行不动...
+print(assistant.summary())                    # 新增：本轮花了多少、补上几条
+```
+
+```bash
+V2_AGENT_ANOMALY_ASSIST=true    # 默认关闭
+```
+
+## 11. 目前还没有的（下一步）
 
 - **评测集**：80–120 条标注了期望工具序列和期望事实的 query，指标为工具选择准确率、
   多跳完成率、溯源率、步数/token/延迟。有了它，`--mode both` 的单例对比才能变成

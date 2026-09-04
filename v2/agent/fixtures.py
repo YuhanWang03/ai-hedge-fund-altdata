@@ -173,6 +173,64 @@ PORTFOLIO_FIXTURES: dict[str, Any] = {
 }
 
 
+# --- B1: anomalies whose cause lives in filings rather than in the news -------
+#
+# ARM is the case the top-up exists for: a real 8-K explains the move, but the
+# news search that runs first found nothing quotable. SMCI keeps its simulated
+# timeout so the failure path stays exercised here too.
+
+_ANOMALY_EXTRA: dict[str, Any] = {
+    "ARM": ("📋 <b>ARM 8-K</b>（近 30 天）\n"
+            "· 2026-09-03 Item 1.01 — 与一家超大规模云厂商签署为期 5 年、"
+            "总额 $2.40B 的架构授权协议\n"
+            "· 2026-08-28 Item 5.02 — 任命新任 COO"),
+    "PLTR": "📋 <b>PLTR 8-K</b>（近 30 天）\n· 无重大事项申报。",
+}
+
+_ANOMALY_INSIDERS: dict[str, str] = {
+    "ARM": "📥 <b>ARM 内部人交易</b>（过去 90 天）\n· 无 Form 4 记录。",
+    "PLTR": ("📥 <b>PLTR 内部人交易</b>（过去 90 天）\n"
+             "· 2026-09-02 CEO 卖出 400,000 股 @ $38.20（$15.28M）\n"
+             "· 2026-08-29 CTO 卖出 120,000 股 @ $37.60（$4.51M）\n"
+             "⚠️ 90 天内 2 次卖出、0 次买入"),
+}
+
+_ANOMALY_EARNINGS: dict[str, str] = {
+    "ARM": "📞 <b>ARM 财报</b>\n· 下次财报：2026-11-05 — 距今 63 天",
+    "PLTR": "📞 <b>PLTR 财报</b>\n· 下次财报：2026-11-03 — 距今 61 天",
+}
+
+_ANOMALY_FLOW: dict[str, str] = {
+    "ARM": "💧 <b>ARM 资金流</b>\n· CMF(20) +0.22 → 资金净流入\n· RSI(14) 68.5",
+    "PLTR": "💧 <b>PLTR 资金流</b>\n· CMF(20) -0.14 → 资金流出\n· RSI(14) 44.1",
+}
+
+
+def _anomaly_eight_k(args: dict[str, Any]) -> str:
+    ticker = str(args.get("ticker", "")).upper()
+    if ticker in _ANOMALY_EXTRA:
+        return _ANOMALY_EXTRA[ticker]
+    return _eight_k(args)
+
+
+ANOMALY_FIXTURES: dict[str, Any] = {
+    **PORTFOLIO_FIXTURES,
+    "eight_k_view": _anomaly_eight_k,
+    "insider_view": {**_INSIDERS, **_ANOMALY_INSIDERS},
+    "earnings_view": {**_EARNINGS, **_ANOMALY_EARNINGS},
+    "moneyflow_view": {**_MONEYFLOW, **_ANOMALY_FLOW},
+}
+
+
+def build_anomaly_registry(**kwargs: Any):
+    """Registry limited to the four read-only tools the top-up may call."""
+    from v2.agent.anomaly_assist import ASSIST_TOOLS
+    from v2.agent.registry import TOOL_SPECS, FixtureExecutor, ToolRegistry
+
+    specs = tuple(s for s in TOOL_SPECS if s.name in ASSIST_TOOLS)
+    return ToolRegistry(executor=FixtureExecutor(ANOMALY_FIXTURES), specs=specs, **kwargs)
+
+
 def build_registry(**kwargs: Any):
     """A ToolRegistry backed by these fixtures — no keys, no network."""
     from v2.agent.registry import FixtureExecutor, ToolRegistry
