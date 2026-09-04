@@ -36,7 +36,12 @@ class EvalCase:
     intent: str = "unknown"                 # what v2/bot/intent.py returns
     ticker: str = ""
     must_call: tuple[str, ...] = ()
-    must_not_call: tuple[str, ...] = ()
+    #: Tools that are merely unnecessary for this question. Counted as **cost,
+    #: never as a failure** — the same rule ``must_call`` already follows
+    #: ("extra tools are charged to the cost metrics, not to correctness").
+    #: Scoring them as errors double-counted waste: t02 failed 3/3 for calling
+    #: one redundant tool while producing an entirely correct answer.
+    wasteful_tools: tuple[str, ...] = ()
     #: Assertions about *data*: each must be quotable from the recorded
     #: fixtures, and a test enforces that.
     facts: tuple[tuple[str, ...], ...] = ()
@@ -53,6 +58,10 @@ class EvalCase:
     #: release_type, period …). Without them the baseline is handicapped by the
     #: harness rather than by its own design, and the comparison lies.
     extra: dict[str, Any] = field(default_factory=dict)
+    #: Tools whose use would make the answer *wrong*. Reserved for genuine
+    #: correctness breaks; in this tool set reading an extra card never makes an
+    #: answer wrong, so it stays empty and wrongness is caught by ``forbidden``.
+    must_not_call: tuple[str, ...] = ()
 
 
 C = EvalCase

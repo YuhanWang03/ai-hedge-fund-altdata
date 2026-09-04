@@ -388,6 +388,115 @@ def test_repair_happens_at_most_once():
 
 
 # ---------------------------------------------------------------------------
+# attribution — the number is real, the subject is not
+# ---------------------------------------------------------------------------
+
+def _records(*rows):
+    return [(tool, args, content, True) for tool, args, content in rows]
+
+
+def test_attribution_catches_another_entitys_figure():
+    """h07: only NVDA had institutional data; the model gave AMD NVDA's numbers."""
+    from v2.agent import attribution
+
+    report = attribution.check(
+        "NVDA Vanguard 8.94%；AMD Vanguard 8.94%。",
+        _records(("holders", {"ticker": "NVDA"}, "Vanguard 8.94% BlackRock 7.31%"),
+                 ("holders", {"ticker": "AMD"}, "fixture 未记录该 ticker 的机构持仓。")))
+    assert not report.ok
+    assert ("AMD", "8.94", ("NVDA",)) in report.misattributed
+
+
+def test_attribution_catches_a_false_frame():
+    """h04: every figure is correctly attributed to its stock — but ARKQ has no
+    card, so presenting ARKK's holdings under ARKQ's name is still false."""
+    from v2.agent import attribution
+
+    report = attribution.check(
+        "ARKQ 前三大持仓：TSLA 9.80%、COIN 7.20%。",
+        _records(("etf_view", {"symbol": "ARKQ"}, "fixture 模式未记录该 ETF。"),
+                 ("etf_view", {"symbol": "ARKK"}, "前三：TSLA 9.80% · COIN 7.20%")))
+    assert not report.ok and report.empty_presented
+
+
+def test_attribution_accepts_an_acknowledged_gap():
+    from v2.agent import attribution
+
+    report = attribution.check(
+        "ARKQ 没有记录数据。ARKK 前三：TSLA 9.80%。",
+        _records(("etf_view", {"symbol": "ARKQ"}, "fixture 模式未记录该 ETF。"),
+                 ("etf_view", {"symbol": "ARKK"}, "前三：TSLA 9.80% · COIN 7.20%")))
+    assert report.ok
+
+
+def test_attribution_does_not_flag_a_correct_multi_ticker_answer():
+    """The false positive that matters: a figure belongs to the nearest entity
+    named before it, so a list of positions must not cross-contaminate."""
+    from v2.agent import attribution
+
+    assert attribution.check(
+        "NVDA 占仓 18.2%，CRWD 占仓 22.4%。",
+        _records(("portfolio_view", {}, "CRWD 22.4% NVDA 18.2%"))).ok
+    assert attribution.check(
+        "CRWD beat 6.1%，SMCI miss 23.6%。",
+        _records(("earnings_view", {"ticker": "CRWD"}, "EPS beat +6.1%"),
+                 ("earnings_view", {"ticker": "SMCI"}, "EPS miss -23.6%"))).ok
+
+
+def test_attribution_allows_a_constituent_to_own_its_weight():
+    """ARKK's card prints "TSLA 9.80%"; that weight is TSLA's as well as ARKK's."""
+    from v2.agent import attribution
+
+    assert attribution.check(
+        "TSLA 在 ARKK 里占 9.80%。",
+        _records(("etf_view", {"symbol": "ARKK"}, "前三：TSLA 9.80% · COIN 7.20%"))).ok
+
+
+def _holders_registry() -> ToolRegistry:
+    """Only NVDA has institutional data — the shape that produced h07."""
+    def executor(spec, args):
+        if args.get("ticker") == "NVDA":
+            return "Vanguard 8.94% · BlackRock 7.31%"
+        return "fixture 未记录该 ticker 的机构持仓。"
+
+    return ToolRegistry(executor=executor)
+
+
+def test_the_loop_repairs_a_misattributed_answer():
+    llm = ScriptedLLM([
+        _acts(_call("holders", 1, ticker="NVDA"), _call("holders", 2, ticker="AMD")),
+        _says("NVDA Vanguard 8.94%；AMD Vanguard 8.94%。"),
+        _says("NVDA 的 Vanguard 持股 8.94%；AMD 没有机构持仓数据。"),
+    ])
+    result = run_agent("我持仓的机构持股比例", llm=llm, registry=_holders_registry())
+    assert result.repairs == 1
+    assert result.stop_reason == "final_answer"
+    assert result.attribution.ok
+
+
+def test_an_unrepaired_misattribution_is_named_in_the_stop_reason():
+    llm = ScriptedLLM([
+        _acts(_call("holders", 1, ticker="NVDA"), _call("holders", 2, ticker="AMD")),
+        _says("AMD Vanguard 8.94%。"),
+        _says("AMD Vanguard 8.94%。"),          # repair fails too
+    ])
+    result = run_agent("机构持股", llm=llm, registry=_holders_registry())
+    assert result.stop_reason == "final_answer_misattributed"
+    assert not result.attribution.ok
+
+
+def test_attribution_can_be_switched_off():
+    llm = ScriptedLLM([
+        _acts(_call("holders", 1, ticker="NVDA"), _call("holders", 2, ticker="AMD")),
+        _says("AMD Vanguard 8.94%。"),
+    ])
+    result = run_agent("机构持股", llm=llm, registry=_holders_registry(),
+                       config=AgentConfig(attribution_check=False))
+    assert result.attribution.ok, "关掉后不应产生任何归属判定"
+    assert result.repairs == 0
+
+
+# ---------------------------------------------------------------------------
 # context management
 # ---------------------------------------------------------------------------
 

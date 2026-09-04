@@ -86,12 +86,19 @@ def test_missing_a_required_tool_is_reported_by_name():
     assert "portfolio_view" in score.failure_reason()
 
 
-def test_a_forbidden_tool_fails_the_case_outright():
+def test_a_redundant_tool_is_charged_to_cost_not_correctness():
+    """t02 failed 3/3 for calling one extra tool while answering correctly.
+
+    Waste was being counted twice — once in the cost metrics, once as a hard
+    failure — which contradicts the rule ``must_call`` already follows. It is a
+    cost signal now, and the case passes on the strength of its answer.
+    """
     case = _CASE_BY_ID["t01"]
     score = score_case(case, mode="agent", answer="总市值 184,320.55",
                        tools_called=["portfolio_view", "risk_view"], tool_calls=2)
-    assert score.violations == ("risk_view",)
-    assert not score.passed
+    assert score.waste == ("risk_view",)
+    assert not score.violations
+    assert score.passed, "答案正确就该通过；多调工具体现在成本指标里"
 
 
 def test_borrowing_another_tickers_number_is_caught():
@@ -340,7 +347,7 @@ def test_no_case_can_pass_without_asserting_anything():
 def test_every_required_tool_exists():
     unknown = []
     for case in CASES:
-        for tool in case.must_call + case.must_not_call:
+        for tool in case.must_call + case.wasteful_tools + case.must_not_call:
             if tool not in SPECS_BY_NAME:
                 unknown.append(f"{case.id}: {tool}")
     assert not unknown, "引用了不存在的工具：" + ", ".join(unknown)

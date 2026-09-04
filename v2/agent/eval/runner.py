@@ -175,7 +175,7 @@ def _fmt_int(value: float) -> str:
 def render_comparison(reports: list[SuiteReport]) -> str:
     lines = [_RULE, "【模式对比】", _RULE,
              f"  {'mode':<20}{'通过':>9}{'通过率':>8}{'工具召回':>9}{'事实召回':>9}"
-             f"{'溯源率':>8}{'越界':>7}{'超预算':>8}{'工具/例':>9}{'token/例':>10}{'每通过token':>12}"]
+             f"{'溯源率':>8}{'浪费':>7}{'超预算':>8}{'工具/例':>9}{'token/例':>10}{'每通过token':>12}"]
     for report in reports:
         row = report.summary()
         per_case = row["total_tokens"] / row["total"] if row["total"] else 0.0
@@ -187,7 +187,7 @@ def render_comparison(reports: list[SuiteReport]) -> str:
             + f"{row['tool_recall']:>9.0%}"
             + f"{row['fact_recall']:>9.0%}"
             + f"{row['grounded_rate']:>8.0%}"
-            + f"{row['violation_rate']:>7.0%}"
+            + f"{row['waste_rate']:>7.0%}"
             + f"{row['overspend_rate']:>8.0%}"
             + f"{row['mean_tool_calls']:>9.1f}"
             + f"{_fmt_int(per_case):>10}"

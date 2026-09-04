@@ -183,6 +183,11 @@ def handle_nl_sync(
     # Shipping it unmarked would quietly undo the grounding guarantee: the loop
     # checked, found unsupported figures, failed to repair them — and then the
     # user reads it as if it had passed.
+    if agent_result is not None and not agent_result.attribution.ok:
+        answer = (f"⚠️ <i>以下回答中有数字可能被安在了错误的标的上"
+                  f"（{agent_result.attribution.summary()}），请以原始数据为准。</i>"
+                  f"\n\n{answer}")
+
     if agent_result is not None and not agent_result.grounding.ok:
         figures = ", ".join(agent_result.grounding.ungrounded[:5])
         answer = (f"⚠️ <i>以下回答中有数字未能追溯到任何工具返回"

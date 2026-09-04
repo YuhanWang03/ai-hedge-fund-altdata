@@ -76,6 +76,8 @@ class CaseScore:
     missing_tools: tuple[str, ...] = ()
     missing_facts: tuple[str, ...] = ()
     violations: tuple[str, ...] = ()
+    #: Unnecessary tools called. A cost signal, never a failure.
+    waste: tuple[str, ...] = ()
     forbidden_hit: tuple[str, ...] = ()
     #: The figures that failed to trace. "数字无法溯源" without naming them is
     #: the same unactionable verdict this package criticises elsewhere.
@@ -161,6 +163,7 @@ def score_case(
         tool_recall=tool_recall, fact_recall=fact_recall, grounded=grounded,
         missing_tools=missing_tools, missing_facts=missing_facts,
         violations=tuple(sorted(called & set(case.must_not_call))),
+        waste=tuple(sorted(called & set(case.wasteful_tools))),
         forbidden_hit=forbidden_hit, ungrounded=tuple(ungrounded),
         ungrounded_kinds=dict(ungrounded_kinds or {}), derived=derived,
         tool_calls=tool_calls, llm_calls=llm_calls, tokens=tokens,
@@ -236,6 +239,7 @@ class SuiteReport:
             "fact_recall": _mean([s.fact_recall for s in self.scores]),
             "grounded_rate": _mean([1.0 if s.grounded else 0.0 for s in self.scores]),
             "violation_rate": _mean([1.0 if s.violations else 0.0 for s in self.scores]),
+            "waste_rate": _mean([1.0 if s.waste else 0.0 for s in self.scores]),
             "overspend_rate": _mean([1.0 if s.overspend else 0.0 for s in self.scores]),
             "routing_accuracy": _mean([1.0 if s.path_correct else 0.0 for s in self.scores]),
             "ungrounded_kinds": self.ungrounded_breakdown(),

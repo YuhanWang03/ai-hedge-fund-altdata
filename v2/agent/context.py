@@ -102,6 +102,11 @@ class Trajectory:
                 seen.append(name)
         return seen
 
+    def tool_records(self) -> list[tuple[str, dict[str, Any], str, bool]]:
+        """(tool, args, content, ok) per call — what the attribution check needs."""
+        return [(r.name, r.args, r.content, r.ok)
+                for s in self.steps for r in s.results]
+
     def observations_text(self) -> str:
         """Every successful observation concatenated — the grounding corpus."""
         return "\n".join(r.content for s in self.steps for r in s.results if r.ok)

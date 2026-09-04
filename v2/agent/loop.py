@@ -43,7 +43,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
 
-from v2.agent import grounding
+from v2.agent import attribution, grounding
 from v2.agent.context import Step, Trajectory, extract_note
 from v2.agent.llm import LLMClient, LLMError, LLMResponse, ToolCall, build_llm
 from v2.agent.prompts import FORCE_FINAL_SUFFIX, SYSTEM_PROMPT
@@ -93,6 +93,9 @@ class AgentConfig:
     max_parallel: int = 6
     allow_mutations: bool = False
     grounding_repair: bool = True
+    #: Also verify that figures are attributed to the entity they belong to.
+    #: Grounding alone cannot see this: the numbers are real, the subject is not.
+    attribution_check: bool = True
     fresh_observations: int = 3
     stale_chars: int = 600
     system_prompt: str = SYSTEM_PROMPT
@@ -108,6 +111,8 @@ class AgentResult:
     stop_reason: str
     elapsed_ms: int
     grounding: grounding.GroundingReport = field(default_factory=grounding.GroundingReport)
+    attribution: attribution.AttributionReport = field(
+        default_factory=attribution.AttributionReport)
     repairs: int = 0
     repaired_figures: list[str] = field(default_factory=list)
     deduped_calls: int = 0
@@ -122,6 +127,8 @@ class AgentResult:
             "stop_reason": self.stop_reason,
             "grounding_ratio": round(self.grounding.ratio, 3),
             "ungrounded_figures": len(self.grounding.ungrounded),
+            "misattributed": len(self.attribution.misattributed)
+                             + len(self.attribution.empty_presented),
             "repairs": self.repairs,
             "deduped_calls": self.deduped_calls,
             "forced_final": self.forced_final,
@@ -237,6 +244,7 @@ def run_agent(
     error = ""
     forced_final = False
     report = grounding.GroundingReport()
+    attribution_report = attribution.AttributionReport()
 
     _emit("agent_start", query=query[:200], tools=len(tool_schemas))
 
@@ -273,18 +281,32 @@ def run_agent(
         if not response.tool_calls:
             answer = response.text
             report = grounding.check(answer, trajectory.observations_text())
+            attribution_report = (attribution.check(answer, trajectory.tool_records())
+                                  if config.attribution_check
+                                  else attribution.AttributionReport())
             can_repair = config.grounding_repair and repairs < 1 and not budget_spent
-            if report.ok or not can_repair:
-                stop_reason = "final_answer" if report.ok else "final_answer_ungrounded"
+
+            if report.ok and attribution_report.ok:
+                stop_reason = "final_answer"
+                forced_final = budget_spent
+                break
+            if not can_repair:
+                stop_reason = ("final_answer_misattributed" if not attribution_report.ok
+                               else "final_answer_ungrounded")
                 forced_final = budget_spent
                 break
             repairs += 1
-            repaired_figures.extend(report.ungrounded)
+            reasons: list[str] = []
+            if not report.ok:
+                repaired_figures.extend(report.ungrounded)
+                directives.append(grounding.repair_instruction(report))
+                reasons.append(f"{len(report.ungrounded)} 个数字无法溯源")
+            if not attribution_report.ok:
+                directives.append(attribution.repair_instruction(attribution_report))
+                reasons.append(attribution_report.summary())
             _notify(on_step, StepEvent(
-                "repair", step_index,
-                f"初稿有 {len(report.ungrounded)} 个数字无法溯源，正在重写",
+                "repair", step_index, "初稿有问题，正在重写：" + "；".join(reasons),
                 ok=False))
-            directives.append(grounding.repair_instruction(report))
             _emit("agent_grounding_repair", ungrounded=len(report.ungrounded))
             continue
 
@@ -332,6 +354,7 @@ def run_agent(
         stop_reason=stop_reason,
         elapsed_ms=int((time.time() - started) * 1000),
         grounding=report,
+        attribution=attribution_report,
         repairs=repairs,
         repaired_figures=repaired_figures,
         deduped_calls=deduped_total,
