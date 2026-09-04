@@ -636,6 +636,42 @@ def test_a_benchmark_is_not_the_subject():
     ).misattributed == [("SPY", "-14", ("TSLA",))]
 
 
+def test_the_backward_pass_abstains_on_the_same_terms():
+    """The clause abstention was only ever applied to the forward pass.
+
+    「占仓最重的 CRWD（22.4%）和回撤较大的 SMCI 都将在 3–6 天内发财报」: the
+    postposed-modifier rule hands CRWD's weight forward to SMCI, and the clause
+    that names both of them never got to say otherwise — because that check
+    lived in the other loop. One rule, two passes, one place it was written.
+    """
+    from v2.agent import attribution
+
+    assert attribution.check(
+        "但真正的风险在未来一周：占仓最重的 CRWD（22.4%）和回撤较大的 SMCI 都将发财报。",
+        _records(("portfolio_view", {}, "CRWD 22.4% SMCI 8.6%"))).ok
+
+    # The postposed rule still catches a genuinely borrowed figure.
+    assert not attribution.check(
+        "被浮亏 -35.9% 的 NVDA 拖累。",
+        _records(("portfolio_view", {"ticker": "ARM"}, "ARM -35.9%"))).ok
+
+
+def test_a_slash_date_and_a_duration_are_not_quantities():
+    """Two more shapes of «text that parses as a number»: 「财报在 9/30」 and
+    「第一次 30s 超时」. The hyphen form was masked three rounds ago; the slash
+    and the duration were not, and each cost one false positive."""
+    from v2.agent import attribution
+
+    assert attribution.check(
+        "NVDA（18.2%）、MSFT（14.1%）财报分别在 9/30 和更远。",
+        _records(("portfolio_view", {}, "NVDA 18.2% MSFT 14.1%"),
+                 ("earnings_view", {"ticker": "CRWD"}, "阈值 30%"))).ok
+
+    assert attribution.check(
+        "SMCI 的申报：EDGAR 查询失败（第一次 30s 超时）。",
+        _records(("eight_k_view", {"ticker": "AAPL"}, "近 30 天无申报"))).ok
+
+
 def test_a_date_is_not_a_negative_number():
     """A hyphen in front of a day of the month is a minus sign to any number
     extractor. The earnings calendar is a column of them, one ticker per row, so

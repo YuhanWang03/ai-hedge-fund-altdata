@@ -63,6 +63,8 @@ _ENTITY_MENTION = re.compile(
 _FILING_TOKEN = re.compile(
     r"\b\d{4}-\d{1,2}-\d{1,2}\b"          # 2026-11-17
     r"|\b\d{1,2}-\d{1,2}\b"                # 10-21, 09-30
+    r"|\b\d{1,2}/\d{1,2}\b"                # 9/30 — the slash form
+    r"|\b\d{1,4}\s?(?:ms|s|秒|分钟|小时)\b"  # 30s 超时 — a duration
     r"|\b[A-Z]-\d{1,4}\b"                   # D-74
     r"|\b\d{1,2}-[A-Z]\b|\b\d{1,2}[FKQ]\b"
     r"|(?:[Ii]tem|[Ss]ection)\s*\d+(?:\.\d+)?")
@@ -529,8 +531,16 @@ def check(
         if not key or key in neutral or _is_structural(key):
             continue
         holders = owners.get(key)
-        if holders:
-            _record(report, entity, token, holders, _line_at(body, start_pos))
+        if not holders:
+            continue
+        # The same abstention as the forward pass. It was only ever applied
+        # there, and the asymmetry showed up as 「占仓最重的 CRWD（22.4%）和回撤
+        # 较大的 SMCI 都将…发财报」: the postposed rule handed CRWD's weight to
+        # SMCI, and the clause naming both of them never got to say otherwise.
+        clause_entities = {name for name, _ in _mentions(_clause_at(body, start_pos))}
+        if len(clause_entities) >= 2 and (holders & clause_entities):
+            continue
+        _record(report, entity, token, holders, _line_at(body, start_pos))
     return report
 
 
