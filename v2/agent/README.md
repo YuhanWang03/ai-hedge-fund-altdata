@@ -165,7 +165,18 @@ test_baseline_cannot_answer_a_multi_hop_question
 
 ---
 
-## 6. 目前还没有的（下一步）
+## 6. 基线的分类器：优先用生产那份，缺依赖时用同源移植
+
+`v2/bot/intent.py` 依赖 LangChain。如果运行环境只装了一个 LLM key（比如新建的
+conda env），基线那半边会 `ModuleNotFoundError`，对比只剩一半。
+
+所以 `baseline.resolve_classifier()` 优先 import 生产分类器；import 失败时退回
+`intent_port.py`——它**不复制 prompt**，而是用 `ast.literal_eval` 从
+`v2/bot/intent.py` 源码里把 `_SYSTEM_PROMPT` 和三个白名单读出来。因此 bot 改了
+prompt，基线跟着改；常量被重命名则显式报错，而不是默默测一份过期副本。CLI 会打印
+本次用的是哪一个。
+
+## 7. 目前还没有的（下一步）
 
 - **评测集**：80–120 条标注了期望工具序列和期望事实的 query，指标为工具选择准确率、
   多跳完成率、溯源率、步数/token/延迟。有了它，`--mode both` 的单例对比才能变成

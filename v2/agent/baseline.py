@@ -68,6 +68,22 @@ INTENT_TO_TOOL: dict[str, tuple[str, Callable[[dict[str, Any]], dict[str, Any]]]
 UNROUTED_INTENTS = {"find_anomalies"}
 
 
+def resolve_classifier() -> tuple[Callable[[str], dict[str, Any]], str]:
+    """Prefer the real bot classifier; fall back to the source-derived port.
+
+    ``v2.bot.intent`` needs LangChain. An environment set up to run the agent
+    (one LLM key, no project deps) would otherwise fail the baseline half and
+    leave nothing to compare against — so the port stands in, using the prompt
+    and whitelists read out of the bot's own source.
+    """
+    try:
+        from v2.bot import intent
+        return intent.classify, "bot"
+    except ImportError:
+        from v2.agent import intent_port
+        return intent_port.classify, "port"
+
+
 @dataclass
 class BaselineResult:
     """Same shape as AgentResult where it overlaps, so both can go in one table."""
@@ -79,6 +95,7 @@ class BaselineResult:
     elapsed_ms: int
     result: ToolResult | None = None
     parsed: dict[str, Any] = field(default_factory=dict)
+    classifier_kind: str = "bot"
     error: str = ""
 
     def stats(self) -> dict[str, Any]:
@@ -113,12 +130,6 @@ class ScriptedClassifier:
         return self.results.pop(0)
 
 
-def _default_classifier(text: str) -> dict[str, Any]:
-    """The real thing — imported lazily so this module stays dependency-free."""
-    from v2.bot import intent
-    return intent.classify(text)
-
-
 def run_baseline(
     query: str,
     *,
@@ -126,15 +137,18 @@ def run_baseline(
     registry: ToolRegistry | None = None,
 ) -> BaselineResult:
     """Answer ``query`` the way the current bot does: one label, one call."""
-    classify = classifier or _default_classifier
+    if classifier is None:
+        classify, kind = resolve_classifier()
+    else:
+        classify, kind = classifier, "injected"
     registry = registry or ToolRegistry()
     started = time.time()
 
     try:
         parsed = classify(query)
     except Exception as exc:  # noqa: BLE001 — mirrors intent.classify's own guard
-        return BaselineResult(query=query, answer=f"分类失败：{type(exc).__name__}",
-                              intent="unknown", tool="",
+        return BaselineResult(query=query, answer=f"分类失败：{type(exc).__name__}: {exc}",
+                              intent="unknown", tool="", classifier_kind=kind,
                               elapsed_ms=int((time.time() - started) * 1000),
                               error=str(exc))
 
@@ -145,6 +159,7 @@ def run_baseline(
             query=query, intent=name, tool="",
             answer="（该 intent 由 bot 内部私有函数处理，未在对比工具层中暴露）",
             elapsed_ms=int((time.time() - started) * 1000), parsed=parsed,
+            classifier_kind=kind,
         )
 
     route = INTENT_TO_TOOL.get(name)
@@ -153,6 +168,7 @@ def run_baseline(
             query=query, intent="unknown", tool="",
             answer="❓ 没听懂。可以试试 /help 看看支持哪些命令。",
             elapsed_ms=int((time.time() - started) * 1000), parsed=parsed,
+            classifier_kind=kind,
         )
 
     tool_name, build_args = route
@@ -165,4 +181,5 @@ def run_baseline(
         elapsed_ms=int((time.time() - started) * 1000),
         result=result,
         parsed=parsed,
+        classifier_kind=kind,
     )

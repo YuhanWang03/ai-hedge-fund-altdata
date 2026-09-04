@@ -47,6 +47,10 @@ def _wrap(text: str, indent: str = "    ", width: int = 96) -> str:
 
 def _print_baseline(result) -> None:
     print(f"\n{_RULE}\n【基线】单跳路由 — 复刻 v2/bot/commands.py:cmd_nl\n{_RULE}")
+    source = {"bot": "v2/bot/intent.py（生产分类器）",
+              "port": "v2/agent/intent_port.py（同源移植，prompt 从 bot 源码读取）",
+              "injected": "调用方注入"}.get(result.classifier_kind, result.classifier_kind)
+    print(f"  分类器     → {source}")
     print(f"  intent 分类 → {result.intent or '(none)'}")
     print(f"  调用工具   → {result.tool or '(none)'}  ×1")
     print("\n  回答（工具返回原文，LLM 不参与撰写）：")
@@ -104,6 +108,9 @@ def _print_comparison(baseline, agent) -> None:
         print(f"  {label:<18}{str(left):>16}{str(right):>16}")
     print("\n  注：基线的溯源率恒为 100%，因为它原样返回工具输出、LLM 不撰写任何文字。")
     print("      代价是它只能回答单个工具就能回答的问题。")
+    if not a.get("context_chars_saved"):
+        print("      上下文压缩为 0 属正常：本轮观测批次未超出保鲜窗口"
+              f"（fresh_observations），无需裁剪。")
 
 
 def main(argv: list[str] | None = None) -> int:

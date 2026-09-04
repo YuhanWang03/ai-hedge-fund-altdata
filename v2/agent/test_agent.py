@@ -419,6 +419,54 @@ def test_baseline_covers_the_bots_intent_enum():
 
 
 # ---------------------------------------------------------------------------
+# intent port — keeps the baseline runnable without LangChain
+# ---------------------------------------------------------------------------
+
+def test_intent_port_reads_the_live_bot_prompt():
+    """Extraction must come from the bot's source, so the prompt cannot drift."""
+    from v2.agent.intent_port import bot_intent_constants
+
+    constants = bot_intent_constants()
+    assert len(constants["_SYSTEM_PROMPT"]) > 500
+    assert "意图分类器" in constants["_SYSTEM_PROMPT"]
+    # 24 routable intents + "unknown"
+    assert len(constants["_VALID_INTENTS"]) == 25
+    assert set(INTENT_TO_TOOL) < constants["_VALID_INTENTS"]
+    assert constants["_INSIDER_DAYS_BACK_MIN"] < constants["_INSIDER_DAYS_BACK_MAX"]
+
+
+def test_intent_port_matches_classify_contract():
+    from v2.agent.intent_port import classify
+
+    parsed = classify("我的组合风险怎么样", llm=ScriptedLLM([
+        _says('```json\n{"intent": "risk_view", "ticker": "", "raw": "组合风险"}\n```')]))
+    assert parsed["intent"] == "risk_view"
+    # every key the bot's classify promises its callers
+    for key in ("intent", "ticker", "manager", "etf", "target_price", "direction",
+                "days_horizon", "period", "days_back", "release_type", "raw"):
+        assert key in parsed
+
+
+def test_intent_port_coerces_outside_the_whitelist():
+    from v2.agent.intent_port import classify
+
+    assert classify("x", llm=ScriptedLLM([_says('{"intent": "buy_the_dip"}')]))["intent"] == "unknown"
+    assert classify("x", llm=ScriptedLLM([_says("not json at all")]))["intent"] == "unknown"
+    # bounded days_back, same clamping the bot applies
+    parsed = classify("x", llm=ScriptedLLM([
+        _says('{"intent": "insider_view", "ticker": "nvda", "days_back": 9999}')]))
+    assert parsed["days_back"] == 365 and parsed["ticker"] == "NVDA"
+
+
+def test_baseline_resolves_a_classifier_in_any_environment():
+    from v2.agent.baseline import resolve_classifier
+
+    classify, kind = resolve_classifier()
+    assert callable(classify)
+    assert kind in ("bot", "port")
+
+
+# ---------------------------------------------------------------------------
 # llm plumbing
 # ---------------------------------------------------------------------------
 
