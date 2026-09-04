@@ -403,6 +403,45 @@ def test_hook_hands_a_single_hop_query_back_to_the_existing_dispatch():
     assert llm.calls == []
 
 
+def test_ask_prefix_is_stripped_before_anything_sees_it():
+    """The prefix must not reach the classifier or the agent as part of the
+    question, and a bare /ask forces nothing — there is no query to route."""
+    assert router.strip_ask_prefix("/ask NVDA 和 SMCI 谁更危险") == (
+        "NVDA 和 SMCI 谁更危险", True)
+    assert router.strip_ask_prefix("/ask：我持仓里哪只最危险") == (
+        "我持仓里哪只最危险", True)
+    assert router.strip_ask_prefix("NVDA 为什么涨") == ("NVDA 为什么涨", False)
+    assert router.strip_ask_prefix("/ask") == ("/ask", False)
+    assert router.route("/ask", mode="heuristic").path == "slash"
+
+
+def test_hook_honours_ask_on_a_query_the_router_would_not_take():
+    """/ask overrides the mode. "NVDA 为什么涨" is a textbook fast-path query,
+    and under unknown_only nothing at all routes — the prefix still wins, and
+    the agent receives the question without it."""
+    placeholder = _FakePlaceholder()
+    llm = ScriptedLLM([
+        LLMResponse(text="先看异动",
+                    tool_calls=[ToolCall("c1", "explain_move", {"ticker": "NVDA"}, "{}")]),
+        LLMResponse(text="NVDA 今日 +0.90%。"),
+    ])
+    seen: list[str] = []
+
+    def classifier(text):
+        seen.append(text)
+        return _parsed("explain_move", ticker="NVDA")
+
+    with _Env(V2_AGENT_ROUTING="unknown_only"):
+        handled, _parsed_out, text = _run(bot_bridge.telegram_hook(
+            "/ask NVDA 为什么涨", 1, placeholder, classifier=classifier,
+            registry=build_registry(), llm=llm, store=session.SessionStore()))
+
+    assert handled is True
+    assert seen == ["NVDA 为什么涨"], "分类器不该看到斜杠命令"
+    assert text == "NVDA 为什么涨"
+    assert placeholder.edits, "接手了就该改写占位消息"
+
+
 def test_hook_answers_a_multi_hop_query_and_edits_the_placeholder():
     placeholder = _FakePlaceholder()
     llm = ScriptedLLM([

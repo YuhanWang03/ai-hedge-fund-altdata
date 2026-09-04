@@ -54,6 +54,23 @@ class RouteDecision:
         return self.path == "agent"
 
 
+def strip_ask_prefix(text: str) -> tuple[str, bool]:
+    """Split the explicit escape hatch off the query. Returns (query, forced).
+
+    The prefix has to be *removed*, not just detected: "/ask NVDA 和 SMCI 谁更
+    危险" reaching the classifier and the agent verbatim asks them to interpret
+    a slash command as part of the question.
+
+    A bare "/ask" with nothing after it is not a forced query — there is nothing
+    to route — so it comes back unforced and takes its chances as a slash
+    command."""
+    stripped = (text or "").strip()
+    if not stripped.lower().startswith(ASK_PREFIX):
+        return stripped, False
+    rest = stripped[len(ASK_PREFIX):].lstrip(" \t:：，,")
+    return (rest, True) if rest else (stripped, False)
+
+
 def routing_mode() -> str:
     """Read the flag. Anything unrecognised degrades to 'off' — a typo in an env
     var must never silently enable a 10x-cost path in production."""
@@ -245,7 +262,8 @@ HEURISTIC_SIGNALS: tuple[tuple[str, Callable[[str, dict], bool], str], ...] = (
 # Routing
 # ---------------------------------------------------------------------------
 
-def route(text: str, parsed: dict | None = None, *, mode: str | None = None) -> RouteDecision:
+def route(text: str, parsed: dict | None = None, *, mode: str | None = None,
+          forced: bool = False) -> RouteDecision:
     """Decide the path for one query.
 
     Args:
@@ -258,8 +276,10 @@ def route(text: str, parsed: dict | None = None, *, mode: str | None = None) -> 
     parsed = parsed or {}
     stripped = (text or "").strip()
 
-    # Explicit escape always wins — a user who typed /ask meant it.
-    if stripped.lower().startswith(ASK_PREFIX):
+    # Explicit escape always wins — a user who typed /ask meant it. Callers that
+    # already stripped the prefix (the bot bridge does, so the classifier never
+    # sees it) pass forced=True instead.
+    if forced or strip_ask_prefix(stripped)[1]:
         return RouteDecision("agent", "explicit_ask", "用户用 /ask 显式要求 agent", mode)
 
     if stripped.startswith("/"):
