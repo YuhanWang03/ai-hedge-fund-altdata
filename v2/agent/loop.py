@@ -131,6 +131,10 @@ class AgentResult:
     draft: str = ""
     #: What rejected it: ungrounded figures and misattribution findings.
     draft_findings: list[str] = field(default_factory=list)
+    #: The rewrite came back as a fragment: it dropped more than half of the
+    #: figures the draft had traced. Recorded so that "the repair lost a fact"
+    #: can be told apart from "the repair sent back one sentence".
+    partial_rewrite: bool = False
     deduped_calls: int = 0
     capped_calls: int = 0
     forced_final: bool = False
@@ -277,6 +281,8 @@ def run_agent(
     repaired_figures: list[str] = []
     draft = ""
     draft_findings: list[str] = []
+    draft_traced: list[str] = []
+    partial_rewrite = False
     deduped_total = 0
     capped_total = 0
     error = ""
@@ -329,6 +335,12 @@ def run_agent(
                                   else attribution.AttributionReport())
             can_repair = config.grounding_repair and repairs < 1 and not budget_spent
 
+            # A fragment needs a body to have been dropped from: with one or
+            # two traced figures, losing them is "lost a fact", not "sent
+            # back one sentence".
+            if repairs and len(draft_traced) >= 3:
+                kept = sum(1 for figure in draft_traced if figure in answer)
+                partial_rewrite = kept * 2 < len(draft_traced)
             if report.ok and attribution_report.ok:
                 stop_reason = "final_answer"
                 forced_final = budget_spent
@@ -340,6 +352,7 @@ def run_agent(
                 break
             repairs += 1
             draft = answer
+            draft_traced = list(dict.fromkeys(report.traced))
             draft_findings = (
                 [f"无法溯源 {figure}" for figure in report.ungrounded]
                 + [f"{entity}←{figure}(实为 {'/'.join(owners)})"
@@ -411,6 +424,7 @@ def run_agent(
         repaired_figures=repaired_figures,
         draft=draft,
         draft_findings=draft_findings,
+        partial_rewrite=partial_rewrite,
         deduped_calls=deduped_total,
         capped_calls=capped_total,
         forced_final=forced_final,

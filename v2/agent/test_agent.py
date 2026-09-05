@@ -121,6 +121,11 @@ def test_the_repair_round_names_the_figures_that_were_fine():
     assert text.index("74.6") < text.index("-1,204.33"), "先说错的，再说要保留的"
     # Nothing traced → nothing to keep, no dangling sentence.
     assert "must stay" not in grounding.repair_instruction(grounding.check("估计 74.6%", ""))
+    # Measured 10×: the keep-list alone left the loss rate at 1 in 3 repairs,
+    # because the model answered "fix only these" with only the fixed
+    # sentence. It has to be told its reply is the whole answer.
+    assert "COMPLETE" in text and "replaces the draft" in text
+    assert "Fix only" not in text
 
 
 def test_filing_names_are_masked_before_cjk_text_too():
