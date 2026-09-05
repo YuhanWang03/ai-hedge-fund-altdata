@@ -26,6 +26,7 @@ import time  # noqa: E402
 
 from v2.agent.eval import runner  # noqa: E402
 from v2.agent.eval.cases import CASES, CATEGORIES  # noqa: E402
+from v2.agent.eval.holdout import HOLDOUT  # noqa: E402
 from v2.agent.llm import OpenAICompatLLM, build_llm, describe_provider  # noqa: E402
 
 
@@ -49,6 +50,7 @@ from v2.agent.llm import OpenAICompatLLM, build_llm, describe_provider  # noqa: 
 #   EVAL_CASES=c01,c02,m07             只跑指定 case（配 EVAL_REPEAT 用来看抖动）
 #
 #   EVAL_OUT=data/eval.json            JSON 输出路径
+#   EVAL_SET=holdout                   dev（默认，89 条）/ holdout（留出集）/ all
 #
 #   看抖动的标准跑法（6 条 × 10 次 ≈ 一次全量的 2/3 成本）：
 #     EVAL_MODES=production EVAL_CASES=c01,d06,k03,m07,r09,t04 EVAL_REPEAT=10 \
@@ -89,6 +91,9 @@ ONLY = _env_list("EVAL_CASES", None)
 LIMIT = _env_int("EVAL_LIMIT", None)
 FAILURES = _env_int("EVAL_FAILURES", 20)
 REPEAT = _env_int("EVAL_REPEAT", 1)
+SET = _env_str("EVAL_SET", "dev")
+
+CASE_SETS = {"dev": CASES, "holdout": HOLDOUT, "all": CASES + HOLDOUT}
 
 
 def _needs_llm(modes: list[str]) -> bool:
@@ -111,6 +116,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="打印多少条失败明细")
     parser.add_argument("--repeat", type=int, default=REPEAT,
                         help="每条 case 跑几次，用于区分真失败与抖动")
+    parser.add_argument("--set", default=SET, choices=sorted(CASE_SETS),
+                        help="dev 是路由和检查对着调过的 89 条；holdout 是没用来调过"
+                             "任何东西的 Telegram 实测问题——跑一次，不改代码")
     args = parser.parse_args(argv)
 
     # Load .env the same way the comparison CLI does. If python-dotenv is not
@@ -137,10 +145,10 @@ def main(argv: list[str] | None = None) -> int:
               "，或先 `set -a; source .env`。\n")
         modes = keep or ["baseline"]
 
-    cases = CASES
+    cases = CASE_SETS[args.set]
     if args.cases:
         wanted = {c.strip() for c in args.cases}
-        unknown = wanted - {c.id for c in CASES}
+        unknown = wanted - {c.id for c in cases}
         if unknown:
             parser.error(f"没有这些 case：{', '.join(sorted(unknown))}")
         cases = tuple(c for c in cases if c.id in wanted)
@@ -150,14 +158,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.limit:
         cases = cases[: args.limit]
 
-    print(f"评测集：{len(cases)} 条 · 模式：{', '.join(modes)}")
+    print(f"评测集：{args.set} · {len(cases)} 条 · 模式：{', '.join(modes)}"
+          + ("\n  留出集：这些问题没用来调过路由或检查。跑一次记下数字；"
+             "为了让某条通过而改代码，它就不再是留出集了。" if args.set == "holdout" else ""))
     if _needs_llm(modes):
         print(f"模型：{describe_provider()}")
     # Say which settings came from the environment. An `export EVAL_CASES=…`
     # left over from a flaky-case sweep turned the next "full" run into the
     # same 6 cases again, and only the case count gave it away.
     inherited = [f"{name}={os.environ[name]}" for name in
-                 ("EVAL_MODES", "EVAL_CASES", "EVAL_CATEGORY", "EVAL_LIMIT",
+                 ("EVAL_SET", "EVAL_MODES", "EVAL_CASES", "EVAL_CATEGORY", "EVAL_LIMIT",
                   "EVAL_REPEAT", "EVAL_OUT", "EVAL_WORKERS")
                  if os.environ.get(name, "").strip()]
     if inherited:
