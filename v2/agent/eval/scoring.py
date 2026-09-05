@@ -166,8 +166,15 @@ class CaseScore:
         drops the flagged fact along with the rest, and the case fails on
         「事实缺失」 — booked against the model. m07 and r09 both failed this
         way in the first 6×10 sweep, and the checker's own score stayed at 0.
+
+        A rewrite that keeps the facts and is *still* ungrounded (c02, v01
+        in the first full sweep: the same invented figures, twice) is not a
+        regression — the check was right and the model did not comply. Only
+        a final answer missing a fact, tool or forbidden-string assertion
+        the draft satisfied counts.
         """
-        return self.repairs > 0 and self.draft_facts_ok and not self.passed
+        return (self.repairs > 0 and self.draft_facts_ok
+                and bool(self.missing_facts or self.forbidden_hit or self.missing_tools))
 
     @property
     def passed(self) -> bool:

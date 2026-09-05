@@ -447,6 +447,18 @@ def test_a_rewrite_that_loses_the_drafts_facts_is_booked_against_the_check():
     row = runner.to_json([report])["cases"][0]
     assert row["draft"] == score.draft and row["repair_regressed"] is True
 
+    # A rewrite that keeps the facts but is still ungrounded is the model not
+    # complying, not the check regressing it.
+    def stubborn_factory():
+        return ScriptedLLM([
+            LLMResponse(tool_calls=[ToolCall("c1", "portfolio_view", {}, "{}")]),
+            LLMResponse(text="CRWD 占仓 22.4%，是第一大持仓；组合 beta 1.37。"),
+            LLMResponse(text="CRWD 占仓 22.4%，是第一大持仓；组合 beta 1.37。"),
+        ])
+    stubborn = runner.run_case(_CASE_BY_ID["r03"], runner.MODES["agent"],
+                               llm_factory=stubborn_factory)
+    assert not stubborn.passed and stubborn.repairs == 1 and not stubborn.repair_regressed
+
     # A rewrite that keeps the facts is a repair that worked, not a regression.
     def good_factory():
         return ScriptedLLM([
