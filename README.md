@@ -8,7 +8,7 @@ Built as a portfolio project to demonstrate end-to-end ownership of a multi-sour
 
 **Hero numbers**: 10 phases shipped · 6 scheduled pushes + on-demand bot · 24 NL intents · 5-layer defense · 490 sandbox tests · **~$22/month** total ops cost
 
-**Agent layer** ([`v2/agent/`](./v2/agent/README.md)): a model-driven tool-calling loop over the same 24 responders, plus a router that decides per query whether multi-step planning is worth its cost. Measured on an **89-case labelled evaluation set at 3 samples each**: **53% → 94%** pass rate at **55% of the full loop's tokens**, with **1 attribution false positive in 267 runs** and **0 stable failures**. 197 further tests.
+**Agent layer** ([`v2/agent/`](./v2/agent/README.md)): a model-driven tool-calling loop over the same 24 responders, plus a router that decides per query whether multi-step planning is worth its cost. Measured on an **89-case labelled evaluation set at 3 samples each**: **53% → 95%** pass rate at **54% of the full loop's tokens**; the production config (8 tool calls) holds **93%** at **42%**. Attribution false positives 0–1 in 267 runs. 205 further tests.
 
 ---
 
@@ -147,25 +147,24 @@ router that picks per query which path is worth paying for. Additive throughout:
 89 labelled queries in 10 categories, 3 samples each (267 runs). The tool layer is
 recorded, so the model is the only variable.
 
-| | single-hop (current) | **routed** (production shape) | full agent loop |
-|---|---|---|---|
-| **Pass rate** | 53% | **94%** | 93% |
-| Tool recall / fact recall | 70% / 63% | 98% / 96% | 99% / 98% |
-| Grounding | 100% | 99% | 98% |
-| **Attribution false positives** | — | **1 / 267** | 2 / 267 |
-| Tokens per case | 0 | **5,270** | 9,604 |
-| **Tokens per pass** | — | **5,629** | 10,298 |
-| Stable failures | — | — | **0** |
+| | single-hop (current) | **routed** (20 calls) | **production** (8 calls, live) | full agent loop |
+|---|---|---|---|---|
+| **Pass rate** | 53% | **95%** | 93% | 96% |
+| Tool recall / fact recall | 70% / 63% | 98% / 97% | 98% / 97% | 99% / 99% |
+| Grounding | 100% | 100% | 99% | 99% |
+| **Attribution false positives** | — | **0 / 267** | 1 / 267 | 1 / 267 |
+| Tokens per case | 0 | 5,249 | **3,941** | 9,710 |
+| **Tokens per pass** | — | 5,517 | **4,226** | 10,127 |
 
 ```
-single_lookup  100 / 100 /  98        multi_hop    29 /  88 /  93
-cost_trap      100 / 100 / 100        ranking      30 /  83 /  90
-honesty         86 / 100 / 100        compound      0 /  96 / 100
-causal          75 / 100 /  92        recovery      0 /  73 /  93
-dead_end         0 /  90 /  71        checker_stress 67 / 100 /  89
+single_lookup  100 / 100 / 100 / 100      multi_hop   29 /  90 /  88 /  95
+cost_trap      100 / 100 / 100 /  94      ranking     30 /  87 /  73 /  87
+honesty         86 /  95 / 100 / 100      compound     0 / 100 /  96 / 100
+causal          75 / 100 / 100 /  96      recovery     0 /  80 /  80 / 100
+dead_end         0 /  95 /  95 /  95      checker_stress 67 / 100 / 100 /  89
 ```
 
-**The router wins on both axes: 2pp higher pass rate at 54% of the cost.** Single-hop is perfect on the
+**The router is right, and so is the tighter live config.** Routed keeps 95% at 54% of the full loop's cost; production tightens to 8 calls and holds 93% at 42% — the 2pp lost all sit in `ranking`. Single-hop is perfect on the
 questions it was designed for and near-zero where an answer must span tools; routing
 captures the loop's upside while avoiding its downside on single-card questions —
 where the loop over-explores and then trips its own grounding check.
@@ -530,7 +529,7 @@ WantedBy=multi-user.target
 
 All 490 tests pass under `pytest` in the sandbox environment with no v2.data deps required (production-only deps are stubbed via sys.modules).
 
-**Agent layer: 197 further tests** (`python3 -m v2.agent.run_tests`) needing neither pytest nor any third-party package — the loop, router, checks and eval harness import nothing outside the standard library, and the model is scripted so "does a tool failure get recovered from" is an assertion rather than an anecdote.
+**Agent layer: 205 further tests** (`python3 -m v2.agent.run_tests`) needing neither pytest nor any third-party package — the loop, router, checks and eval harness import nothing outside the standard library, and the model is scripted so "does a tool failure get recovered from" is an assertion rather than an anecdote.
 
 ---
 

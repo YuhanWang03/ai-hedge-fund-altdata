@@ -692,6 +692,33 @@ def test_a_term_in_a_displayed_sum_is_cited_not_attributed():
         _records(("earnings_view", {"ticker": "NVDA"}, "NVDA beat +18.2%"))).ok
 
 
+def test_bare_bi_is_a_comparison_and_a_title_is_not_a_subject():
+    """Two from the first production-settings sweep.
+
+    「但基本面比 SMCI 健康：上次财报 EPS $1.04 vs 预期 $0.98」 — the subject is
+    CRWD, carried over from the previous clause; SMCI is what it is being
+    measured against. Bare 比 joins the benchmark leads, but not when it is the
+    tail of 占比／比例.
+
+    「三位高管（CFO、CEO、SVP Engineering）…合计套现约 $7.96M + $10.97M + $2.76M」
+    — SVP is a job title, and the terms of a dollar sum carry unit suffixes and
+    currency prefixes the sum rule had to learn to see through."""
+    from v2.agent import attribution
+
+    assert attribution.check(
+        "CRWD 权重最高。但基本面比 SMCI 健康：上次财报 EPS $1.04 vs 预期 $0.98。",
+        _records(("earnings_view", {"ticker": "CRWD"}, "EPS $1.04 vs 预期 $0.98"))).ok
+    assert attribution.check(
+        "三位高管（CFO、CEO、SVP Engineering）合计套现约 $7.96M + $10.97M + $2.76M = $21.69M。",
+        _records(("insider_view", {"ticker": "CRWD"},
+                  "CFO $7.96M · CEO $10.97M · SVP $2.76M"))).ok
+
+    # 占比 is not a comparison: a borrowed weight after it is still caught.
+    assert not attribution.check(
+        "NVDA 占比 18.2%。",
+        _records(("portfolio_view", {"ticker": "ARM"}, "ARM 18.2%"))).ok
+
+
 def test_a_comparison_operand_belongs_to_the_other_side():
     """「NVDA 的 EPS 更高（$1.31 vs $0.71），超预期也更大（+5.6% vs +2.9%）」 —
     every second number is AMD's, and nothing in that clause says so."""
