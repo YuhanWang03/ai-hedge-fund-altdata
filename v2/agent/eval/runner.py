@@ -121,6 +121,7 @@ def run_case(case: EvalCase, mode: Mode, *, llm_factory: Callable[[], Any]) -> C
                     list(result.attribution.evidence) + [""] * 8)),
             calls_by_tool=trajectory.calls_by_tool(),
             capped_calls=result.capped_calls,
+            refused_calls=trajectory.refused_calls,
             tool_calls=trajectory.tool_calls, llm_calls=trajectory.llm_calls,
             tokens=trajectory.prompt_tokens + trajectory.completion_tokens,
             elapsed_ms=result.elapsed_ms, path=path,
@@ -353,8 +354,9 @@ def render_overspend(report: SuiteReport, limit: int = 10) -> str:
             shape = " · ".join(f"{name}×{count}" for name, count in top)
             rest = len(score.calls_by_tool) - len(top)
             lines.append(f"        ↳ {shape}" + (f" …另 {rest} 个工具" if rest > 0 else "")
-                         + (f" · 被上限拦下 {score.capped_calls} 次"
-                            if score.capped_calls else ""))
+                         + (f" · 另有 {score.refused_calls} 次被拒（其中上限 "
+                            f"{score.capped_calls} 次，不计入上面的次数）"
+                            if score.refused_calls else ""))
     lines.append("")
     lines.append("  ↳ 那一行是每个工具各调了几次：一个工具扇出很多次是「深度」，"
                  "很多工具各调几次是「广度」——只有前者能被 per-tool 上限拦住。")
@@ -389,6 +391,7 @@ def to_json(reports: list[SuiteReport]) -> dict:
                 "ungrounded": list(s.ungrounded), "overspend": s.overspend,
                 "misattributed": list(s.misattributed),
                 "calls_by_tool": s.calls_by_tool, "capped_calls": s.capped_calls,
+                "refused_calls": s.refused_calls,
                 "ungrounded_kinds": s.ungrounded_kinds,
                 "tool_calls": s.tool_calls, "llm_calls": s.llm_calls,
                 "tokens": s.tokens, "elapsed_ms": s.elapsed_ms,

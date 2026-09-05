@@ -108,6 +108,10 @@ class CaseScore:
     calls_by_tool: dict[str, int] = field(default_factory=dict)
     #: Calls refused because the tool had hit its per-run cap.
     capped_calls: int = 0
+    #: Calls turned away before reaching a tool (duplicate, capped, malformed).
+    #: Kept out of ``tool_calls`` — a refusal costs nothing and must not inflate
+    #: the cost metric, least of all the one the cap exists to reduce.
+    refused_calls: int = 0
 
     tool_calls: int = 0
     llm_calls: int = 0
@@ -170,6 +174,7 @@ def score_case(
     misattributed: Iterable[str] = (),
     calls_by_tool: dict[str, int] | None = None,
     capped_calls: int = 0,
+    refused_calls: int = 0,
     tool_calls: int = 0,
     llm_calls: int = 0,
     tokens: int = 0,
@@ -203,6 +208,7 @@ def score_case(
         ungrounded_kinds=dict(ungrounded_kinds or {}), derived=derived,
         misattributed=tuple(misattributed),
         calls_by_tool=dict(calls_by_tool or {}), capped_calls=capped_calls,
+        refused_calls=refused_calls,
         tool_calls=tool_calls, llm_calls=llm_calls, tokens=tokens,
         elapsed_ms=elapsed_ms, overspend=tool_calls > case.max_tool_calls,
         path=path, path_correct=(not path or path == case.expected_path),
