@@ -137,6 +137,37 @@ def test_a_retraction_paragraph_is_stripped_before_the_checks():
     assert presentation.strip_deliberation(plain) == plain.strip()
 
 
+def test_one_empty_card_does_not_make_an_entity_empty():
+    """m07 collapsed to 2/10 with every failure a rewrite that refused all
+    three names. The draft was right; the check rejected it: summary(ARM)
+    returns no figures, explain_move(ARM) returns +7.42%, and the "entity
+    with no data" rule subtracted the wrong set (figure keys, not holders),
+    so ARM counted as empty and its own +7.42% was flagged. The registry is
+    the real one, so this stays a reproduction rather than a paraphrase."""
+    from v2.agent import attribution
+    from v2.agent.eval.fixtures import build_eval_registry
+    registry = build_eval_registry()
+    records = []
+    for name, args in [("summary", {"ticker": "ARM"}), ("summary", {"ticker": "PLTR"}),
+                       ("explain_move", {"ticker": "ARM"}), ("explain_move", {"ticker": "PLTR"})]:
+        r = registry.call(name, args)
+        assert r.ok
+        records.append((r.name, r.args, r.content, r.ok))
+    assert "未记录" in records[0][2], "前提：summary 对 ARM 是一张空卡"
+
+    draft = ("### ARM — 最强，+7.42%\n- 今日 **+7.42%**，成交量 3.4 倍（explain_move）\n"
+             "### PLTR — 最弱\n- 同期 SPY +0.40%，PLTR 相对强度 **-5.58pp**（explain_move）\n")
+    report = attribution.check(draft, records)
+    assert report.ok, report.summary()
+
+    # The rule itself still fires when the entity really has nothing: h04's
+    # shape, ARKQ with only an empty card and ARKK's weight written under it.
+    records = [("etf_view", {"ticker": "ARKQ"}, "ARKQ：无持仓数据", True),
+               ("etf_view", {"ticker": "ARKK"}, "ARKK 持仓\nTSLA 9.80%", True)]
+    report = attribution.check("ARKQ 第一大持仓 TSLA 9.80%", records)
+    assert not report.ok and ("ARKQ", "9.80") in report.empty_presented
+
+
 def test_the_market_relative_figure_is_claimed_by_exactly_one_tool():
     """r09 «TSLA 和 PLTR 哪个逆势更严重» forked on the first call in 2 of 10
     runs: moneyflow_view instead of explain_move. Both descriptions said

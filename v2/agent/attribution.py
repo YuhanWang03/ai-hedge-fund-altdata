@@ -404,11 +404,19 @@ def check(
     # answered with ARKK's holdings under ARKQ's name. Every figure is correctly
     # attributed to its own stock — the *frame* is what is false, and only the
     # emptiness of ARKQ's own result reveals it.
+    #
+    # An entity is empty only when *none* of its results carried a figure.
+    # This used to subtract ``set(owners)`` — the figure keys, not the holders
+    # — so nothing was ever subtracted, and one empty card was enough: m07's
+    # summary(ARM) returns 「fixture 模式未记录该 ticker」, explain_move(ARM)
+    # returns +7.42%, and the draft quoting +7.42% was rejected as ARM having
+    # no data. The rewrite then refused all three names. 8 runs in 10.
+    holders_of_anything = {h for hs in owners.values() for h in hs}
     empty_entities = {
         _entity_of(args)
         for _tool, args, content, ok in results
         if ok and _entity_of(args) and not extract_numbers(content)
-    } - set(owners) - {""}
+    } - holders_of_anything - {""}
 
     report = AttributionReport()
     body = _mask_filings(answer or "")
