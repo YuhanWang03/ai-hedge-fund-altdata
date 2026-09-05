@@ -68,7 +68,11 @@ def _env_list(name: str, default):
     return raw.replace(",", " ").split() if raw else default
 
 
-MODES = _env_list("EVAL_MODES", ["baseline", "routed", "agent"])
+# One default, owned by the runner. This used to be a second hardcoded list,
+# and the two drifted the first time the runner's changed: a `production` mode
+# was added to runner.DEFAULT_MODES, the sweep was run to measure it, and the
+# header said «baseline, routed, agent» — the whole run answered nothing.
+MODES = _env_list("EVAL_MODES", list(runner.DEFAULT_MODES))
 WORKERS = _env_int("EVAL_WORKERS", 4)
 # data/ 已在 .gitignore:31 —— 评测产物不会被误提交
 OUT = _env_str("EVAL_OUT", "data/eval.json")
