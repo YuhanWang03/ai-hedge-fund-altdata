@@ -192,6 +192,16 @@ def test_the_production_mode_measures_what_production_runs():
         assert getattr(mode.config, field) == getattr(live, field), field
     assert "production" in runner.DEFAULT_MODES
 
+    # …and the entry script must not keep its own copy of the default list. It
+    # did, and a sweep meant to measure this mode ran without it.
+    import ast
+    source = (pathlib.Path(__file__).resolve().parents[1] / "run_eval.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == "MODES" for t in node.targets):
+            assert "DEFAULT_MODES" in ast.unparse(node), "run_eval.MODES 必须引用 runner.DEFAULT_MODES"
+
 
 def test_baseline_leg_needs_no_model_and_is_deterministic():
     llm = ScriptedLLM([])
