@@ -68,6 +68,19 @@ class LLMClient(Protocol):
     ) -> LLMResponse: ...
 
 
+#: How many tries a 429 gets, and how long between them: 2, 4, 8, 16, 30, 30 s
+#: — a tokens-per-minute window has to actually roll over.
+RATE_LIMIT_ATTEMPTS = 6
+RATE_LIMIT_CAP_SECONDS = 30.0
+
+
+def backoff_seconds(attempt: int, *, rate_limited: bool) -> float:
+    """Sleep before retry number ``attempt`` (1-based)."""
+    if rate_limited:
+        return min(RATE_LIMIT_CAP_SECONDS, 2.0 ** attempt)
+    return 2.0 ** (attempt - 1)
+
+
 def _redact(text: str, secret: str) -> str:
     """Replace a credential inside an error message with a stub."""
     if secret and secret in text:
@@ -144,7 +157,9 @@ class OpenAICompatLLM:
 
         started = time.time()
         last_error: Exception | None = None
-        for attempt in range(self.max_retries):
+        attempts = self.max_retries
+        attempt = 0
+        while attempt < attempts:
             try:
                 request = urllib.request.Request(
                     f"{self.base_url}/chat/completions",
@@ -159,14 +174,20 @@ class OpenAICompatLLM:
                 # 4xx other than rate-limit will not fix themselves on retry.
                 if exc.code < 500 and exc.code != 429:
                     raise last_error from exc
+                if exc.code == 429:
+                    # A tokens-per-minute limit clears on its own; 1 s, 2 s was
+                    # not enough for it to. A 200k-TPM account turned a full
+                    # sweep into 27 `error` flakes and a 63% agent score.
+                    attempts = max(attempts, RATE_LIMIT_ATTEMPTS)
             except Exception as exc:  # noqa: BLE001 — network flakiness
                 # Never let the credential into a message that ends up in an
                 # eval report or a chat log.
                 last_error = LLMError(_redact(str(exc), self.api_key))
-            if attempt < self.max_retries - 1:
-                time.sleep(2 ** attempt)
+            attempt += 1
+            if attempt < attempts:
+                time.sleep(backoff_seconds(attempt, rate_limited=attempts > self.max_retries))
 
-        raise LLMError(f"LLM call failed after {self.max_retries} attempts: {last_error}")
+        raise LLMError(f"LLM call failed after {attempts} attempts: {last_error}")
 
     @staticmethod
     def _to_response(data: dict[str, Any], latency_ms: int) -> LLMResponse:

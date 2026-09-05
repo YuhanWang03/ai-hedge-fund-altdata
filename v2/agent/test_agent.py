@@ -142,6 +142,43 @@ def test_the_repair_round_names_the_figures_that_were_fine():
     assert "Fix only" not in text
 
 
+def test_a_ticker_glued_to_cjk_text_is_still_a_mention():
+    """gpt-4.1-mini's first sweep: 「AMD（-0.09）和TSLA（-0.21）」 flagged
+    AMD←-0.21. `\\b` does not fire between 和 and TSLA, the mention was
+    missed, and the figure went to the nearest ticker that was seen.
+    deepseek-chat puts a space there, so fifteen rounds never hit it."""
+    from v2.agent import attribution
+    records = [("moneyflow_view", {"ticker": t}, f"💧 {t} 资金流\n· CMF(20) {v}", True)
+               for t, v in (("CRWD", "-0.18"), ("AMD", "-0.09"), ("TSLA", "-0.21"),
+                            ("SMCI", "-0.31"), ("AAPL", "+0.11"), ("MSFT", "+0.14"))]
+    answer = ("持仓里资金流出的有CRWD（-0.18）、AMD（-0.09）和TSLA（-0.21）。"
+              "SMCI也在流出（-0.31）。MSFT（+0.14）和AAPL（+0.11）在流入。")
+    assert [m for m, _ in attribution._mentions(answer)] == \
+        ["CRWD", "AMD", "TSLA", "SMCI", "MSFT", "AAPL"]
+    assert attribution.check(answer, records).ok
+
+    # x10, same sweep: 「COIN（7.20%）和ROKU（4.10%）」 → COIN←4.10.
+    records = [("etf_view", {"symbol": "ARKK"},
+                "🚀 ARKK\n· 前三：TSLA 9.80% · COIN 7.20% · ROKU 4.10%", True)]
+    assert attribution.check("ARKK前三大持仓是TSLA（9.80%）、COIN（7.20%）和ROKU（4.10%）。",
+                             records).ok
+    # Still not a mention: a ticker-shaped run inside a longer ASCII word.
+    assert attribution._mentions("ABCDEFG 12TSLA") == [], "六个以上字母、或紧贴数字的，不是 ticker"
+
+
+def test_rate_limits_get_a_patient_backoff():
+    """A tokens-per-minute 429 clears when the minute rolls over. 1 s, 2 s
+    did not wait for that; a 200k-TPM account produced 27 error-kind flakes
+    in one sweep."""
+    from v2.agent.llm import RATE_LIMIT_ATTEMPTS, backoff_seconds
+    assert RATE_LIMIT_ATTEMPTS >= 5
+    waits = [backoff_seconds(i, rate_limited=True) for i in range(1, RATE_LIMIT_ATTEMPTS)]
+    assert waits[0] >= 2 and sum(waits) >= 60, waits
+    assert max(waits) <= 30
+    # Ordinary errors keep the short ladder.
+    assert [backoff_seconds(i, rate_limited=False) for i in (1, 2)] == [1.0, 2.0]
+
+
 def test_an_indicator_parameter_is_not_a_figure():
     """c07 wrote a table header 「资金流 CMF(20)」 after naming SMH, and the
     check attributed 20 to SMH (it belongs to every moneyflow card). The

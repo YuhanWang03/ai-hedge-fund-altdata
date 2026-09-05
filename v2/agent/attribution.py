@@ -42,8 +42,14 @@ _ENTITY_ARGS = ("ticker", "symbol", "manager")
 #: the ticker alternative too, so every 2-5 letter word became an entity — "Form",
 #: "Item", "paper" and "Tier" all showed up as owners in the first live run, and
 #: correct answers were flagged. The aliases carry their own case variants instead.
+# Not `\b`: CJK characters are \w, so `\b` never fires between 「和」 and
+# 「TSLA」. deepseek-chat writes 「和 TSLA」 with a space and the bug stayed
+# hidden for fifteen rounds; gpt-4.1-mini writes 「和TSLA（-0.21）」, the
+# mention was missed, and -0.21 went to the nearest ticker the regex *did*
+# see — AMD. Three false positives in its first sweep, all this shape.
 _ENTITY_MENTION = re.compile(
-    r"\b[A-Z]{2,5}\b|巴菲特|伯克希尔|木头姐|[Bb]uffett|[Bb]urry|BERKSHIRE")
+    r"(?<![A-Za-z0-9])[A-Z]{2,5}(?![A-Za-z0-9])"
+    r"|巴菲特|伯克希尔|木头姐|[Bb]uffett|[Bb]urry|BERKSHIRE")
 
 #: Filings, dates, durations and window sizes are masked by the shared
 #: ``grounding.mask_non_quantities`` — one definition for both checks, so they
