@@ -301,6 +301,48 @@ def test_failed_tool_does_not_end_the_run():
     assert "SimulatedToolFailure" in observations
 
 
+def test_one_tool_cannot_be_called_more_than_its_cap():
+    """A hard stop, not a hint — rounds 10 and 11 established that a
+    description changes *which* tool is picked and never *whether* one more is
+    called, because the loop gives the model no "enough" signal to respond to.
+
+    Refused the same way every other bad call is: as an observation the model
+    can read and act on, not an exception. And the refusal says the retry will
+    keep failing, so the budget does not go on the same wall twice.
+    """
+    calls = [_call("explain_move", i, ticker=t) for i, t in enumerate(
+        ("CRWD", "NVDA", "MSFT", "AMD", "TSLA", "AAPL", "SMCI", "GOOGL", "PLTR"))]
+    llm = ScriptedLLM([_acts(*calls), _says("CRWD 占仓 22.4%。")])
+    result = run_agent("每只持仓为什么动", llm=llm, registry=_registry(),
+                       config=AgentConfig(max_calls_per_tool=8))
+
+    assert result.capped_calls == 1, "第 9 次该被拦下"
+    assert result.trajectory.calls_by_tool()["explain_move"] == 9
+    refused = [r for s in result.trajectory.steps for r in s.results
+               if r.error_kind == "tool_call_cap"]
+    assert len(refused) == 1
+    assert "per-tool limit" in refused[0].content
+    assert "keep failing" in refused[0].content
+
+
+def test_the_histogram_separates_depth_from_breadth():
+    """25 tool calls in a run says nothing about *why*. One tool fanned out 25
+    ways and eight tools called three times each need different fixes, and only
+    the first is reachable by a per-tool cap — so the cap was shipped together
+    with the measurement that says whether it can help."""
+    llm = ScriptedLLM([
+        _acts(_call("explain_move", 0, ticker="CRWD"),
+              _call("explain_move", 1, ticker="NVDA"),
+              _call("earnings_view", 2, ticker="CRWD")),
+        _says("CRWD 占仓 22.4%。"),
+    ])
+    result = run_agent("看一下", llm=llm, registry=_registry())
+
+    assert result.trajectory.calls_by_tool() == {"explain_move": 2, "earnings_view": 1}
+    assert list(result.trajectory.calls_by_tool())[0] == "explain_move", "最多的排最前"
+    assert result.stats()["calls_by_tool"]["explain_move"] == 2
+
+
 def test_repeated_identical_call_is_suppressed():
     llm = ScriptedLLM([
         _acts(_call("portfolio_view")),

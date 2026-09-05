@@ -88,6 +88,16 @@ class AgentConfig:
 
     max_steps: int = 8
     max_tool_calls: int = 20
+    #: How many times one tool may be called in a run. The largest collection
+    #: these tools fan out over is the 8-position portfolio, so eight lets every
+    #: legitimate per-holding sweep through and stops the runs that kept going:
+    #: r07 spent 25 calls on a three-name watchlist.
+    #:
+    #: A hard limit rather than a hint, on purpose. Two experiments (rounds 10
+    #: and 11) established that a description can change *which* tool is picked
+    #: and never *whether* one more is called — the loop has no "enough" signal
+    #: for the model to respond to, so the stop has to be imposed.
+    max_calls_per_tool: int = 8
     max_seconds: float = 150.0
     parallel: bool = True
     max_parallel: int = 6
@@ -116,6 +126,7 @@ class AgentResult:
     repairs: int = 0
     repaired_figures: list[str] = field(default_factory=list)
     deduped_calls: int = 0
+    capped_calls: int = 0
     forced_final: bool = False
     error: str = ""
 
@@ -131,6 +142,8 @@ class AgentResult:
                              + len(self.attribution.empty_presented),
             "repairs": self.repairs,
             "deduped_calls": self.deduped_calls,
+            "capped_calls": self.capped_calls,
+            "calls_by_tool": self.trajectory.calls_by_tool(),
             "forced_final": self.forced_final,
         })
         return merged
@@ -163,8 +176,10 @@ def _execute_calls(
     no equivalent because it never issues more than one call per message.
     """
     seen = trajectory.previous_signatures()
+    used = trajectory.calls_by_tool()
     planned: list[tuple[ToolCall, ToolResult | None]] = []
     deduped = 0
+    capped = 0
 
     for call in calls:
         if call.parse_error:
@@ -174,6 +189,20 @@ def _execute_calls(
                 error_kind="bad_json",
             )))
             continue
+        if used.get(call.name, 0) >= config.max_calls_per_tool:
+            capped += 1
+            planned.append((call, ToolResult(
+                name=call.name, args=call.arguments, ok=False,
+                content=(f"'{call.name}' has already run "
+                         f"{config.max_calls_per_tool} times in this session, "
+                         "which is the per-tool limit. Answer from what those "
+                         "calls returned, or use a different tool — calling "
+                         "this one again will keep failing."),
+                error_kind="tool_call_cap",
+            )))
+            continue
+        used[call.name] = used.get(call.name, 0) + 1
+
         signature = trajectory.call_signature(call)
         if signature in seen:
             deduped += 1
@@ -207,7 +236,7 @@ def _execute_calls(
     for result in finished:
         _emit("agent_tool_result", tool=result.name, ok=result.ok,
               elapsed_ms=result.elapsed_ms, error_kind=result.error_kind)
-    return finished, deduped
+    return finished, deduped, capped
 
 
 def run_agent(
@@ -241,6 +270,7 @@ def run_agent(
     repairs = 0
     repaired_figures: list[str] = []
     deduped_total = 0
+    capped_total = 0
     error = ""
     forced_final = False
     report = grounding.GroundingReport()
@@ -328,9 +358,11 @@ def run_agent(
             (response.text or "").strip()[:160] or f"调用 {len(tool_names)} 个工具",
             tools=tool_names))
 
-        results, deduped = _execute_calls(response.tool_calls, registry, trajectory, config)
+        results, deduped, capped = _execute_calls(
+            response.tool_calls, registry, trajectory, config)
         step.results = results
         deduped_total += deduped
+        capped_total += capped
 
         failed = [r.name for r in results if not r.ok]
         _notify(on_step, StepEvent(
@@ -363,6 +395,7 @@ def run_agent(
         repairs=repairs,
         repaired_figures=repaired_figures,
         deduped_calls=deduped_total,
+        capped_calls=capped_total,
         forced_final=forced_final,
         error=error,
     )

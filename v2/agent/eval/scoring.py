@@ -102,6 +102,13 @@ class CaseScore:
     #: never looked at.
     misattributed: tuple[str, ...] = ()
 
+    #: tool name -> times called in this run. Overspend says a run used 25
+    #: calls; only this says whether that was one tool fanned out 25 ways or
+    #: eight tools called three times each — and those have different fixes.
+    calls_by_tool: dict[str, int] = field(default_factory=dict)
+    #: Calls refused because the tool had hit its per-run cap.
+    capped_calls: int = 0
+
     tool_calls: int = 0
     llm_calls: int = 0
     tokens: int = 0
@@ -161,6 +168,8 @@ def score_case(
     ungrounded_kinds: dict[str, list[str]] | None = None,
     derived: int = 0,
     misattributed: Iterable[str] = (),
+    calls_by_tool: dict[str, int] | None = None,
+    capped_calls: int = 0,
     tool_calls: int = 0,
     llm_calls: int = 0,
     tokens: int = 0,
@@ -193,6 +202,7 @@ def score_case(
         forbidden_hit=forbidden_hit, ungrounded=tuple(ungrounded),
         ungrounded_kinds=dict(ungrounded_kinds or {}), derived=derived,
         misattributed=tuple(misattributed),
+        calls_by_tool=dict(calls_by_tool or {}), capped_calls=capped_calls,
         tool_calls=tool_calls, llm_calls=llm_calls, tokens=tokens,
         elapsed_ms=elapsed_ms, overspend=tool_calls > case.max_tool_calls,
         path=path, path_correct=(not path or path == case.expected_path),
