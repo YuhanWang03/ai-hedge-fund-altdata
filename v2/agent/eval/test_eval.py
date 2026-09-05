@@ -24,6 +24,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from v2.agent.eval import runner  # noqa: E402
 from v2.agent.eval.cases import CASES, CATEGORIES, CLASSIFIER_EXTRAS  # noqa: E402
+from v2.agent.eval.holdout import HOLDOUT, HOLDOUT_EXTRAS  # noqa: E402
 from v2.agent.eval.fixtures import EVAL_FIXTURES, build_eval_registry  # noqa: E402
 from v2.agent.eval.scoring import (  # noqa: E402
     SuiteReport, fact_present, normalise, score_case,
@@ -32,6 +33,9 @@ from v2.agent.llm import LLMResponse, ScriptedLLM, ToolCall  # noqa: E402
 from v2.agent.registry import SPECS_BY_NAME  # noqa: E402
 
 _CASE_BY_ID = {c.id: c for c in CASES}
+#: The answer-key checks apply to the held-out set too: a label error there is
+#: worse, because the number it produces is the one meant to be trusted most.
+_ALL_CASES = CASES + HOLDOUT
 
 
 # ---------------------------------------------------------------------------
@@ -550,7 +554,7 @@ def test_every_asserted_fact_comes_from_a_tool_the_case_requires():
     was the second kind, asserting a figure only ``explain_move`` produces.
     """
     unreachable = []
-    for case in CASES:
+    for case in _ALL_CASES:
         if not case.must_call:
             continue
         corpus = _fixture_corpus(case.must_call)
@@ -572,7 +576,7 @@ def test_every_asserted_fact_exists_in_the_fixtures():
     """
     corpus = _fixture_corpus()
     unreachable = []
-    for case in CASES:
+    for case in _ALL_CASES:
         for fact in case.facts:
             if not any(normalise(form) in corpus for form in fact):
                 unreachable.append(f"{case.id}: {fact[0]}")
@@ -640,7 +644,7 @@ def test_no_case_can_pass_without_asserting_anything():
     of these survived the first draft and were only caught when the baseline
     scored suspiciously well on questions it cannot answer.
     """
-    vacuous = [c.id for c in CASES
+    vacuous = [c.id for c in _ALL_CASES
                if not c.facts and not c.behaviors and not c.forbidden]
     assert not vacuous, "这些 case 没有任何断言，必然空过：" + ", ".join(vacuous)
 
@@ -659,7 +663,7 @@ def test_forbidden_strings_belong_to_a_different_entity():
     requirement as a behaviour ("did it admit the gap") instead.
     """
     offenders = []
-    for case in CASES:
+    for case in _ALL_CASES:
         if not case.forbidden:
             continue
         entity = case.ticker or case.extra.get("etf") or case.extra.get("manager")
@@ -670,7 +674,7 @@ def test_forbidden_strings_belong_to_a_different_entity():
 
 def test_every_required_tool_exists():
     unknown = []
-    for case in CASES:
+    for case in _ALL_CASES:
         for tool in case.must_call + case.wasteful_tools + case.must_not_call:
             if tool not in SPECS_BY_NAME:
                 unknown.append(f"{case.id}: {tool}")
@@ -678,25 +682,41 @@ def test_every_required_tool_exists():
 
 
 def test_case_ids_are_unique_and_categories_known():
-    ids = [c.id for c in CASES]
+    ids = [c.id for c in _ALL_CASES]
     assert len(ids) == len(set(ids))
-    assert {c.category for c in CASES} <= set(CATEGORIES)
-    assert {c.expected_path for c in CASES} <= {"single_hop", "agent", "slash"}
+    assert {c.category for c in _ALL_CASES} <= set(CATEGORIES)
+    assert {c.expected_path for c in _ALL_CASES} <= {"single_hop", "agent", "slash"}
 
 
 def test_classifier_extras_reference_real_cases_and_fields():
     known_fields = {"manager", "etf", "release_type", "period", "days_horizon",
                     "days_back", "target_price", "direction"}
-    for case_id, extra in CLASSIFIER_EXTRAS.items():
-        assert case_id in _CASE_BY_ID, case_id
-        assert set(extra) <= known_fields, f"{case_id}: {set(extra) - known_fields}"
+    holdout_ids = {c.id for c in HOLDOUT}
+    for extras, ids in ((CLASSIFIER_EXTRAS, set(_CASE_BY_ID)), (HOLDOUT_EXTRAS, holdout_ids)):
+        for case_id, extra in extras.items():
+            assert case_id in ids, case_id
+            assert set(extra) <= known_fields, f"{case_id}: {set(extra) - known_fields}"
+
+
+def test_the_holdout_set_repeats_no_development_query():
+    """A held-out case that is a development case under a new id measures
+    nothing. Compared with spaces and terminal punctuation removed, because
+    「NVDA为什么涨？」 is the user's spelling of s01 and *that* is what the
+    holdout is for — but 「我持仓里哪只最危险」 verbatim is r01."""
+    def key(q: str) -> str:
+        return q.replace(" ", "").rstrip("？?。!！")
+    dev = {key(c.query): c.id for c in CASES}
+    repeats = [f"{c.id} = {dev[key(c.query)]}" for c in HOLDOUT if key(c.query) in dev]
+    # x01 is the one deliberate near-duplicate: s01 as actually typed.
+    assert repeats == ["x01 = s01"], repeats
+    assert all(c.id.startswith("x") for c in HOLDOUT), "留出集 id 以 x 开头，一眼能认出来"
 
 
 def test_registry_can_serve_every_single_hop_case():
     """The fast path must actually reach a tool for each case labelled single_hop."""
     registry = build_eval_registry()
     broken = []
-    for case in CASES:
+    for case in _ALL_CASES:
         if case.expected_path != "single_hop" or not case.must_call:
             continue
         tool = case.must_call[0]

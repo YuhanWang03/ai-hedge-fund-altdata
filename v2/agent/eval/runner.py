@@ -30,6 +30,7 @@ from typing import Any, Callable
 from v2.agent import grounding, router
 from v2.agent.baseline import run_baseline
 from v2.agent.eval.cases import CASES, EvalCase
+from v2.agent.eval.holdout import HOLDOUT
 from v2.agent.eval.fixtures import build_eval_registry
 from v2.agent.eval.scoring import CaseScore, SuiteReport, score_case
 from v2.agent.loop import AgentConfig, run_agent
@@ -323,7 +324,7 @@ def render_failures(report: SuiteReport, limit: int = 20) -> str:
     if not failures:
         lines.append("  无失败。")
         return "\n".join(lines)
-    case_by_id = {c.id: c for c in CASES}
+    case_by_id = {c.id: c for c in CASES + HOLDOUT}
     for score in failures[:limit]:
         case = case_by_id.get(score.case_id)
         passed, total = stability.get(score.case_id, (0, 1))
@@ -445,7 +446,7 @@ def render_overspend(report: SuiteReport, limit: int = 10) -> str:
     if not over:
         lines.append("  无。")
         return "\n".join(lines)
-    case_by_id = {c.id: c for c in CASES}
+    case_by_id = {c.id: c for c in CASES + HOLDOUT}
     for score in over[:limit]:
         case = case_by_id.get(score.case_id)
         lines.append(f"  · [{score.case_id}] {case.query if case else ''}"
@@ -474,7 +475,7 @@ def render_routing(report: SuiteReport) -> str:
     lines = [_RULE, "【路由】", _RULE,
              f"  准确率 {report.summary()['routing_accuracy']:.0%}"
              f"（{report.total - len(wrong)}/{report.total}）"]
-    case_by_id = {c.id: c for c in CASES}
+    case_by_id = {c.id: c for c in CASES + HOLDOUT}
     for score in wrong[:12]:
         case = case_by_id.get(score.case_id)
         lines.append(f"  ✗ [{score.case_id}] {case.query if case else ''}"
