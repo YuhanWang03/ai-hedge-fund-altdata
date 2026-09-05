@@ -53,9 +53,19 @@ MODES: dict[str, Mode] = {
                             AgentConfig(grounding_repair=False), "关闭溯源重写"),
     "agent_tight": Mode("agent_tight", "agent",
                         AgentConfig(max_steps=3, max_tool_calls=4), "预算收紧"),
+    # What the bot actually runs with. Every sweep so far measured the loop at
+    # its harness default of 20 calls; production caps it at 8. So the
+    # overspend being chased (17–21% at 20 calls) is behaviour production never
+    # exhibits, and the question that matters — what does the 8-call cap cost
+    # in pass rate — had never been asked. The numbers must match
+    # ``bot_bridge.production_config()``'s defaults; a test holds them together.
+    "production": Mode("production", "routed",
+                       AgentConfig(max_steps=5, max_tool_calls=8,
+                                   max_calls_per_tool=8, max_seconds=90.0),
+                       "生产配置（路由 + 5 步 / 8 次调用）"),
 }
 
-DEFAULT_MODES = ("baseline", "routed", "agent")
+DEFAULT_MODES = ("baseline", "routed", "production", "agent")
 
 
 def _parsed(case: EvalCase) -> dict[str, Any]:

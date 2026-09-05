@@ -171,6 +171,28 @@ def test_report_aggregates_and_prices_each_pass():
 # runner
 # ---------------------------------------------------------------------------
 
+def test_the_production_mode_measures_what_production_runs():
+    """Every sweep before this ran the loop at 20 calls; the bot runs it at 8.
+    The overspend being chased was behaviour production never exhibits, and
+    「what does the 8-call cap cost」 had never been measured. This mode exists
+    to ask that, so its numbers must not drift from the bot's."""
+    import os
+    from v2.agent import bot_bridge
+
+    saved = {k: os.environ.pop(k) for k in list(os.environ)
+             if k.startswith("V2_AGENT_MAX_")}
+    try:
+        live = bot_bridge.production_config()
+    finally:
+        os.environ.update(saved)
+
+    mode = runner.MODES["production"]
+    assert mode.kind == "routed", "生产走的是路由，不是裸 agent"
+    for field in ("max_steps", "max_tool_calls", "max_calls_per_tool", "max_seconds"):
+        assert getattr(mode.config, field) == getattr(live, field), field
+    assert "production" in runner.DEFAULT_MODES
+
+
 def test_baseline_leg_needs_no_model_and_is_deterministic():
     llm = ScriptedLLM([])
     first = runner.run_case(_CASE_BY_ID["s06"], runner.MODES["baseline"],
