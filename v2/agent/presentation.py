@@ -40,7 +40,16 @@ _HEADING = re.compile(r"^[ \t]*#{1,6}[ \t]+\S", re.M)
 #: is a normal way to open an answer, while 让我 alone is the model narrating.
 _DELIBERATION = re.compile(
     r"让我(?!们)|我需要|我应该|我先|我来|用户(?:问|想问|说|的问题)|你说得对"
-    r"|我犯了|我此前|我不该|重新核对|直接询问|澄清一下|让我直接")
+    r"|我犯了|我此前|我不该|重新核对|直接询问|澄清一下|让我直接"
+    r"|上一条回复|上一版|之前的回答|我收回|随口编|张冠李戴了|初稿")
+
+#: A repair round talking about the answer it is replacing. The user never saw
+#: that draft, so a paragraph about it carries nothing for them — and it
+#: carries the rejected figure: 「上一条回复里的 400 是我随口编的，我收回」
+#: re-states the very number the check refused, and the rewrite fails again on
+#: it. Dropped when it is the opening paragraph and a real answer follows.
+_RETRACTION = re.compile(r"上一条回复|上一版|之前的回答|我收回|随口编|张冠李戴了|初稿")
+_PARAGRAPH_END = re.compile(r"\n[ \t]*\n")
 
 #: A single opening sentence of process narration, with no rule or heading after
 #: it. The marked case is handled above; this is the unmarked one, and it kept
@@ -80,6 +89,13 @@ def strip_deliberation(text: str) -> str:
                 and len(preamble) <= MAX_PREAMBLE
                 and _DELIBERATION.search(preamble)):
             return remainder
+
+    match = _PARAGRAPH_END.search(body)
+    if match:
+        first, rest = body[: match.start()], body[match.end():].strip()
+        if (len(first) <= MAX_PREAMBLE and _RETRACTION.search(first)
+                and len(rest) >= MIN_REMAINDER):
+            return rest
 
     match = _OPENER_END.search(body)
     if match:

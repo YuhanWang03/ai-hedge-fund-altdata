@@ -196,6 +196,10 @@ def main(argv: list[str] | None = None) -> int:
         if report.mode != "baseline":
             print()
             print(runner.render_attribution(report))
+            block = runner.render_repairs(report)
+            if block:
+                print()
+                print(block)
     print()
     print(runner.render_stability(reports[-1]))
     if reports[-1].repeat > 1:

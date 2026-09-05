@@ -132,6 +132,14 @@ class CaseScore:
     #: The final answer text. Not scored here (every assertion above already
     #: is); recorded so a wording flake can be read instead of guessed at.
     answer: str = ""
+    #: Repair rounds taken (0 or 1), the answer the checks rejected, and why.
+    repairs: int = 0
+    draft: str = ""
+    draft_findings: tuple[str, ...] = ()
+    #: Whether the *draft* carried every fact the case asks for and none of
+    #: the forbidden ones — the answer-key part of the score, applied to the
+    #: text the checks refused.
+    draft_facts_ok: bool = False
 
     @property
     def answer_correct(self) -> bool:
@@ -149,6 +157,19 @@ class CaseScore:
         return self.answer_correct and bool(self.misattributed)
 
     @property
+    def repair_regressed(self) -> bool:
+        """The draft had the facts; the rewrite the checks demanded lost them.
+
+        This is the failure the false-positive axis could not see. A warning
+        on a *final* answer that is correct counts as the check's error; a
+        warning on a draft that is correct triggers a rewrite, the rewrite
+        drops the flagged fact along with the rest, and the case fails on
+        「事实缺失」 — booked against the model. m07 and r09 both failed this
+        way in the first 6×10 sweep, and the checker's own score stayed at 0.
+        """
+        return self.repairs > 0 and self.draft_facts_ok and not self.passed
+
+    @property
     def passed(self) -> bool:
         return self.answer_correct and not self.misattributed
 
@@ -156,6 +177,12 @@ class CaseScore:
         """The single most actionable reason, for the per-case failure list."""
         if self.error:
             return f"运行错误：{self.error}"
+        if self.repair_regressed:
+            return (f"重写丢了事实（初稿事实齐全，被打回：{'；'.join(self.draft_findings[:4])}）"
+                    f" → {self._own_reason()}")
+        return self._own_reason()
+
+    def _own_reason(self) -> str:
         if self.tool_recall < 1.0:
             return f"工具漏调：{', '.join(self.missing_tools)}"
         if self.violations:
@@ -192,6 +219,9 @@ def score_case(
     stop_reason: str = "",
     error: str = "",
     trace: Iterable[str] = (),
+    repairs: int = 0,
+    draft: str = "",
+    draft_findings: Iterable[str] = (),
 ) -> CaseScore:
     called = set(tools_called)
 
@@ -207,6 +237,10 @@ def score_case(
 
     haystack = normalise(answer)
     forbidden_hit = tuple(f for f in case.forbidden if normalise(f) in haystack)
+
+    draft_facts_ok = bool(draft) and all(
+        fact_present(forms, draft) for forms in required) and not any(
+        normalise(f) in normalise(draft) for f in case.forbidden)
 
     return CaseScore(
         case_id=case.id, category=case.category, mode=mode,
@@ -224,6 +258,8 @@ def score_case(
         path=path, path_correct=(not path or path == case.expected_path),
         stop_reason=stop_reason, error=error,
         trace=tuple(trace), answer=answer,
+        repairs=repairs, draft=draft, draft_findings=tuple(draft_findings),
+        draft_facts_ok=draft_facts_ok,
     )
 
 
@@ -420,6 +456,11 @@ class SuiteReport:
             # on the table for the last nine rounds.
             "false_misattribution_rate": _mean(
                 [1.0 if s.false_misattribution else 0.0 for s in self.scores]),
+            "repair_rate": _mean([1.0 if s.repairs else 0.0 for s in self.scores]),
+            # The check's *other* error rate: rewrites it demanded that lost
+            # facts the draft had. Invisible to false_misattribution_rate.
+            "repair_regression_rate": _mean(
+                [1.0 if s.repair_regressed else 0.0 for s in self.scores]),
             "mean_tool_calls": _mean([float(s.tool_calls) for s in self.scores]),
             "mean_llm_calls": _mean([float(s.llm_calls) for s in self.scores]),
             "total_tokens": int(sum(tokens)),
@@ -443,6 +484,10 @@ class SuiteReport:
 
     def failures(self) -> list[CaseScore]:
         return [s for s in self.scores if not s.passed]
+
+    def repair_regressions(self) -> list[CaseScore]:
+        """Runs whose draft had the facts and whose rewrite lost them."""
+        return [s for s in self.scores if s.repair_regressed]
 
     def false_misattributions(self) -> list[tuple[str, tuple[str, ...]]]:
         """(case id, findings) for every warning raised on a correct answer."""

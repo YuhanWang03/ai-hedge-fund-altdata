@@ -107,6 +107,36 @@ def test_the_schema_does_not_carry_prices():
         s.cost_hint for s in TOOL_SPECS) >= 10
 
 
+def test_filing_names_are_masked_before_cjk_text_too():
+    """d06 «你能帮你做什么» failed 3/10 on numbers that are not quantities:
+    「机构13F持仓」 left a bare 13 behind because `\\b` does not fire between
+    F and a CJK character. A capability answer calls no tool, so every
+    surviving digit is ungrounded by construction."""
+    for text in ("机构13F持仓", "机构 13F 持仓", "13F/13D", "8-K重大事件", "10-Q季报",
+                 "截至2026-09-05收盘", "30秒超时", "财报日09-30"):
+        assert grounding.check(text, "").ungrounded == [], text
+    # The mask must not swallow real figures that merely start with the same digits.
+    assert grounding.check("涨了 13%", "").ungrounded == ["13"]
+
+
+def test_a_retraction_paragraph_is_stripped_before_the_checks():
+    """A repair round that apologises for the draft re-states the rejected
+    figure — 「上一条回复里的 400 是我随口编的，我收回」 — and fails again on
+    it. The user never saw the draft, so the paragraph carries nothing."""
+    from v2.agent import presentation
+    text = ("抱歉，我上一条回复里举的例子「给 TSLA 设一个 400 美元的提醒」中的 **400** "
+            "是我随口编的示例数字，并没有出现在任何工具返回里。我收回这个例子。\n\n"
+            "重新说明一下我能帮你做的事：\n\n**1. 账户与持仓**\n- 查看当前所有持仓\n"
+            "- 哪些持仓在未来 7 天内要发财报\n- 内部人交易、机构 13F 持仓\n")
+    stripped = presentation.strip_deliberation(text)
+    assert stripped.startswith("重新说明一下")
+    assert grounding.check(stripped, "").ok, grounding.check(stripped, "").ungrounded
+
+    # An ordinary opening paragraph with a number in it is not a retraction.
+    plain = "CRWD 占仓 22.4%，是第一大持仓。\n\n其余持仓见下表。\n- SMCI 8.6%\n- NVDA 18.2%\n"
+    assert presentation.strip_deliberation(plain) == plain.strip()
+
+
 def test_the_market_relative_figure_is_claimed_by_exactly_one_tool():
     """r09 «TSLA 和 PLTR 哪个逆势更严重» forked on the first call in 2 of 10
     runs: moneyflow_view instead of explain_move. Both descriptions said

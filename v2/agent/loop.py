@@ -125,6 +125,12 @@ class AgentResult:
         default_factory=attribution.AttributionReport)
     repairs: int = 0
     repaired_figures: list[str] = field(default_factory=list)
+    #: The answer the checks rejected, when a repair round ran. Kept because a
+    #: rewrite can "pass" by deleting the facts the draft got right — and
+    #: without the draft that reads as the model failing, not the check.
+    draft: str = ""
+    #: What rejected it: ungrounded figures and misattribution findings.
+    draft_findings: list[str] = field(default_factory=list)
     deduped_calls: int = 0
     capped_calls: int = 0
     forced_final: bool = False
@@ -269,6 +275,8 @@ def run_agent(
     stop_reason = "max_steps"
     repairs = 0
     repaired_figures: list[str] = []
+    draft = ""
+    draft_findings: list[str] = []
     deduped_total = 0
     capped_total = 0
     error = ""
@@ -331,6 +339,11 @@ def run_agent(
                 forced_final = budget_spent
                 break
             repairs += 1
+            draft = answer
+            draft_findings = (
+                [f"无法溯源 {figure}" for figure in report.ungrounded]
+                + [f"{entity}←{figure}(实为 {'/'.join(owners)})"
+                   for entity, figure, owners in attribution_report.misattributed])
             reasons: list[str] = []
             if not report.ok:
                 repaired_figures.extend(report.ungrounded)
@@ -394,6 +407,8 @@ def run_agent(
         attribution=attribution_report,
         repairs=repairs,
         repaired_figures=repaired_figures,
+        draft=draft,
+        draft_findings=draft_findings,
         deduped_calls=deduped_total,
         capped_calls=capped_total,
         forced_final=forced_final,
