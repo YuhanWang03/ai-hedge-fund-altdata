@@ -53,7 +53,8 @@ class ToolSpec:
             "none" -> fn(); "dict" -> fn(args); "args" -> fn(*ordered values).
         arg_order: for invoke_style="args", the property order to pass.
         mutating: True if the call writes to state.db.
-        cost_hint: rough seconds; used only for budgeting/telemetry display.
+        cost_hint: rough seconds per call. Shown to the model — see
+            ``to_openai_schema``.
     """
 
     name: str
@@ -66,15 +67,41 @@ class ToolSpec:
     cost_hint: float = 2.0
 
     def to_openai_schema(self) -> dict[str, Any]:
-        """Render as an OpenAI-compatible ``tools[]`` entry."""
+        """Render as an OpenAI-compatible ``tools[]`` entry.
+
+        The description carries the tool's price. Without it the model plans
+        against a flat cost model that is wrong by a factor of eighty: the
+        watchlist is 0.1s, ``explain_move`` is 6s — and in production the latter
+        is a Tavily search plus two model calls of its own, none of which shows
+        up in the loop's own token count. A fan-out over eight holdings is eight
+        searches and sixteen model calls, and nothing in the model's context
+        distinguishes that from eight cheap lookups.
+
+        This is deliberately a *fact*, not a rule. The round-10 experiment
+        (see README) found that supplying a fact the model cannot discover moved
+        behaviour, while a procedural instruction did not — so the price is
+        stated and nothing tells the model to be frugal.
+        """
+        description = self.description
+        if self.cost_hint >= _EXPENSIVE:
+            description += (f" [~{self.cost_hint:.0f}s per call — one of the "
+                            f"expensive ones; it fetches and reasons, not just "
+                            f"reads.]")
+        else:
+            description += f" [~{self.cost_hint:.1f}s per call.]"
         return {
             "type": "function",
             "function": {
                 "name": self.name,
-                "description": self.description,
+                "description": description,
                 "parameters": self.parameters,
             },
         }
+
+
+#: Above this many seconds a tool is doing real work (search, generation) rather
+#: than reading a cached card, and is worth naming as such.
+_EXPENSIVE = 5.0
 
 
 @dataclass

@@ -46,6 +46,7 @@ from v2.agent.llm import OpenAICompatLLM, build_llm, describe_provider  # noqa: 
 #   EVAL_WORKERS=8                     并发数
 #   EVAL_LIMIT=10                      只跑前 N 条，快速冒烟
 #   EVAL_CATEGORY=ranking multi_hop    只跑某几类
+#   EVAL_CASES=c01,c02,m07             只跑指定 case（配 EVAL_REPEAT 用来看抖动）
 #   EVAL_OUT=data/eval.json            JSON 输出路径
 # ---------------------------------------------------------------------------
 
@@ -72,6 +73,7 @@ WORKERS = _env_int("EVAL_WORKERS", 4)
 # data/ 已在 .gitignore:31 —— 评测产物不会被误提交
 OUT = _env_str("EVAL_OUT", "data/eval.json")
 CATEGORY = _env_list("EVAL_CATEGORY", None)
+ONLY = _env_list("EVAL_CASES", None)
 LIMIT = _env_int("EVAL_LIMIT", None)
 FAILURES = _env_int("EVAL_FAILURES", 20)
 REPEAT = _env_int("EVAL_REPEAT", 1)
@@ -87,6 +89,9 @@ def main(argv: list[str] | None = None) -> int:
                         choices=sorted(runner.MODES))
     parser.add_argument("--category", nargs="+", default=CATEGORY,
                         choices=sorted(CATEGORIES))
+    parser.add_argument("--cases", nargs="+", default=ONLY, metavar="ID",
+                        help="只跑这些 case id —— 抖动要靠同一小批多跑几次来分辨，"
+                             "而全量重复十次太贵")
     parser.add_argument("--limit", type=int, default=LIMIT, help="只跑前 N 条（快速冒烟）")
     parser.add_argument("--workers", type=int, default=WORKERS)
     parser.add_argument("--out", default=OUT, help="把逐条结果写成 JSON")
@@ -111,6 +116,12 @@ def main(argv: list[str] | None = None) -> int:
         modes = keep or ["baseline"]
 
     cases = CASES
+    if args.cases:
+        wanted = {c.strip() for c in args.cases}
+        unknown = wanted - {c.id for c in CASES}
+        if unknown:
+            parser.error(f"没有这些 case：{', '.join(sorted(unknown))}")
+        cases = tuple(c for c in cases if c.id in wanted)
     if args.category:
         wanted = set(args.category)
         cases = tuple(c for c in cases if c.category in wanted)
