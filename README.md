@@ -165,7 +165,7 @@ causal          75 / 100 /  88 /  96      recovery     0 /  73 /  80 / 100
 dead_end         0 / 100 /  90 / 100      checker_stress 67 / 100 / 100 /  94
 ```
 
-**The router is right, and so is the tighter live config.** Routed keeps 96% at 57% of the full loop's cost; production tightens to 8 calls and holds 92–95% at 45% — the loss sits in `ranking` and `causal`. Two full sweeps of the same code differ by 3pp on production, so this harness resolves about ±2pp and nothing finer. Single-hop is perfect on the
+**The router is right, and so is the tighter live config.** Routed keeps 96% at 57% of the full loop's cost; production tightens to 8 calls and holds 92–95% at 45% — the loss sits in `ranking` and `causal`. Two full sweeps of the same code differ by 3pp on production, so this harness resolves about ±2pp and nothing finer. On **15 held-out questions** taken from live Telegram use and never used for tuning, the full loop scores **100%**, routed **84%** and the router **87%** — every miss is a two-topic question whose topic the router's lexicon does not know. What overfit is the hand-written router, not the model-driven loop. Single-hop is perfect on the
 questions it was designed for and near-zero where an answer must span tools; routing
 captures the loop's upside while avoiding its downside on single-card questions —
 where the loop over-explores and then trips its own grounding check.
