@@ -82,35 +82,29 @@ def test_specs_are_well_formed():
                 assert key in spec.parameters["properties"]
 
 
-def test_the_model_is_told_what_each_tool_costs():
-    """The registry has carried a cost_hint since the first commit — 0.1s for
-    the watchlist, 8s for summary, an eighty-fold spread — and never showed it
-    to anyone. Its own docstring said "budgeting/telemetry display", and the
-    loop displayed it nowhere.
+def test_the_schema_does_not_carry_prices():
+    """Pinning a *removal*, because the idea is a good one that does not work.
 
-    So the model planned against a flat cost model. In production the gap is
-    wider than the seconds suggest: explain_move is a Tavily search plus two
-    model calls of its own, invisible in the loop's token count, and a fan-out
-    over eight holdings is eight searches and sixteen model calls.
+    Round 11 put each tool's cost_hint into its description — the registry has
+    always carried one, 0.1s to 8s, and the model plans blind to it. Over 267
+    runs it changed nothing: tool calls per case 4.2 → 4.1, pass rate flat, and
+    tokens per case up 1,048 — against 1,089 predicted from the labels' own
+    size resent on every call. The entire increase was the labels. The model
+    never responded to the price.
 
-    Stated as a price, not as an instruction — nothing here tells the model to
-    be frugal. That is the round-10 finding applied: a fact it cannot discover
-    moved behaviour, a procedural rule did not.
+    Anyone re-adding this should re-measure rather than re-reason: it is the
+    kind of change that sounds obviously right and is obviously wrong once
+    counted.
     """
-    by_name = {s.name: s for s in TOOL_SPECS}
+    for spec in TOOL_SPECS:
+        rendered = spec.to_openai_schema()["function"]["description"]
+        assert rendered == spec.description, f"{spec.name}: schema 里混进了描述以外的东西"
+        assert "per call" not in rendered
 
-    cheap = by_name["watchlist_view"].to_openai_schema()["function"]["description"]
-    dear = by_name["summary"].to_openai_schema()["function"]["description"]
-    assert "0.1s per call" in cheap
-    assert "8s per call" in dear and "expensive" in dear
-
-    # The spread is what makes the price informative; a flat list would not be.
-    hints = {spec.cost_hint for spec in TOOL_SPECS}
-    assert max(hints) / min(hints) >= 10, "价差被抹平了，价格就不再携带信息"
-
-    # And it is a price, not an order.
-    assert not any(word in dear.lower() for word in ("avoid", "don't", "sparing",
-                                                     "minimi", "prefer cheaper"))
+    # The hint itself stays — it is real, and a budgeting/telemetry use that
+    # does not pay per token could still want it.
+    assert max(s.cost_hint for s in TOOL_SPECS) / min(
+        s.cost_hint for s in TOOL_SPECS) >= 10
 
 
 def test_the_collection_tools_say_what_they_lack_and_what_comes_next():
