@@ -158,6 +158,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.limit:
         cases = cases[: args.limit]
 
+    # One call before the sweep. A bad key or base URL otherwise fails every
+    # case three times with backoff — 387 s to learn the header had a \r in it.
+    if _needs_llm(modes):
+        try:
+            build_llm().complete([{"role": "user", "content": "ping"}])
+        except Exception as exc:  # noqa: BLE001 — we want the message, whatever it is
+            print(f"❌ 模型预检失败，未开始评测：{exc}\n"
+                  f"   模型：{describe_provider()}")
+            return 2
+
     print(f"评测集：{args.set} · {len(cases)} 条 · 模式：{', '.join(modes)}"
           + ("\n  留出集：这些问题没用来调过路由或检查。跑一次记下数字；"
              "为了让某条通过而改代码，它就不再是留出集了。" if args.set == "holdout" else ""))

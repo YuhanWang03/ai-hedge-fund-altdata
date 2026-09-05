@@ -22,6 +22,7 @@ works by pointing ``AGENT_LLM_BASE_URL`` at it:
 from __future__ import annotations
 
 import json
+import re
 import os
 import time
 import urllib.error
@@ -67,6 +68,13 @@ class LLMClient(Protocol):
     ) -> LLMResponse: ...
 
 
+def _redact(text: str, secret: str) -> str:
+    """Replace a credential inside an error message with a stub."""
+    if secret and secret in text:
+        text = text.replace(secret, f"{secret[:6]}…{secret[-4:]}")
+    return re.sub(r"Bearer\s+\S+", "Bearer ***", text)
+
+
 class LLMError(RuntimeError):
     """Transport or protocol failure the loop cannot turn into an observation."""
 
@@ -105,9 +113,12 @@ class OpenAICompatLLM:
         self.model = model or os.environ.get("AGENT_LLM_MODEL", "deepseek-chat")
         self.base_url = (base_url or os.environ.get("AGENT_LLM_BASE_URL")
                          or "https://api.deepseek.com/v1").rstrip("/")
+        # .strip(): a key copied out of a CRLF .env carries a trailing \r, and
+        # http.client rejects the header — after the sweep has already run
+        # every case three times. Seen once; cost 387 s and printed the key.
         self.api_key = (api_key or os.environ.get("AGENT_LLM_API_KEY")
                         or os.environ.get("DEEPSEEK_API_KEY")
-                        or os.environ.get("OPENAI_API_KEY") or "")
+                        or os.environ.get("OPENAI_API_KEY") or "").strip()
         self.temperature = temperature
         self.timeout = timeout
         self.max_retries = max_retries
@@ -149,7 +160,9 @@ class OpenAICompatLLM:
                 if exc.code < 500 and exc.code != 429:
                     raise last_error from exc
             except Exception as exc:  # noqa: BLE001 — network flakiness
-                last_error = exc
+                # Never let the credential into a message that ends up in an
+                # eval report or a chat log.
+                last_error = LLMError(_redact(str(exc), self.api_key))
             if attempt < self.max_retries - 1:
                 time.sleep(2 ** attempt)
 
