@@ -42,6 +42,22 @@ _ALL_CASES = CASES + HOLDOUT
 # fact matching
 # ---------------------------------------------------------------------------
 
+def test_a_date_written_in_chinese_is_the_same_date():
+    """gpt-4.1-mini answered 「CRWD 下次财报日期是 2026 年 9 月 6 日」 and was
+    scored 事实缺失 against ("2026-09-06", "9-06"). deepseek-chat copies the
+    ISO form off the card, so fifteen rounds of labels never noticed they were
+    testing spelling. Either spelling on either side must match."""
+    assert fact_present(("2026-09-06", "9-06"), "CRWD 下次财报日期是 2026 年 9 月 6 日（盘后）")
+    assert fact_present(("2026-10-21", "10-21"), "TSLA下一次财报日期是2026年10月21日")
+    assert fact_present(("09-30", "9-30"), "MSFT 9月30日")
+    assert fact_present(("9 月 6",), "2026-09-06 (D-3) CRWD")
+    # Not a date, not touched: a decimal range, a plan name, a bare figure.
+    assert not fact_present(("9-06",), "2026-08-25 Item 5.02")
+    assert normalise("维持 4.25-4.50% 不变") == "维持 4.25-4.50% 不变"
+    assert normalise("10b5-1 计划") == "10b5-1 计划"
+    assert normalise("上周五我亏了多少") == "上周五我亏了多少"
+
+
 def test_thousands_separators_do_not_decide_correctness():
     assert fact_present(("184,320.55",), "总市值 184320.55 美元")
     assert fact_present(("184320.55",), "总市值 $184,320.55")
