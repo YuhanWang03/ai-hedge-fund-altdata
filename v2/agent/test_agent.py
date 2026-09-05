@@ -65,6 +65,20 @@ def _registry(**kwargs) -> ToolRegistry:
 # registry — the tool surface and its policy gate
 # ---------------------------------------------------------------------------
 
+def test_the_llm_client_strips_the_key_and_never_prints_it():
+    """A key read out of a CRLF .env carried a trailing \\r; http.client
+    rejected the header, the sweep ran all 267 cases into that error, and
+    the failure list printed the full key. Two rules: strip it, redact it."""
+    from v2.agent.llm import OpenAICompatLLM, _redact
+    client = OpenAICompatLLM(api_key="sk-proj-abcdef0123456789\r\n", base_url="http://x")
+    assert client.api_key == "sk-proj-abcdef0123456789"
+    message = _redact("Invalid header value b'Bearer sk-proj-abcdef0123456789\\r'",
+                      client.api_key)
+    assert "sk-proj-abcdef0123456789" not in message
+    assert "Bearer ***" in message
+    assert _redact("HTTP 401 from x: bad", "") == "HTTP 401 from x: bad"
+
+
 def test_specs_are_well_formed():
     names = [s.name for s in TOOL_SPECS]
     assert len(names) == len(set(names)), "tool names must be unique"
