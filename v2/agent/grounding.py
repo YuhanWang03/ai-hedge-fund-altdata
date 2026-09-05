@@ -58,6 +58,9 @@ NON_QUANTITY = re.compile(
     + "|" + _L + r"[A-Z]-\d{1,4}" + _R             # D-74
     + "|" + _L + r"\d{1,2}-[A-Z]" + _R             # 8-K, 10-Q
     + "|" + _L + r"\d{1,2}[FKQD]" + _R             # 13F, 13D
+    # An indicator's lookback parameter: CMF(20), RSI(14). c07's table
+    # header 「资金流 CMF(20)」 had its 20 attributed to SMH.
+    + "|" + _L + r"[A-Z]{2,6}\(\d{1,3}\)"
     + r"|(?:[Ii]tem|[Ss]ection)\s*\d+(?:\.\d+)?")
 
 #: A figure followed by a time unit is the size of a window, not a value:

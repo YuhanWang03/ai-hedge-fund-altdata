@@ -128,6 +128,20 @@ def test_the_repair_round_names_the_figures_that_were_fine():
     assert "Fix only" not in text
 
 
+def test_an_indicator_parameter_is_not_a_figure():
+    """c07 wrote a table header 「资金流 CMF(20)」 after naming SMH, and the
+    check attributed 20 to SMH (it belongs to every moneyflow card). The
+    20 in CMF(20) is a lookback, like the 52 in 52 周."""
+    from v2.agent import attribution
+    records = [("moneyflow_view", {"ticker": "NVDA"},
+                "💧 NVDA 资金流\n· CMF(20) +0.26\n· RSI(14) 63.7", True)]
+    answer = "| 股票 | 相对板块(SMH +2.90%) | 资金流 CMF(20) |\n| NVDA | +1.2% | +0.26 |"
+    assert attribution.check(answer, records).ok
+    report = grounding.check("NVDA CMF(20) +0.26，RSI(14) 63.7", records[0][2])
+    assert report.ok and report.total == 2, "只有 0.26 和 63.7 是量"
+    assert grounding.check("CMF(20) +0.31", records[0][2]).ungrounded == ["0.31"]
+
+
 def test_filing_names_are_masked_before_cjk_text_too():
     """d06 «你能帮你做什么» failed 3/10 on numbers that are not quantities:
     「机构13F持仓」 left a bare 13 behind because `\\b` does not fire between
