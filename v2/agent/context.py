@@ -128,6 +128,24 @@ class Trajectory:
             counts[name] = counts.get(name, 0) + 1
         return dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
 
+    def trace(self) -> list[str]:
+        """The path this run took: every call that reached a tool, in order,
+        as ``tool(arg=value, …)``.
+
+        Two runs of the same query at temperature 0 can still fork — on the
+        first tool they pick, or later. Pass rate says *that* a case is flaky;
+        only the path says *where* it forks, and a fork on tool choice and a
+        fork on wording after identical evidence are different problems with
+        different fixes. Refused calls are left out: they added no evidence.
+        """
+        out: list[str] = []
+        for step in self.steps:
+            for r in step.results:
+                if r.reached_tool:
+                    args = ", ".join(f"{k}={v}" for k, v in sorted((r.args or {}).items()))
+                    out.append(f"{r.name}({args})")
+        return out
+
     def tool_records(self) -> list[tuple[str, dict[str, Any], str, bool]]:
         """(tool, args, content, ok) per call — what the attribution check needs."""
         return [(r.name, r.args, r.content, r.ok)
