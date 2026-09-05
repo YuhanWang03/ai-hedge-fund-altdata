@@ -64,6 +64,8 @@ _ALIASES = {
 #: reported as belonging to it.
 _NOT_ENTITIES = frozenset({
     "AI", "US", "USD", "CEO", "CFO", "COO", "CTO", "SEC", "ETF", "IPO", "EPS",
+    # job titles, which insider cards print next to the figure they moved
+    "SVP", "EVP", "VP", "CIO", "CMO", "GM", "MD",
     "PE", "PB", "ROE", "GDP", "CPI", "PCE", "NFP", "PPI", "FOMC", "FED", "RSI",
     "CMF", "OK", "VS", "AND", "THE", "FOR", "NL", "LLM", "API", "MD", "P&L",
     # data provider, vendor and account-mode labels printed inside tool output
@@ -125,7 +127,8 @@ _VS_OPERAND = re.compile(
 #: card was fetched, and one of them (IVV) is a position this user actually
 #: holds, so a stoplist would both miss cases and break a real one.
 _BENCHMARK_LEAD = re.compile(
-    r"(?:同期|相对|相比|对比|较之?|跑输|跑赢|基准|参照|落后于|领先于|\bvs\.?|versus)"
+    r"(?:同期|相对|相比|对比|较之?|跑输|跑赢|基准|参照|落后于|领先于|\bvs\.?|versus"
+    r"|(?<![占比])比)"                        # 「比 SMCI 健康」— but not 占比／比例
     r"[\s，,：:的]*$", re.IGNORECASE)
 
 #: An operand of a displayed sum is being cited as an *input*, not attributed:
@@ -135,8 +138,8 @@ _BENCHMARK_LEAD = re.compile(
 #: the tell — a figure with a digit and a plus sign right before it, or a plus
 #: or equals and a digit right after it, is a term in an expression. A sign
 #: (「（+5.6%」) has no digit before its plus and is not matched.
-_IN_SUM_BEFORE = re.compile(r"[\d%）)]\s*[+＋=＝]\s*$")
-_IN_SUM_AFTER = re.compile(r"^\s*%?\s*[+＋=＝]\s*[\d$￥(（]")
+_IN_SUM_BEFORE = re.compile(r"[\d%）)MBKmbk万亿]\s*[+＋=＝]\s*[$￥¥]?\s*$")
+_IN_SUM_AFTER = re.compile(r"^\s*[%MBKmbk万亿]?\s*[+＋=＝]\s*[\d$￥¥(（]")
 
 #: Chinese puts a modifier before its head, so a figure can belong to the entity
 #: that *follows* it: 「但被占仓 66.3% 的 IVV 微跌 -0.47% 抵消了大半」. Reading
