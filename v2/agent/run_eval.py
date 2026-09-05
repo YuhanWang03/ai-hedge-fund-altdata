@@ -242,9 +242,13 @@ def main(argv: list[str] | None = None) -> int:
         if not out_path.is_absolute():
             out_path = _REPO_ROOT / out_path
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(
-            json.dumps(runner.to_json(reports), ensure_ascii=False, indent=2),
-            encoding="utf-8")
+        payload = runner.to_json(reports)
+        # Which model produced these numbers. Two sweeps from two providers
+        # in the same data/ directory are otherwise indistinguishable.
+        payload["provider"] = describe_provider() if _needs_llm(modes) else "baseline only"
+        payload["case_set"] = args.set
+        out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2),
+                            encoding="utf-8")
         print(f"\n逐条结果已写入 {out_path}")
 
     return 0
