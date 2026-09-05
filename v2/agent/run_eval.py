@@ -210,11 +210,18 @@ def main(argv: list[str] | None = None) -> int:
             if block:
                 print()
                 print(block)
-    print()
-    print(runner.render_stability(reports[-1]))
-    if reports[-1].repeat > 1:
+    # Stability per model-driven mode, not only the last one: the first full
+    # sweep after the flaky-case round printed six flaky cases — all under
+    # `agent`, the 20-call ablation — and nothing about `production`, the
+    # config the bot runs.
+    for report in reports:
+        if runner.MODES[report.mode].kind == "baseline":
+            continue
         print()
-        print(runner.render_divergence(reports[-1]))
+        print(runner.render_stability(report))
+        if report.repeat > 1:
+            print()
+            print(runner.render_divergence(report))
     print()
     print(runner.render_overspend(reports[-1]))
     print()

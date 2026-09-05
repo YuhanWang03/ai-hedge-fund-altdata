@@ -107,6 +107,22 @@ def test_the_schema_does_not_carry_prices():
         s.cost_hint for s in TOOL_SPECS) >= 10
 
 
+def test_the_repair_round_names_the_figures_that_were_fine():
+    """p04's draft had the day's P&L (1,204.33, traced) and one untraced
+    percentage; the rewrite fixed the percentage by deleting the P&L too.
+    The instruction only ever said what was wrong. Now it also says what
+    traced and must stay — a fact about the check's verdict the model
+    cannot otherwise know."""
+    report = grounding.check("今日 -1,204.33，占组合 74.6%，回撤 -4.20%",
+                             "当日盈亏 -1,204.33\n组合当前回撤 -4.20%")
+    assert report.ungrounded == ["74.6"] and report.traced == ["-1,204.33", "-4.20"]
+    text = grounding.repair_instruction(report)
+    assert "74.6" in text and "-1,204.33" in text and "-4.20" in text
+    assert text.index("74.6") < text.index("-1,204.33"), "先说错的，再说要保留的"
+    # Nothing traced → nothing to keep, no dangling sentence.
+    assert "must stay" not in grounding.repair_instruction(grounding.check("估计 74.6%", ""))
+
+
 def test_filing_names_are_masked_before_cjk_text_too():
     """d06 «你能帮你做什么» failed 3/10 on numbers that are not quantities:
     「机构13F持仓」 left a bare 13 behind because `\\b` does not fire between

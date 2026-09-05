@@ -164,6 +164,12 @@ class GroundingReport:
     total: int = 0
     grounded: int = 0
     ungrounded: list[str] = field(default_factory=list)
+    #: Figures that traced, as written. The repair round names them so the
+    #: rewrite keeps them: told only what was wrong, the model deletes what
+    #: was right along with it (p04 dropped the day's P&L to fix one
+    #: percentage), and nothing in the loop rewards keeping a figure it was
+    #: not told about.
+    traced: list[str] = field(default_factory=list)
     exempt: int = 0
     #: Figures accepted because the answer *showed* the arithmetic producing them
     #: from figures that are themselves traceable.
@@ -253,19 +259,23 @@ def check(
         variants = {token, token.rstrip("0").rstrip("."), f"{as_float:g}"}
         if any(v and v in haystack for v in variants):
             report.grounded += 1
+            report.traced.append(raw)
             continue
         # 2. The same quantity at a different scale (57.80B -> 578 亿).
         if _digit_signature(raw) in signatures:
             report.grounded += 1
+            report.traced.append(raw)
             continue
         # 3. The card's value, rounded (15,851.57 -> 15,852).
         if any(abs(target - v) <= max(rounding_tolerance * v, 0.005) for v in values):
             report.grounded += 1
+            report.traced.append(raw)
             continue
         # 4. Arithmetic the answer actually shows, over inputs that themselves trace.
         if _shows_its_working(target, answer, start, end, traceable):
             report.grounded += 1
             report.derived += 1
+            report.traced.append(raw)
             continue
         report.ungrounded.append(raw)
 
@@ -370,4 +380,8 @@ def repair_instruction(report: GroundingReport) -> str:
         "inputs is accepted, a bare result is not. "
         "If you cannot support it, drop the claim — omitting a number is always "
         "better than inventing one."
+        + (f"\nEvery other figure traced and must stay exactly as written: "
+           f"{', '.join(dict.fromkeys(report.traced))[:400]}. "
+           "Fix only the figures listed above; do not drop or reword the rest."
+           if report.traced else "")
     )
