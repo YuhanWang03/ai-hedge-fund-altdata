@@ -317,12 +317,43 @@ def test_one_tool_cannot_be_called_more_than_its_cap():
                        config=AgentConfig(max_calls_per_tool=8))
 
     assert result.capped_calls == 1, "第 9 次该被拦下"
-    assert result.trajectory.calls_by_tool()["explain_move"] == 9
+    # 8 executed, 1 refused — and the refusal must not count as a call, or the
+    # cap inflates the very number it exists to bring down.
+    assert result.trajectory.calls_by_tool()["explain_move"] == 8
+    assert result.trajectory.tool_calls == 8
+    assert result.trajectory.refused_calls == 1
     refused = [r for s in result.trajectory.steps for r in s.results
                if r.error_kind == "tool_call_cap"]
     assert len(refused) == 1
     assert "per-tool limit" in refused[0].content
     assert "keep failing" in refused[0].content
+
+
+def test_a_refused_call_is_not_a_call():
+    """The counter used to include refusals, and the effect was perverse: a cap
+    turning away four calls *raised* «tool calls» by four. 「explain_move×12」
+    against a cap of 8 was eight executions and four refusals.
+
+    A tool that ran and failed is different — a timeout costs what a call costs,
+    so it still counts.
+    """
+    from v2.agent.registry import REFUSED_BEFORE_DISPATCH
+
+    llm = ScriptedLLM([
+        _acts(_call("portfolio_view", 0),
+              _call("portfolio_view", 1),          # duplicate — refused
+              _call("nonexistent_tool", 2),        # unknown — refused
+              _call("eight_k_view", 3, ticker="SMCI")),   # runs, then times out
+        _says("CRWD 占仓 22.4%。"),
+    ])
+    result = run_agent("看一下", llm=llm, registry=_registry())
+
+    assert result.trajectory.tool_calls == 2, "只有真正跑起来的两次算数"
+    assert result.trajectory.refused_calls == 2
+    assert result.trajectory.calls_by_tool() == {"eight_k_view": 1, "portfolio_view": 1}
+
+    # The simulated timeout ran; it is a cost, not a refusal.
+    assert "SimulatedToolFailure" not in REFUSED_BEFORE_DISPATCH
 
 
 def test_the_histogram_separates_depth_from_breadth():

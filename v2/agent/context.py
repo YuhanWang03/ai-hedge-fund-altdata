@@ -77,7 +77,19 @@ class Trajectory:
 
     @property
     def tool_calls(self) -> int:
-        return sum(len(s.results) for s in self.steps)
+        """Calls that reached a tool — the ones that cost something.
+
+        Refusals (duplicate, over the per-tool cap, malformed arguments) used to
+        be counted here, which made the cost metric wrong in the worst
+        direction: the cap refusing four calls added four to the count it was
+        installed to bring down.
+        """
+        return sum(1 for s in self.steps for r in s.results if r.reached_tool)
+
+    @property
+    def refused_calls(self) -> int:
+        """Calls the loop or the gate turned away before anything ran."""
+        return sum(1 for s in self.steps for r in s.results if not r.reached_tool)
 
     @property
     def failed_tool_calls(self) -> int:
@@ -93,7 +105,7 @@ class Trajectory:
 
     @property
     def tools_used(self) -> list[str]:
-        return [r.name for s in self.steps for r in s.results]
+        return [r.name for s in self.steps for r in s.results if r.reached_tool]
 
     def distinct_tools(self) -> list[str]:
         seen: list[str] = []

@@ -95,6 +95,21 @@ class ToolSpec:
         }
 
 
+#: Error kinds where the call never reached the tool — it was refused by the
+#: loop or by the registry's gate before anything ran. Distinguished from a tool
+#: that ran and failed (a timeout, a provider error), which did cost what a call
+#: costs.
+#:
+#: This matters because the counters used to lump them together, and the effect
+#: was perverse: a per-tool cap refusing four calls *raised* «tool calls» by
+#: four, so the mechanism inflated the very number it exists to reduce.
+#: 「explain_move×12」 with a cap of 8 was eight executions and four refusals.
+REFUSED_BEFORE_DISPATCH = frozenset({
+    "bad_json", "bad_arguments", "duplicate_call", "tool_call_cap",
+    "unknown_tool", "mutation_blocked",
+})
+
+
 @dataclass
 class ToolResult:
     """Outcome of one tool call. ``ok=False`` is still a legal observation."""
@@ -106,6 +121,11 @@ class ToolResult:
     elapsed_ms: int = 0
     error_kind: str = ""
     meta: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def reached_tool(self) -> bool:
+        """True when something actually ran — the unit real cost is paid in."""
+        return self.error_kind not in REFUSED_BEFORE_DISPATCH
 
     def as_observation(self) -> str:
         """Text handed back to the model. Failures stay actionable, not opaque."""
