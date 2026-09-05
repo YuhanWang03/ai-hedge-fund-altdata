@@ -496,6 +496,34 @@ def test_a_rewrite_that_loses_the_drafts_facts_is_booked_against_the_check():
     assert "render_repairs" in calls
 
 
+def test_a_saved_sweep_can_be_rescored_against_a_changed_answer_key():
+    """The JSON keeps every answer and the tools each run reached, so an
+    answer-key change can be measured on runs that already happened instead
+    of buying another sweep to find out."""
+    from v2.agent.eval import rescore
+
+    case = _CASE_BY_ID["s02"]                       # TSLA 什么时候发财报 → 2026-10-21
+    good = score_case(case, mode="routed", answer="TSLA 下次财报 2026-10-21。",
+                      tools_called=["earnings_view"], trace=["earnings_view(ticker=TSLA)"])
+    bad = score_case(case, mode="routed", answer="TSLA 下次财报在十月底。",
+                     tools_called=["earnings_view"], trace=["earnings_view(ticker=TSLA)"])
+    report = SuiteReport(mode="routed", scores=[good, bad])
+    payload = runner.to_json([report])
+    payload["provider"] = "scripted"
+
+    result = rescore.rescore(payload)
+    assert result["routed"]["saved"] == 1 and result["routed"]["rescored"] == 1
+    assert result["routed"]["changed"] == [], "答案键没变，重打分不该动任何一条"
+
+    # Simulate a key change by editing the saved verdict: the row says it
+    # passed, the key says it did not → reported as a flip, not silently kept.
+    payload["cases"][1]["passed"] = True
+    result = rescore.rescore(payload)
+    assert [c[0] for c in result["routed"]["changed"]] == ["s02"]
+    text = rescore.render(result, "scripted")
+    assert "✓→✗ s02" in text and "1/2" in text
+
+
 def test_repeat_is_skipped_for_the_deterministic_baseline():
     report = runner.run_suite("baseline", llm_factory=lambda: ScriptedLLM([]),
                               cases=CASES[:5], workers=1, repeat=3)
