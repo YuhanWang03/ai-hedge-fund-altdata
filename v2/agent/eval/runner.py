@@ -138,7 +138,8 @@ def run_case(case: EvalCase, mode: Mode, *, llm_factory: Callable[[], Any]) -> C
             elapsed_ms=result.elapsed_ms, path=path,
             stop_reason=result.stop_reason, error=result.error,
             trace=trajectory.trace(), repairs=result.repairs,
-            draft=result.draft, draft_findings=result.draft_findings)
+            draft=result.draft, draft_findings=result.draft_findings,
+            partial_rewrite=result.partial_rewrite)
     except Exception as exc:  # noqa: BLE001 — one bad case must not kill the sweep
         return score_case(case, mode=mode.name, answer="", tools_called=[],
                           grounded=False, elapsed_ms=int((time.time() - started) * 1000),
@@ -388,8 +389,12 @@ def render_repairs(report: SuiteReport) -> str:
     if not regressed:
         lines.append("  没有重写把正确的初稿改坏。")
         return "\n".join(lines)
+    partial = sum(1 for s in regressed if s.partial_rewrite)
+    if partial:
+        lines.append(f"  其中 {partial} 次是重写只回了改动的那一段（初稿里过半的数字不见了）")
     for score in regressed[:8]:
-        lines.append(f"  · [{score.case_id}] 打回原因：{'；'.join(score.draft_findings[:4])}")
+        lines.append(f"  · [{score.case_id}] 打回原因：{'；'.join(score.draft_findings[:4])}"
+                     + ("  ← 只回了一段" if score.partial_rewrite else ""))
         lines.append(f"      重写后：{score._own_reason()}")
     lines.append("")
     lines.append("  这一栏是校验的另一种错误率：警告打在了正确的初稿上，重写把事实一起扔了。"
@@ -502,6 +507,7 @@ def to_json(reports: list[SuiteReport]) -> dict:
                 "draft_findings": list(s.draft_findings),
                 "draft_facts_ok": s.draft_facts_ok,
                 "repair_regressed": s.repair_regressed,
+                "partial_rewrite": s.partial_rewrite,
             }
             for r in reports for s in r.scores
         ],

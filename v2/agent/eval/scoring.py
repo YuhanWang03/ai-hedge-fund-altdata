@@ -140,6 +140,9 @@ class CaseScore:
     #: the forbidden ones — the answer-key part of the score, applied to the
     #: text the checks refused.
     draft_facts_ok: bool = False
+    #: The rewrite dropped more than half of the draft's traced figures — it
+    #: came back as the corrected fragment rather than the whole answer.
+    partial_rewrite: bool = False
 
     @property
     def answer_correct(self) -> bool:
@@ -185,7 +188,8 @@ class CaseScore:
         if self.error:
             return f"运行错误：{self.error}"
         if self.repair_regressed:
-            return (f"重写丢了事实（初稿事实齐全，被打回：{'；'.join(self.draft_findings[:4])}）"
+            shape = "重写只回了改动的那一段" if self.partial_rewrite else "重写丢了事实"
+            return (f"{shape}（初稿事实齐全，被打回：{'；'.join(self.draft_findings[:4])}）"
                     f" → {self._own_reason()}")
         return self._own_reason()
 
@@ -229,6 +233,7 @@ def score_case(
     repairs: int = 0,
     draft: str = "",
     draft_findings: Iterable[str] = (),
+    partial_rewrite: bool = False,
 ) -> CaseScore:
     called = set(tools_called)
 
@@ -266,7 +271,7 @@ def score_case(
         stop_reason=stop_reason, error=error,
         trace=tuple(trace), answer=answer,
         repairs=repairs, draft=draft, draft_findings=tuple(draft_findings),
-        draft_facts_ok=draft_facts_ok,
+        draft_facts_ok=draft_facts_ok, partial_rewrite=partial_rewrite,
     )
 
 

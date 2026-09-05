@@ -447,6 +447,22 @@ def test_a_rewrite_that_loses_the_drafts_facts_is_booked_against_the_check():
     row = runner.to_json([report])["cases"][0]
     assert row["draft"] == score.draft and row["repair_regressed"] is True
 
+    # p04's shape: the rewrite is the corrected sentence and nothing else.
+    def fragment_factory():
+        return ScriptedLLM([
+            LLMResponse(tool_calls=[ToolCall("c1", "portfolio_view", {}, "{}")]),
+            LLMResponse(text="CRWD 占仓 22.4%，是第一大持仓。\n\nNVDA 18.2%，MSFT 14.1%。"
+                             "\n\n组合 beta 1.37。"),
+            LLMResponse(text="组合数据里没有 beta 这一项。"),
+        ])
+    fragment = runner.run_case(_CASE_BY_ID["r03"], runner.MODES["agent"],
+                               llm_factory=fragment_factory)
+    assert fragment.repairs == 1 and fragment.repair_regressed
+    assert fragment.partial_rewrite, "初稿溯源过的数字过半不见了，这是只回了一段"
+    assert fragment.failure_reason().startswith("重写只回了改动的那一段")
+    assert not score.partial_rewrite, "整段改坏和只回一段是两种形状"
+    assert "只回了一段" in runner.render_repairs(SuiteReport(mode="agent", scores=[fragment]))
+
     # A rewrite that keeps the facts but is still ungrounded is the model not
     # complying, not the check regressing it.
     def stubborn_factory():

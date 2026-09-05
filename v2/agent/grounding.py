@@ -381,7 +381,13 @@ def repair_instruction(report: GroundingReport) -> str:
         "If you cannot support it, drop the claim — omitting a number is always "
         "better than inventing one."
         + (f"\nEvery other figure traced and must stay exactly as written: "
-           f"{', '.join(dict.fromkeys(report.traced))[:400]}. "
-           "Fix only the figures listed above; do not drop or reword the rest."
+           f"{', '.join(dict.fromkeys(report.traced))[:400]}."
            if report.traced else "")
+        # A fact the model cannot know: this is not a conversation where the
+        # draft stays visible. Told to "fix only the listed figures", it sent
+        # back the one corrected sentence, and that sentence became the whole
+        # answer (p04, the day's P&L gone).
+        + "\nSend the COMPLETE answer again, every section, not only the corrected "
+          "part: your reply replaces the draft in full and is the only text the "
+          "user will see."
     )
