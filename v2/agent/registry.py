@@ -208,8 +208,9 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         name="explain_move",
         description=(
             "Explain WHY one ticker moved recently: price change, volume, "
-            "sector-relative strength, and Tier-1/2 news attribution. Use for "
-            "'why is X up/down' questions."
+            "relative strength vs SPY in pp (this is the 逆势 / against-the-market "
+            "figure), and Tier-1/2 news attribution. Use for 'why is X up/down' "
+            "and 'which moved against the market' questions."
         ),
         parameters=_obj({"ticker": _TICKER}, ["ticker"]),
         target="v2.bot.responders.explain_move",
@@ -244,8 +245,9 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         name="moneyflow_view",
         description=(
-            "Money-flow divergence for one ticker: CMF and RSI against price, to "
-            "judge accumulation vs distribution."
+            "Money-flow divergence for one ticker: CMF and RSI against its own "
+            "price, to judge accumulation vs distribution. Says nothing about the "
+            "stock vs the market (逆势 is explain_move)."
         ),
         parameters=_obj({"ticker": _TICKER}, ["ticker"]),
         target="v2.bot.responders.moneyflow_view",

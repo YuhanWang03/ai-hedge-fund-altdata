@@ -107,6 +107,22 @@ def test_the_schema_does_not_carry_prices():
         s.cost_hint for s in TOOL_SPECS) >= 10
 
 
+def test_the_market_relative_figure_is_claimed_by_exactly_one_tool():
+    """r09 «TSLA 和 PLTR 哪个逆势更严重» forked on the first call in 2 of 10
+    runs: moneyflow_view instead of explain_move. Both descriptions said
+    "relative"/"divergence" and neither said which one holds the stock-vs-SPY
+    figure the question is about; the runs that started on moneyflow_view
+    called explain_move later and still wrote the wrong number, so the fork
+    is not recovered from by more calls. Round 10's finding applies — a fact
+    about what a tool returns moves the choice; a rule does not."""
+    by_name = {s.name: s for s in TOOL_SPECS}
+    assert "逆势" in by_name["explain_move"].description
+    assert "SPY" in by_name["explain_move"].description
+    assert "逆势" in by_name["moneyflow_view"].description \
+        and "explain_move" in by_name["moneyflow_view"].description, \
+        "moneyflow_view 要把 逆势 让给 explain_move，不能只说自己是什么"
+
+
 def test_the_collection_tools_say_what_they_lack_and_what_comes_next():
     """Three descriptions carry a routing fact that was added from measurement,
     not taste, and a later tidy-up would silently undo it.

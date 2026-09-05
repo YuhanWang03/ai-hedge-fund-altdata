@@ -247,6 +247,10 @@ def _median(values: list[float]) -> float:
 #                from outside the loop; nothing in the loop to fix
 #   budget       same calls as a passing run, then the failing one ran out of
 #                steps, calls or seconds before writing — a stop-rule problem
+#   early_stop   same calls as a passing run, then the failing one decided it
+#                had enough and wrote — the evidence it needed was usually
+#                already in hand (m07: explain_move(ARM) called, 7.42% not
+#                written), so this points at the answer, not the tool table
 #   tool_choice  the failing run called a different tool, or the same tool with
 #                different arguments, somewhere before the end — the model chose
 #                differently on identical context; the prompt or a description
@@ -257,7 +261,7 @@ def _median(values: list[float]) -> float:
 # The order matters: a run that errored out has a shorter trace too, and would
 # otherwise be misread as a tool-choice fork.
 
-FLAKE_KINDS = ("error", "budget", "tool_choice", "wording")
+FLAKE_KINDS = ("error", "budget", "early_stop", "tool_choice", "wording")
 
 _BUDGET_STOPS = frozenset({"max_steps", "budget_exhausted"})
 
@@ -294,8 +298,8 @@ def _classify_one(good: tuple[str, ...], bad: CaseScore) -> str:
         return "wording"
     # Same calls as far as it got, then stopped by a limit: the loop had the
     # evidence and ran out of room, which is a different bug from choosing badly.
-    if bad.trace == good[:len(bad.trace)] and bad.stop_reason in _BUDGET_STOPS:
-        return "budget"
+    if bad.trace == good[:len(bad.trace)]:
+        return "budget" if bad.stop_reason in _BUDGET_STOPS else "early_stop"
     return "tool_choice"
 
 

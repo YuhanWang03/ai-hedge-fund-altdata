@@ -251,6 +251,7 @@ def render_stability(report: SuiteReport) -> str:
 _KIND_LABEL = {
     "error": "运行错误（模型侧/网络，循环里没有可修的东西）",
     "budget": "预算（路径和通过的一样，只是没走完就被截停）",
+    "early_stop": "提前收尾（路径是通过路径的前缀，模型自己决定够了就写了）",
     "tool_choice": "工具选择（同样的上下文，模型选了不同的工具或参数）",
     "wording": "措辞（路径、证据完全相同，只是写出来的答案不同）",
 }

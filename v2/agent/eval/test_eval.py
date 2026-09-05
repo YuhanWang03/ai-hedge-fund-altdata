@@ -360,6 +360,14 @@ def test_divergence_names_where_the_failing_runs_left_the_passing_path():
     d = diverge([good, budget])
     assert d.kind == "budget" and d.fork_at == 1
 
+    # Same prefix, but the model *chose* to write: that is not a tool-choice
+    # fork (m07 had every must_call tool in hand and still left 7.42% out).
+    early = score_case(case, mode="agent", answer="",
+                       tools_called=["portfolio_view"], stop_reason="final_answer",
+                       trace=good_path[:1])
+    d = diverge([good, early])
+    assert d.kind == "early_stop" and d.fork_at == 1
+
     # The provider dropped the *final* call: the path is complete and identical
     # to a passing run, so trace comparison alone would call this "wording".
     error = score_case(case, mode="agent", answer="",
