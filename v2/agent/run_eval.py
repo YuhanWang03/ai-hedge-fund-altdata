@@ -48,10 +48,14 @@ from v2.agent.llm import OpenAICompatLLM, build_llm, describe_provider  # noqa: 
 #   EVAL_CATEGORY=ranking multi_hop    只跑某几类
 #   EVAL_CASES=c01,c02,m07             只跑指定 case（配 EVAL_REPEAT 用来看抖动）
 #
-#   看抖动的标准跑法（6 条 × 10 次 ≈ 一次全量的 2/3 成本）：
-#     EVAL_MODES=production EVAL_CASES=c01,d06,k03,m07,r09,t04 EVAL_REPEAT=10
-#   输出里的「抖动分叉点」会把每条按 error / budget / tool_choice / wording 分类。
 #   EVAL_OUT=data/eval.json            JSON 输出路径
+#
+#   看抖动的标准跑法（6 条 × 10 次 ≈ 一次全量的 2/3 成本）：
+#     EVAL_MODES=production EVAL_CASES=c01,d06,k03,m07,r09,t04 EVAL_REPEAT=10 \
+#       EVAL_OUT=data/flaky.json poetry run python v2/agent/run_eval.py
+#   输出里的「抖动分叉点」会把每条按 error / budget / tool_choice / wording 分类。
+#   变量和命令必须在同一行（或先 export）；VPS 上要用 poetry run，系统 python3
+#   没装 python-dotenv，.env 里的 key 读不到。
 # ---------------------------------------------------------------------------
 
 
@@ -109,18 +113,28 @@ def main(argv: list[str] | None = None) -> int:
                         help="每条 case 跑几次，用于区分真失败与抖动")
     args = parser.parse_args(argv)
 
-    # Load .env the same way the comparison CLI does.
+    # Load .env the same way the comparison CLI does. If python-dotenv is not
+    # importable the file is silently never read — which is exactly what
+    # happens under the system `python3` on the VPS, where only the poetry
+    # venv has the package. A 6×10 flaky sweep once ran as a 0-second
+    # baseline because of this, and the message blamed the key.
+    dotenv_state = "loaded"
     try:
         from dotenv import load_dotenv
         load_dotenv(_REPO_ROOT / ".env")
     except ImportError:
-        pass
+        dotenv_state = "python-dotenv 未安装，.env 没有被读取"
 
     modes = list(dict.fromkeys(args.modes))
     if _needs_llm(modes) and not OpenAICompatLLM().api_key:
         keep = [m for m in modes if runner.MODES[m].kind == "baseline"]
+        env_file = _REPO_ROOT / ".env"
+        hint = (f"    .env：{'存在' if env_file.exists() else '不存在'}（{env_file}）"
+                f" · dotenv：{dotenv_state} · 解释器：{sys.executable}")
         print("⚠️  没有找到 LLM API key —— 只跑不需要模型的 baseline 档。\n"
-              "    配好 DEEPSEEK_API_KEY 后再跑 routed / agent 才有对比。\n")
+              f"{hint}\n"
+              "    key 在 .env 里而 dotenv 未安装时，用 `poetry run python v2/agent/run_eval.py`"
+              "，或先 `set -a; source .env`。\n")
         modes = keep or ["baseline"]
 
     cases = CASES

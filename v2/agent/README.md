@@ -369,7 +369,7 @@ m07  earnings×3 · 8K×3 · explain×3 · flow×3   ← 3 个成员 × 5 个工
   `error`（模型侧报错，循环里没东西可修）/ `budget`（同一条路，没走完被截停）/
   `tool_choice`（同样的上下文选了不同工具或参数）/ `wording`（路径证据全同，只是写得不一样）。
   四类指向四个不同的地方，通过率本身从来没说过是哪个。跑法：
-  `EVAL_MODES=production EVAL_CASES=c01,d06,k03,m07,r09,t04 EVAL_REPEAT=10`，
+  `EVAL_MODES=production EVAL_CASES=c01,d06,k03,m07,r09,t04 EVAL_REPEAT=10 poetry run python v2/agent/run_eval.py`，
   输出里的「抖动分叉点」一节就是这个分类。这一步的结果还没跑，见下一轮。
 
 ---
