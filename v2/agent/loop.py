@@ -343,7 +343,9 @@ def run_agent(
             draft_findings = (
                 [f"无法溯源 {figure}" for figure in report.ungrounded]
                 + [f"{entity}←{figure}(实为 {'/'.join(owners)})"
-                   for entity, figure, owners in attribution_report.misattributed])
+                   for entity, figure, owners in attribution_report.misattributed]
+                + [f"{entity}←{figure}(该主体无数据)"
+                   for entity, figure in attribution_report.empty_presented])
             reasons: list[str] = []
             if not report.ok:
                 repaired_figures.extend(report.ungrounded)
