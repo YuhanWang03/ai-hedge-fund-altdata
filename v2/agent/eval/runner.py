@@ -108,7 +108,8 @@ def run_case(case: EvalCase, mode: Mode, *, llm_factory: Callable[[], Any]) -> C
                 tools_called=[result.tool] if result.tool else [],
                 grounded=True, tool_calls=1 if result.tool else 0, llm_calls=1,
                 tokens=0, elapsed_ms=result.elapsed_ms, path=path,
-                stop_reason="single_hop")
+                stop_reason="single_hop",
+                trace=[result.tool] if result.tool else [])
 
         result = run_agent(case.query, llm=llm_factory(), registry=registry,
                            config=mode.config or AgentConfig())
@@ -135,7 +136,8 @@ def run_case(case: EvalCase, mode: Mode, *, llm_factory: Callable[[], Any]) -> C
             tool_calls=trajectory.tool_calls, llm_calls=trajectory.llm_calls,
             tokens=trajectory.prompt_tokens + trajectory.completion_tokens,
             elapsed_ms=result.elapsed_ms, path=path,
-            stop_reason=result.stop_reason, error=result.error)
+            stop_reason=result.stop_reason, error=result.error,
+            trace=trajectory.trace())
     except Exception as exc:  # noqa: BLE001 — one bad case must not kill the sweep
         return score_case(case, mode=mode.name, answer="", tools_called=[],
                           grounded=False, elapsed_ms=int((time.time() - started) * 1000),
@@ -243,6 +245,63 @@ def render_stability(report: SuiteReport) -> str:
              f"  抖动（有时过有时挂，先别急着改）：{len(flaky)} 条"]
     for case_id, passed, total in flaky:
         lines.append(f"    · {case_id}  {passed}/{total} 次通过")
+    return "\n".join(lines)
+
+
+_KIND_LABEL = {
+    "error": "运行错误（模型侧/网络，循环里没有可修的东西）",
+    "budget": "预算（路径和通过的一样，只是没走完就被截停）",
+    "tool_choice": "工具选择（同样的上下文，模型选了不同的工具或参数）",
+    "wording": "措辞（路径、证据完全相同，只是写出来的答案不同）",
+}
+
+
+def _short(call: str, width: int = 34) -> str:
+    return call if len(call) <= width else call[: width - 1] + "…"
+
+
+def render_divergence(report: SuiteReport) -> str:
+    """For each flaky case: where its failing runs left the passing path.
+
+    Temperature is already zero, so the flaky list cannot be shrunk by a
+    sampling knob; it can only be split by cause. A tool-choice fork points at
+    a prompt or a description, a wording fork at the answer check, a budget
+    fork at the stop rule, and an error at the provider — four different
+    places to look, and the pass ratio alone never said which.
+    """
+    if report.repeat <= 1:
+        return ""
+    flaky = report.flaky()
+    lines = [_RULE, f"【{report.mode} 抖动分叉点】{len(flaky)} 条", _RULE]
+    if not flaky:
+        lines.append("  没有抖动的 case。")
+        return "\n".join(lines)
+    by_kind = report.flaky_by_kind()
+    lines.append("  按分叉类型：" + " · ".join(
+        f"{kind} {len(ids)}" for kind, ids in by_kind.items()))
+    lines.append("")
+    for case_id, passed, total in flaky:
+        d = report.divergence(case_id)
+        lines.append(f"  · {case_id}  {passed}/{total} 通过 → {_KIND_LABEL.get(d.kind, d.kind)}")
+        good = " → ".join(_short(c) for c in d.good_trace) or "(未调用工具)"
+        lines.append(f"      通过路径：{good}")
+        if d.kind == "wording":
+            lines.append(f"      失败路径：同上；失败原因：{'；'.join(d.reasons)}")
+        else:
+            marked = []
+            for i, call in enumerate(d.bad_trace):
+                text = _short(call)
+                marked.append(f"⟨{text}⟩" if d.fork_at is not None and i == d.fork_at else text)
+            if d.fork_at is not None and d.fork_at >= len(d.bad_trace):
+                marked.append("⟨停⟩")
+            bad = " → ".join(marked) or "(未调用工具)"
+            where = f"第 {d.fork_at + 1} 步分叉" if d.fork_at is not None else "无通过样本可比"
+            lines.append(f"      失败路径：{bad}   ({where}"
+                         + (f" · {'/'.join(d.bad_stops)}" if d.bad_stops else "") + ")")
+            lines.append(f"      失败原因：{'；'.join(d.reasons)}")
+    lines.append("")
+    lines.append("  ⟨⟩ 标出失败路径里第一处与通过路径不同的调用；"
+                 "完整路径和答案原文在 JSON 的 trace / answer 字段里。")
     return "\n".join(lines)
 
 
@@ -407,6 +466,7 @@ def to_json(reports: list[SuiteReport]) -> dict:
                 "tokens": s.tokens, "elapsed_ms": s.elapsed_ms,
                 "path": s.path, "path_correct": s.path_correct,
                 "stop_reason": s.stop_reason, "error": s.error,
+                "trace": list(s.trace), "answer": s.answer,
             }
             for r in reports for s in r.scores
         ],

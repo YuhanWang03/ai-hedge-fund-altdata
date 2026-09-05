@@ -47,6 +47,10 @@ from v2.agent.llm import OpenAICompatLLM, build_llm, describe_provider  # noqa: 
 #   EVAL_LIMIT=10                      只跑前 N 条，快速冒烟
 #   EVAL_CATEGORY=ranking multi_hop    只跑某几类
 #   EVAL_CASES=c01,c02,m07             只跑指定 case（配 EVAL_REPEAT 用来看抖动）
+#
+#   看抖动的标准跑法（6 条 × 10 次 ≈ 一次全量的 2/3 成本）：
+#     EVAL_MODES=production EVAL_CASES=c01,d06,k03,m07,r09,t04 EVAL_REPEAT=10
+#   输出里的「抖动分叉点」会把每条按 error / budget / tool_choice / wording 分类。
 #   EVAL_OUT=data/eval.json            JSON 输出路径
 # ---------------------------------------------------------------------------
 
@@ -180,6 +184,9 @@ def main(argv: list[str] | None = None) -> int:
             print(runner.render_attribution(report))
     print()
     print(runner.render_stability(reports[-1]))
+    if reports[-1].repeat > 1:
+        print()
+        print(runner.render_divergence(reports[-1]))
     print()
     print(runner.render_overspend(reports[-1]))
     print()

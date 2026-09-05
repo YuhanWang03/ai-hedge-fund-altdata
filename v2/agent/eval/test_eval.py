@@ -308,6 +308,106 @@ def test_repeats_separate_stable_failures_from_flaky_ones():
     assert report.flaky() == [("m01", 1, 2)]
 
 
+def test_the_trace_records_the_path_a_run_took_and_not_the_refusals():
+    """Six cases stayed flaky at temperature 0. To say *where* two runs of the
+    same query fork, each run has to keep its path; a duplicate call that was
+    turned away added no evidence and must not appear in it."""
+    def factory():
+        return ScriptedLLM([
+            LLMResponse(tool_calls=[ToolCall("c1", "portfolio_view", {}, "{}")]),
+            LLMResponse(tool_calls=[ToolCall("c2", "portfolio_view", {}, "{}"),   # dup
+                                    ToolCall("c3", "earnings_view",
+                                             {"ticker": "CRWD"}, '{"ticker":"CRWD"}')]),
+            LLMResponse(text="CRWD 最危险：占仓 22.4%，2026-09-06 财报。"),
+        ])
+
+    score = runner.run_case(_CASE_BY_ID["r01"], runner.MODES["agent"], llm_factory=factory)
+    assert score.trace == ("portfolio_view()", "earnings_view(ticker=CRWD)")
+    assert score.refused_calls == 1
+    assert "22.4%" in score.answer
+
+
+def test_divergence_names_where_the_failing_runs_left_the_passing_path():
+    """Pass ratio says a case is flaky; only the fork says which of four places
+    to look. The four kinds are ordered: an errored run has a short trace too,
+    and must not be misread as a tool-choice fork."""
+    from v2.agent.eval.scoring import diverge
+
+    case = _CASE_BY_ID["r01"]
+    good_path = ["portfolio_view()", "earnings_view(ticker=CRWD)"]
+    good = score_case(case, mode="agent", answer="CRWD 22.4% 2026-09-06",
+                      tools_called=["portfolio_view", "earnings_view"],
+                      stop_reason="final_answer", trace=good_path)
+
+    wording = score_case(case, mode="agent", answer="CRWD 看起来还行",
+                         tools_called=["portfolio_view", "earnings_view"],
+                         stop_reason="final_answer", trace=good_path)
+    d = diverge([good, good, wording])
+    assert d.kind == "wording" and d.fork_at is None
+    assert d.good_trace == tuple(good_path) and d.reasons and "事实缺失" in d.reasons[0]
+
+    choice = score_case(case, mode="agent", answer="",
+                        tools_called=["portfolio_view", "risk_view"],
+                        stop_reason="final_answer",
+                        trace=["portfolio_view()", "risk_view()"])
+    d = diverge([good, choice])
+    assert d.kind == "tool_choice" and d.fork_at == 1
+    assert d.bad_trace[1] == "risk_view()"
+
+    budget = score_case(case, mode="agent", answer="",
+                        tools_called=["portfolio_view"], stop_reason="budget_exhausted",
+                        trace=good_path[:1])
+    d = diverge([good, budget])
+    assert d.kind == "budget" and d.fork_at == 1
+
+    # The provider dropped the *final* call: the path is complete and identical
+    # to a passing run, so trace comparison alone would call this "wording".
+    error = score_case(case, mode="agent", answer="",
+                       tools_called=["portfolio_view", "earnings_view"],
+                       stop_reason="llm_error", error="TimeoutError: read timed out",
+                       trace=good_path)
+    d = diverge([good, error])
+    assert d.kind == "error", "报错的运行不管路径长短都是 error，不是措辞或工具选择"
+    d = diverge([good, score_case(case, mode="agent", answer="", tools_called=[],
+                                  stop_reason="llm_error", error="boom", trace=[])])
+    assert d.kind == "error"
+
+    # Majority kind wins; the shown failing run is one of that kind.
+    d = diverge([good, wording, wording, choice])
+    assert d.kind == "wording"
+
+    report = SuiteReport(mode="agent", repeat=2,
+                         scores=[good, wording, good, choice, good, good])
+    assert report.flaky_by_kind() == {"wording": ["r01"]} or \
+        report.flaky_by_kind() == {"tool_choice": ["r01"]}
+    assert report.summary()["flaky_by_kind"]
+
+
+def test_the_divergence_report_marks_the_fork_and_only_prints_for_repeats():
+    case = _CASE_BY_ID["r01"]
+    good = score_case(case, mode="agent", answer="CRWD 22.4% 2026-09-06",
+                      tools_called=["portfolio_view", "earnings_view"],
+                      stop_reason="final_answer",
+                      trace=["portfolio_view()", "earnings_view(ticker=CRWD)"])
+    bad = score_case(case, mode="agent", answer="", tools_called=["portfolio_view", "risk_view"],
+                     stop_reason="final_answer", trace=["portfolio_view()", "risk_view()"])
+    single = SuiteReport(mode="agent", repeat=1, scores=[bad])
+    assert runner.render_divergence(single) == "", "单轮没有分叉可言"
+
+    text = runner.render_divergence(SuiteReport(mode="agent", repeat=2, scores=[good, bad]))
+    assert "r01" in text and "1/2" in text and "工具选择" in text
+    assert "⟨risk_view()⟩" in text, "失败路径里第一处不同的调用要被标出来"
+    assert "第 2 步分叉" in text
+
+    # The sweep entry point actually prints it — a renderer nobody calls is
+    # the production-mode bug again.
+    import ast
+    source = (_REPO_ROOT / "v2/agent/run_eval.py").read_text(encoding="utf-8")
+    calls = {node.func.attr for node in ast.walk(ast.parse(source))
+             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)}
+    assert "render_divergence" in calls
+
+
 def test_repeat_is_skipped_for_the_deterministic_baseline():
     report = runner.run_suite("baseline", llm_factory=lambda: ScriptedLLM([]),
                               cases=CASES[:5], workers=1, repeat=3)
