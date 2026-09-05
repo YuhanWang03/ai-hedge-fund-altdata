@@ -35,14 +35,36 @@ from v2.agent.eval.cases import CATEGORIES, EvalCase
 _WS = re.compile(r"\s+")
 
 
+_DATE_CJK_FULL = re.compile(r"(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日?")
+_DATE_CJK = re.compile(r"(?<!\d)(\d{1,2})\s*月\s*(\d{1,2})\s*日?")
+_DATE_ISO = re.compile(r"(?<!\d)(\d{4})-(\d{1,2})-(\d{1,2})(?!\d)")
+_DATE_MD = re.compile(r"(?<![\d.])(\d{1,2})-(\d{1,2})(?![\d.])")
+
+
+def _canonical_dates(text: str) -> str:
+    """「2026 年 9 月 6 日」, ``2026-09-06``, 「9月6日」, ``9-06`` → ``2026-9-6`` / ``9-6``.
+
+    The labels were written in the ISO forms deepseek-chat copies off the cards.
+    gpt-4.1-mini writes 「2026 年 9 月 6 日」, and its first clean sweep booked
+    that as 事实缺失 on p03, p06 and others — the key was scoring the date's
+    spelling, not the answer's correctness. Both sides of the match go through
+    this, so a label written either way accepts an answer written either way.
+    """
+    text = _DATE_CJK_FULL.sub(lambda m: f"{int(m[1])}-{int(m[2])}-{int(m[3])}", text)
+    text = _DATE_CJK.sub(lambda m: f"{int(m[1])}-{int(m[2])}", text)
+    text = _DATE_ISO.sub(lambda m: f"{int(m[1])}-{int(m[2])}-{int(m[3])}", text)
+    text = _DATE_MD.sub(lambda m: f"{int(m[1])}-{int(m[2])}", text)
+    return text
+
+
 def normalise(text: str) -> str:
-    """Lowercase, drop thousands separators, collapse whitespace.
+    """Lowercase, drop thousands separators, collapse whitespace, canonicalise dates.
 
     Removing commas is what lets a case assert ``184,320.55`` and still match a
     model that wrote ``184320.55``. Whitespace is collapsed rather than removed
     so that English quotes keep their word boundaries.
     """
-    return _WS.sub(" ", (text or "").replace(",", "").lower()).strip()
+    return _WS.sub(" ", _canonical_dates((text or "").replace(",", "")).lower()).strip()
 
 
 def fact_present(forms: Iterable[str], answer: str) -> bool:
