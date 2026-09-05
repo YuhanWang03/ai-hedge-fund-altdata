@@ -102,6 +102,20 @@ class Trajectory:
                 seen.append(name)
         return seen
 
+    def calls_by_tool(self) -> dict[str, int]:
+        """How many times each tool was called, most-used first.
+
+        The overspend metric says a run used 25 calls; it does not say whether
+        that was one tool fanned out 25 ways or eight tools called three times
+        each. Those two have different fixes — a per-tool cap only touches the
+        first — and until this existed the difference was unmeasured, so any
+        cap would have been a guess.
+        """
+        counts: dict[str, int] = {}
+        for name in self.tools_used:
+            counts[name] = counts.get(name, 0) + 1
+        return dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
+
     def tool_records(self) -> list[tuple[str, dict[str, Any], str, bool]]:
         """(tool, args, content, ok) per call — what the attribution check needs."""
         return [(r.name, r.args, r.content, r.ok)

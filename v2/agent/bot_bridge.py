@@ -67,10 +67,19 @@ def production_config() -> AgentConfig:
 
     So the live ceiling is lower than the harness's, and tunable without a
     deploy:  V2_AGENT_MAX_STEPS · V2_AGENT_MAX_TOOL_CALLS · V2_AGENT_MAX_SECONDS
+    · V2_AGENT_MAX_CALLS_PER_TOOL
+
+    The per-tool cap is deliberately left **non-binding here** (8 per tool
+    against 8 calls in total). It is the harness that has room to overspend, so
+    it is the harness that should measure what the right value is; shipping a
+    tightened production default on a guess is the thing this package keeps
+    finding it was wrong about. The knob exists so that tightening it later
+    needs no deploy.
     """
     return AgentConfig(
         max_steps=_env_int("V2_AGENT_MAX_STEPS", 5),
         max_tool_calls=_env_int("V2_AGENT_MAX_TOOL_CALLS", 8),
+        max_calls_per_tool=_env_int("V2_AGENT_MAX_CALLS_PER_TOOL", 8),
         max_seconds=float(_env_int("V2_AGENT_MAX_SECONDS", 90)),
     )
 
