@@ -153,6 +153,16 @@ def main(argv: list[str] | None = None) -> int:
     print(f"评测集：{len(cases)} 条 · 模式：{', '.join(modes)}")
     if _needs_llm(modes):
         print(f"模型：{describe_provider()}")
+    # Say which settings came from the environment. An `export EVAL_CASES=…`
+    # left over from a flaky-case sweep turned the next "full" run into the
+    # same 6 cases again, and only the case count gave it away.
+    inherited = [f"{name}={os.environ[name]}" for name in
+                 ("EVAL_MODES", "EVAL_CASES", "EVAL_CATEGORY", "EVAL_LIMIT",
+                  "EVAL_REPEAT", "EVAL_OUT", "EVAL_WORKERS")
+                 if os.environ.get(name, "").strip()]
+    if inherited:
+        print("环境变量生效：" + " ".join(inherited)
+              + "\n  （不想要的话 unset 掉，否则每次都会沿用）")
     print()
 
     done = 0
