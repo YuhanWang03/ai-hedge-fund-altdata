@@ -29,8 +29,9 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
-from v2.agent.grounding import (_normalise, extract_numbers,
-                                extract_numbers_with_context)
+from v2.agent.grounding import (WINDOW_UNIT as _WINDOW_UNIT, _normalise,
+                                extract_numbers, extract_numbers_with_context,
+                                mask_non_quantities as _mask_filings)
 
 #: Arguments that name the subject a tool result is about.
 _ENTITY_ARGS = ("ticker", "symbol", "manager")
@@ -44,30 +45,9 @@ _ENTITY_ARGS = ("ticker", "symbol", "manager")
 _ENTITY_MENTION = re.compile(
     r"\b[A-Z]{2,5}\b|巴菲特|伯克希尔|木头姐|[Bb]uffett|[Bb]urry|BERKSHIRE")
 
-#: Text that reads as a number but names something — a document, a date, a
-#: countdown. Masked out before extraction, on both sides.
-#:
-#: Filings first: 8-K, 10-Q, 13F, Item 5.02, so 「SMCI 的 8-K 查询超时」 cannot
-#: be read as attributing the value 8 to SMCI.
-#:
-#: Then dates, which is the expensive one. A hyphen in front of a day of the
-#: month is a *minus sign* to any number extractor, so the earnings calendar
-#:
-#:     · MU：09-30      · LRCX：10-21      · INTC：10-22
-#:
-#: hands MU the value -30, LRCX the value -21, INTC -22 — and the answer's own
-#: correct list then reads as four misattributions against its neighbours.
-#: Seen live, on a list where every single row was right.
-#:
-#: D-74 (days to the next report) is the same shape and the same mistake.
-_FILING_TOKEN = re.compile(
-    r"\b\d{4}-\d{1,2}-\d{1,2}\b"          # 2026-11-17
-    r"|\b\d{1,2}-\d{1,2}\b"                # 10-21, 09-30
-    r"|\b\d{1,2}/\d{1,2}\b"                # 9/30 — the slash form
-    r"|\b\d{1,4}\s?(?:ms|s|秒|分钟|小时)\b"  # 30s 超时 — a duration
-    r"|\b[A-Z]-\d{1,4}\b"                   # D-74
-    r"|\b\d{1,2}-[A-Z]\b|\b\d{1,2}[FKQ]\b"
-    r"|(?:[Ii]tem|[Ss]ection)\s*\d+(?:\.\d+)?")
+#: Filings, dates, durations and window sizes are masked by the shared
+#: ``grounding.mask_non_quantities`` — one definition for both checks, so they
+#: cannot disagree about what a figure is.
 
 #: The 13F tool takes an alias while answers use the Chinese name; without
 #: normalising, every figure next to 「巴菲特」 looks misattributed away from
@@ -148,11 +128,15 @@ _BENCHMARK_LEAD = re.compile(
     r"(?:同期|相对|相比|对比|较之?|跑输|跑赢|基准|参照|落后于|领先于|\bvs\.?|versus)"
     r"[\s，,：:的]*$", re.IGNORECASE)
 
-#: A figure followed by a time unit is the *size of a window*, not a quantity
-#: belonging to anyone: 「52 周高点」「200 日均线」「过去 30 天」. Live, the 52 in
-#: MU's 「接近 52 周高点」 was reported as belonging to INTC/MU and flagged
-#: against a neighbouring name.
-_WINDOW_UNIT = re.compile(r"^\s*(?:个)?\s*(?:周|日|天|月|年|季|季度|小时)")
+#: An operand of a displayed sum is being cited as an *input*, not attributed:
+#: 「CRWD 22.4% 的仓位已触发集中度超标（前 3 大合计 22.4% + 18.2% + 14.1% =
+#: 54.7%）」 names one entity, so the clause rule does not apply, and proximity
+#: hands NVDA's 18.2 and MSFT's 14.1 to CRWD. The operator on either side is
+#: the tell — a figure with a digit and a plus sign right before it, or a plus
+#: or equals and a digit right after it, is a term in an expression. A sign
+#: (「（+5.6%」) has no digit before its plus and is not matched.
+_IN_SUM_BEFORE = re.compile(r"[\d%）)]\s*[+＋=＝]\s*$")
+_IN_SUM_AFTER = re.compile(r"^\s*%?\s*[+＋=＝]\s*[\d$￥(（]")
 
 #: Chinese puts a modifier before its head, so a figure can belong to the entity
 #: that *follows* it: 「但被占仓 66.3% 的 IVV 微跌 -0.47% 抵消了大半」. Reading
@@ -329,14 +313,6 @@ def _window_end(text: str, start: int, limit: int) -> int:
     return brk.start() if brk else limit
 
 
-def _mask_filings(text: str) -> str:
-    """Blank out filings, dates and countdowns so they are not read as values.
-
-    Equal-length spaces, so every offset downstream still lines up.
-    """
-    return _FILING_TOKEN.sub(lambda m: " " * len(m.group(0)), text or "")
-
-
 def _entity_of(args: dict[str, Any]) -> str:
     for key in _ENTITY_ARGS:
         value = str((args or {}).get(key, "")).strip()
@@ -494,6 +470,9 @@ def check(
             if _VS_OPERAND.search(body[max(0, position + start - 10):
                                        position + start]):
                 continue                    # 「x vs y」 — y is the other subject
+            if (_IN_SUM_BEFORE.search(body[max(0, position + start - 6): position + start])
+                    or _IN_SUM_AFTER.match(body[position + end: position + end + 8])):
+                continue                    # a term in 「a + b + c = d」
 
             clause = _clause_at(body, position + start)
             if _ACKNOWLEDGES_GAP.search(clause):

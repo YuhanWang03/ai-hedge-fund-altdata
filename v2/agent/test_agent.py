@@ -455,7 +455,25 @@ def test_grounding_accepts_a_unit_conversion():
 def test_grounding_exempts_identifiers():
     """8-K Item 5.02 names a section — demanding it trace to data is incoherent."""
     report = grounding.check("披露了 Item 5.02 与 Item 1.01", "无关观测")
-    assert report.ok and report.exempt == 2
+    assert report.ok and not report.ungrounded
+    # Masked before extraction now, so they are not figures at all — neither
+    # counted nor exempted. The shared mask is the point: see the next test.
+    assert report.total == 0
+
+
+def test_both_checks_agree_on_what_a_figure_is():
+    """「你能帮我做什么」 — a capability answer, zero tool calls, zero
+    observations — failed 0/3 for saying 13F, 近 30 天 and 52 周高点. The
+    attribution check already knew none of those was a quantity; grounding
+    kept its own shorter list. One mask now, imported by both."""
+    from v2.agent import attribution
+
+    answer = "我可以查 13F 机构持仓、近 30 天的 8-K 申报、以及 52 周高点，D-74。"
+    assert grounding.check(answer, "").ok
+    assert attribution._mask_filings is grounding.mask_non_quantities
+
+    # A real invented figure in the same sentence is still caught.
+    assert grounding.check(answer + " NVDA 权重 88.6%。", "").ungrounded == ["88.6"]
 
 
 def test_grounding_still_rejects_unshown_arithmetic_and_invention():
@@ -653,6 +671,25 @@ def test_a_clause_that_disclaims_the_data_is_not_claiming_it():
         _records(("etf_view", {"symbol": "ARKQ"}, "ARKQ 未记录"),
                  ("etf_view", {"symbol": "ARKK"}, "TSLA 9.80%"),
                  ("portfolio_view", {}, "CRWD 22.4%"))).ok
+
+
+def test_a_term_in_a_displayed_sum_is_cited_not_attributed():
+    """「CRWD 22.4% 的仓位已触发集中度超标（前 3 大合计 22.4% + 18.2% + 14.1% =
+    54.7%）」 names one entity, so the clause rule stands down and proximity
+    hands NVDA's and MSFT's weights to CRWD. The plus signs are the tell.
+
+    A *sign* is not an operator: 「（+18.2%）」 has no digit before its plus, and
+    a borrowed figure written that way is still caught."""
+    from v2.agent import attribution
+
+    card = "CRWD 22.4% · NVDA 18.2% · MSFT 14.1% · 前三合计 54.7%"
+    assert attribution.check(
+        "CRWD 22.4% 的仓位已触发超标（前 3 大合计 22.4% + 18.2% + 14.1% = 54.7%）。",
+        _records(("risk_view", {}, card))).ok
+
+    assert not attribution.check(
+        "CRWD 超预期（+18.2%）。",
+        _records(("earnings_view", {"ticker": "NVDA"}, "NVDA beat +18.2%"))).ok
 
 
 def test_a_comparison_operand_belongs_to_the_other_side():

@@ -33,6 +33,33 @@ _NUMBER = re.compile(r"-?\d[\d,]*(?:\.\d+)?")
 _IDENTIFIER_CONTEXT = re.compile(
     r"(?:item|section|条款|项)\s*$", re.IGNORECASE)
 
+#: Text that reads as a number but names something — a filing, a date, a
+#: countdown, a duration. Blanked with equal-length spaces before extraction so
+#: every offset downstream still lines up.
+#:
+#: Owned here and shared with the attribution check, because for a while each
+#: check kept its own list and they disagreed: attribution knew 13F, 「近 30
+#: 天」 and 「52 周高点」 were not quantities, grounding did not, and 「你能帮我
+#: 做什么」 — a capability answer with no observations at all — failed 0/3 for
+#: mentioning them. Two checks with two ideas of what a figure is will drift
+#: apart again if they are not the same function.
+NON_QUANTITY = re.compile(
+    r"\b\d{4}-\d{1,2}-\d{1,2}\b"          # 2026-11-17
+    r"|\b\d{1,2}-\d{1,2}\b"                # 10-21, 09-30
+    r"|\b\d{1,2}/\d{1,2}\b"                # 9/30
+    r"|\b\d{1,4}\s?(?:ms|s|秒|分钟|小时)\b"  # 30s 超时
+    r"|\b[A-Z]-\d{1,4}\b"                   # D-74
+    r"|\b\d{1,2}-[A-Z]\b|\b\d{1,2}[FKQ]\b" # 8-K, 10-Q, 13F
+    r"|(?:[Ii]tem|[Ss]ection)\s*\d+(?:\.\d+)?")
+
+#: A figure followed by a time unit is the size of a window, not a value:
+#: 「52 周高点」「200 日均线」「过去 30 天」.
+WINDOW_UNIT = re.compile(r"^\s*(?:个)?\s*(?:周|日|天|月|年|季|季度|小时)")
+
+
+def mask_non_quantities(text: str) -> str:
+    return NON_QUANTITY.sub(lambda m: " " * len(m.group(0)), text or "")
+
 
 def _normalise(token: str) -> str:
     return token.replace(",", "").lstrip("-").rstrip(".")
@@ -187,9 +214,13 @@ def check(
 
     report = GroundingReport()
 
-    for raw, before, start, end in extract_numbers_with_context(answer):
+    masked = mask_non_quantities(answer)
+    for raw, before, start, end in extract_numbers_with_context(masked):
         token = _normalise(raw)
         if not token:
+            continue
+        if WINDOW_UNIT.match(masked[end:]):
+            report.exempt += 1
             continue
 
         # Structural exemptions: ordinals, counts, years, identifiers.
