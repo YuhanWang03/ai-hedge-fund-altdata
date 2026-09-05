@@ -43,14 +43,22 @@ _IDENTIFIER_CONTEXT = re.compile(
 #: 做什么」 — a capability answer with no observations at all — failed 0/3 for
 #: mentioning them. Two checks with two ideas of what a figure is will drift
 #: apart again if they are not the same function.
+# `\b` is the wrong boundary for this text: CJK characters are \w, so `\b`
+# never fires between 「构」 and 「13F」 or between 「秒」 and 「超」. 「机构13F持仓」
+# left a bare 13 behind, and d06 (a capability answer, no tool called, every
+# surviving digit ungrounded by construction) failed 3 runs in 10 on it. The
+# boundaries below are "not a letter or digit", which is what was meant.
+_L = r"(?<![A-Za-z0-9])"
+_R = r"(?![A-Za-z0-9])"
 NON_QUANTITY = re.compile(
-    r"\b\d{4}-\d{1,2}-\d{1,2}\b"          # 2026-11-17
-    r"|\b\d{1,2}-\d{1,2}\b"                # 10-21, 09-30
-    r"|\b\d{1,2}/\d{1,2}\b"                # 9/30
-    r"|\b\d{1,4}\s?(?:ms|s|秒|分钟|小时)\b"  # 30s 超时
-    r"|\b[A-Z]-\d{1,4}\b"                   # D-74
-    r"|\b\d{1,2}-[A-Z]\b|\b\d{1,2}[FKQ]\b" # 8-K, 10-Q, 13F
-    r"|(?:[Ii]tem|[Ss]ection)\s*\d+(?:\.\d+)?")
+    _L + r"\d{4}-\d{1,2}-\d{1,2}" + _R          # 2026-11-17
+    + "|" + _L + r"\d{1,2}-\d{1,2}" + _R          # 10-21, 09-30
+    + "|" + _L + r"\d{1,2}/\d{1,2}" + _R          # 9/30
+    + "|" + _L + r"\d{1,4}\s?(?:ms|s|秒|分钟|小时)" + _R   # 30s 超时
+    + "|" + _L + r"[A-Z]-\d{1,4}" + _R             # D-74
+    + "|" + _L + r"\d{1,2}-[A-Z]" + _R             # 8-K, 10-Q
+    + "|" + _L + r"\d{1,2}[FKQD]" + _R             # 13F, 13D
+    + r"|(?:[Ii]tem|[Ss]ection)\s*\d+(?:\.\d+)?")
 
 #: A figure followed by a time unit is the size of a window, not a value:
 #: 「52 周高点」「200 日均线」「过去 30 天」.

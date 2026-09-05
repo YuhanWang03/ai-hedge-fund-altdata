@@ -416,6 +416,54 @@ def test_the_divergence_report_marks_the_fork_and_only_prints_for_repeats():
     assert "render_divergence" in calls
 
 
+def test_a_rewrite_that_loses_the_drafts_facts_is_booked_against_the_check():
+    """m07's failing run: the draft named ARM +7.42%, a check rejected it, and
+    the rewrite refused everything — 「无法确认这些数字分别属于哪一只」. That
+    was scored as 事实缺失, a model failure, and the check's own error rate
+    stayed at zero. The draft and its findings are now kept, and a rewrite that
+    drops facts the draft had is the check's regression, not the model's."""
+    import ast
+
+    def factory():
+        return ScriptedLLM([
+            LLMResponse(tool_calls=[ToolCall("c1", "portfolio_view", {}, "{}")]),
+            # Draft: the right fact plus one invented figure → grounding repair.
+            LLMResponse(text="CRWD 占仓 22.4%，是第一大持仓；组合 beta 1.37。"),
+            # Rewrite: over-corrects and drops the fact too.
+            LLMResponse(text="数据不足，无法确认第一大持仓。"),
+        ])
+
+    score = runner.run_case(_CASE_BY_ID["r03"], runner.MODES["agent"], llm_factory=factory)
+    assert not score.passed and score.repairs == 1
+    assert "22.4%" in score.draft and score.draft_facts_ok
+    assert score.draft_findings == ("无法溯源 1.37",)
+    assert score.repair_regressed
+    assert score.failure_reason().startswith("重写丢了事实")
+
+    report = SuiteReport(mode="agent", scores=[score])
+    assert report.summary()["repair_regression_rate"] == 1.0
+    text = runner.render_repairs(report)
+    assert "r03" in text and "1.37" in text
+    row = runner.to_json([report])["cases"][0]
+    assert row["draft"] == score.draft and row["repair_regressed"] is True
+
+    # A rewrite that keeps the facts is a repair that worked, not a regression.
+    def good_factory():
+        return ScriptedLLM([
+            LLMResponse(tool_calls=[ToolCall("c1", "portfolio_view", {}, "{}")]),
+            LLMResponse(text="CRWD 占仓 22.4%，是第一大持仓；组合 beta 1.37。"),
+            LLMResponse(text="CRWD 占仓 22.4%，是第一大持仓。"),
+        ])
+    fixed = runner.run_case(_CASE_BY_ID["r03"], runner.MODES["agent"], llm_factory=good_factory)
+    assert fixed.passed and fixed.repairs == 1 and not fixed.repair_regressed
+    assert runner.render_repairs(SuiteReport(mode="agent", scores=[fixed])).count("没有重写") == 1
+
+    source = (_REPO_ROOT / "v2/agent/run_eval.py").read_text(encoding="utf-8")
+    calls = {node.func.attr for node in ast.walk(ast.parse(source))
+             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)}
+    assert "render_repairs" in calls
+
+
 def test_repeat_is_skipped_for_the_deterministic_baseline():
     report = runner.run_suite("baseline", llm_factory=lambda: ScriptedLLM([]),
                               cases=CASES[:5], workers=1, repeat=3)

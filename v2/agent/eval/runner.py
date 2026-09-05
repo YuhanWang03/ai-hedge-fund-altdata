@@ -137,7 +137,8 @@ def run_case(case: EvalCase, mode: Mode, *, llm_factory: Callable[[], Any]) -> C
             tokens=trajectory.prompt_tokens + trajectory.completion_tokens,
             elapsed_ms=result.elapsed_ms, path=path,
             stop_reason=result.stop_reason, error=result.error,
-            trace=trajectory.trace())
+            trace=trajectory.trace(), repairs=result.repairs,
+            draft=result.draft, draft_findings=result.draft_findings)
     except Exception as exc:  # noqa: BLE001 — one bad case must not kill the sweep
         return score_case(case, mode=mode.name, answer="", tools_called=[],
                           grounded=False, elapsed_ms=int((time.time() - started) * 1000),
@@ -367,6 +368,35 @@ def render_attribution(report: SuiteReport) -> str:
     return "\n".join(lines)
 
 
+def render_repairs(report: SuiteReport) -> str:
+    """Repair rounds, and the ones that made the answer worse.
+
+    A rewrite the checks demanded is supposed to fix a figure. When the draft
+    already had every fact the case asks for and the rewrite does not, the
+    check has cost a correct answer — and until this existed that cost was
+    booked as 「事实缺失」 against the model, with the check's own error rate
+    sitting at zero. Printed whenever any repair ran.
+    """
+    repaired = [s for s in report.scores if s.repairs]
+    if not repaired:
+        return ""
+    regressed = report.repair_regressions()
+    lines = [_RULE,
+             f"【{report.mode} 重写】{len(repaired)} 次运行被打回重写，"
+             f"其中 {len(regressed)} 次重写丢了初稿已有的事实",
+             _RULE]
+    if not regressed:
+        lines.append("  没有重写把正确的初稿改坏。")
+        return "\n".join(lines)
+    for score in regressed[:8]:
+        lines.append(f"  · [{score.case_id}] 打回原因：{'；'.join(score.draft_findings[:4])}")
+        lines.append(f"      重写后：{score._own_reason()}")
+    lines.append("")
+    lines.append("  这一栏是校验的另一种错误率：警告打在了正确的初稿上，重写把事实一起扔了。"
+                 "初稿原文在 JSON 的 draft 字段里。")
+    return "\n".join(lines)
+
+
 def render_grounding(report: SuiteReport) -> str:
     """Split the rejected figures by why they failed.
 
@@ -468,6 +498,10 @@ def to_json(reports: list[SuiteReport]) -> dict:
                 "path": s.path, "path_correct": s.path_correct,
                 "stop_reason": s.stop_reason, "error": s.error,
                 "trace": list(s.trace), "answer": s.answer,
+                "repairs": s.repairs, "draft": s.draft,
+                "draft_findings": list(s.draft_findings),
+                "draft_facts_ok": s.draft_facts_ok,
+                "repair_regressed": s.repair_regressed,
             }
             for r in reports for s in r.scores
         ],
