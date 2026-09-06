@@ -30,6 +30,7 @@ from typing import Any, Callable
 from v2.agent import grounding, router
 from v2.agent.baseline import run_baseline
 from v2.agent.eval.cases import CASES, EvalCase
+from v2.agent.eval.holdout import HOLDOUT
 from v2.agent.eval.fixtures import build_eval_registry
 from v2.agent.eval.scoring import CaseScore, SuiteReport, score_case
 from v2.agent.loop import AgentConfig, run_agent
@@ -53,9 +54,19 @@ MODES: dict[str, Mode] = {
                             AgentConfig(grounding_repair=False), "关闭溯源重写"),
     "agent_tight": Mode("agent_tight", "agent",
                         AgentConfig(max_steps=3, max_tool_calls=4), "预算收紧"),
+    # What the bot actually runs with. Every sweep so far measured the loop at
+    # its harness default of 20 calls; production caps it at 8. So the
+    # overspend being chased (17–21% at 20 calls) is behaviour production never
+    # exhibits, and the question that matters — what does the 8-call cap cost
+    # in pass rate — had never been asked. The numbers must match
+    # ``bot_bridge.production_config()``'s defaults; a test holds them together.
+    "production": Mode("production", "routed",
+                       AgentConfig(max_steps=5, max_tool_calls=8,
+                                   max_calls_per_tool=8, max_seconds=90.0),
+                       "生产配置（路由 + 5 步 / 8 次调用）"),
 }
 
-DEFAULT_MODES = ("baseline", "routed", "agent")
+DEFAULT_MODES = ("baseline", "routed", "production", "agent")
 
 
 def _parsed(case: EvalCase) -> dict[str, Any]:
@@ -98,7 +109,8 @@ def run_case(case: EvalCase, mode: Mode, *, llm_factory: Callable[[], Any]) -> C
                 tools_called=[result.tool] if result.tool else [],
                 grounded=True, tool_calls=1 if result.tool else 0, llm_calls=1,
                 tokens=0, elapsed_ms=result.elapsed_ms, path=path,
-                stop_reason="single_hop")
+                stop_reason="single_hop",
+                trace=[result.tool] if result.tool else [])
 
         result = run_agent(case.query, llm=llm_factory(), registry=registry,
                            config=mode.config or AgentConfig())
@@ -112,10 +124,23 @@ def run_case(case: EvalCase, mode: Mode, *, llm_factory: Callable[[], Any]) -> C
             ungrounded_kinds=(grounding.diagnose(result.grounding,
                                                  trajectory.observations_text())
                               if not result.grounding.ok else None),
+            # The finding *and* the line it came from: a verdict with no
+            # evidence is a verdict nobody can act on.
+            misattributed=tuple(
+                f"{entity}←{figure}(实为 {'/'.join(owners)})｜{evidence}"
+                for (entity, figure, owners), evidence in zip(
+                    result.attribution.misattributed,
+                    list(result.attribution.evidence) + [""] * 8)),
+            calls_by_tool=trajectory.calls_by_tool(),
+            capped_calls=result.capped_calls,
+            refused_calls=trajectory.refused_calls,
             tool_calls=trajectory.tool_calls, llm_calls=trajectory.llm_calls,
             tokens=trajectory.prompt_tokens + trajectory.completion_tokens,
             elapsed_ms=result.elapsed_ms, path=path,
-            stop_reason=result.stop_reason, error=result.error)
+            stop_reason=result.stop_reason, error=result.error,
+            trace=trajectory.trace(), repairs=result.repairs,
+            draft=result.draft, draft_findings=result.draft_findings,
+            partial_rewrite=result.partial_rewrite)
     except Exception as exc:  # noqa: BLE001 — one bad case must not kill the sweep
         return score_case(case, mode=mode.name, answer="", tools_called=[],
                           grounded=False, elapsed_ms=int((time.time() - started) * 1000),
@@ -226,6 +251,64 @@ def render_stability(report: SuiteReport) -> str:
     return "\n".join(lines)
 
 
+_KIND_LABEL = {
+    "error": "运行错误（模型侧/网络，循环里没有可修的东西）",
+    "budget": "预算（路径和通过的一样，只是没走完就被截停）",
+    "early_stop": "提前收尾（路径是通过路径的前缀，模型自己决定够了就写了）",
+    "tool_choice": "工具选择（同样的上下文，模型选了不同的工具或参数）",
+    "wording": "措辞（路径、证据完全相同，只是写出来的答案不同）",
+}
+
+
+def _short(call: str, width: int = 34) -> str:
+    return call if len(call) <= width else call[: width - 1] + "…"
+
+
+def render_divergence(report: SuiteReport) -> str:
+    """For each flaky case: where its failing runs left the passing path.
+
+    Temperature is already zero, so the flaky list cannot be shrunk by a
+    sampling knob; it can only be split by cause. A tool-choice fork points at
+    a prompt or a description, a wording fork at the answer check, a budget
+    fork at the stop rule, and an error at the provider — four different
+    places to look, and the pass ratio alone never said which.
+    """
+    if report.repeat <= 1:
+        return ""
+    flaky = report.flaky()
+    lines = [_RULE, f"【{report.mode} 抖动分叉点】{len(flaky)} 条", _RULE]
+    if not flaky:
+        lines.append("  没有抖动的 case。")
+        return "\n".join(lines)
+    by_kind = report.flaky_by_kind()
+    lines.append("  按分叉类型：" + " · ".join(
+        f"{kind} {len(ids)}" for kind, ids in by_kind.items()))
+    lines.append("")
+    for case_id, passed, total in flaky:
+        d = report.divergence(case_id)
+        lines.append(f"  · {case_id}  {passed}/{total} 通过 → {_KIND_LABEL.get(d.kind, d.kind)}")
+        good = " → ".join(_short(c) for c in d.good_trace) or "(未调用工具)"
+        lines.append(f"      通过路径：{good}")
+        if d.kind == "wording":
+            lines.append(f"      失败路径：同上；失败原因：{'；'.join(d.reasons)}")
+        else:
+            marked = []
+            for i, call in enumerate(d.bad_trace):
+                text = _short(call)
+                marked.append(f"⟨{text}⟩" if d.fork_at is not None and i == d.fork_at else text)
+            if d.fork_at is not None and d.fork_at >= len(d.bad_trace):
+                marked.append("⟨停⟩")
+            bad = " → ".join(marked) or "(未调用工具)"
+            where = f"第 {d.fork_at + 1} 步分叉" if d.fork_at is not None else "无通过样本可比"
+            lines.append(f"      失败路径：{bad}   ({where}"
+                         + (f" · {'/'.join(d.bad_stops)}" if d.bad_stops else "") + ")")
+            lines.append(f"      失败原因：{'；'.join(d.reasons)}")
+    lines.append("")
+    lines.append("  ⟨⟩ 标出失败路径里第一处与通过路径不同的调用；"
+                 "完整路径和答案原文在 JSON 的 trace / answer 字段里。")
+    return "\n".join(lines)
+
+
 def render_failures(report: SuiteReport, limit: int = 20) -> str:
     seen: set[str] = set()
     failures = []
@@ -241,7 +324,7 @@ def render_failures(report: SuiteReport, limit: int = 20) -> str:
     if not failures:
         lines.append("  无失败。")
         return "\n".join(lines)
-    case_by_id = {c.id: c for c in CASES}
+    case_by_id = {c.id: c for c in CASES + HOLDOUT}
     for score in failures[:limit]:
         case = case_by_id.get(score.case_id)
         passed, total = stability.get(score.case_id, (0, 1))
@@ -255,6 +338,68 @@ def render_failures(report: SuiteReport, limit: int = 20) -> str:
             lines.append(f"      标注说明：{case.note}")
     if len(failures) > limit:
         lines.append(f"  …另有 {len(failures) - limit} 条，完整清单见 JSON 输出")
+    return "\n".join(lines)
+
+
+def render_attribution(report: SuiteReport) -> str:
+    """Every misattribution warning raised on an answer the case says is correct.
+
+    Read this as the *checker's* error rate, not the model's: the case's own
+    assertions already decided the answer was right, so anything listed here is
+    the check rejecting good work. The axis exists because for nine rounds it
+    did not: seven false positives shipped, each found by a human reading a
+    Telegram message rather than by this suite.
+    """
+    findings = report.false_misattributions()
+    lines = [_RULE,
+             f"【{report.mode} 归属检查的误报】{len(findings)} / {report.total} 条用例",
+             _RULE]
+    if not findings:
+        lines.append("  无 —— 正确的回答没有被打上张冠李戴的标记。")
+        return "\n".join(lines)
+    for case_id, pairs in findings[:12]:
+        for pair in pairs[:2]:
+            finding, _, evidence = pair.partition("｜")
+            lines.append(f"  {case_id:<6}{finding}")
+            if evidence:
+                lines.append(f"        ↳ {evidence[:110]}")
+    if len(findings) > 12:
+        lines.append(f"  …另有 {len(findings) - 12} 条")
+    lines.append("")
+    lines.append("  这些回答通过了自己全部的事实与禁词断言,警告是检查器的错,不是模型的。")
+    return "\n".join(lines)
+
+
+def render_repairs(report: SuiteReport) -> str:
+    """Repair rounds, and the ones that made the answer worse.
+
+    A rewrite the checks demanded is supposed to fix a figure. When the draft
+    already had every fact the case asks for and the rewrite does not, the
+    check has cost a correct answer — and until this existed that cost was
+    booked as 「事实缺失」 against the model, with the check's own error rate
+    sitting at zero. Printed whenever any repair ran.
+    """
+    repaired = [s for s in report.scores if s.repairs]
+    if not repaired:
+        return ""
+    regressed = report.repair_regressions()
+    lines = [_RULE,
+             f"【{report.mode} 重写】{len(repaired)} 次运行被打回重写，"
+             f"其中 {len(regressed)} 次重写丢了初稿已有的事实",
+             _RULE]
+    if not regressed:
+        lines.append("  没有重写把正确的初稿改坏。")
+        return "\n".join(lines)
+    partial = sum(1 for s in regressed if s.partial_rewrite)
+    if partial:
+        lines.append(f"  其中 {partial} 次是重写只回了改动的那一段（初稿里过半的数字不见了）")
+    for score in regressed[:8]:
+        lines.append(f"  · [{score.case_id}] 打回原因：{'；'.join(score.draft_findings[:4])}"
+                     + ("  ← 只回了一段" if score.partial_rewrite else ""))
+        lines.append(f"      重写后：{score._own_reason()}")
+    lines.append("")
+    lines.append("  这一栏是校验的另一种错误率：警告打在了正确的初稿上，重写把事实一起扔了。"
+                 "初稿原文在 JSON 的 draft 字段里。")
     return "\n".join(lines)
 
 
@@ -301,13 +446,26 @@ def render_overspend(report: SuiteReport, limit: int = 10) -> str:
     if not over:
         lines.append("  无。")
         return "\n".join(lines)
-    case_by_id = {c.id: c for c in CASES}
+    case_by_id = {c.id: c for c in CASES + HOLDOUT}
     for score in over[:limit]:
         case = case_by_id.get(score.case_id)
         lines.append(f"  · [{score.case_id}] {case.query if case else ''}"
                      f"  {score.tool_calls} 次 / 上限 {case.max_tool_calls if case else '?'}"
                      f" · {score.tokens} token"
                      f" · {'通过' if score.passed else '未通过'}")
+        # Depth or breadth? The count alone cannot say, and the two have
+        # different fixes — a per-tool cap only ever touches depth.
+        top = list(score.calls_by_tool.items())[:4]
+        if top:
+            shape = " · ".join(f"{name}×{count}" for name, count in top)
+            rest = len(score.calls_by_tool) - len(top)
+            lines.append(f"        ↳ {shape}" + (f" …另 {rest} 个工具" if rest > 0 else "")
+                         + (f" · 另有 {score.refused_calls} 次被拒（其中上限 "
+                            f"{score.capped_calls} 次，不计入上面的次数）"
+                            if score.refused_calls else ""))
+    lines.append("")
+    lines.append("  ↳ 那一行是每个工具各调了几次：一个工具扇出很多次是「深度」，"
+                 "很多工具各调几次是「广度」——只有前者能被 per-tool 上限拦住。")
     return "\n".join(lines)
 
 
@@ -317,7 +475,7 @@ def render_routing(report: SuiteReport) -> str:
     lines = [_RULE, "【路由】", _RULE,
              f"  准确率 {report.summary()['routing_accuracy']:.0%}"
              f"（{report.total - len(wrong)}/{report.total}）"]
-    case_by_id = {c.id: c for c in CASES}
+    case_by_id = {c.id: c for c in CASES + HOLDOUT}
     for score in wrong[:12]:
         case = case_by_id.get(score.case_id)
         lines.append(f"  ✗ [{score.case_id}] {case.query if case else ''}"
@@ -337,11 +495,20 @@ def to_json(reports: list[SuiteReport]) -> dict:
                 "missing_facts": list(s.missing_facts),
                 "violations": list(s.violations), "forbidden": list(s.forbidden_hit),
                 "ungrounded": list(s.ungrounded), "overspend": s.overspend,
+                "misattributed": list(s.misattributed),
+                "calls_by_tool": s.calls_by_tool, "capped_calls": s.capped_calls,
+                "refused_calls": s.refused_calls,
                 "ungrounded_kinds": s.ungrounded_kinds,
                 "tool_calls": s.tool_calls, "llm_calls": s.llm_calls,
                 "tokens": s.tokens, "elapsed_ms": s.elapsed_ms,
                 "path": s.path, "path_correct": s.path_correct,
                 "stop_reason": s.stop_reason, "error": s.error,
+                "trace": list(s.trace), "answer": s.answer,
+                "repairs": s.repairs, "draft": s.draft,
+                "draft_findings": list(s.draft_findings),
+                "draft_facts_ok": s.draft_facts_ok,
+                "repair_regressed": s.repair_regressed,
+                "partial_rewrite": s.partial_rewrite,
             }
             for r in reports for s in r.scores
         ],

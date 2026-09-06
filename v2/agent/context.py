@@ -77,7 +77,19 @@ class Trajectory:
 
     @property
     def tool_calls(self) -> int:
-        return sum(len(s.results) for s in self.steps)
+        """Calls that reached a tool — the ones that cost something.
+
+        Refusals (duplicate, over the per-tool cap, malformed arguments) used to
+        be counted here, which made the cost metric wrong in the worst
+        direction: the cap refusing four calls added four to the count it was
+        installed to bring down.
+        """
+        return sum(1 for s in self.steps for r in s.results if r.reached_tool)
+
+    @property
+    def refused_calls(self) -> int:
+        """Calls the loop or the gate turned away before anything ran."""
+        return sum(1 for s in self.steps for r in s.results if not r.reached_tool)
 
     @property
     def failed_tool_calls(self) -> int:
@@ -93,7 +105,7 @@ class Trajectory:
 
     @property
     def tools_used(self) -> list[str]:
-        return [r.name for s in self.steps for r in s.results]
+        return [r.name for s in self.steps for r in s.results if r.reached_tool]
 
     def distinct_tools(self) -> list[str]:
         seen: list[str] = []
@@ -101,6 +113,38 @@ class Trajectory:
             if name not in seen:
                 seen.append(name)
         return seen
+
+    def calls_by_tool(self) -> dict[str, int]:
+        """How many times each tool was called, most-used first.
+
+        The overspend metric says a run used 25 calls; it does not say whether
+        that was one tool fanned out 25 ways or eight tools called three times
+        each. Those two have different fixes — a per-tool cap only touches the
+        first — and until this existed the difference was unmeasured, so any
+        cap would have been a guess.
+        """
+        counts: dict[str, int] = {}
+        for name in self.tools_used:
+            counts[name] = counts.get(name, 0) + 1
+        return dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
+
+    def trace(self) -> list[str]:
+        """The path this run took: every call that reached a tool, in order,
+        as ``tool(arg=value, …)``.
+
+        Two runs of the same query at temperature 0 can still fork — on the
+        first tool they pick, or later. Pass rate says *that* a case is flaky;
+        only the path says *where* it forks, and a fork on tool choice and a
+        fork on wording after identical evidence are different problems with
+        different fixes. Refused calls are left out: they added no evidence.
+        """
+        out: list[str] = []
+        for step in self.steps:
+            for r in step.results:
+                if r.reached_tool:
+                    args = ", ".join(f"{k}={v}" for k, v in sorted((r.args or {}).items()))
+                    out.append(f"{r.name}({args})")
+        return out
 
     def tool_records(self) -> list[tuple[str, dict[str, Any], str, bool]]:
         """(tool, args, content, ok) per call — what the attribution check needs."""

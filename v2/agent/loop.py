@@ -43,7 +43,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
 
-from v2.agent import attribution, grounding
+from v2.agent import attribution, grounding, presentation
 from v2.agent.context import Step, Trajectory, extract_note
 from v2.agent.llm import LLMClient, LLMError, LLMResponse, ToolCall, build_llm
 from v2.agent.prompts import FORCE_FINAL_SUFFIX, SYSTEM_PROMPT
@@ -88,6 +88,16 @@ class AgentConfig:
 
     max_steps: int = 8
     max_tool_calls: int = 20
+    #: How many times one tool may be called in a run. The largest collection
+    #: these tools fan out over is the 8-position portfolio, so eight lets every
+    #: legitimate per-holding sweep through and stops the runs that kept going:
+    #: r07 spent 25 calls on a three-name watchlist.
+    #:
+    #: A hard limit rather than a hint, on purpose. Two experiments (rounds 10
+    #: and 11) established that a description can change *which* tool is picked
+    #: and never *whether* one more is called — the loop has no "enough" signal
+    #: for the model to respond to, so the stop has to be imposed.
+    max_calls_per_tool: int = 8
     max_seconds: float = 150.0
     parallel: bool = True
     max_parallel: int = 6
@@ -115,7 +125,18 @@ class AgentResult:
         default_factory=attribution.AttributionReport)
     repairs: int = 0
     repaired_figures: list[str] = field(default_factory=list)
+    #: The answer the checks rejected, when a repair round ran. Kept because a
+    #: rewrite can "pass" by deleting the facts the draft got right — and
+    #: without the draft that reads as the model failing, not the check.
+    draft: str = ""
+    #: What rejected it: ungrounded figures and misattribution findings.
+    draft_findings: list[str] = field(default_factory=list)
+    #: The rewrite came back as a fragment: it dropped more than half of the
+    #: figures the draft had traced. Recorded so that "the repair lost a fact"
+    #: can be told apart from "the repair sent back one sentence".
+    partial_rewrite: bool = False
     deduped_calls: int = 0
+    capped_calls: int = 0
     forced_final: bool = False
     error: str = ""
 
@@ -131,6 +152,8 @@ class AgentResult:
                              + len(self.attribution.empty_presented),
             "repairs": self.repairs,
             "deduped_calls": self.deduped_calls,
+            "capped_calls": self.capped_calls,
+            "calls_by_tool": self.trajectory.calls_by_tool(),
             "forced_final": self.forced_final,
         })
         return merged
@@ -163,8 +186,10 @@ def _execute_calls(
     no equivalent because it never issues more than one call per message.
     """
     seen = trajectory.previous_signatures()
+    used = trajectory.calls_by_tool()
     planned: list[tuple[ToolCall, ToolResult | None]] = []
     deduped = 0
+    capped = 0
 
     for call in calls:
         if call.parse_error:
@@ -174,6 +199,20 @@ def _execute_calls(
                 error_kind="bad_json",
             )))
             continue
+        if used.get(call.name, 0) >= config.max_calls_per_tool:
+            capped += 1
+            planned.append((call, ToolResult(
+                name=call.name, args=call.arguments, ok=False,
+                content=(f"'{call.name}' has already run "
+                         f"{config.max_calls_per_tool} times in this session, "
+                         "which is the per-tool limit. Answer from what those "
+                         "calls returned, or use a different tool — calling "
+                         "this one again will keep failing."),
+                error_kind="tool_call_cap",
+            )))
+            continue
+        used[call.name] = used.get(call.name, 0) + 1
+
         signature = trajectory.call_signature(call)
         if signature in seen:
             deduped += 1
@@ -207,7 +246,7 @@ def _execute_calls(
     for result in finished:
         _emit("agent_tool_result", tool=result.name, ok=result.ok,
               elapsed_ms=result.elapsed_ms, error_kind=result.error_kind)
-    return finished, deduped
+    return finished, deduped, capped
 
 
 def run_agent(
@@ -240,7 +279,12 @@ def run_agent(
     stop_reason = "max_steps"
     repairs = 0
     repaired_figures: list[str] = []
+    draft = ""
+    draft_findings: list[str] = []
+    draft_traced: list[str] = []
+    partial_rewrite = False
     deduped_total = 0
+    capped_total = 0
     error = ""
     forced_final = False
     report = grounding.GroundingReport()
@@ -279,13 +323,24 @@ def run_agent(
 
         # -- the model chose to answer -------------------------------------
         if not response.tool_calls:
-            answer = response.text
+            # Strip the model's process narration *before* checking, not after:
+            # the checks should verify the text the user is shown, and a repair
+            # round that apologises in prose ("没有 IVV 的「1」这个数据") would
+            # otherwise put figures into the answer that only exist because a
+            # check complained about them.
+            answer = presentation.strip_deliberation(response.text)
             report = grounding.check(answer, trajectory.observations_text())
             attribution_report = (attribution.check(answer, trajectory.tool_records())
                                   if config.attribution_check
                                   else attribution.AttributionReport())
             can_repair = config.grounding_repair and repairs < 1 and not budget_spent
 
+            # A fragment needs a body to have been dropped from: with one or
+            # two traced figures, losing them is "lost a fact", not "sent
+            # back one sentence".
+            if repairs and len(draft_traced) >= 3:
+                kept = sum(1 for figure in draft_traced if figure in answer)
+                partial_rewrite = kept * 2 < len(draft_traced)
             if report.ok and attribution_report.ok:
                 stop_reason = "final_answer"
                 forced_final = budget_spent
@@ -296,6 +351,14 @@ def run_agent(
                 forced_final = budget_spent
                 break
             repairs += 1
+            draft = answer
+            draft_traced = list(dict.fromkeys(report.traced))
+            draft_findings = (
+                [f"无法溯源 {figure}" for figure in report.ungrounded]
+                + [f"{entity}←{figure}(实为 {'/'.join(owners)})"
+                   for entity, figure, owners in attribution_report.misattributed]
+                + [f"{entity}←{figure}(该主体无数据)"
+                   for entity, figure in attribution_report.empty_presented])
             reasons: list[str] = []
             if not report.ok:
                 repaired_figures.extend(report.ungrounded)
@@ -323,9 +386,11 @@ def run_agent(
             (response.text or "").strip()[:160] or f"调用 {len(tool_names)} 个工具",
             tools=tool_names))
 
-        results, deduped = _execute_calls(response.tool_calls, registry, trajectory, config)
+        results, deduped, capped = _execute_calls(
+            response.tool_calls, registry, trajectory, config)
         step.results = results
         deduped_total += deduped
+        capped_total += capped
 
         failed = [r.name for r in results if not r.ok]
         _notify(on_step, StepEvent(
@@ -357,7 +422,11 @@ def run_agent(
         attribution=attribution_report,
         repairs=repairs,
         repaired_figures=repaired_figures,
+        draft=draft,
+        draft_findings=draft_findings,
+        partial_rewrite=partial_rewrite,
         deduped_calls=deduped_total,
+        capped_calls=capped_total,
         forced_final=forced_final,
         error=error,
     )

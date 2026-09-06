@@ -199,7 +199,7 @@ CASES: tuple[EvalCase, ...] = (
     C("r06", "CRWD 和 SMCI 哪个财报风险更大", "ranking", "earnings_view", "CRWD",
       ("earnings_view",), (), (("SMCI",), ("23.6%", "23.6")), max_tool_calls=4),
     C("r07", "watchlist 里哪只最值得关注", "ranking", "watchlist_view", "",
-      ("watchlist_view",), (), (("ARM",), ("7.42%", "7.42", "2.40B", "2.4B")),
+      ("watchlist_view", "explain_move"), (), (("ARM",), ("7.42%", "7.42", "2.40B", "2.4B")),
       max_tool_calls=8,
       note="要给出选它的理由，只念一遍关注列表不算回答"),
     C("r08", "我持仓里哪只的内部人卖得最凶", "ranking", "insider_view", "",
@@ -235,10 +235,14 @@ CASES: tuple[EvalCase, ...] = (
       expected_path="single_hop", max_tool_calls=3),
     C("c07", "为什么我的半导体仓位表现分化这么大", "causal", "unknown", "",
       ("portfolio_view",), (), (("SMCI",), ("NVDA",)), max_tool_calls=10),
-    C("c08", "我上周亏的钱这周补回来了吗", "causal", "pnl_period", "",
+    C("c08", "我这周亏的钱今天补回来了吗", "causal", "pnl_period", "",
       ("pnl_period", "pnl_view"), (),
       (("3,880.12", "3880.12"), ("1,204.33", "1204.33")), max_tool_calls=6,
-      note="要对比两个周期，一张卡答不了 —— 初版把两个数写成同一条事实的备选，被单跳蒙混过关"),
+      note="要对比两个周期，一张卡答不了 —— 初版把两个数写成同一条事实的备选，"
+           "被单跳蒙混过关。问句原本写的是「上周…这周」,而 pnl_period 只有 "
+           "day/week/month,根本取不到上周:断言要的 3,880.12 是本周、1,204.33 "
+           "是今日,正确回答「没有上周的数据」反而会挂掉两条事实。0/3 稳定失败,"
+           "查下来又是标注和 fixture 对不上,不是模型不会规划。"),
 
     # =======================================================================
     # 5. compound — two asks in one message (8)
@@ -368,6 +372,65 @@ CASES: tuple[EvalCase, ...] = (
       ("holders",), ("portfolio_view", "institutional_13f"),
       (("Vanguard",), ("8.94%", "8.94")),
       expected_path="single_hop", max_tool_calls=2),
+
+    # =======================================================================
+    # 10. checker_stress — answer shapes that broke the checks, not the model (6)
+    # =======================================================================
+    #
+    # Every case here was a production incident. Nine rounds of live testing
+    # produced seven attribution false positives, and not one of them was
+    # visible to this suite: the cases passed, the ⚠️ banner nobody scored sat
+    # on top of a correct answer, and a human found it by reading Telegram.
+    #
+    # So these do not test the model. They aim questions at the fixture regions
+    # whose *shape* defeated the checker — a column of dates, a threshold, a
+    # window length, a percentage the answer computes — and the attribution axis
+    # scores whatever the model writes about them. A warning raised here on an
+    # otherwise-correct answer is a false positive by construction.
+    #
+    # Phrasing cannot be forced, which is the point: the shapes recur, the
+    # wording will not, and a fixed list of remembered sentences would only
+    # re-detect the seven bugs already fixed.
+    C("k01", "接下来两周谁要发财报，分别是什么时候",
+      "checker_stress", "earnings_calendar", "",
+      ("earnings_calendar",), (),
+      (("09-30", "9-30", "9 月 30"), ("10-21", "10 月 21"), ("MSFT",), ("AMD",)),
+      expected_path="single_hop", max_tool_calls=3,
+      note="日期列：每个日子都会被数字提取器读成负数，落进上一行标的的窗口"),
+    C("k02", "NVDA 和 AMD 上次财报各自超预期多少，谁的幅度更大",
+      "checker_stress", "unknown", "",
+      ("earnings_view",), (),
+      (("5.6%", "5.6"), ("2.9%", "2.9"), ("AMD",)),
+      max_tool_calls=4,
+      note="「实际 vs 预期（+X%）」：X 是模型当场算的比值，没有卡片拥有它"),
+    C("k03", "MSFT 离 52 周高点还有多远",
+      "checker_stress", "moneyflow_view", "MSFT",
+      ("moneyflow_view",), (),
+      (("0.14",), ("58.4",), ("3.10%", "3.1%")),
+      expected_path="single_hop", max_tool_calls=3,
+      note="「52 周高点」「200 日均线」：52 和 200 是窗口长度，不是谁的量"),
+    C("k04", "CRWD 占仓多少，超没超过集中度阈值",
+      "checker_stress", "risk_view", "CRWD",
+      ("risk_view",), (),
+      (("22.4%", "22.4"), ("20%", "20.0%")),
+      expected_path="single_hop", max_tool_calls=3,
+      note="阈值数字不归任何主体所有，却紧挨着 CRWD 出现"),
+    C("k05", "把我持仓里亏损的几只按浮亏排个序，用整数百分比说",
+      "checker_stress", "unknown", "",
+      ("portfolio_view",), (),
+      (("SMCI",), ("TSLA",), ("AMD",)),
+      max_tool_calls=4,
+      note="要求整数百分比，逼出「-21.5% 写成 21%」这类舍入表述"),
+    C("k06", "我组合里半导体和软件各占多少",
+      "checker_stress", "risk_view", "",
+      ("risk_view",), (),
+      (("38.1%", "38.1"), ("36.5%", "36.5")),
+      expected_path="single_hop", max_tool_calls=3,
+      note="行业标签（BROAD/半导体）不是 ticker，却会被大写词模式收成实体。"
+           "另外它意外成了一条工具选择的硬用例：权重恰好凑得出答案"
+           "（NVDA 18.2 + AMD 11.3 + SMCI 8.6 = 38.1），但「哪只属于哪个行业」"
+           "不在任何工具返回里，只有 risk_view 说得出。模型用 portfolio_view "
+           "自己算，数字对、来源不可溯 —— grounding 独立地也拒了它。"),
 )
 
 
@@ -400,6 +463,7 @@ CASES = tuple(
 CATEGORIES: tuple[str, ...] = (
     "single_lookup", "multi_hop", "ranking", "causal",
     "compound", "recovery", "honesty", "dead_end", "cost_trap",
+    "checker_stress",
 )
 
 

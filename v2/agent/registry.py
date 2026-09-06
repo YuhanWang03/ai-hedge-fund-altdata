@@ -53,7 +53,9 @@ class ToolSpec:
             "none" -> fn(); "dict" -> fn(args); "args" -> fn(*ordered values).
         arg_order: for invoke_style="args", the property order to pass.
         mutating: True if the call writes to state.db.
-        cost_hint: rough seconds; used only for budgeting/telemetry display.
+        cost_hint: rough seconds per call. **Not** shown to the model — that was
+            tried and measured, and it cost more than it saved. See
+            ``to_openai_schema``.
     """
 
     name: str
@@ -66,7 +68,23 @@ class ToolSpec:
     cost_hint: float = 2.0
 
     def to_openai_schema(self) -> dict[str, Any]:
-        """Render as an OpenAI-compatible ``tools[]`` entry."""
+        """Render as an OpenAI-compatible ``tools[]`` entry.
+
+        **The price is deliberately not here.** Round 11 put each tool's
+        ``cost_hint`` into its description — a 0.1s watchlist against an 8s
+        summary, an eighty-fold spread the model otherwise plans blind to — on
+        the theory that a fact it cannot discover would move behaviour the way
+        the sector fact did in round 10.
+
+        It did not. Measured over 267 runs: tool calls per case 4.2 → 4.1, pass
+        rate unchanged, and tokens per case **up** 1,048. The labels themselves
+        are 218 tokens of schema resent on every call, and at ~5 calls per case
+        that is 1,089 predicted against 1,048 observed — the whole increase.
+        The model did not respond to the price at all; only the bill changed.
+
+        The lesson is in the README (round 11). Short version: a description can
+        change *which* tool gets picked, never *whether* one more gets called.
+        """
         return {
             "type": "function",
             "function": {
@@ -75,6 +93,21 @@ class ToolSpec:
                 "parameters": self.parameters,
             },
         }
+
+
+#: Error kinds where the call never reached the tool — it was refused by the
+#: loop or by the registry's gate before anything ran. Distinguished from a tool
+#: that ran and failed (a timeout, a provider error), which did cost what a call
+#: costs.
+#:
+#: This matters because the counters used to lump them together, and the effect
+#: was perverse: a per-tool cap refusing four calls *raised* «tool calls» by
+#: four, so the mechanism inflated the very number it exists to reduce.
+#: 「explain_move×12」 with a cap of 8 was eight executions and four refusals.
+REFUSED_BEFORE_DISPATCH = frozenset({
+    "bad_json", "bad_arguments", "duplicate_call", "tool_call_cap",
+    "unknown_tool", "mutation_blocked",
+})
 
 
 @dataclass
@@ -88,6 +121,11 @@ class ToolResult:
     elapsed_ms: int = 0
     error_kind: str = ""
     meta: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def reached_tool(self) -> bool:
+        """True when something actually ran — the unit real cost is paid in."""
+        return self.error_kind not in REFUSED_BEFORE_DISPATCH
 
     def as_observation(self) -> str:
         """Text handed back to the model. Failures stay actionable, not opaque."""
@@ -119,7 +157,10 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         description=(
             "List every current position in the user's Alpaca account: ticker, "
             "quantity, market value, weight, unrealized P&L. Start here for any "
-            "question about what the user actually holds."
+            "question about what the user actually holds. No sector or industry "
+            "column: which ticker belongs to which sector is NOT in this card, "
+            "so sector weights cannot be built by adding position weights — "
+            "risk_view is the only source for that."
         ),
         parameters=_EMPTY,
         target="v2.bot.responders.portfolio_view",
@@ -150,10 +191,12 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         name="risk_view",
         description=(
-            "Portfolio-level risk panorama: concentration, sector exposure, "
-            "drawdown, and which holdings report earnings within 7 days. Returns "
-            "aggregate risk for the whole book — it does NOT rank individual "
-            "positions, so combine it with per-ticker tools for that."
+            "Portfolio-level risk panorama: concentration, sector/industry "
+            "exposure, drawdown, and which holdings report earnings within 7 "
+            "days. THE source for how much of the book sits in each sector — "
+            "no other tool records sector membership. Returns aggregate risk "
+            "for the whole book, and it does NOT rank individual positions, so "
+            "combine it with per-ticker tools for that."
         ),
         parameters=_EMPTY,
         target="v2.bot.responders.risk_view",
@@ -165,8 +208,9 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         name="explain_move",
         description=(
             "Explain WHY one ticker moved recently: price change, volume, "
-            "sector-relative strength, and Tier-1/2 news attribution. Use for "
-            "'why is X up/down' questions."
+            "relative strength vs SPY in pp (this is the 逆势 / against-the-market "
+            "figure), and Tier-1/2 news attribution. Use for 'why is X up/down' "
+            "and 'which moved against the market' questions."
         ),
         parameters=_obj({"ticker": _TICKER}, ["ticker"]),
         target="v2.bot.responders.explain_move",
@@ -201,8 +245,9 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         name="moneyflow_view",
         description=(
-            "Money-flow divergence for one ticker: CMF and RSI against price, to "
-            "judge accumulation vs distribution."
+            "Money-flow divergence for one ticker: CMF and RSI against its own "
+            "price, to judge accumulation vs distribution. Says nothing about the "
+            "stock vs the market (逆势 is explain_move)."
         ),
         parameters=_obj({"ticker": _TICKER}, ["ticker"]),
         target="v2.bot.responders.moneyflow_view",
@@ -327,7 +372,12 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
     # --- watchlist / alerts / settings ---------------------------------------
     ToolSpec(
         name="watchlist_view",
-        description="The user's watchlist (tickers they track but may not hold).",
+        description=(
+            "The user's watchlist — a list of ticker symbols they track but may "
+            "not hold. Names only: no prices, no moves, no fundamentals. A "
+            "question about how the members are *doing* needs one per-ticker "
+            "call for each name this returns."
+        ),
         parameters=_EMPTY,
         target="v2.bot.state.watchlist_list",
         invoke_style="none",
@@ -562,9 +612,14 @@ class ToolRegistry:
         if spec.mutating and not self.allow_mutations:
             return ToolResult(
                 name=name, args=args, ok=False,
-                content=(f"'{name}' writes to the user's database and mutations are "
-                         "disabled for this run. Report what you would have changed "
-                         "instead of retrying."),
+                content=(
+                    f"'{name}' writes to the user's database. The analysis path is "
+                    "read-only BY DESIGN — this is not an outage, nothing will be "
+                    "restored later, and retrying cannot succeed. Finish the "
+                    "analysis, then hand the user the exact message(s) to send so "
+                    "the bot's ordinary command path performs the write, one per "
+                    "line, e.g. 「把 ARM 加入关注列表」. Never tell the user to wait "
+                    "for writes to come back."),
                 error_kind="mutation_blocked",
             )
 

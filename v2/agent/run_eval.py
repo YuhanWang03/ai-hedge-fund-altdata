@@ -26,6 +26,7 @@ import time  # noqa: E402
 
 from v2.agent.eval import runner  # noqa: E402
 from v2.agent.eval.cases import CASES, CATEGORIES  # noqa: E402
+from v2.agent.eval.holdout import HOLDOUT  # noqa: E402
 from v2.agent.llm import OpenAICompatLLM, build_llm, describe_provider  # noqa: E402
 
 
@@ -46,7 +47,17 @@ from v2.agent.llm import OpenAICompatLLM, build_llm, describe_provider  # noqa: 
 #   EVAL_WORKERS=8                     并发数
 #   EVAL_LIMIT=10                      只跑前 N 条，快速冒烟
 #   EVAL_CATEGORY=ranking multi_hop    只跑某几类
+#   EVAL_CASES=c01,c02,m07             只跑指定 case（配 EVAL_REPEAT 用来看抖动）
+#
 #   EVAL_OUT=data/eval.json            JSON 输出路径
+#   EVAL_SET=holdout                   dev（默认，89 条）/ holdout（留出集）/ all
+#
+#   看抖动的标准跑法（6 条 × 10 次 ≈ 一次全量的 2/3 成本）：
+#     EVAL_MODES=production EVAL_CASES=c01,d06,k03,m07,r09,t04 EVAL_REPEAT=10 \
+#       EVAL_OUT=data/flaky.json poetry run python v2/agent/run_eval.py
+#   输出里的「抖动分叉点」会把每条按 error / budget / tool_choice / wording 分类。
+#   变量和命令必须在同一行（或先 export）；VPS 上要用 poetry run，系统 python3
+#   没装 python-dotenv，.env 里的 key 读不到。
 # ---------------------------------------------------------------------------
 
 
@@ -67,14 +78,22 @@ def _env_list(name: str, default):
     return raw.replace(",", " ").split() if raw else default
 
 
-MODES = _env_list("EVAL_MODES", ["baseline", "routed", "agent"])
+# One default, owned by the runner. This used to be a second hardcoded list,
+# and the two drifted the first time the runner's changed: a `production` mode
+# was added to runner.DEFAULT_MODES, the sweep was run to measure it, and the
+# header said «baseline, routed, agent» — the whole run answered nothing.
+MODES = _env_list("EVAL_MODES", list(runner.DEFAULT_MODES))
 WORKERS = _env_int("EVAL_WORKERS", 4)
 # data/ 已在 .gitignore:31 —— 评测产物不会被误提交
 OUT = _env_str("EVAL_OUT", "data/eval.json")
 CATEGORY = _env_list("EVAL_CATEGORY", None)
+ONLY = _env_list("EVAL_CASES", None)
 LIMIT = _env_int("EVAL_LIMIT", None)
 FAILURES = _env_int("EVAL_FAILURES", 20)
 REPEAT = _env_int("EVAL_REPEAT", 1)
+SET = _env_str("EVAL_SET", "dev")
+
+CASE_SETS = {"dev": CASES, "holdout": HOLDOUT, "all": CASES + HOLDOUT}
 
 
 def _needs_llm(modes: list[str]) -> bool:
@@ -87,6 +106,9 @@ def main(argv: list[str] | None = None) -> int:
                         choices=sorted(runner.MODES))
     parser.add_argument("--category", nargs="+", default=CATEGORY,
                         choices=sorted(CATEGORIES))
+    parser.add_argument("--cases", nargs="+", default=ONLY, metavar="ID",
+                        help="只跑这些 case id —— 抖动要靠同一小批多跑几次来分辨，"
+                             "而全量重复十次太贵")
     parser.add_argument("--limit", type=int, default=LIMIT, help="只跑前 N 条（快速冒烟）")
     parser.add_argument("--workers", type=int, default=WORKERS)
     parser.add_argument("--out", default=OUT, help="把逐条结果写成 JSON")
@@ -94,32 +116,73 @@ def main(argv: list[str] | None = None) -> int:
                         help="打印多少条失败明细")
     parser.add_argument("--repeat", type=int, default=REPEAT,
                         help="每条 case 跑几次，用于区分真失败与抖动")
+    parser.add_argument("--set", default=SET, choices=sorted(CASE_SETS),
+                        help="dev 是路由和检查对着调过的 89 条；holdout 是没用来调过"
+                             "任何东西的 Telegram 实测问题——跑一次，不改代码")
     args = parser.parse_args(argv)
 
-    # Load .env the same way the comparison CLI does.
+    # Load .env the same way the comparison CLI does. If python-dotenv is not
+    # importable the file is silently never read — which is exactly what
+    # happens under the system `python3` on the VPS, where only the poetry
+    # venv has the package. A 6×10 flaky sweep once ran as a 0-second
+    # baseline because of this, and the message blamed the key.
+    dotenv_state = "loaded"
     try:
         from dotenv import load_dotenv
         load_dotenv(_REPO_ROOT / ".env")
     except ImportError:
-        pass
+        dotenv_state = "python-dotenv 未安装，.env 没有被读取"
 
     modes = list(dict.fromkeys(args.modes))
     if _needs_llm(modes) and not OpenAICompatLLM().api_key:
         keep = [m for m in modes if runner.MODES[m].kind == "baseline"]
+        env_file = _REPO_ROOT / ".env"
+        hint = (f"    .env：{'存在' if env_file.exists() else '不存在'}（{env_file}）"
+                f" · dotenv：{dotenv_state} · 解释器：{sys.executable}")
         print("⚠️  没有找到 LLM API key —— 只跑不需要模型的 baseline 档。\n"
-              "    配好 DEEPSEEK_API_KEY 后再跑 routed / agent 才有对比。\n")
+              f"{hint}\n"
+              "    key 在 .env 里而 dotenv 未安装时，用 `poetry run python v2/agent/run_eval.py`"
+              "，或先 `set -a; source .env`。\n")
         modes = keep or ["baseline"]
 
-    cases = CASES
+    cases = CASE_SETS[args.set]
+    if args.cases:
+        wanted = {c.strip() for c in args.cases}
+        unknown = wanted - {c.id for c in cases}
+        if unknown:
+            parser.error(f"没有这些 case：{', '.join(sorted(unknown))}")
+        cases = tuple(c for c in cases if c.id in wanted)
     if args.category:
         wanted = set(args.category)
         cases = tuple(c for c in cases if c.category in wanted)
     if args.limit:
         cases = cases[: args.limit]
 
-    print(f"评测集：{len(cases)} 条 · 模式：{', '.join(modes)}")
+    # One call before the sweep. A bad key or base URL otherwise fails every
+    # case three times with backoff — 387 s to learn the header had a \r in it.
+    if _needs_llm(modes):
+        try:
+            build_llm().complete([{"role": "user", "content": "ping"}])
+        except Exception as exc:  # noqa: BLE001 — we want the message, whatever it is
+            print(f"❌ 模型预检失败，未开始评测：{exc}\n"
+                  f"   模型：{describe_provider()}")
+            return 2
+
+    print(f"评测集：{args.set} · {len(cases)} 条 · 模式：{', '.join(modes)}"
+          + ("\n  留出集：这些问题没用来调过路由或检查。跑一次记下数字；"
+             "为了让某条通过而改代码，它就不再是留出集了。" if args.set == "holdout" else ""))
     if _needs_llm(modes):
         print(f"模型：{describe_provider()}")
+    # Say which settings came from the environment. An `export EVAL_CASES=…`
+    # left over from a flaky-case sweep turned the next "full" run into the
+    # same 6 cases again, and only the case count gave it away.
+    inherited = [f"{name}={os.environ[name]}" for name in
+                 ("EVAL_SET", "EVAL_MODES", "EVAL_CASES", "EVAL_CATEGORY", "EVAL_LIMIT",
+                  "EVAL_REPEAT", "EVAL_OUT", "EVAL_WORKERS")
+                 if os.environ.get(name, "").strip()]
+    if inherited:
+        print("环境变量生效：" + " ".join(inherited)
+              + "\n  （不想要的话 unset 掉，否则每次都会沿用）")
     print()
 
     done = 0
@@ -156,8 +219,29 @@ def main(argv: list[str] | None = None) -> int:
         if report.ungrounded_breakdown():
             print()
             print(runner.render_grounding(report))
-    print()
-    print(runner.render_stability(reports[-1]))
+    # Printed unconditionally: "no false positives" is the result worth seeing,
+    # and a section that only appears when something is wrong trains you to stop
+    # looking for it.
+    for report in reports:
+        if report.mode != "baseline":
+            print()
+            print(runner.render_attribution(report))
+            block = runner.render_repairs(report)
+            if block:
+                print()
+                print(block)
+    # Stability per model-driven mode, not only the last one: the first full
+    # sweep after the flaky-case round printed six flaky cases — all under
+    # `agent`, the 20-call ablation — and nothing about `production`, the
+    # config the bot runs.
+    for report in reports:
+        if runner.MODES[report.mode].kind == "baseline":
+            continue
+        print()
+        print(runner.render_stability(report))
+        if report.repeat > 1:
+            print()
+            print(runner.render_divergence(report))
     print()
     print(runner.render_overspend(reports[-1]))
     print()
@@ -168,9 +252,13 @@ def main(argv: list[str] | None = None) -> int:
         if not out_path.is_absolute():
             out_path = _REPO_ROOT / out_path
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(
-            json.dumps(runner.to_json(reports), ensure_ascii=False, indent=2),
-            encoding="utf-8")
+        payload = runner.to_json(reports)
+        # Which model produced these numbers. Two sweeps from two providers
+        # in the same data/ directory are otherwise indistinguishable.
+        payload["provider"] = describe_provider() if _needs_llm(modes) else "baseline only"
+        payload["case_set"] = args.set
+        out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2),
+                            encoding="utf-8")
         print(f"\n逐条结果已写入 {out_path}")
 
     return 0

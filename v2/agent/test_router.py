@@ -10,6 +10,7 @@ returns the whole set.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import pathlib
 import sys
@@ -370,16 +371,31 @@ def test_bridge_records_the_turn_for_the_next_question():
 # ---------------------------------------------------------------------------
 
 class _FakePlaceholder:
-    """Stands in for the Telegram message cmd_nl edits in place."""
+    """Stands in for the Telegram message cmd_nl edits in place.
 
-    def __init__(self, fail_html: bool = False) -> None:
+    ``limit`` mirrors Telegram's real 4096-character cap, which the bridge used
+    to fail silently against; ``replies`` collects the follow-up messages a long
+    answer is continued in.
+    """
+
+    def __init__(self, fail_html: bool = False,
+                 limit: int = bot_bridge.TELEGRAM_LIMIT) -> None:
         self.edits: list[tuple[str, bool]] = []
+        self.replies: list[str] = []
         self.fail_html = fail_html
+        self.limit = limit
 
     async def edit_text(self, text, parse_mode=None, disable_web_page_preview=None):
         if self.fail_html and parse_mode == "HTML":
             raise RuntimeError("Bad Request: can't parse entities")
+        if len(text) > self.limit:
+            raise RuntimeError("Bad Request: message is too long")
         self.edits.append((text, parse_mode == "HTML"))
+
+    async def reply_text(self, text, parse_mode=None, disable_web_page_preview=None):
+        if len(text) > self.limit:
+            raise RuntimeError("Bad Request: message is too long")
+        self.replies.append(text)
 
 
 def _run(coro):
@@ -401,6 +417,188 @@ def test_hook_hands_a_single_hop_query_back_to_the_existing_dispatch():
     assert text == "组合风险怎么样"
     assert placeholder.edits == [], "未接手就不该改动那条占位消息"
     assert llm.calls == []
+
+
+def test_an_answer_longer_than_telegram_allows_still_arrives():
+    """Seen live: a finished run left the placeholder saying 「分析中…」 for
+    five minutes. editMessageText rejects anything over 4096 characters, and
+    the except branch — whose own comment said "too long" — passed."""
+    placeholder = _FakePlaceholder()
+    long_answer = "\n\n".join(f"第 {i} 段：ARM 浮亏 -35.74%。" * 20 for i in range(30))
+    assert len(long_answer) > bot_bridge.TELEGRAM_LIMIT
+
+    _run(bot_bridge._deliver(placeholder, long_answer))
+
+    assert placeholder.edits, "第一段必须写进占位消息"
+    delivered = placeholder.edits[-1][0] + "".join(placeholder.replies)
+    assert "第 0 段" in delivered and "第 29 段" in delivered, "整条回答都要送到"
+    assert all(len(t) <= bot_bridge.TELEGRAM_LIMIT
+               for t in [placeholder.edits[-1][0]] + placeholder.replies)
+
+
+def test_a_short_answer_is_still_one_message():
+    placeholder = _FakePlaceholder()
+    _run(bot_bridge._deliver(placeholder, "CRWD 占仓 22.4%。"))
+    assert placeholder.replies == [], "没超长就不该拆成两条"
+    assert placeholder.edits[-1][0] == "CRWD 占仓 22.4%。"
+
+
+def test_a_late_progress_line_cannot_overwrite_the_answer():
+    """The other way a finished run looks hung: the last progress update is
+    still in flight at Telegram when the answer is written, lands after it, and
+    puts 「分析中…」 back on the screen for good."""
+    placeholder = _FakePlaceholder()
+
+    async def scenario():
+        channel = bot_bridge.ProgressChannel(
+            asyncio.get_running_loop(),
+            lambda t: bot_bridge._edit(placeholder, t))
+        channel("🤔 分析中…")
+        channel("✅ 已生成回答")
+        await channel.close()
+        channel("✅ 迟到的进度")          # dropped: the channel is closed
+        await bot_bridge._deliver(placeholder, "结论：ARM 最危险。")
+        await asyncio.sleep(0)            # let anything still queued run
+        return placeholder.edits[-1][0]
+
+    assert _run(scenario()) == "结论：ARM 最危险。"
+    assert "迟到" not in "".join(t for t, _ in placeholder.edits)
+
+
+def test_the_hook_discloses_a_rewrite_it_performed_itself():
+    """The hook resolves before routing, then calls handle_nl_sync with the
+    resolved text. Re-resolving there finds nothing left to rewrite and reports
+    rewritten=False, so the disclosure vanishes — which is what production did
+    while the direct-call test kept passing."""
+    store = session.SessionStore()
+    store.record(1, session.Turn(query="我的持仓最近整体在跌还是涨？"))
+    placeholder = _FakePlaceholder()
+    llm = ScriptedLLM([
+        LLMResponse(text="先看盈亏",
+                    tool_calls=[ToolCall("c1", "pnl_view", {}, "{}")]),
+        LLMResponse(text="本周 +0.13%。"),
+        LLMResponse(text="本周 +0.13%。"),
+    ])
+
+    with _Env(V2_AGENT_ROUTING="unknown_only"):
+        handled, _p, text = _run(bot_bridge.telegram_hook(
+            "为什么？", 1, placeholder, classifier=lambda _t: _parsed("unknown"),
+            registry=build_registry(), llm=llm, store=store))
+
+    assert handled is True
+    assert "我的持仓最近整体在跌还是涨" in text, "补全后的问题要交回调用方"
+    assert placeholder.edits, "接手了就该改写占位消息"
+    final = placeholder.edits[-1][0]
+    assert "补全" in final, "改写了用户的问题就必须讲明"
+    assert "本周 +0.13%" in final
+
+
+def test_a_fixed_phrase_is_not_a_conjunction():
+    """「还有多远」「还有几天」 are one question. Found while building the
+    checker-stress cases: 「MSFT 离 52 周高点还有多远」 escalated on the compound
+    signal. Third member of the family that already cost this router 最近／最新
+    (superlative) and 这个月 (pronoun resolution)."""
+    for query in ("MSFT 离 52 周高点还有多远", "还有几天发财报", "还有多少现金"):
+        assert router.route(query, _parsed("moneyflow_view", "MSFT"),
+                            mode="heuristic").signal != "compound", query
+
+    # A real conjunction still fires.
+    assert router.route("看一下 NVDA，另外 CPI 怎么样", _parsed("summary", "NVDA"),
+                        mode="heuristic").signal == "compound"
+
+
+def test_a_demonstrative_inside_a_time_word_is_not_a_pronoun():
+    """「我这个月比上个月表现好还是差？」 came back as 「我NVDA月比上个月表现好
+    还是差？」 — 这个 matched, the ticker went in, the question was destroyed and
+    the agent answered about NVDA. Same shape as 最近／最新 in the router: a
+    substring that looks like the thing but belongs to a time expression."""
+    store = session.SessionStore()
+    store.record(1, session.Turn(query="NVDA 为什么涨？", tickers=("NVDA",)))
+
+    for query in ("我这个月比上个月表现好还是差？", "这个季度的回撤",
+                  "这周怎么样", "那个月的盈亏"):
+        assert store.resolve(1, query).text == query, query
+
+    # …and a real demonstrative still resolves.
+    assert store.resolve(1, "这只怎么样").text == "NVDA怎么样"
+
+
+def test_a_write_never_escalates():
+    """The agent runs with allow_mutations=False, so escalating a write means
+    researching for ten seconds and then not doing the one thing that was asked.
+    「把我持仓里跌超过 30% 的都加进关注列表」 hit the collection signal and did
+    exactly that."""
+    for query, intent in (("把我持仓里跌超过 30% 的都加进关注列表", "watchlist_add"),
+                          ("给我持仓里最危险的那只设个提醒", "alert_set"),
+                          ("把关注列表里没持仓的都删了", "watchlist_remove")):
+        decision = router.route(query, _parsed(intent), mode="heuristic")
+        assert decision.path == "single_hop", f"{query} 不该升级"
+
+    # Derived from the registry, so a new mutating tool cannot slip past.
+    from v2.agent.registry import ToolRegistry
+    assert router.WRITE_INTENTS == frozenset(
+        spec.name for spec in ToolRegistry().specs if spec.mutating)
+    assert router.WRITE_INTENTS, "写意图集合为空说明取的地方错了"
+
+
+def test_a_bare_follow_up_restores_the_previous_question():
+    """"为什么？" on its own, seen live: no pronoun to substitute, so the
+    resolver passed it through, the classifier returned unknown, and the agent
+    spent a full budget concluding it should ask what the user meant."""
+    store = session.SessionStore()
+    store.record(1, session.Turn(query="我的持仓最近整体在跌还是涨？"))
+
+    resolution = store.resolve(1, "为什么？")
+    assert resolution.rewritten
+    assert "我的持仓最近整体在跌还是涨" in resolution.text
+    assert resolution.text.endswith("为什么？")
+    assert "补全" in resolution.note, "改写过就要对用户讲明"
+
+    # A question that carries its own subject is not a follow-up.
+    assert store.resolve(1, "为什么 NVDA 涨").rewritten is False
+    # Nothing to restore, and two bare follow-ups in a row restore nothing.
+    assert session.SessionStore().resolve(9, "为什么？").rewritten is False
+    store.record(2, session.Turn(query="为什么？"))
+    assert store.resolve(2, "为什么？").rewritten is False
+
+
+def test_ask_prefix_is_stripped_before_anything_sees_it():
+    """The prefix must not reach the classifier or the agent as part of the
+    question, and a bare /ask forces nothing — there is no query to route."""
+    assert router.strip_ask_prefix("/ask NVDA 和 SMCI 谁更危险") == (
+        "NVDA 和 SMCI 谁更危险", True)
+    assert router.strip_ask_prefix("/ask：我持仓里哪只最危险") == (
+        "我持仓里哪只最危险", True)
+    assert router.strip_ask_prefix("NVDA 为什么涨") == ("NVDA 为什么涨", False)
+    assert router.strip_ask_prefix("/ask") == ("/ask", False)
+    assert router.route("/ask", mode="heuristic").path == "slash"
+
+
+def test_hook_honours_ask_on_a_query_the_router_would_not_take():
+    """/ask overrides the mode. "NVDA 为什么涨" is a textbook fast-path query,
+    and under unknown_only nothing at all routes — the prefix still wins, and
+    the agent receives the question without it."""
+    placeholder = _FakePlaceholder()
+    llm = ScriptedLLM([
+        LLMResponse(text="先看异动",
+                    tool_calls=[ToolCall("c1", "explain_move", {"ticker": "NVDA"}, "{}")]),
+        LLMResponse(text="NVDA 今日 +0.90%。"),
+    ])
+    seen: list[str] = []
+
+    def classifier(text):
+        seen.append(text)
+        return _parsed("explain_move", ticker="NVDA")
+
+    with _Env(V2_AGENT_ROUTING="unknown_only"):
+        handled, _parsed_out, text = _run(bot_bridge.telegram_hook(
+            "/ask NVDA 为什么涨", 1, placeholder, classifier=classifier,
+            registry=build_registry(), llm=llm, store=session.SessionStore()))
+
+    assert handled is True
+    assert seen == ["NVDA 为什么涨"], "分类器不该看到斜杠命令"
+    assert text == "NVDA 为什么涨"
+    assert placeholder.edits, "接手了就该改写占位消息"
 
 
 def test_hook_answers_a_multi_hop_query_and_edits_the_placeholder():

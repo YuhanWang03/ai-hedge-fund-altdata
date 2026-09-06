@@ -87,6 +87,11 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("yields", commands.cmd_yields))
 
     # Stage 3 — NL intent classifier + dispatch
+    #
+    # /ask is the agent layer's explicit escape hatch, and the MessageHandler
+    # below excludes commands — without this line Telegram swallows it and the
+    # hatch is unreachable in production. It is the same handler either way.
+    app.add_handler(CommandHandler("ask", commands.cmd_nl))
     app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, commands.cmd_nl)
     )

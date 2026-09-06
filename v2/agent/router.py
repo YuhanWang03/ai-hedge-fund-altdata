@@ -54,6 +54,23 @@ class RouteDecision:
         return self.path == "agent"
 
 
+def strip_ask_prefix(text: str) -> tuple[str, bool]:
+    """Split the explicit escape hatch off the query. Returns (query, forced).
+
+    The prefix has to be *removed*, not just detected: "/ask NVDA 和 SMCI 谁更
+    危险" reaching the classifier and the agent verbatim asks them to interpret
+    a slash command as part of the question.
+
+    A bare "/ask" with nothing after it is not a forced query — there is nothing
+    to route — so it comes back unforced and takes its chances as a slash
+    command."""
+    stripped = (text or "").strip()
+    if not stripped.lower().startswith(ASK_PREFIX):
+        return stripped, False
+    rest = stripped[len(ASK_PREFIX):].lstrip(" \t:：，,")
+    return (rest, True) if rest else (stripped, False)
+
+
 def routing_mode() -> str:
     """Read the flag. Anything unrecognised degrades to 'off' — a typo in an env
     var must never silently enable a 10x-cost path in production."""
@@ -91,7 +108,11 @@ _COLLECTION = re.compile(
 _PER_ITEM_STATE = re.compile(r"怎么样|表现|情况|如何|怎样")
 
 # Several asks welded into one message.
-_COMPOUND = re.compile(r"并且|还有|另外|顺便|同时|以及|,\s*还|，还|;|；")
+#: 「还有」 is a conjunction in 「NVDA 财报，还有 CPI 呢」 and a *quantity* in
+#: 「离 52 周高点还有多远」「还有几天发财报」 — one question, not two. Third
+#: member of the family that already cost this router 最近／最新 and 这个月: a
+#: substring that looks like the marker but belongs to a fixed phrase.
+_COMPOUND = re.compile(r"并且|还有(?![多几])|另外|顺便|同时|以及|,\s*还|，还|;|；")
 
 # Causal questions that span the book rather than one ticker.
 _CAUSAL = re.compile(r"为什么|为啥|怎么回事|原因是|什么导致|怎么来的|谁拖|拖累")
@@ -138,6 +159,21 @@ _INTENT_OWN_TOPIC: dict[str, str] = {
     "settings": "settings",
 }
 AGGREGATE_INTENTS = frozenset(_INTENT_OWN_TOPIC)
+
+
+def _write_intents() -> frozenset[str]:
+    """Intents that ask the bot to *change* something, taken from the registry
+    rather than retyped, so a new mutating tool cannot quietly slip past."""
+    from v2.agent.registry import ToolRegistry
+    return frozenset(spec.name for spec in ToolRegistry().specs if spec.mutating)
+
+
+#: A write must never escalate. The agent runs with ``allow_mutations=False``,
+#: so 「把我持仓里跌超过 30% 的都加进关注列表」 routed to it would research the
+#: portfolio for ten seconds and then be unable to do the one thing that was
+#: asked. The fast path cannot fulfil an under-specified write either — but it
+#: says so immediately, which is the honest failure of the two.
+WRITE_INTENTS = _write_intents()
 
 # Rough ticker detector: 2-5 uppercase letters, minus common English words that
 # appear in bilingual queries. Deliberately loose — it only feeds a signal, and
@@ -245,7 +281,8 @@ HEURISTIC_SIGNALS: tuple[tuple[str, Callable[[str, dict], bool], str], ...] = (
 # Routing
 # ---------------------------------------------------------------------------
 
-def route(text: str, parsed: dict | None = None, *, mode: str | None = None) -> RouteDecision:
+def route(text: str, parsed: dict | None = None, *, mode: str | None = None,
+          forced: bool = False) -> RouteDecision:
     """Decide the path for one query.
 
     Args:
@@ -258,8 +295,10 @@ def route(text: str, parsed: dict | None = None, *, mode: str | None = None) -> 
     parsed = parsed or {}
     stripped = (text or "").strip()
 
-    # Explicit escape always wins — a user who typed /ask meant it.
-    if stripped.lower().startswith(ASK_PREFIX):
+    # Explicit escape always wins — a user who typed /ask meant it. Callers that
+    # already stripped the prefix (the bot bridge does, so the classifier never
+    # sees it) pass forced=True instead.
+    if forced or strip_ask_prefix(stripped)[1]:
         return RouteDecision("agent", "explicit_ask", "用户用 /ask 显式要求 agent", mode)
 
     if stripped.startswith("/"):
@@ -276,6 +315,9 @@ def route(text: str, parsed: dict | None = None, *, mode: str | None = None) -> 
 
     if mode == "unknown_only":
         return RouteDecision("single_hop", "", "已命中 intent，按现有单跳路径处理", mode)
+
+    if str(parsed.get("intent", "")) in WRITE_INTENTS:
+        return RouteDecision("single_hop", "", "写操作不升级：agent 无写权限", mode)
 
     for name, predicate, reason in HEURISTIC_SIGNALS:
         try:

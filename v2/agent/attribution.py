@@ -29,13 +29,31 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
-from v2.agent.grounding import _normalise, extract_numbers
+from v2.agent.grounding import (WINDOW_UNIT as _WINDOW_UNIT, _normalise,
+                                extract_numbers, extract_numbers_with_context,
+                                mask_non_quantities as _mask_filings)
 
 #: Arguments that name the subject a tool result is about.
 _ENTITY_ARGS = ("ticker", "symbol", "manager")
 
 #: Uppercase tickers plus the manager aliases the 13F tool accepts.
-_ENTITY_MENTION = re.compile(r"\b[A-Z]{2,5}\b|巴菲特|buffett|burry|ark", re.IGNORECASE)
+#:
+#: **No global IGNORECASE.** It was there for the aliases and silently applied to
+#: the ticker alternative too, so every 2-5 letter word became an entity — "Form",
+#: "Item", "paper" and "Tier" all showed up as owners in the first live run, and
+#: correct answers were flagged. The aliases carry their own case variants instead.
+# Not `\b`: CJK characters are \w, so `\b` never fires between 「和」 and
+# 「TSLA」. deepseek-chat writes 「和 TSLA」 with a space and the bug stayed
+# hidden for fifteen rounds; gpt-4.1-mini writes 「和TSLA（-0.21）」, the
+# mention was missed, and -0.21 went to the nearest ticker the regex *did*
+# see — AMD. Three false positives in its first sweep, all this shape.
+_ENTITY_MENTION = re.compile(
+    r"(?<![A-Za-z0-9])[A-Z]{2,5}(?![A-Za-z0-9])"
+    r"|巴菲特|伯克希尔|木头姐|[Bb]uffett|[Bb]urry|BERKSHIRE")
+
+#: Filings, dates, durations and window sizes are masked by the shared
+#: ``grounding.mask_non_quantities`` — one definition for both checks, so they
+#: cannot disagree about what a figure is.
 
 #: The 13F tool takes an alias while answers use the Chinese name; without
 #: normalising, every figure next to 「巴菲特」 looks misattributed away from
@@ -45,15 +63,96 @@ _ALIASES = {
     "BURRY": "BURRY", "木头姐": "ARK", "ARKK": "ARKK",
 }
 
+#: Uppercase tokens that are not subjects. Two live findings came from names
+#: this system prints itself: "FD" is the data provider, named in tool messages
+#: («FD 未覆盖该 ticker»), and "HBM" is a memory technology the model wrote in
+#: its own prose — 「存储/HBM」 became an entity, and a neighbouring 52 was
+#: reported as belonging to it.
 _NOT_ENTITIES = frozenset({
     "AI", "US", "USD", "CEO", "CFO", "COO", "CTO", "SEC", "ETF", "IPO", "EPS",
+    # job titles, which insider cards print next to the figure they moved
+    "SVP", "EVP", "VP", "CIO", "CMO", "GM", "MD",
     "PE", "PB", "ROE", "GDP", "CPI", "PCE", "NFP", "PPI", "FOMC", "FED", "RSI",
     "CMF", "OK", "VS", "AND", "THE", "FOR", "NL", "LLM", "API", "MD", "P&L",
+    # data provider, vendor and account-mode labels printed inside tool output
+    "FD", "EDGAR", "ARK", "PAPER", "LIVE", "BROAD", "TOP", "HHI",
+    # technology / metric acronyms the model writes in its own prose
+    "HBM", "EUV", "CPU", "GPU", "DRAM", "NAND", "SOC", "HHI", "PEG", "TTM",
+    "YOY", "QOQ", "IP", "D",
 })
 
 #: How far after an entity mention a figure is still "about" that entity.
 WINDOW = 60
 
+#: Boundaries a figure never reaches back across, and the unit a subject
+#: governs. The window used to stop only at the next entity mention, so the last
+#: entity on a line swallowed whatever came after it:
+#:
+#:     · 已浮亏 -21.5%，今日 -5.40%，相对 SMH 逆势 -8.30pp
+#:     · 2026-09-09 财报，上次 EPS miss -23.6%、财报后次日 -14.20%
+#:
+#: No entity follows SMH, so its 60 characters ran into the next bullet and
+#: reported SMCI's earnings history as SMH's — a correct answer, rejected.
+#:
+#: Sentence enders belong here for the same reason a newline does, and for a
+#: while they were missing: 「…TSLA、AMD 次之。三者合计 -$4,332.61 + -$2,013.77」
+#: gave AMD both totals, one clause after AMD had stopped being the subject.
+#:
+#: Only applied to the answer for the *window*; the observation side bounds at
+#: line ends only (see the inner loop), because a card's rows are lines.
+_LAYOUT_BREAK = re.compile(r"[\n·•。！？；;]")
+
+
+#: A figure used as a *boundary* rather than a measurement: 「VIX 18.40…仍处于
+#: 20 以下的舒适区」. The 20 is a level being compared against; it belongs to
+#: nobody, and it happened to appear in the risk card as CRWD's concentration
+#: threshold, so it was reported as CRWD's.
+_THRESHOLD_AFTER = re.compile(r"^\s*[%％]?\s*(?:以[下上]|阈值|关口|上方|下方|一线)")
+_THRESHOLD_BEFORE = re.compile(
+    r"(?:低于|高于|超过|不足|突破|跌破|超出|站上|回落至|阈值)\s*[^\s，。]{0,4}$")
+
+#: The second operand of a comparison belongs to whatever is being compared
+#: *against*, which is often named in an earlier sentence: 「NVDA 的 EPS 绝对值
+#: 更高（$1.31 vs $0.71），超预期幅度也更大（+5.6% vs +2.9%）」 — every second
+#: number there is AMD's, and no name on that line says so.
+#: 「（-5.58pp 对 -3.14pp）」 uses a bare 对 as the operator. Requiring a figure
+#: in front of it keeps the far more common uses of 对 (对…来说, 对手, 面对)
+#: from swallowing the numbers after them.
+_VS_OPERAND = re.compile(
+    r"(?:\bvs\.?|对比|相比|较之|[\d%pp）)]\s*对)\s*[+\-±$￥¥]?\s*$", re.IGNORECASE)
+
+#: A benchmark named as a comparison point is not the subject of the figures
+#: around it. 「同期 SPY +0.40% → 相对强度 -3.14pp ★ 逆势」 is a sentence about
+#: TSLA; SPY is what TSLA is being measured against, and the delivery figure two
+#: clauses later is TSLA's.
+#:
+#: This is the shape that produced the very first false positive of the whole
+#: series (「相对 SMH 逆势 -8.30pp」) and, twelve fixes later, the last two on the
+#: evaluation set. Recognising the *construction* rather than listing SPY, SMH,
+#: XLK … is what makes it stop recurring: the benchmark of the day is whatever
+#: card was fetched, and one of them (IVV) is a position this user actually
+#: holds, so a stoplist would both miss cases and break a real one.
+_BENCHMARK_LEAD = re.compile(
+    r"(?:同期|相对|相比|对比|较之?|跑输|跑赢|基准|参照|落后于|领先于|\bvs\.?|versus"
+    r"|(?<![占比])比)"                        # 「比 SMCI 健康」— but not 占比／比例
+    r"[\s，,：:的]*$", re.IGNORECASE)
+
+#: An operand of a displayed sum is being cited as an *input*, not attributed:
+#: 「CRWD 22.4% 的仓位已触发集中度超标（前 3 大合计 22.4% + 18.2% + 14.1% =
+#: 54.7%）」 names one entity, so the clause rule does not apply, and proximity
+#: hands NVDA's 18.2 and MSFT's 14.1 to CRWD. The operator on either side is
+#: the tell — a figure with a digit and a plus sign right before it, or a plus
+#: or equals and a digit right after it, is a term in an expression. A sign
+#: (「（+5.6%」) has no digit before its plus and is not matched.
+_IN_SUM_BEFORE = re.compile(r"[\d%）)MBKmbk万亿]\s*[+＋=＝]\s*[$￥¥]?\s*$")
+_IN_SUM_AFTER = re.compile(r"^\s*[%MBKmbk万亿]?\s*[+＋=＝]\s*[\d$￥¥(（]")
+
+#: Chinese puts a modifier before its head, so a figure can belong to the entity
+#: that *follows* it: 「但被占仓 66.3% 的 IVV 微跌 -0.47% 抵消了大半」. Reading
+#: left to right, 66.3 sits after NVDA and was reported as NVDA's — a correct
+#: sentence, rejected. When a figure is joined to the next entity by a short
+#: 「…的」, that entity is its subject, not the one before it.
+_POSTPOSED = re.compile(r"^[^，。；、,;\n]{0,10}的\s*$")
 
 #: Sentence boundaries, plus phrases that acknowledge missing data.
 _SENTENCE = re.compile(r"[。！？；;\n]")
@@ -68,6 +167,14 @@ class AttributionReport:
     #: Entities that were queried, returned nothing, and are still presented
     #: as having data. (entity, the figure it was given)
     empty_presented: list[tuple[str, str]] = field(default_factory=list)
+    #: The answer line behind each misattribution, in the same order.
+    #:
+    #: 「MSFT←18.2(实为 NVDA)」 says what the check concluded and nothing about
+    #: why. Five plausible reconstructions of the sentence failed to reproduce
+    #: it, which is the same unactionable verdict this package rejects
+    #: elsewhere ("数字无法溯源" without naming the figure). The sentence is the
+    #: evidence; without it the next fix is a guess.
+    evidence: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -80,11 +187,139 @@ class AttributionReport:
         if self.misattributed:
             pairs = ", ".join(f"{entity}←{figure}(实为 {'/'.join(owners)})"
                               for entity, figure, owners in self.misattributed[:3])
-            parts.append(f"{len(self.misattributed)} 处张冠李戴：{pairs}")
+            more = "…" if len(self.misattributed) > 3 else ""
+            parts.append(f"{len(self.misattributed)} 处张冠李戴：{pairs}{more}")
         if self.empty_presented:
             pairs = ", ".join(f"{e}←{f}" for e, f in self.empty_presented[:3])
             parts.append(f"{len(self.empty_presented)} 处「无数据主体被写成有数据」：{pairs}")
         return "；".join(parts)
+
+
+def _is_structural(token: str, *, exempt_below: int = 13,
+                   tolerate_years: bool = True) -> bool:
+    """Ordinals, small counts and years carry no attribution risk.
+
+    Grounding has exempted these from the start — "Top 1" and "过去 4 次" are
+    labels, not measurements — but the attribution check did not, and the gap
+    showed up live in the ugliest possible way. The check complained that IVV
+    was given a "1"; the repair round dutifully wrote *「risk_view 里没有 IVV
+    的「1」这个数据」*; that sentence puts a 1 right after IVV, so the check
+    complained again about the apology it had just caused.
+
+    Same thresholds as grounding, for the same reason: two checks disagreeing
+    about what counts as a figure is a bug generator.
+    """
+    try:
+        value = float(token)
+    except ValueError:
+        return False
+    if value.is_integer() and abs(value) < exempt_below:
+        return True
+    return tolerate_years and value.is_integer() and 1900 <= value <= 2100
+
+
+#: Tolerance for recognising a figure as the arithmetic of its neighbours.
+_DERIVED_TOLERANCE = 0.01
+
+
+def _derived_from_neighbours(target: str, line: str) -> bool:
+    """True when the line displays the arithmetic that produces ``target``.
+
+    「NVDA … EPS $2.46 vs $1.85（+33.0%）」 — the 33.0 is NVDA's surprise,
+    computed by the model, and no card owns it. It happened to appear verbatim
+    in AMD's card, so ownership said it was AMD's and flagged a correct line.
+
+    Grounding deliberately refuses ratios, because there accepting one lets a
+    fabrication through. Here the asymmetry is the other way round: a false
+    positive rejects a correct answer, and a figure the line derives in front of
+    the reader is not borrowed from anybody. Same evidence, opposite risk, so
+    opposite rule.
+    """
+    try:
+        value = abs(float(target))
+    except ValueError:
+        return False
+    numbers: list[float] = []
+    for token in extract_numbers(line):
+        try:
+            other = float(_normalise(token))
+        except ValueError:
+            continue
+        if other and abs(other) != value and abs(other) not in numbers:
+            numbers.append(abs(other))
+    for i, a_val in enumerate(numbers[:8]):
+        for b_val in numbers[i + 1: 8]:
+            candidates = [a_val + b_val, abs(a_val - b_val)]
+            for x, y in ((a_val, b_val), (b_val, a_val)):
+                if y:
+                    candidates += [abs(x / y - 1) * 100, abs((x - y) / y) * 100]
+            if any(abs(value - c) <= max(_DERIVED_TOLERANCE * value, 0.005)
+                   for c in candidates):
+                return True
+    return False
+
+
+def _rounds_to_own_figure(token: str, values: list[float]) -> bool:
+    """True when the answer's figure is this entity's own, written shorter.
+
+    「QCOM …虽然浮亏 30%」 is QCOM's own -30.39% rounded to whole percent. The
+    literal string "30" also appears in the risk card's threshold («单票 IVV >
+    30%»), so ownership by exact string said it was IVV's and flagged a correct
+    sentence.
+
+    The tolerance is half of the last written digit — exactly what "rounded to
+    this precision" means — rather than a relative fudge factor: "30" admits
+    anything in [29.5, 30.5), "30.4" only [30.35, 30.45).
+    """
+    try:
+        target = abs(float(token))
+    except ValueError:
+        return False
+    decimals = len(token.partition(".")[2])
+    tolerance = 0.5 * (10 ** -decimals)
+    return any(abs(target - value) < tolerance for value in values)
+
+
+def _offset_in(line: str, text: str, position: int) -> int:
+    """Where ``position`` falls inside the line that contains it."""
+    return position - (text.rfind("\n", 0, position) + 1)
+
+
+def _line_at(text: str, position: int) -> str:
+    start = text.rfind("\n", 0, position) + 1
+    end = text.find("\n", position)
+    return text[start: end if end != -1 else len(text)]
+
+
+#: The unit a subject governs. The whole line was too coarse: 「NVDA Vanguard
+#: 8.94%；AMD Vanguard 8.94%。」 is two statements sharing a line, and the h07
+#: failure this check exists for lives entirely in the second one.
+_CLAUSE_BREAK = _LAYOUT_BREAK
+
+
+def _clause_at(text: str, position: int) -> str:
+    start = 0
+    for match in _CLAUSE_BREAK.finditer(text, 0, position):
+        start = match.end()
+    end = _CLAUSE_BREAK.search(text, position)
+    return text[start: end.start() if end else len(text)]
+
+
+def _record(report: "AttributionReport", entity: str, token: str,
+            holders: set[str], context: str = "") -> None:
+    report.checked += 1
+    finding = (entity, token, tuple(sorted(holders)))
+    if entity not in holders and finding not in report.misattributed:
+        report.misattributed.append(finding)
+        report.evidence.append(" ".join((context or "").split())[:160])
+
+
+def _window_end(text: str, start: int, limit: int) -> int:
+    """Where an entity's window really ends: the first layout boundary in it."""
+    if limit <= start:
+        return start
+    brk = _LAYOUT_BREAK.search(text, start, limit)
+    return brk.start() if brk else limit
 
 
 def _entity_of(args: dict[str, Any]) -> str:
@@ -117,11 +352,14 @@ def check(
         results: (tool name, arguments, content, ok) for each tool call made.
     """
     owners: dict[str, set[str]] = {}
+    #: entity -> the numeric values it owns, for the rounding check below.
+    owned_values: dict[str, list[float]] = {}
     neutral: set[str] = set()
 
-    for _tool, args, content, ok in results:
+    for _tool, args, raw_content, ok in results:
         if not ok:
             continue
+        content = _mask_filings(raw_content)
         entity = _entity_of(args)
         # Entities named *inside* a result own the figures beside them too.
         # ARKK's holdings card prints "TSLA 9.80%": that weight belongs to ARKK
@@ -135,6 +373,15 @@ def check(
             if index + 1 < len(inner_mentions):
                 nxt = inner_mentions[index + 1]
                 limit = min(limit, nxt[1] - len(nxt[0]))
+            # Bounded at the line end here too. This was deliberately *not*
+            # done — the reasoning was that extra owners on the observation
+            # side can only reduce false positives — and the reasoning was
+            # wrong. A ticker at the end of one card line went on owning the
+            # next line's portfolio-level figures, so 「组合当前回撤 -4.20%」
+            # became MSFT's and 「软件/安全 36.5%」 became SMCI's, and correct
+            # answers quoting them were flagged. Unbounded generosity does not
+            # add owners, it adds *wrong* owners.
+            limit = _window_end(content, position, limit)
             for token in extract_numbers(content[position: max(limit, position)]):
                 key = _normalise(token)
                 if key:
@@ -149,6 +396,12 @@ def check(
                 holders = holders | {entity}
             if holders:
                 owners.setdefault(key, set()).update(holders)
+                try:
+                    value = abs(float(key))
+                except ValueError:
+                    continue
+                for holder in holders:
+                    owned_values.setdefault(holder, []).append(value)
             else:
                 neutral.add(key)
 
@@ -157,14 +410,22 @@ def check(
     # answered with ARKK's holdings under ARKQ's name. Every figure is correctly
     # attributed to its own stock — the *frame* is what is false, and only the
     # emptiness of ARKQ's own result reveals it.
+    #
+    # An entity is empty only when *none* of its results carried a figure.
+    # This used to subtract ``set(owners)`` — the figure keys, not the holders
+    # — so nothing was ever subtracted, and one empty card was enough: m07's
+    # summary(ARM) returns 「fixture 模式未记录该 ticker」, explain_move(ARM)
+    # returns +7.42%, and the draft quoting +7.42% was rejected as ARM having
+    # no data. The rewrite then refused all three names. 8 runs in 10.
+    holders_of_anything = {h for hs in owners.values() for h in hs}
     empty_entities = {
         _entity_of(args)
         for _tool, args, content, ok in results
         if ok and _entity_of(args) and not extract_numbers(content)
-    } - set(owners) - {""}
+    } - holders_of_anything - {""}
 
     report = AttributionReport()
-    body = answer or ""
+    body = _mask_filings(answer or "")
     mentions = _mentions(body)
 
     for sentence in _SENTENCE.split(body):
@@ -176,8 +437,12 @@ def check(
         figures = extract_numbers(sentence)
         for entity in sorted(present):
             for figure in figures[:3]:
-                report.empty_presented.append((entity, figure))
+                if (entity, figure) not in report.empty_presented:
+                    report.empty_presented.append((entity, figure))
     for index, (entity, position) in enumerate(mentions):
+        if _BENCHMARK_LEAD.search(body[max(0, position - len(entity) - 12):
+                                       position - len(entity)]):
+            continue                        # a yardstick, not a subject
         # A figure belongs to the nearest entity named before it, so the window
         # stops at the next mention. Without this, "NVDA 占仓 18.2%，CRWD 占仓
         # 22.4%" reads CRWD's weight as NVDA's and flags a correct sentence.
@@ -185,17 +450,93 @@ def check(
         if index + 1 < len(mentions):
             next_start = mentions[index + 1][1] - len(mentions[index + 1][0])
             limit = min(limit, next_start)
+        limit = _window_end(body, position, limit)
         window = body[position: max(limit, position)]
-        for token in extract_numbers(window):
+        next_entity, next_start = "", len(body)
+        if index + 1 < len(mentions):
+            next_entity, next_end = mentions[index + 1]
+            next_start = next_end - len(next_entity)
+
+        for token, _before, start, end in extract_numbers_with_context(window):
             key = _normalise(token)
-            if not key or key in neutral:
+            if not key or key in neutral or _is_structural(key):
                 continue
             holders = owners.get(key)
             if not holders:
                 continue                    # nobody owns it — grounding's problem
-            report.checked += 1
-            if entity not in holders:
-                report.misattributed.append((entity, token, tuple(sorted(holders))))
+            if _WINDOW_UNIT.match(window[end:]):
+                continue                    # 「52 周高点」 — a window, not a value
+            if _derived_from_neighbours(key, _line_at(body, position + start)):
+                continue                    # the line shows where it came from
+            if _rounds_to_own_figure(key, owned_values.get(entity, [])):
+                continue                    # its own number, written shorter
+
+            line = _line_at(body, position + start)
+            if _THRESHOLD_AFTER.match(line[_offset_in(line, body, position + end):]) \
+                    or _THRESHOLD_BEFORE.search(body[max(0, position + start - 8):
+                                                     position + start]):
+                continue                    # 「20 以下」 — a level, not a value
+
+            # Proximity only carries information when the clause names one
+            # entity. 「22.4%（CRWD）+ 18.2%（NVDA）+ 14.1%（MSFT）= 54.7%」 and
+            # 「NVDA 超预期 +5.6% vs +2.9% …领先 AMD」 pair their figures
+            # structurally, and "nearest name before" reads every pair off by
+            # one. When several names share a line the check cannot resolve the
+            # pairing, so it abstains — provided one of those names does own
+            # the figure. If none of them does, that is still a real finding.
+            if _VS_OPERAND.search(body[max(0, position + start - 10):
+                                       position + start]):
+                continue                    # 「x vs y」 — y is the other subject
+            if (_IN_SUM_BEFORE.search(body[max(0, position + start - 6): position + start])
+                    or _IN_SUM_AFTER.match(body[position + end: position + end + 8])):
+                continue                    # a term in 「a + b + c = d」
+
+            clause = _clause_at(body, position + start)
+            if _ACKNOWLEDGES_GAP.search(clause):
+                # 「ARKQ 的工具返回里没有任何数据，那些数字（TSLA 9.80%、PATH
+                # 22.4%）都不是 ARKQ 的」 is the answer *disclaiming* the
+                # figures — the exact behaviour h04 asks for. Flagging it
+                # punishes the honest write-up, and the empty-entity pass has
+                # trusted this same phrase list since the beginning.
+                continue
+
+            clause_entities = {name for name, _ in _mentions(clause)}
+            if len(clause_entities) >= 2 and (holders & clause_entities):
+                continue
+            # 「占仓 66.3% 的 IVV」: the figure modifies what comes after it.
+            # The backward pass below checks it against that entity, so skipping
+            # here reattributes rather than excuses.
+            if next_entity and _POSTPOSED.match(body[position + end: next_start]):
+                continue
+            _record(report, entity, token, holders,
+                    _line_at(body, position + start))
+
+    # Backward pass: a figure joined to a mention by 「…的」 belongs to it, and
+    # the forward windows cannot see it — they start *after* each mention, so a
+    # figure in front of the first entity in a sentence is checked by nobody.
+    for entity, end_pos in mentions:
+        start_pos = end_pos - len(entity)
+        prefix = body[max(0, start_pos - WINDOW): start_pos]
+        figures = extract_numbers_with_context(prefix)
+        if not figures:
+            continue
+        token, _before, _start, end = figures[-1]
+        if not _POSTPOSED.match(prefix[end:]):
+            continue
+        key = _normalise(token)
+        if not key or key in neutral or _is_structural(key):
+            continue
+        holders = owners.get(key)
+        if not holders:
+            continue
+        # The same abstention as the forward pass. It was only ever applied
+        # there, and the asymmetry showed up as 「占仓最重的 CRWD（22.4%）和回撤
+        # 较大的 SMCI 都将…发财报」: the postposed rule handed CRWD's weight to
+        # SMCI, and the clause naming both of them never got to say otherwise.
+        clause_entities = {name for name, _ in _mentions(_clause_at(body, start_pos))}
+        if len(clause_entities) >= 2 and (holders & clause_entities):
+            continue
+        _record(report, entity, token, holders, _line_at(body, start_pos))
     return report
 
 

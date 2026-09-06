@@ -28,15 +28,18 @@ Two details that matter for correctness rather than style:
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from v2.agent import router, session
+from v2.agent import presentation, router, session
 from v2.agent.baseline import BaselineResult, resolve_classifier, run_baseline
 from v2.agent.loop import AgentConfig, AgentResult, StepEvent, run_agent
 from v2.agent.registry import ToolRegistry
+
+logger = logging.getLogger(__name__)
 
 
 def enabled() -> bool:
@@ -64,10 +67,19 @@ def production_config() -> AgentConfig:
 
     So the live ceiling is lower than the harness's, and tunable without a
     deploy:  V2_AGENT_MAX_STEPS · V2_AGENT_MAX_TOOL_CALLS · V2_AGENT_MAX_SECONDS
+    · V2_AGENT_MAX_CALLS_PER_TOOL
+
+    The per-tool cap is deliberately left **non-binding here** (8 per tool
+    against 8 calls in total). It is the harness that has room to overspend, so
+    it is the harness that should measure what the right value is; shipping a
+    tightened production default on a guess is the thing this package keeps
+    finding it was wrong about. The knob exists so that tightening it later
+    needs no deploy.
     """
     return AgentConfig(
         max_steps=_env_int("V2_AGENT_MAX_STEPS", 5),
         max_tool_calls=_env_int("V2_AGENT_MAX_TOOL_CALLS", 8),
+        max_calls_per_tool=_env_int("V2_AGENT_MAX_CALLS_PER_TOOL", 8),
         max_seconds=float(_env_int("V2_AGENT_MAX_SECONDS", 90)),
     )
 
@@ -139,23 +151,58 @@ class ProgressReporter:
         self.sink(self.header + "\n\n" + "\n".join(self.lines))
 
 
+class ProgressChannel:
+    """Progress updates, crossing the thread boundary — and never outliving the
+    answer they were narrating.
+
+    ``run_agent`` is synchronous and runs in an executor thread, while
+    ``placeholder.edit_text`` is a coroutine owned by the bot's event loop, so
+    each update is handed back fire-and-forget: a dropped progress line must
+    never take the answer down with it.
+
+    Fire-and-forget has a tail, though. The last update ("✅ 已生成回答") is
+    pushed as ``run_agent`` returns, and its HTTP request to Telegram is still
+    in flight when the final answer is written to the same message. Whichever
+    request Telegram settles last wins — and when that is the progress line, the
+    run finishes successfully and the user sits looking at 「分析中…」 for ever.
+    Seen live, five minutes after a completed run.
+
+    So the channel closes before the answer goes out: later pushes are dropped,
+    and the one still in flight is waited out first.
+    """
+
+    def __init__(self, loop: asyncio.AbstractEventLoop,
+                 send: Callable[[str], Any]) -> None:
+        self._loop = loop
+        self._send = send
+        self._pending: Any = None
+        self._closed = False
+
+    def __call__(self, text: str) -> None:
+        if self._closed:
+            return
+        try:
+            self._pending = asyncio.run_coroutine_threadsafe(self._send(text), self._loop)
+        except Exception:  # noqa: BLE001
+            pass
+
+    async def close(self, timeout: float = 5.0) -> None:
+        """Stop accepting updates and let the in-flight one land."""
+        self._closed = True
+        pending, self._pending = self._pending, None
+        if pending is None:
+            return
+        try:
+            await asyncio.wait_for(asyncio.wrap_future(pending), timeout)
+        except Exception:  # noqa: BLE001 — a stuck progress edit must not block
+            pass
+
+
 def make_threadsafe_progress(
     loop: asyncio.AbstractEventLoop,
     send: Callable[[str], Any],
-) -> Callable[[str], None]:
-    """Adapt an async sender for use from the worker thread the loop runs on.
-
-    ``run_agent`` is synchronous and executes in an executor thread, while
-    ``placeholder.edit_text`` is a coroutine owned by the bot's event loop.
-    This hands each update back across that boundary, fire-and-forget: a dropped
-    progress line must never take the answer down with it.
-    """
-    def _push(text: str) -> None:
-        try:
-            asyncio.run_coroutine_threadsafe(send(text), loop)
-        except Exception:  # noqa: BLE001
-            pass
-    return _push
+) -> ProgressChannel:
+    return ProgressChannel(loop, send)
 
 
 # ---------------------------------------------------------------------------
@@ -174,13 +221,23 @@ def handle_nl_sync(
     store: session.SessionStore | None = None,
     on_progress: Callable[[str], None] | None = None,
     mode: str | None = None,
+    resolution: session.Resolution | None = None,
 ) -> BridgeResult:
-    """Resolve → classify → route → answer. Never raises."""
+    """Resolve → classify → route → answer. Never raises.
+
+    ``resolution`` is accepted for the same reason ``parsed`` is: the caller may
+    have resolved already. ``telegram_hook`` does — it has to, since routing
+    reads the resolved text — and re-resolving here would silently *undo the
+    disclosure*, because the second pass sees the rewritten text, finds no
+    pronoun left in it, and reports rewritten=False. That is exactly what
+    happened live: 「为什么？」 was correctly answered in context and the user
+    was never told the question had been rewritten.
+    """
     started = time.time()
     store = store or session.STORE
     registry = registry or ToolRegistry()
 
-    resolution = store.resolve(chat_id, text)
+    resolution = resolution or store.resolve(chat_id, text)
     query = resolution.text
 
     if parsed is None:
@@ -200,7 +257,11 @@ def handle_nl_sync(
     if decision.is_agent:
         agent_result = run_agent(query, llm=llm, registry=registry,
                                  config=config, on_step=reporter)
-        answer = agent_result.answer
+        # Rendered here, not at delivery: the warnings and the disclosure below
+        # are hand-built HTML, and running them through the Markdown renderer
+        # would escape their own tags into view. Baseline answers are responder
+        # cards — already HTML — and are never rendered.
+        answer = presentation.to_telegram_html(agent_result.answer)
         tools_used = tuple(agent_result.trajectory.distinct_tools())
     else:
         baseline_result = run_baseline(query, classifier=lambda _t: parsed,
@@ -279,6 +340,61 @@ class _Throttled:
         self.send(text)
 
 
+#: Telegram rejects any message body longer than this.
+TELEGRAM_LIMIT = 4096
+#: Headroom for the routing chip, the disclosure line and a continuation mark.
+CHUNK_LIMIT = 3600
+
+
+def split_for_telegram(text: str, limit: int = CHUNK_LIMIT) -> list[str]:
+    """Cut an answer into pieces Telegram will accept, at paragraph breaks.
+
+    An agent answer can run past 4096 characters — the multi-step ones routinely
+    do — and ``editMessageText`` then fails outright. The old code caught that
+    exception, named it in a comment ("message unchanged / deleted / too long")
+    and passed, so a complete, correct, expensive answer was discarded and the
+    placeholder kept saying 「分析中…」.
+    """
+    body = (text or "").strip()
+    if len(body) <= limit:
+        return [body]
+
+    chunks: list[str] = []
+    rest = body
+    while len(rest) > limit:
+        window = rest[:limit]
+        # Prefer a paragraph break, then a line break; only cut mid-line when
+        # the alternative is a chunk barely worth sending.
+        cut = max(window.rfind("\n\n"), window.rfind("\n"))
+        if cut < limit // 3:
+            cut = limit
+        chunks.append(rest[:cut].rstrip())
+        rest = rest[cut:].lstrip("\n")
+    if rest.strip():
+        chunks.append(rest.strip())
+    return chunks
+
+
+async def _deliver(placeholder: Any, text: str) -> None:
+    """Put the whole answer in front of the user, however long it is."""
+    chunks = split_for_telegram(text)
+    await _edit(placeholder, chunks[0])
+    reply = getattr(placeholder, "reply_text", None)
+    for index, chunk in enumerate(chunks[1:], start=2):
+        marked = f"<i>（续 {index}/{len(chunks)}）</i>\n\n{chunk}"
+        if reply is None:
+            break
+        try:
+            await reply(marked, parse_mode="HTML", disable_web_page_preview=True)
+        except Exception:  # noqa: BLE001
+            try:
+                await reply(presentation.to_plain_text(chunk),
+                            disable_web_page_preview=True)
+            except Exception:  # noqa: BLE001
+                logger.warning("续段 %d/%d 发送失败", index, len(chunks))
+                break
+
+
 async def _edit(placeholder: Any, text: str) -> None:
     """Edit a Telegram message, falling back to plain text on malformed HTML.
 
@@ -287,14 +403,21 @@ async def _edit(placeholder: Any, text: str) -> None:
     this before (see main._error_handler), and losing a correct answer to a
     parse error is the worst possible outcome, so the fallback is unconditional.
     """
+    if len(text) > TELEGRAM_LIMIT:
+        text = text[: TELEGRAM_LIMIT - 24].rstrip() + "\n…（已截断）"
     try:
         await placeholder.edit_text(text, parse_mode="HTML",
                                     disable_web_page_preview=True)
     except Exception:  # noqa: BLE001 — telegram.error.BadRequest and friends
         try:
-            await placeholder.edit_text(text, disable_web_page_preview=True)
-        except Exception:  # noqa: BLE001 — message unchanged / deleted / too long
-            pass
+            # Plain text, with the markup removed rather than shown: a reader
+            # who gets "<b>结论</b>" is worse off than one who gets "结论".
+            await placeholder.edit_text(presentation.to_plain_text(text),
+                                        disable_web_page_preview=True)
+        except Exception:  # noqa: BLE001 — message unchanged / deleted / gone
+            # Never silent again: this is how a finished run ends up looking
+            # like a hung one, and the log is the only place it can be seen.
+            logger.warning("无法写入占位消息（%d 字符）", len(text or ""))
 
 
 async def telegram_hook(
@@ -324,6 +447,10 @@ async def telegram_hook(
     store = store or session.STORE
     loop = asyncio.get_running_loop()
 
+    # "/ask …" forces the agent. Strip it here so neither the classifier nor the
+    # agent ever sees the slash command as part of the question.
+    text, forced = router.strip_ask_prefix(text)
+
     resolution = store.resolve(chat_id, text)
     query = resolution.text
 
@@ -341,22 +468,26 @@ async def telegram_hook(
         or ((parsed.get("ticker"),) if parsed.get("ticker") else ()),
     ))
 
-    decision = router.route(query, parsed)
+    decision = router.route(query, parsed, forced=forced)
     if not decision.is_agent:
         return False, parsed, query
 
     progress: Callable[[str], None] | None = None
+    progress_channel: ProgressChannel | None = None
     if placeholder is not None:
-        sender = make_threadsafe_progress(loop, lambda t: _edit(placeholder, t))
-        progress = _Throttled(sender)
+        progress_channel = ProgressChannel(loop, lambda t: _edit(placeholder, t))
+        progress = _Throttled(progress_channel)
 
     result = await loop.run_in_executor(None, lambda: handle_nl_sync(
         query, chat_id, parsed=parsed, registry=registry, llm=llm,
         config=config or production_config(), store=store, on_progress=progress,
-        mode=decision.mode))
+        mode=decision.mode, resolution=resolution))
+
+    if progress_channel is not None:
+        await progress_channel.close()
 
     if placeholder is not None:
         chip = f"<i>{router.explain(decision)}</i>\n\n"
-        await _edit(placeholder, chip + result.answer)
+        await _deliver(placeholder, chip + result.answer)
 
     return True, parsed, query

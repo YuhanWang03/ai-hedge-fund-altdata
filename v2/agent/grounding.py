@@ -33,6 +33,44 @@ _NUMBER = re.compile(r"-?\d[\d,]*(?:\.\d+)?")
 _IDENTIFIER_CONTEXT = re.compile(
     r"(?:item|section|条款|项)\s*$", re.IGNORECASE)
 
+#: Text that reads as a number but names something — a filing, a date, a
+#: countdown, a duration. Blanked with equal-length spaces before extraction so
+#: every offset downstream still lines up.
+#:
+#: Owned here and shared with the attribution check, because for a while each
+#: check kept its own list and they disagreed: attribution knew 13F, 「近 30
+#: 天」 and 「52 周高点」 were not quantities, grounding did not, and 「你能帮我
+#: 做什么」 — a capability answer with no observations at all — failed 0/3 for
+#: mentioning them. Two checks with two ideas of what a figure is will drift
+#: apart again if they are not the same function.
+# `\b` is the wrong boundary for this text: CJK characters are \w, so `\b`
+# never fires between 「构」 and 「13F」 or between 「秒」 and 「超」. 「机构13F持仓」
+# left a bare 13 behind, and d06 (a capability answer, no tool called, every
+# surviving digit ungrounded by construction) failed 3 runs in 10 on it. The
+# boundaries below are "not a letter or digit", which is what was meant.
+_L = r"(?<![A-Za-z0-9])"
+_R = r"(?![A-Za-z0-9])"
+NON_QUANTITY = re.compile(
+    _L + r"\d{4}-\d{1,2}-\d{1,2}" + _R          # 2026-11-17
+    + "|" + _L + r"\d{1,2}-\d{1,2}" + _R          # 10-21, 09-30
+    + "|" + _L + r"\d{1,2}/\d{1,2}" + _R          # 9/30
+    + "|" + _L + r"\d{1,4}\s?(?:ms|s|秒|分钟|小时)" + _R   # 30s 超时
+    + "|" + _L + r"[A-Z]-\d{1,4}" + _R             # D-74
+    + "|" + _L + r"\d{1,2}-[A-Z]" + _R             # 8-K, 10-Q
+    + "|" + _L + r"\d{1,2}[FKQD]" + _R             # 13F, 13D
+    # An indicator's lookback parameter: CMF(20), RSI(14). c07's table
+    # header 「资金流 CMF(20)」 had its 20 attributed to SMH.
+    + "|" + _L + r"[A-Z]{2,6}\(\d{1,3}\)"
+    + r"|(?:[Ii]tem|[Ss]ection)\s*\d+(?:\.\d+)?")
+
+#: A figure followed by a time unit is the size of a window, not a value:
+#: 「52 周高点」「200 日均线」「过去 30 天」.
+WINDOW_UNIT = re.compile(r"^\s*(?:个)?\s*(?:周|日|天|月|年|季|季度|小时)")
+
+
+def mask_non_quantities(text: str) -> str:
+    return NON_QUANTITY.sub(lambda m: " " * len(m.group(0)), text or "")
+
 
 def _normalise(token: str) -> str:
     return token.replace(",", "").lstrip("-").rstrip(".")
@@ -129,6 +167,12 @@ class GroundingReport:
     total: int = 0
     grounded: int = 0
     ungrounded: list[str] = field(default_factory=list)
+    #: Figures that traced, as written. The repair round names them so the
+    #: rewrite keeps them: told only what was wrong, the model deletes what
+    #: was right along with it (p04 dropped the day's P&L to fix one
+    #: percentage), and nothing in the loop rewards keeping a figure it was
+    #: not told about.
+    traced: list[str] = field(default_factory=list)
     exempt: int = 0
     #: Figures accepted because the answer *showed* the arithmetic producing them
     #: from figures that are themselves traceable.
@@ -187,9 +231,13 @@ def check(
 
     report = GroundingReport()
 
-    for raw, before, start, end in extract_numbers_with_context(answer):
+    masked = mask_non_quantities(answer)
+    for raw, before, start, end in extract_numbers_with_context(masked):
         token = _normalise(raw)
         if not token:
+            continue
+        if WINDOW_UNIT.match(masked[end:]):
+            report.exempt += 1
             continue
 
         # Structural exemptions: ordinals, counts, years, identifiers.
@@ -214,19 +262,23 @@ def check(
         variants = {token, token.rstrip("0").rstrip("."), f"{as_float:g}"}
         if any(v and v in haystack for v in variants):
             report.grounded += 1
+            report.traced.append(raw)
             continue
         # 2. The same quantity at a different scale (57.80B -> 578 亿).
         if _digit_signature(raw) in signatures:
             report.grounded += 1
+            report.traced.append(raw)
             continue
         # 3. The card's value, rounded (15,851.57 -> 15,852).
         if any(abs(target - v) <= max(rounding_tolerance * v, 0.005) for v in values):
             report.grounded += 1
+            report.traced.append(raw)
             continue
         # 4. Arithmetic the answer actually shows, over inputs that themselves trace.
         if _shows_its_working(target, answer, start, end, traceable):
             report.grounded += 1
             report.derived += 1
+            report.traced.append(raw)
             continue
         report.ungrounded.append(raw)
 
@@ -331,4 +383,14 @@ def repair_instruction(report: GroundingReport) -> str:
         "inputs is accepted, a bare result is not. "
         "If you cannot support it, drop the claim — omitting a number is always "
         "better than inventing one."
+        + (f"\nEvery other figure traced and must stay exactly as written: "
+           f"{', '.join(dict.fromkeys(report.traced))[:400]}."
+           if report.traced else "")
+        # A fact the model cannot know: this is not a conversation where the
+        # draft stays visible. Told to "fix only the listed figures", it sent
+        # back the one corrected sentence, and that sentence became the whole
+        # answer (p04, the day's P&L gone).
+        + "\nSend the COMPLETE answer again, every section, not only the corrected "
+          "part: your reply replaces the draft in full and is the only text the "
+          "user will see."
     )
