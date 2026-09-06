@@ -8,7 +8,12 @@ from v2.institutional.models import (
     Position,
     PositionChange,
 )
-from v2.institutional.orchestrator import run_institutional_pipeline
+
+
+def run_institutional_pipeline(*args, **kwargs):
+    """Load the optional EDGAR client only for an actual 13F run."""
+    from v2.institutional.orchestrator import run_institutional_pipeline as _run
+    return _run(*args, **kwargs)
 
 __all__ = [
     "ChangeType",

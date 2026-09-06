@@ -168,12 +168,26 @@ async def flow_status(tickers: str = Query("")) -> dict:
 # --------------------------------------------------------------------------
 
 # yfinance symbols. Treasury yields deliberately excluded here (Yahoo returns
-# 10× wrong values) — the 10Y is appended from FRED below.
+# 10× wrong values) — Treasury series are appended from FRED below.
 _TAPE_SYMBOLS = [
-    ("SPY", "标普500"), ("QQQ", "纳指100"), ("DIA", "道指"),
-    ("IWM", "罗素2000"), ("SOXX", "半导体"), ("^VIX", "VIX"),
-    ("GC=F", "黄金"), ("CL=F", "原油"), ("DX-Y.NYB", "美元"),
-    ("BTC-USD", "比特币"),
+    ("sp500", "SPY", "标普500"),
+    ("nasdaq100", "QQQ", "纳指100"),
+    ("dow", "DIA", "道指"),
+    ("russell2000", "IWM", "罗素2000"),
+    ("semiconductor_etf", "SOXX", "半导体ETF"),
+    ("philadelphia_semiconductor", "^SOX", "费城半导体指数"),
+    ("vix", "^VIX", "VIX"),
+    ("gold", "GC=F", "黄金"),
+    ("silver", "SI=F", "白银"),
+    ("wti", "CL=F", "WTI原油"),
+    ("brent", "BZ=F", "布伦特原油"),
+    ("dollar", "DX-Y.NYB", "美元"),
+    ("bitcoin", "BTC-USD", "比特币"),
+]
+
+_TAPE_FRED_SERIES = [
+    ("us5y", "DGS5", "美债5Y"),
+    ("us10y", "DGS10", "美债10Y"),
 ]
 
 
@@ -190,23 +204,33 @@ def _fetch_tape() -> dict:
     from v2.macro.market_client import _safe_quote
 
     items: list[dict] = []
-    for sym, label in _TAPE_SYMBOLS:
+    for key, sym, label in _TAPE_SYMBOLS:
         q = _safe_quote(sym)
         value = _finite_number(q.get("value")) if q else None
-        if value is not None:
-            items.append({"label": label, "value": value,
-                          "change_pct": _finite_number(q.get("pct_change_1d")),
-                          "unit": ""})
+        items.append({
+            "key": key,
+            "label": label,
+            "value": value,
+            "change_pct": _finite_number(q.get("pct_change_1d")) if q else None,
+            "unit": "",
+        })
 
-    # 10Y yield from FRED (Yahoo's ^TNX is unreliable).
     try:
         from v2.macro.fred_client import get_latest_value
-        y10 = _finite_number(get_latest_value("DGS10"))
-        if y10 is not None:
-            items.append({"label": "美债10Y", "value": y10,
-                          "change_pct": None, "unit": "%"})
     except Exception:
-        pass
+        get_latest_value = None
+    for key, series, label in _TAPE_FRED_SERIES:
+        try:
+            value = _finite_number(get_latest_value(series)) if get_latest_value else None
+        except Exception:
+            value = None
+        items.append({
+            "key": key,
+            "label": label,
+            "value": value,
+            "change_pct": None,
+            "unit": "%",
+        })
 
     return {"items": items}
 

@@ -1,6 +1,5 @@
 """Lateral expansion — LLM-driven discovery of supply-chain neighbors."""
 
-from v2.lateral.discover import discover
 from v2.lateral.models import (
     CATEGORIES,
     CATEGORY_LABEL_CN,
@@ -8,7 +7,6 @@ from v2.lateral.models import (
     LateralResult,
     Neighbor,
 )
-from v2.lateral.orchestrator import run_lateral_expansion
 from v2.lateral.verify import verify
 from v2.screening.models import FilterConfig
 
@@ -26,6 +24,16 @@ LATERAL_FILTERS = FilterConfig(
     gross_margin_min=0.35,                # 35%  (was 50%)
     volatility_max=0.70,                  # 70%  (was 60%)
 )
+
+
+def discover(*args, **kwargs):
+    from v2.lateral.discover import discover as _discover
+    return _discover(*args, **kwargs)
+
+
+def run_lateral_expansion(*args, **kwargs):
+    from v2.lateral.orchestrator import run_lateral_expansion as _run
+    return _run(*args, **kwargs)
 
 __all__ = [
     "CATEGORIES",

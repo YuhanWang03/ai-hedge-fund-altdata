@@ -5,9 +5,37 @@ import time
 
 from fastapi.testclient import TestClient
 
-from app import dispatch as dispatch_module
 from app.main import app
-from app.routers import chat as chat_router
+from app.routers import research as research_router
+
+
+def _research_result(ticker: str) -> dict:
+    return {
+        "run_id": f"run-{ticker}",
+        "ticker": ticker,
+        "status": "COMPLETED",
+        "modules": {
+            "supply_chain": {
+                "status": "COMPLETED",
+                "summary": f"{ticker} chain result",
+                "metrics": {"relationship_count": 1},
+                "details": {
+                    "relationships": [{
+                        "source_company": ticker,
+                        "target_company": "SUPPLIER",
+                        "relationship_type": "supplier",
+                        "description": "validated relationship",
+                        "verified": True,
+                    }],
+                },
+            },
+        },
+    }
+
+
+def _reset_jobs() -> None:
+    research_router._JOBS.clear()
+    research_router._ACTIVE_BY_TICKER.clear()
 
 
 def _poll(client: TestClient, job_id: str) -> dict:
@@ -21,15 +49,13 @@ def _poll(client: TestClient, job_id: str) -> dict:
 
 
 def test_chain_runs_as_background_job(monkeypatch):
-    chat_router._CHAT_JOBS.clear()
-    monkeypatch.setattr(
-        dispatch_module,
-        "dispatch",
-        lambda parsed: {
-            "html": f"chain result for {parsed['ticker']}",
-            "data": {"seeds": [parsed["ticker"]], "neighbors": []},
-        },
-    )
+    _reset_jobs()
+
+    class FakeEngine:
+        def run(self, ticker, *, refresh=False, progress=None):
+            return _research_result(ticker)
+
+    monkeypatch.setattr(research_router, "_new_engine", FakeEngine)
 
     with TestClient(app) as client:
         started = client.post("/api/chat", json={"text": "/chain AAPL"})
@@ -39,19 +65,20 @@ def test_chain_runs_as_background_job(monkeypatch):
         completed = _poll(client, started.json()["job_id"])
         assert completed["status"] == "completed"
         assert completed["intent"] == "chain"
-        assert completed["html"] == "chain result for AAPL"
-        assert completed["data"]["seeds"] == ["AAPL"]
+        assert "AAPL · 产业链" in completed["html"]
+        assert completed["data"]["relationships"][0]["target_company"] == "SUPPLIER"
 
 
 def test_duplicate_running_chain_is_deduplicated(monkeypatch):
-    chat_router._CHAT_JOBS.clear()
+    _reset_jobs()
     release = threading.Event()
 
-    def slow_dispatch(parsed):
-        release.wait(timeout=1)
-        return {"html": f"done {parsed['ticker']}"}
+    class SlowEngine:
+        def run(self, ticker, *, refresh=False, progress=None):
+            release.wait(timeout=1)
+            return _research_result(ticker)
 
-    monkeypatch.setattr(dispatch_module, "dispatch", slow_dispatch)
+    monkeypatch.setattr(research_router, "_new_engine", SlowEngine)
 
     with TestClient(app) as client:
         first = client.post("/api/chat", json={"text": "/chain TSLA"}).json()

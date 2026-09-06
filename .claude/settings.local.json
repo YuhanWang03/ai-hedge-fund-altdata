@@ -5,7 +5,24 @@
       "Bash(poetry remove *)",
       "Bash(poetry env *)",
       "Bash(python *)",
-      "Bash(poetry run *)"
+      "Bash(poetry run *)",
+      "WebFetch(domain:www.ark-funds.com)",
+      "WebSearch",
+      "Bash(Remove-Item _smoke_etf.py, _smoke_features.py -ErrorAction SilentlyContinue)",
+      "Bash(Write-Host \"Cleaned smoke files\")",
+      "Bash(echo \"exit=$?\")",
+      "WebFetch(domain:stockanalysis.com)",
+      "Bash(curl -sS -A \"Mozilla/5.0 \\(Windows NT 10.0; Win64; x64\\) AppleWebKit/537.36 \\(KHTML, like Gecko\\) Chrome/126.0.0.0 Safari/537.36\" \"https://www.ark-funds.com/funds/arkq/\" -o /tmp/arkq.html)",
+      "Read(//tmp/**)",
+      "Bash(git rm *)",
+      "Bash(poetry show *)",
+      "Bash(git fetch *)",
+      "Bash(git pull *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git push *)",
+      "Bash(git merge *)",
+      "Bash(git stash *)"
     ]
   }
 }

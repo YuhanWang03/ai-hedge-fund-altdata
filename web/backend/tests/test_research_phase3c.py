@@ -1,0 +1,94 @@
+from copy import deepcopy
+
+from v2.research.depth import _guidance_from_text
+from v2.research.intelligence import build_intelligence
+from v2.research.store import ResearchStore
+
+
+def module(status="COMPLETED", confidence=.9, completeness=1.0, *, metrics=None, details=None, sources=None, score=70):
+    return {"status": status, "confidence": confidence, "completeness": completeness, "metrics": metrics or {},
+            "details": details or {}, "sources": sources or [], "data_sources_used": sources or [], "score": score,
+            "source_count": len(sources or []), "verified_source_count": len(sources or []), "missing_fields": []}
+
+
+def modules_for(ticker):
+    profiles = {
+        "AAPL": ("Technology", "Consumer Electronics", .08, .46, .48, 31),
+        "NVDA": ("Technology", "Semiconductors", .55, .73, .75, 48),
+        "JPM": ("Financial Services", "Banks - Diversified", .06, None, .17, 14),
+        "XOM": ("Energy", "Oil & Gas Integrated", .03, .34, .12, 16),
+        "TSLA": ("Consumer Cyclical", "Auto Manufacturers", -.04, .18, .06, 62),
+    }
+    sector, industry, growth, margin, roic, pe = profiles[ticker]
+    return {
+        "fundamental": module(metrics={"revenue_growth": growth, "gross_margin": margin, "roic": roic, "roe": .18, "growth_score": 70, "profitability_score": 75, "financial_health_score": 65}, details={"capital_allocation": {"assessment": "SHAREHOLDER_RETURN" if ticker in {"AAPL", "XOM"} else "INSUFFICIENT_EVIDENCE", "research_and_development": 1, "stock_based_compensation": 1}}, sources=["fd_metrics"]),
+        "valuation": module(metrics={"pe_ttm": pe}, details={"peer_comparison": [{"ticker": "MSFT", "sector": "Technology", "industry": "Software", "revenue_growth": .1, "operating_margin": .4}, {"ticker": "HPQ", "sector": "Technology", "industry": "Computer Hardware", "revenue_growth": .02, "operating_margin": .08}]}, sources=["fd_metrics"]),
+        "earnings": module(metrics={"latest_eps_surprise": .05}, sources=["fd_earnings"]),
+        "expectations": module("PARTIAL", .4, .5, metrics={"revision_trend": None}, sources=["fd_earnings"]),
+        "institutional": module(metrics={"insider_buy_value_90d": 0, "insider_sell_value_90d": 1}, sources=["fd_insiders"]),
+        "technical": module(metrics={"trend_state": "Bearish" if ticker == "TSLA" else "Bullish", "timeframe": "1d"}, sources=["yf_prices"]),
+        "catalyst": module(details={"timeline": [{"title": f"{ticker} earnings", "description": "Scheduled earnings event", "direction": "neutral", "impact": "Very High", "item_type": "EVENT", "source_id": "yf_calendar"}]}, sources=["yf_calendar"]),
+        "macro": module(metrics={"vix": 18, "wti_crude": 76}, sources=["macro_snapshot"]),
+        "sec": module(details={"guidance": [], "risk_factor_changes": []}, sources=["sec_filings"]),
+        "supply_chain": module(details={"relationships": ([{"target_company": "TSM", "relationship_type": "supplier", "verified": True}] if ticker == "NVDA" else [])}, sources=["supply_chain"] if ticker == "NVDA" else []),
+        "risk": module(details={"radar": ([{"name": "SUPPLY_CHAIN", "level": "HIGH", "reason": "Foundry concentration and export restrictions", "evidence": ["supply_chain", "sec_filings"], "confidence": .85, "trend": "RISING"}] if ticker == "NVDA" else [{"name": "VALUATION", "level": "HIGH" if pe >= 40 else "MEDIUM", "reason": f"P/E {pe}", "evidence": ["fd_metrics"], "confidence": .85, "trend": "STABLE"}])}, sources=["fd_metrics", "sec_filings"]),
+    }, {"name": ticker, "ticker": ticker, "sector": sector, "industry": industry}
+
+
+def test_five_company_theses_and_sector_profiles_are_specific():
+    results = {}
+    for ticker in ("AAPL", "NVDA", "JPM", "XOM", "TSLA"):
+        modules, company = modules_for(ticker)
+        results[ticker] = build_intelligence(ticker, modules, company)
+    assert len({item["core_thesis"] for item in results.values()}) == 5
+    assert results["JPM"]["scoring_profile"]["profile"] == "FINANCIALS"
+    assert "debt_to_equity" in results["JPM"]["scoring_profile"]["excluded_metrics"]
+    assert results["XOM"]["scoring_profile"]["profile"] == "ENERGY"
+    assert results["AAPL"]["scoring_profile"]["profile"] == "TECHNOLOGY"
+    for result in results.values():
+        assert result["scenarios"]["BULL"]["narrative"].startswith(result["research_findings"][0]["ticker"])
+        assert all(finding["evidence_ids"] for finding in result["research_findings"])
+    nvda_risks = [f for f in results["NVDA"]["research_findings"] if f["category"] == "risk"]
+    assert any("export restrictions" in f["claim"] for f in nvda_risks)
+    assert any("supply_chain" in f["source_ids"] for f in nvda_risks)
+
+
+def test_peer_relevance_guidance_and_missing_expectations():
+    modules, company = modules_for("AAPL")
+    result = build_intelligence("AAPL", modules, company)
+    peers = {row["ticker"]: row for row in result["peer_relevance"]}
+    assert peers["MSFT"]["relevance_score"] >= peers["HPQ"]["relevance_score"]
+    missing = [f for f in result["research_findings"] if f["title"] == "Expectations history unavailable"][0]
+    assert missing["direction"] == "NEUTRAL" and missing["confidence"] <= .3
+    rows = _guidance_from_text("We expect revenue between $10 billion and $11 billion in fiscal 2027. We believe our culture is strong.", "2026-09-01", "sec")
+    assert rows[0]["guidance_type"] in {"FORMAL_GUIDANCE", "QUANTITATIVE_OUTLOOK"}
+    assert rows[0]["value"] is None and rows[0]["range"] is None
+    assert rows[1]["guidance_type"] == "MANAGEMENT_COMMENTARY"
+
+
+def test_low_completeness_conflicts_and_traceability():
+    modules, company = modules_for("TSLA")
+    modules["fundamental"]["completeness"] = .15
+    modules["valuation"]["completeness"] = .15
+    modules["technical"]["metrics"]["trend_state"] = "Bullish"
+    result = build_intelligence("TSLA", modules, company)
+    assert result["research_confidence"]["score"] < 75
+    assert result["quality_gate"]["status"] == "LIMITED_RESEARCH_THESIS"
+    assert result["conflicts"]
+    evidence_ids = {row["id"] for row in result["evidence_index"]}
+    assert all(set(finding["evidence_ids"]) <= evidence_ids for finding in result["research_findings"])
+
+
+def test_what_changed_v2_detects_new_driver_and_risk(tmp_path):
+    store = ResearchStore(tmp_path / "research.db")
+    modules, company = modules_for("AAPL")
+    old = {"run_id": "old", "ticker": "AAPL", "status": "COMPLETED", "generated_at": "2026-09-01T00:00:00+00:00", "modules": modules, **build_intelligence("AAPL", deepcopy(modules), company)}
+    changed = deepcopy(modules)
+    changed["risk"]["details"]["radar"].append({"name": "REGULATORY", "level": "HIGH", "reason": "New filing disclosure", "evidence": ["sec_filings"], "confidence": .8, "trend": "RISING"})
+    changed["fundamental"]["metrics"]["revenue_growth"] = -.1
+    new = {"run_id": "new", "ticker": "AAPL", "status": "COMPLETED", "generated_at": "2026-09-02T00:00:00+00:00", "modules": changed, **build_intelligence("AAPL", changed, company)}
+    store.save_snapshot("old", old)
+    store.save_snapshot("new", new)
+    comparison = store.compare_latest("AAPL")
+    assert comparison["driver_changes"]["negative"]["added"]
+    assert comparison["risk_changes"]["findings"]["added"]

@@ -8,7 +8,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app.routers import dashboard, workspace
+from app.market_analysis import build_technical_analysis, enrich_bars
+from app.routers import dashboard, portfolio, workspace
 from v2.bot import state as bot_state
 
 
@@ -16,6 +17,7 @@ from v2.bot import state as bot_state
 def client(tmp_path, monkeypatch):
     monkeypatch.setattr(bot_state, "_DB_PATH", tmp_path / "bot_state.db")
     workspace._LAB_RUNS.clear()
+    portfolio._PRICE_CACHE.clear()
     return TestClient(app)
 
 
@@ -34,6 +36,20 @@ def test_watchlist_and_price_alert_crud(client: TestClient):
 
     assert client.delete("/api/watchlist/NVDA").json()["items"] == []
     assert client.delete(f"/api/price-alerts/{alert_id}").json()["items"] == []
+
+
+def test_monitoring_universe_matches_production_streamer(client: TestClient):
+    from v2.screening.universe import TECH_30
+
+    response = client.get("/api/monitoring/universe")
+    assert response.status_code == 200
+    assert response.json() == {
+        "intraday": TECH_30,
+        "source": "TECH_30",
+        "scan_interval_seconds": 60,
+        "price_pct_threshold": 0.03,
+        "volume_pace_threshold": 2.5,
+    }
 
 
 def test_activity_reads_archive(client: TestClient, tmp_path, monkeypatch):
@@ -120,9 +136,16 @@ def test_ticker_validation():
         workspace._normalize_tickers(["123"])
 
 
-def test_ticker_tape_drops_non_finite_provider_values(monkeypatch):
+def test_ticker_tape_normalizes_non_finite_provider_values(monkeypatch):
     from v2.macro import fred_client, market_client
 
+    monkeypatch.setattr(dashboard, "_TAPE_SYMBOLS", [
+        ("sp500", "SPY", "标普500"),
+        ("nasdaq100", "QQQ", "纳指100"),
+    ])
+    monkeypatch.setattr(dashboard, "_TAPE_FRED_SERIES", [
+        ("us5y", "DGS5", "美债5Y"),
+    ])
     quotes = {
         "SPY": {"value": float("nan"), "pct_change_1d": 0.01},
         "QQQ": {"value": 500, "pct_change_1d": float("inf")},
@@ -133,6 +156,189 @@ def test_ticker_tape_drops_non_finite_provider_values(monkeypatch):
     result = dashboard._fetch_tape()
 
     assert result == {
-        "items": [{"label": "纳指100", "value": 500.0,
-                   "change_pct": None, "unit": ""}],
+        "items": [
+            {"key": "sp500", "label": "标普500", "value": None,
+             "change_pct": 0.01, "unit": ""},
+            {"key": "nasdaq100", "label": "纳指100", "value": 500.0,
+             "change_pct": None, "unit": ""},
+            {"key": "us5y", "label": "美债5Y", "value": None,
+             "change_pct": None, "unit": "%"},
+        ],
     }
+
+
+def test_ticker_tape_catalog_includes_requested_markets():
+    symbols = {key: symbol for key, symbol, _label in dashboard._TAPE_SYMBOLS}
+    fred = {key: series for key, series, _label in dashboard._TAPE_FRED_SERIES}
+
+    assert symbols["silver"] == "SI=F"
+    assert symbols["brent"] == "BZ=F"
+    assert symbols["philadelphia_semiconductor"] == "^SOX"
+    assert fred["us5y"] == "DGS5"
+    assert fred["us10y"] == "DGS10"
+
+
+def test_position_price_history_returns_consistent_contract(client: TestClient, monkeypatch):
+    payload = {
+        "symbol": "BRK.B", "range": "3Y", "timeframe": "1w",
+        "periodDays": 1096, "visibleStart": "2023-09-04",
+        "visibleEnd": "2026-09-04", "warmupBars": 250,
+        "source": "YAHOO_FINANCE",
+        "adjustmentMode": "SPLIT_ADJUSTED",
+        "includesExtendedHours": False,
+        "quote": {
+            "symbol": "BRK.B", "timestamp": "2026-09-04T16:00:00-04:00",
+            "price": 507.5, "regularClose": 507.5, "previousClose": 502.25,
+            "dailyChangePct": .01045, "extendedHoursChangePct": None,
+            "source": "YAHOO_FINANCE", "session": "CLOSED", "isDelayed": True,
+        },
+        "bars": [], "technicalAnalysis": {},
+    }
+    monkeypatch.setattr(portfolio, "_fetch_price_history", lambda ticker, range_key, extended: payload)
+    response = client.get("/api/price-history/BRK.B?range=3Y")
+
+    assert response.status_code == 200
+    assert response.json() == payload
+
+
+def test_position_price_history_rejects_invalid_ticker(client: TestClient):
+    response = client.get("/api/price-history/not%20a%20ticker")
+    assert response.status_code == 400
+
+
+def test_position_price_history_supports_requested_ranges(client: TestClient):
+    assert portfolio._PRICE_RANGES == {
+        "1W": {"days": 7, "timeframe": "30m", "warmup_days": 45},
+        "1M": {"days": 31, "timeframe": "1h", "warmup_days": 150},
+        "3M": {"days": 93, "timeframe": "1d", "warmup_days": 400},
+        "6M": {"days": 186, "timeframe": "1d", "warmup_days": 400},
+        "1Y": {"days": 366, "timeframe": "1d", "warmup_days": 400},
+        "3Y": {"days": 1096, "timeframe": "1w", "warmup_days": 1900},
+    }
+    response = client.get("/api/price-history/AAPL?range=5Y")
+    assert response.status_code == 400
+
+
+def test_position_price_history_uses_30_minute_bars_for_one_week(
+    client: TestClient,
+    monkeypatch,
+):
+    def fake_history(ticker, range_key, extended):
+        assert (ticker, range_key, extended) == ("AAPL", "1W", False)
+        return {
+            "symbol": "AAPL", "range": "1W", "timeframe": "30m",
+            "periodDays": 7, "visibleStart": "2026-08-28", "visibleEnd": "2026-09-04",
+            "warmupBars": 220, "source": "YAHOO_FINANCE",
+            "adjustmentMode": "SPLIT_ADJUSTED", "includesExtendedHours": False,
+            "quote": {}, "technicalAnalysis": {},
+            "bars": [{"timestamp": "2026-09-04T10:00:00-04:00", "close": 231.5,
+                      "high": 232.0, "volume": 740000}],
+        }
+
+    monkeypatch.setattr(portfolio, "_fetch_price_history", fake_history)
+    response = client.get("/api/price-history/AAPL?range=1W")
+
+    assert response.status_code == 200
+    assert response.json()["timeframe"] == "30m"
+    assert response.json()["bars"][0]["close"] == 231.5
+    assert response.json()["bars"][0]["high"] == 232.0
+    assert response.json()["bars"][0]["volume"] == 740000
+
+
+def _synthetic_bars(count: int = 280, timeframe: str = "1d") -> list[dict]:
+    bars = []
+    for index in range(count):
+        center = 100 + index * .03 + ((index % 20) - 10) * .2
+        bars.append({
+            "symbol": "TEST", "timestamp": f"2025-01-{(index % 28) + 1:02d}T16:00:00-05:00",
+            "open": center - .2, "high": center + 1.2, "low": center - 1.1,
+            "close": center + .25, "volume": 1_000_000 + (index % 7) * 100_000,
+            "timeframe": timeframe, "session": "REGULAR", "source": "TEST",
+            "isFinal": True,
+        })
+    return bars
+
+
+def test_indicator_warmup_keeps_sma_complete_at_visible_start():
+    bars = enrich_bars(_synthetic_bars(), "1d")
+    visible = bars[-20:]
+
+    assert visible[0]["indicators"]["sma20"] is not None
+    assert visible[0]["indicators"]["sma50"] is not None
+    assert visible[0]["indicators"]["sma200"] is not None
+    assert visible[0]["indicators"]["timeframe"] == "1d"
+    assert visible[0]["indicators"]["volumeMA20"] is not None
+
+
+def test_technical_analysis_levels_are_timeframe_bound_and_directional():
+    bars = enrich_bars(_synthetic_bars(), "1d")
+    quote = {
+        "symbol": "TEST", "timestamp": bars[-1]["timestamp"], "price": 105.0,
+        "regularClose": 105.0, "dailyChangePct": .01,
+        "source": "TEST", "session": "CLOSED", "isDelayed": False,
+    }
+    analysis = build_technical_analysis(bars, "1d", quote, "SPLIT_ADJUSTED")
+
+    assert analysis["timeframe"] == "1d"
+    assert analysis["SMA200"] is not None
+    assert analysis["volumeMA20"] is not None
+    assert analysis["supports"] and analysis["resistances"]
+    assert all(level["timeframe"] == "1d" for level in analysis["supports"] + analysis["resistances"])
+    assert all(level["upper"] < analysis["currentPrice"] for level in analysis["supports"])
+    assert all(level["lower"] > analysis["currentPrice"] for level in analysis["resistances"])
+    assert [level["distancePct"] for level in analysis["supports"]] == sorted(level["distancePct"] for level in analysis["supports"])
+    assert [level["distancePct"] for level in analysis["resistances"]] == sorted(level["distancePct"] for level in analysis["resistances"])
+    all_levels = analysis["supports"] + analysis["resistances"]
+    assert all(
+        first["upper"] < second["lower"] or second["upper"] < first["lower"]
+        for index, first in enumerate(all_levels)
+        for second in all_levels[index + 1:]
+    )
+
+
+def test_hourly_last_regular_bar_closes_at_market_boundary():
+    from zoneinfo import ZoneInfo
+
+    et = ZoneInfo("America/New_York")
+    start = datetime(2026, 9, 4, 15, 30, tzinfo=et)
+    assert portfolio._bar_is_final(start, "1h", datetime(2026, 9, 4, 16, 0, tzinfo=et))
+    assert not portfolio._bar_is_final(start, "1h", datetime(2026, 9, 4, 15, 59, tzinfo=et))
+
+
+def test_after_hours_quote_finalizes_last_intraday_regular_bar():
+    bars = [{
+        "timestamp": "2026-09-04T15:30:00-04:00", "session": "REGULAR",
+        "open": 1012.0, "high": 1015.2, "low": 1010.5, "close": 1014.95,
+        "isFinal": True, "status": "FINAL", "isStale": False,
+    }]
+    quote = {
+        "timestamp": "2026-09-04T17:20:00-04:00", "session": "AFTER_HOURS",
+        "price": 1013.88, "regularClose": 1016.59, "regularCloseIsOfficial": True,
+    }
+
+    portfolio._synchronize_forming_bar(bars, quote, "1h")
+
+    assert bars[0]["close"] == 1016.59
+    assert bars[0]["high"] == 1016.59
+    assert bars[0]["isFinal"] is True
+    assert bars[0]["status"] == "FINAL"
+    assert bars[0]["finalizationSource"] == "DAILY_REGULAR_CLOSE"
+
+
+def test_missing_terminal_intraday_bar_is_marked_stale_not_final():
+    bars = [{
+        "timestamp": "2026-09-04T14:30:00-04:00", "session": "REGULAR",
+        "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5,
+        "isFinal": True, "status": "FINAL", "isStale": False,
+    }]
+    quote = {
+        "timestamp": "2026-09-04T17:20:00-04:00", "session": "AFTER_HOURS",
+        "price": 100.2, "regularClose": 101.5, "regularCloseIsOfficial": True,
+    }
+
+    portfolio._synchronize_forming_bar(bars, quote, "1h")
+
+    assert bars[0]["close"] == 100.5
+    assert bars[0]["isFinal"] is False
+    assert bars[0]["status"] == "STALE"
+    assert bars[0]["isStale"] is True

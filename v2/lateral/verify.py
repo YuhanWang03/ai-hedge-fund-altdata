@@ -6,8 +6,6 @@ from __future__ import annotations
 import logging
 import os
 
-from tavily import TavilyClient
-
 from v2.data.client import FDClient
 from v2.lateral.models import Neighbor
 
@@ -59,6 +57,11 @@ def verify_relation(neighbor: Neighbor) -> int:
         return 0
 
     neighbor.relation_checked = True
+    try:
+        from tavily import TavilyClient
+    except ImportError:
+        logger.warning("Tavily relation verification unavailable: tavily package not installed")
+        return 0
     client = TavilyClient(api_key=api_key)
     calls = 0
 

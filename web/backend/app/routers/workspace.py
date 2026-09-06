@@ -105,6 +105,20 @@ async def activity(
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
+@router.get("/monitoring/universe")
+async def monitoring_universe() -> dict:
+    """The production ticker pool scanned by the minute-level streamer."""
+    from v2.screening.universe import TECH_30
+
+    return {
+        "intraday": list(TECH_30),
+        "source": "TECH_30",
+        "scan_interval_seconds": 60,
+        "price_pct_threshold": 0.03,
+        "volume_pace_threshold": 2.5,
+    }
+
+
 class WatchlistInput(BaseModel):
     ticker: str
     note: str = Field(default="", max_length=200)
