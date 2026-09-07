@@ -386,10 +386,51 @@ def test_large_screening_runs_as_a_polled_job(client, monkeypatch):
     assert job["status"] == "failed" and "provider down" in job["error"]
 
 
-def test_ticking_list_reports_each_index():
-    seen = []
-    items = workspace._Ticking(["A", "B", "C"], seen.append)
-    assert list(items) == ["A", "B", "C"] and seen == [0, 1, 2] and len(items) == 3
+def test_screening_rules_are_optional_and_missing_fields_fail_closed():
+    from app.screening import CRITERIA, DEFAULT_RULES, Rule, screen
+
+    r = Rule(field="gross_margin", op="gte", value=0.5)
+    assert r.passes({"gross_margin": 0.6}) and not r.passes({"gross_margin": 0.4})
+    assert not r.passes({"gross_margin": None}) and not r.passes({"gross_margin": float("nan")}) and not r.passes({})
+    assert r.describe() == "毛利率 ≥ 50%"
+    assert Rule(field="market_cap", op="gte", value=10e9).describe() == "市值 ≥ $10B"
+    assert Rule(field="price_to_earnings_ratio", op="lte", value=25).describe() == "市盈率 ≤ 25"
+    assert all(rule.field in CRITERIA for rule in DEFAULT_RULES)
+
+    # Legacy threshold fields still work and fold into rules; none given → defaults; unknown field → 400.
+    body = workspace.ScreeningInput(universe="custom", tickers=["AAA"])
+    assert [x.model_dump() for x in body.effective_rules()] == [x.model_dump() for x in DEFAULT_RULES]
+    body = workspace.ScreeningInput(universe="custom", tickers=["AAA"], gross_margin_min=0.3)
+    assert [x.describe() for x in body.effective_rules()] == ["毛利率 ≥ 30%"]
+    body = workspace.ScreeningInput(universe="custom", tickers=["AAA"], rules=[{"field": "nope", "op": "gte", "value": 1}])
+    with pytest.raises(ValueError, match="nope"):
+        body.effective_rules()
+
+    # Only the enabled rules are applied; a ticker without enough price history is reported, not silently dropped.
+    class Metrics:
+        def get_financial_metrics(self, ticker, end_date, limit=1, **kw):
+            return [{"market_cap": 5e9 if ticker == "SMALL" else 50e9, "gross_margin": 0.7, "price_to_earnings_ratio": 40 if ticker == "PRICEY" else 15}]
+
+    class Prices:
+        def get_prices(self, ticker, start, end):
+            if ticker == "NEW":
+                return [{"close": 10.0}] * 5
+            return [{"close": 100.0 + (i % 7)} for i in range(300)]
+
+    ticks = []
+    out = screen(["BIG", "SMALL", "PRICEY", "NEW"], Metrics(), Prices(), [Rule(field="price_to_earnings_ratio", op="lte", value=25)], on_tick=ticks.append)
+    assert ticks == [0, 1, 2, 3]
+    assert [c["ticker"] for c in out["candidates"]] == ["BIG", "SMALL"]  # market-cap rule not enabled → SMALL passes
+    assert out["rejected_count"] == 1 and out["no_data"] == ["NEW"]
+    assert out["reject_reasons"] == {"市盈率 ≤ 25": 1} and out["rules_text"] == ["市盈率 ≤ 25"]
+    assert {"volatility", "return_3m", "pct_from_52w_high"} <= set(out["candidates"][0])
+
+
+def test_screening_criteria_endpoint_lists_fields_and_defaults(client):
+    body = client.get("/api/lab/screening/criteria").json()
+    assert body["kind"] == "criteria" and len(body["items"]) >= 20
+    assert body["items"]["gross_margin"] == {"label": "毛利率", "unit": "pct", "source": "metrics"}
+    assert body["defaults"][0] == {"field": "market_cap", "op": "gte", "value": 10e9}
 
 
 

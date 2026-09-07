@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 from app.auth import require_owner
 from app.config import SETTINGS
 from app.fd_pricing import cost as fd_cost
+from app.screening import CRITERIA, DEFAULT_RULES, Rule, screen as lab_screen
 from app.lab_store import LabRunStore
 from app.sources import BIG_LIMIT, INDEX_UNIVERSES, MAX_TICKERS, Universe, normalize_tickers, resolve_universe
 from v2.archive.store import recent_trading_day_cutoff_iso
@@ -264,11 +265,25 @@ class ScreeningInput(BaseModel):
     data_source: Literal["yfinance", "fd"] = "yfinance"
     #: enrich candidates with Wall-Street earnings estimates (one FD request per candidate)
     with_earnings: bool = False
-    market_cap_min: float = Field(default=10_000_000_000, ge=0)
-    market_cap_max: float = Field(default=5_000_000_000_000, gt=0)
-    revenue_growth_min: float = Field(default=0.05, ge=-1, le=10)
-    gross_margin_min: float = Field(default=0.50, ge=-1, le=1)
-    volatility_max: float = Field(default=0.60, gt=0, le=10)
+    #: pick-and-mix criteria; omitted → DEFAULT_RULES (the old five-threshold screen minus the cap ceiling)
+    rules: list[Rule] | None = Field(default=None, max_length=24)
+    # legacy thresholds, still accepted; folded into rules when `rules` is omitted
+    market_cap_min: float | None = Field(default=None, ge=0)
+    market_cap_max: float | None = Field(default=None, gt=0)
+    revenue_growth_min: float | None = Field(default=None, ge=-1, le=10)
+    gross_margin_min: float | None = Field(default=None, ge=-1, le=1)
+    volatility_max: float | None = Field(default=None, gt=0, le=10)
+
+    def effective_rules(self) -> list[Rule]:
+        if self.rules is not None:
+            unknown = [r.field for r in self.rules if r.field not in CRITERIA]
+            if unknown:
+                raise ValueError(f"unknown screening field: {', '.join(unknown)}")
+            return list(self.rules)
+        legacy = [("market_cap", "gte", self.market_cap_min), ("market_cap", "lte", self.market_cap_max), ("revenue_growth", "gte", self.revenue_growth_min),
+                  ("gross_margin", "gte", self.gross_margin_min), ("volatility", "lte", self.volatility_max)]
+        picked = [Rule(field=f, op=o, value=v) for f, o, v in legacy if v is not None]
+        return picked or list(DEFAULT_RULES)
 
 
 class _ScreenData:
@@ -339,37 +354,17 @@ def _screen_clients(body: "ScreeningInput") -> _ScreenData:
     return _ScreenData(fd, metrics_is_fd=True, earnings_client=fd if body.with_earnings else None)
 
 
-class _Ticking(list):
-    """A ticker list that reports progress as the screener iterates it."""
-
-    def __init__(self, items, on_tick):
-        super().__init__(items)
-        self._on_tick = on_tick
-
-    def __iter__(self):
-        for i, item in enumerate(list.__iter__(self)):
-            self._on_tick(i)
-            yield item
-
-
 def _run_screening(body: ScreeningInput, on_tick=None) -> dict:
-    from v2.screening import FilterConfig, run_screening
+    from v2.data.price_source import default_price_source
 
     tickers, meta = resolve_universe(body.universe, body.tickers, limit=BIG_LIMIT)
-    config = FilterConfig(
-        market_cap_min=body.market_cap_min,
-        market_cap_max=body.market_cap_max,
-        revenue_growth_min=body.revenue_growth_min,
-        gross_margin_min=body.gross_margin_min,
-        volatility_max=body.volatility_max,
-    )
+    rules = body.effective_rules()
     with _screen_clients(body) as client:
-        result = run_screening(_Ticking(tickers, on_tick) if on_tick else tickers, client, config)
+        result = lab_screen(tickers, client, default_price_source(), rules, on_tick=on_tick, with_earnings=body.with_earnings)
         skipped, fd_requests = dict(client.skipped), dict(client.fd_requests)
     return {"kind": "screening", "universe": meta["universe"], "universe_as_of": meta.get("as_of"), "tickers": tickers,
             "data_source": body.data_source, "with_earnings": body.with_earnings,
-            "fd_requests": fd_requests, "fd_cost_usd": fd_cost(fd_requests),
-            "thresholds": config.model_dump(), "skipped": skipped, **result.model_dump()}
+            "fd_requests": fd_requests, "fd_cost_usd": fd_cost(fd_requests), "skipped": skipped, **result}
 
 
 #: screens bigger than this run as a background job (nginx cuts requests at 90 s)
@@ -456,6 +451,12 @@ async def screening_job(job_id: str) -> dict:
     if not job:
         raise HTTPException(status_code=404, detail="screening job not found")
     return job
+
+
+@router.get("/lab/screening/criteria")
+async def screening_criteria() -> dict:
+    """Fields a screening rule may use, with labels / units, and the default rule set."""
+    return {"kind": "criteria", "items": CRITERIA, "defaults": [r.model_dump() for r in DEFAULT_RULES]}
 
 
 @router.get("/lab/universes")

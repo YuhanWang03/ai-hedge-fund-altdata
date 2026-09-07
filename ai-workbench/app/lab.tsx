@@ -26,11 +26,14 @@ const UNIVERSES: { id: Universe; label: string }[] = [
 ];
 const UNIVERSE_LABEL: Record<string, string> = Object.fromEntries(UNIVERSES.map(u => [u.id, u.label]));
 
-type ScreenCandidate = { ticker: string; price: number; price_change: number | null; market_cap: number | null; revenue_growth: number | null; gross_margin: number | null; volatility: number | null; high_52w: number | null; return_1w?: number | null; revenue_actual?: number | null; revenue_estimate?: number | null };
+type ScreenCandidate = { ticker: string; price: number; price_change: number | null; market_cap: number | null; revenue_growth: number | null; gross_margin: number | null; volatility: number | null; high_52w: number | null; return_1w?: number | null; revenue_actual?: number | null; revenue_estimate?: number | null; [key: string]: unknown };
+type ScreenRule = { field: string; op: 'gte' | 'lte'; value: number };
+type CriterionMeta = { label: string; unit: 'pct' | 'usd' | 'x'; source: 'metrics' | 'prices' };
+type CriteriaResp = { items: Record<string, CriterionMeta>; defaults: ScreenRule[] };
 type ScreeningJob = { job_id: string; status: 'running' | 'completed' | 'failed'; done: number; total: number; universe: string; error?: string; result?: ScreeningResult };
 type UniverseInfo = { size: number; as_of: string | null; label: string };
 type Pricing = { prices_usd: Record<string, number>; committee_per_ticker: { full: number; lean: number } };
-type ScreeningResult = { kind: 'screening'; lab_run_id?: string; universe: string; universe_as_of?: string | null; skipped?: Record<string, string>; data_source?: 'yfinance' | 'fd'; with_earnings?: boolean; fd_requests?: Record<string, number>; fd_cost_usd?: number; tickers: string[]; thresholds: Record<string, number>; date: string; universe_size: number; candidates: ScreenCandidate[]; fd_calls?: number };
+type ScreeningResult = { kind: 'screening'; lab_run_id?: string; universe: string; universe_as_of?: string | null; skipped?: Record<string, string>; data_source?: 'yfinance' | 'fd'; with_earnings?: boolean; fd_requests?: Record<string, number>; fd_cost_usd?: number; tickers: string[]; rules?: ScreenRule[]; rules_text?: string[]; rejected_count?: number; no_data?: string[]; reject_reasons?: Record<string, number>; date: string; universe_size: number; candidates: ScreenCandidate[] };
 
 type CommitteeSource = 'tickers' | 'holdings' | 'watchlist' | 'screening';
 type PersonaMeta = { key: string; name: string; name_zh: string; style: string; period: string; lookback: number; needs: string[] };
@@ -175,9 +178,31 @@ function RunRow({ run, onOpen }: { run: RunSummary; onOpen: () => void }) {
 
 // ------------------------------------------------------------------------- screening
 
+/** Order, default operator and default value for each criterion; labels/units come from the backend catalog. */
+const CRITERIA_UI: { field: string; op: 'gte' | 'lte'; def: string; hint?: string }[] = [
+  { field: 'market_cap', op: 'gte', def: '10' }, { field: 'price', op: 'gte', def: '5' },
+  { field: 'revenue_growth', op: 'gte', def: '5' }, { field: 'earnings_growth', op: 'gte', def: '10' },
+  { field: 'gross_margin', op: 'gte', def: '50' }, { field: 'operating_margin', op: 'gte', def: '15' }, { field: 'net_margin', op: 'gte', def: '10' },
+  { field: 'return_on_equity', op: 'gte', def: '15' }, { field: 'return_on_invested_capital', op: 'gte', def: '10' },
+  { field: 'debt_to_equity', op: 'lte', def: '1' }, { field: 'current_ratio', op: 'gte', def: '1' },
+  { field: 'price_to_earnings_ratio', op: 'lte', def: '30' }, { field: 'price_to_sales_ratio', op: 'lte', def: '10' }, { field: 'price_to_book_ratio', op: 'lte', def: '10' },
+  { field: 'free_cash_flow_yield', op: 'gte', def: '3' }, { field: 'payout_ratio', op: 'lte', def: '60' },
+  { field: 'volatility', op: 'lte', def: '60' }, { field: 'return_1w', op: 'gte', def: '0' }, { field: 'return_1m', op: 'gte', def: '0' }, { field: 'return_3m', op: 'gte', def: '0' },
+  { field: 'pct_from_52w_high', op: 'gte', def: '-15' }, { field: 'pct_from_52w_low', op: 'gte', def: '20' },
+];
+const DEFAULT_ENABLED = ['market_cap', 'revenue_growth', 'gross_margin', 'volatility'];
+const unitLabel = (unit: string, field: string) => unit === 'pct' ? '%' : unit === 'usd' ? (field === 'market_cap' ? '十亿美元' : '美元') : '倍';
+const toBackend = (field: string, unit: string, raw: string) => { const n = Number(raw); return unit === 'pct' ? n / 100 : unit === 'usd' && field === 'market_cap' ? n * 1e9 : n };
+const fmtCell = (unit: string, field: string, v: unknown) => typeof v !== 'number' ? '—' : unit === 'pct' ? pct(v) : unit === 'usd' ? (field === 'market_cap' ? money(v) : `$${num(v)}`) : num(v);
+
+
 function ScreeningTool({ result, setResult, onHand, watchlist, refreshWatchlist, ask }: ToolProps & { result?: ScreeningResult; setResult: (r?: ScreeningResult) => void; onHand: (t: string[], from: string, to: LabTool) => void }) {
   const [universe, setUniverse] = useState<Universe>('tech30'); const [tickers, setTickers] = useState('');
-  const [capMin, setCapMin] = useState('10'); const [capMax, setCapMax] = useState('5000'); const [rev, setRev] = useState('5'); const [gm, setGm] = useState('50'); const [vol, setVol] = useState('60');
+  const criteria = useLabData<CriteriaResp>('/api/lab/screening/criteria');
+  const [enabled, setEnabled] = useState<Set<string>>(new Set(DEFAULT_ENABLED));
+  const [values, setValues] = useState<Record<string, string>>(() => Object.fromEntries(CRITERIA_UI.map(c => [c.field, c.def])));
+  const [ops, setOps] = useState<Record<string, 'gte' | 'lte'>>(() => Object.fromEntries(CRITERIA_UI.map(c => [c.field, c.op])));
+  const activeRules = (): ScreenRule[] => CRITERIA_UI.filter(c => enabled.has(c.field) && values[c.field] !== '' && Number.isFinite(Number(values[c.field]))).map(c => ({ field: c.field, op: ops[c.field], value: toBackend(c.field, criteria.data?.items[c.field]?.unit || 'x', values[c.field]) }));
   const [busy, setBusy] = useState(false); const [error, setError] = useState(''); const [picked, setPicked] = useState<Set<string>>(new Set()); const [job, setJob] = useState<ScreeningJob | null>(null);
   const [dataSource, setDataSource] = useState<'yfinance' | 'fd'>('yfinance'); const [withEarnings, setWithEarnings] = useState(false);
   const info = useLabData<{ items: Record<string, UniverseInfo> }>('/api/lab/universes');
@@ -187,7 +212,7 @@ function ScreeningTool({ result, setResult, onHand, watchlist, refreshWatchlist,
   const run = async () => {
     setBusy(true); setError(''); setJob(null);
     try {
-      const body = { universe, tickers: universe === 'custom' ? parseTickers(tickers) : [], data_source: dataSource, with_earnings: withEarnings, market_cap_min: Number(capMin) * 1e9, market_cap_max: Number(capMax) * 1e9, revenue_growth_min: Number(rev) / 100, gross_margin_min: Number(gm) / 100, volatility_max: Number(vol) / 100 };
+      const body = { universe, tickers: universe === 'custom' ? parseTickers(tickers) : [], data_source: dataSource, with_earnings: dataSource === 'fd' && withEarnings, rules: activeRules() };
       let r = await apiJson<ScreeningResult | ScreeningJob>('/api/lab/screening', { method: 'POST', body: JSON.stringify(body) });
       while ('job_id' in r) {
         setJob(r);
@@ -204,21 +229,20 @@ function ScreeningTool({ result, setResult, onHand, watchlist, refreshWatchlist,
     <section className="surface lab-config"><div className="surface-header"><div><h2>筛选条件</h2><span>全部阈值可改，缺数据的股票不通过</span></div></div>
       <UniversePicker universe={universe} setUniverse={setUniverse} tickers={tickers} setTickers={setTickers} info={info.data?.items}/>
       <Field label="数据源" hint={dataSource === 'yfinance' ? '市值、营收增长、毛利率来自 yfinance，免费；口径：营收增长为最近一季同比，毛利率为 TTM' : `Financial Datasets 按请求计费，约 ${usd(pricing.data?.prices_usd.financial_metrics ?? 0.02)}/只`}><Chips options={[{ id: 'yfinance', label: 'yfinance（免费）' }, { id: 'fd', label: 'Financial Datasets（付费）' }]} value={dataSource} onChange={setDataSource}/></Field>
-      <Field label="候选的华尔街财报预期" hint={`来自 Financial Datasets，每只候选约 ${usd(pricing.data?.prices_usd.earnings ?? 0.02)}`}><Chips options={[{ id: 'no', label: '不取' }, { id: 'yes', label: '取' }]} value={withEarnings ? 'yes' : 'no'} onChange={v => setWithEarnings(v === 'yes')}/></Field>
-      <div className="lab-grid2"><Field label="市值下限（十亿美元）"><NumberInput value={capMin} onChange={setCapMin} min={0} step={1}/></Field><Field label="市值上限（十亿美元）"><NumberInput value={capMax} onChange={setCapMax} min={1} step={10}/></Field>
-        <Field label="营收增长 ≥（%）"><NumberInput value={rev} onChange={setRev} step={1}/></Field><Field label="毛利率 ≥（%）"><NumberInput value={gm} onChange={setGm} min={0} max={100} step={5}/></Field><Field label="年化波动率 ≤（%）"><NumberInput value={vol} onChange={setVol} min={1} step={5}/></Field></div>
+      {dataSource === 'fd' && <Field label="候选的华尔街财报预期" hint={`每只候选约 ${usd(pricing.data?.prices_usd.earnings ?? 0.02)}`}><Chips options={[{ id: 'no', label: '不取' }, { id: 'yes', label: '取' }]} value={withEarnings ? 'yes' : 'no'} onChange={v => setWithEarnings(v === 'yes')}/></Field>}
+      <Field label={`筛选条件（已启用 ${enabled.size}）`} hint="勾选的条件全部满足才通过；某只股票缺该字段即不通过该条。yfinance 可能缺少部分财务比率，缺失的会显示为 —。"><div className="lab-criteria">{CRITERIA_UI.map(c => { const meta = criteria.data?.items[c.field]; const on = enabled.has(c.field); const unit = meta?.unit || 'x'; return <div key={c.field} className={on ? 'on' : ''}><input type="checkbox" checked={on} onChange={() => setEnabled(cur => { const next = new Set(cur); if (next.has(c.field)) next.delete(c.field); else next.add(c.field); return next })}/><span className="lab-crit-label">{meta?.label || c.field}</span><button type="button" className="lab-op" disabled={!on} onClick={() => setOps(cur => ({ ...cur, [c.field]: cur[c.field] === 'gte' ? 'lte' : 'gte' }))}>{ops[c.field] === 'gte' ? '≥' : '≤'}</button><input type="number" disabled={!on} value={values[c.field]} onChange={e => setValues(cur => ({ ...cur, [c.field]: e.target.value }))}/><small>{unitLabel(unit, c.field)}</small></div> })}</div></Field>
       <p className="lab-note">预计 Financial Datasets 费用：{estMetrics > 0 ? `≈ ${usd(estMetrics)}（${poolSize} 次指标请求）` : '$0.00'}{withEarnings ? ` + 每只候选 ${usd(pricing.data?.prices_usd.earnings ?? 0.02)}` : ''}。价格来自 /api/lab/committee/pricing，可用 FD_PRICES 环境变量校正。</p>
-      <button className="run-button" disabled={busy || (universe === 'custom' && !parseTickers(tickers).length)} onClick={() => void run()}>{busy ? (job ? `筛选中… ${job.done} / ${job.total}` : '筛选中…') : '运行筛选'}</button>
+      <button className="run-button" disabled={busy || !enabled.size || (universe === 'custom' && !parseTickers(tickers).length)} onClick={() => void run()}>{busy ? (job ? `筛选中… ${job.done} / ${job.total}` : '筛选中…') : '运行筛选'}</button>
       {job && <div className="lab-progress"><i style={{ width: `${job.total ? Math.round((job.done / job.total) * 100) : 0}%` }}/></div>}
     </section>
-    <section className="surface lab-result">
-      {error ? <ErrorBox text={error}/> : !result ? <Empty glyph="⌕" title="等待筛选" text="选一个股票池、调好阈值，结果是通过硬规则的候选名单。可以整单送进委员会。"/> : <>
-        <div className="surface-header"><div><h2>{result.candidates.length} / {result.universe_size} 只通过</h2><span>{UNIVERSE_LABEL[result.universe] || result.universe}{result.universe_as_of ? `（成分股 ${result.universe_as_of}）` : ''} · {result.date} · {result.data_source === 'fd' ? 'Financial Datasets' : 'yfinance'} · FD 费用 {usd(result.fd_cost_usd ?? 0)}{result.fd_requests && Object.keys(result.fd_requests).length ? `（${Object.entries(result.fd_requests).map(([k, n]) => `${k} ${n}`).join('，')}）` : ''}{result.skipped && Object.keys(result.skipped).length ? ` · 数据源无覆盖跳过 ${Object.keys(result.skipped).length} 只（${Object.keys(result.skipped).slice(0, 6).join(' ')}${Object.keys(result.skipped).length > 6 ? ' …' : ''}）` : ''} · 市值 ≥ {money(result.thresholds.market_cap_min)} · 营收增长 ≥ {pctAbs(result.thresholds.revenue_growth_min)} · 毛利率 ≥ {pctAbs(result.thresholds.gross_margin_min)} · 波动 ≤ {pctAbs(result.thresholds.volatility_max)}</span></div>
+    <section className="surface lab-result lab-result-clamp">
+      {error ? <ErrorBox text={error}/> : !result ? <Empty glyph="⌕" title="等待筛选" text="选一个股票池、勾选条件，结果是全部通过的候选名单。可以整单送进委员会。"/> : <>
+        <div className="surface-header"><div><h2>{result.candidates.length} / {result.universe_size} 只通过</h2><span>{UNIVERSE_LABEL[result.universe] || result.universe}{result.universe_as_of ? `（成分股 ${result.universe_as_of}）` : ''} · {result.date} · {result.data_source === 'fd' ? 'Financial Datasets' : 'yfinance'} · FD 费用 {usd(result.fd_cost_usd ?? 0)}{(result.no_data?.length || 0) + Object.keys(result.skipped || {}).length ? ` · 无数据跳过 ${new Set([...(result.no_data || []), ...Object.keys(result.skipped || {})]).size} 只` : ''} · 条件：{(result.rules_text || []).join('，') || '无'}</span></div>
           <div className="lab-actions"><button type="button" disabled={!chosen.length} onClick={() => onHand(chosen, '股票筛选', 'committee')}>送入委员会（{chosen.length}）</button><button type="button" disabled={!chosen.length} onClick={() => onHand(chosen, '股票筛选', 'backtest')}>送入回测</button></div></div>
-        {result.candidates.length === 0 ? <p className="lab-note">没有股票通过。放宽阈值，或换一个股票池。</p> : <div className="lab-table-wrap"><table className="lab-table"><thead><tr><th><input type="checkbox" checked={picked.size === result.candidates.length} onChange={e => setPicked(e.target.checked ? new Set(result.candidates.map(c => c.ticker)) : new Set())}/></th><th>股票</th><th>价格</th><th>1 日</th><th>1 周</th><th>市值</th><th>营收增长</th><th>毛利率</th><th>波动率</th><th></th></tr></thead><tbody>
-          {result.candidates.map(c => <tr key={c.ticker}><td><input type="checkbox" checked={picked.has(c.ticker)} onChange={() => setPicked(cur => { const next = new Set(cur); if (next.has(c.ticker)) next.delete(c.ticker); else next.add(c.ticker); return next })}/></td><td><strong>{c.ticker}</strong></td><td>${num(c.price)}</td><td className={(c.price_change || 0) >= 0 ? 'positive' : 'negative'}>{pct(c.price_change)}</td><td className={(c.return_1w || 0) >= 0 ? 'positive' : 'negative'}>{pct(c.return_1w)}</td><td>{money(c.market_cap)}</td><td>{pct(c.revenue_growth)}</td><td>{pctAbs(c.gross_margin)}</td><td>{pctAbs(c.volatility)}</td><td><AddToWatchlist ticker={c.ticker} watchlist={watchlist} onAdded={refreshWatchlist}/></td></tr>)}
-        </tbody></table></div>}
-        <div className="lab-foot"><button type="button" className="explain-button" onClick={() => ask(`股票筛选结果：${result.candidates.map(c => c.ticker).join(', ') || '无'}（股票池 ${result.universe_size} 只，阈值：营收增长≥${pctAbs(result.thresholds.revenue_growth_min)}，毛利率≥${pctAbs(result.thresholds.gross_margin_min)}）。请点评这批候选的共同点和明显遗漏。`, '实验室 · 股票筛选')}>问 AI 点评这批候选</button><RawJson data={result}/></div>
+        {result.candidates.length === 0 ? <div className="lab-note">没有股票通过。{result.reject_reasons && Object.keys(result.reject_reasons).length ? ` 最常见的不通过原因：${Object.entries(result.reject_reasons).slice(0, 3).map(([r, n]) => `${r}（${n} 只）`).join('，')}。` : ''}放宽条件，或换一个股票池。</div> : (() => { const core = new Set(['market_cap', 'revenue_growth', 'gross_margin', 'volatility']); const extra = (result.rules || []).map(r => r.field).filter((f, i, a) => !core.has(f) && f !== 'price' && a.indexOf(f) === i); return <div className="lab-table-wrap lab-scroll"><table className="lab-table"><thead><tr><th><input type="checkbox" checked={picked.size === result.candidates.length} onChange={e => setPicked(e.target.checked ? new Set(result.candidates.map(c => c.ticker)) : new Set())}/></th><th>股票</th><th>价格</th><th>1 日</th><th>1 周</th><th>市值</th><th>营收增长</th><th>毛利率</th><th>波动率</th>{extra.map(f => <th key={f}>{criteria.data?.items[f]?.label || f}</th>)}<th></th></tr></thead><tbody>
+          {result.candidates.map(c => <tr key={c.ticker}><td><input type="checkbox" checked={picked.has(c.ticker)} onChange={() => setPicked(cur => { const next = new Set(cur); if (next.has(c.ticker)) next.delete(c.ticker); else next.add(c.ticker); return next })}/></td><td><strong>{c.ticker}</strong></td><td>${num(c.price)}</td><td className={(c.price_change || 0) >= 0 ? 'positive' : 'negative'}>{pct(c.price_change)}</td><td className={(c.return_1w || 0) >= 0 ? 'positive' : 'negative'}>{pct(c.return_1w)}</td><td>{money(c.market_cap)}</td><td>{pct(c.revenue_growth)}</td><td>{pctAbs(c.gross_margin)}</td><td>{pctAbs(c.volatility)}</td>{extra.map(f => <td key={f}>{fmtCell(criteria.data?.items[f]?.unit || 'x', f, c[f])}</td>)}<td><AddToWatchlist ticker={c.ticker} watchlist={watchlist} onAdded={refreshWatchlist}/></td></tr>)}
+        </tbody></table></div> })()}
+        <div className="lab-foot"><button type="button" className="explain-button" onClick={() => ask(`股票筛选结果：${result.candidates.slice(0, 40).map(c => c.ticker).join(', ') || '无'}${result.candidates.length > 40 ? ` 等 ${result.candidates.length} 只` : ''}（股票池 ${result.universe_size} 只，条件：${(result.rules_text || []).join('，')}）。请点评这批候选的共同点和明显遗漏。`, '实验室 · 股票筛选')}>问 AI 点评这批候选</button><RawJson data={result}/></div>
       </>}
     </section>
   </div>;

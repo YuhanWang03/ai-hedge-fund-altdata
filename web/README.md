@@ -86,8 +86,18 @@ as a background job — `POST /api/lab/screening` returns `{job_id, done, total}
 and `GET /api/lab/screening/jobs/{id}` is polled — because nginx cuts requests
 at 90 s. `GET /api/lab/universes` lists sizes and snapshot dates.
 
+Screening rules are individually optional: the UI ticks any subset of the
+criteria (market cap, price, growth, margins, ROE/ROIC, leverage, valuation
+multiples, FCF yield, payout, volatility, 1w/1m/3m returns, distance from the
+52-week high/low) and each rule is `field ≥/≤ value`. A ticker missing a
+field fails that rule; `reject_reasons` counts which rules cut the most.
+The legacy `market_cap_min/…` fields still work and are folded into rules;
+with neither given the four defaults apply. Under yfinance some ratio
+fields (e.g. ROIC, payout) may be empty for part of the universe.
+
 ```
-POST /api/lab/screening              {universe, tickers?, market_cap_min/max, revenue_growth_min, gross_margin_min, volatility_max}
+POST /api/lab/screening              {universe, tickers?, data_source: yfinance|fd, with_earnings?, rules: [{field, op: gte|lte, value}]}
+GET  /api/lab/screening/criteria     the 22 rule fields (label, unit, source) + the default rule set
 POST /api/lab/backtest               {universe, tickers?, strategy: "pead", holding_days, earnings_limit, capital, per_trade}
 POST /api/lab/event-study            {universe, tickers?, earnings_limit, n_bootstrap, require_eps_surprise}
 GET  /api/lab/signals                production anomaly thresholds, read-only
