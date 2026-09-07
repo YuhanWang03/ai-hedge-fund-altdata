@@ -18,44 +18,54 @@ from pydantic import BaseModel, Field
 
 from app.auth import require_owner
 from app.config import SETTINGS
+from app.lab_store import LabRunStore
+from app.sources import MAX_TICKERS, Universe, normalize_tickers, resolve_universe
 from v2.archive.store import recent_trading_day_cutoff_iso
 
 router = APIRouter(prefix="/api", tags=["workspace"], dependencies=[Depends(require_owner)])
 
 _LAB_TIMEOUT_SECONDS = 240
-_LAB_RUNS: list[dict] = []
+_LAB_STORE: LabRunStore | None = None
 
 
-def _remember_run(kind: str, result: dict) -> None:
-    summary: dict = {"kind": kind, "ran_at": datetime.now(timezone.utc).isoformat()}
+def _lab_store() -> LabRunStore:
+    global _LAB_STORE
+    if _LAB_STORE is None:
+        _LAB_STORE = LabRunStore()
+    return _LAB_STORE
+
+
+def _summarize(kind: str, result: dict) -> dict:
+    """Compact, list-friendly view of one run; the full result is stored alongside."""
+    summary: dict = {"tickers": result.get("tickers", [])}
     if kind == "backtest":
-        summary.update({"n_trades": (result.get("metrics") or {}).get("n_trades", 0), "tickers": result.get("tickers", [])})
+        m = result.get("metrics") or {}
+        summary.update({"strategy": result.get("strategy"), "universe": result.get("universe"), "n_trades": m.get("n_trades", 0),
+                        "total_return_pct": m.get("total_return_pct"), "sharpe_ratio": m.get("sharpe_ratio"), "max_drawdown_pct": m.get("max_drawdown_pct")})
     elif kind == "event_study":
-        summary.update({"n_events": len(result.get("events") or []), "tickers": result.get("tickers", [])})
+        summary.update({"universe": result.get("universe"), "n_events": len(result.get("events") or []), "n_groups": len(result.get("aggregates") or [])})
     elif kind == "screening":
-        summary.update({"n_candidates": len(result.get("candidates") or []), "tickers": result.get("tickers", [])})
+        summary.update({"universe": result.get("universe"), "universe_size": result.get("universe_size"), "n_candidates": len(result.get("candidates") or []),
+                        "candidates": [c.get("ticker") for c in (result.get("candidates") or [])][:20]})
     elif kind == "committee":
         verdicts = result.get("verdicts") or []
-        summary.update({
-            "run_id": result.get("run_id"), "source": result.get("source"),
-            "n_tickers": len(verdicts), "tickers": [v.get("ticker") for v in verdicts],
-            "top": [t.get("ticker") for t in (result.get("top") or [])[:5]],
-        })
-    _LAB_RUNS.insert(0, summary)
-    del _LAB_RUNS[50:]
+        summary.update({"run_id": result.get("run_id"), "source": result.get("source"), "n_tickers": len(verdicts),
+                        "tickers": [v.get("ticker") for v in verdicts], "top": [t.get("ticker") for t in (result.get("top") or [])[:5]],
+                        "stances": {k: sum(1 for v in verdicts if v.get("stance") == k) for k in ("bullish", "bearish", "neutral", "abstain")}})
+    elif kind == "backfill":
+        summary.update({"checked": result.get("checked"), "filled": result.get("filled")})
+    return summary
 
 
-def _normalize_tickers(values: list[str], *, limit: int = 30) -> list[str]:
-    out: list[str] = []
-    for raw in values:
-        ticker = raw.strip().upper()
-        if not ticker or len(ticker) > 8 or not all(ch.isalpha() or ch in ".-" for ch in ticker):
-            raise ValueError(f"invalid ticker: {raw!r}")
-        if ticker not in out:
-            out.append(ticker)
-    if not out:
-        raise ValueError("at least one ticker is required")
-    return out[:limit]
+def _remember_run(kind: str, result: dict, params: dict | None = None) -> str:
+    """Persist a run and stamp its id onto the result."""
+    run_id = _lab_store().save(kind, params=params, summary=_summarize(kind, result), result=result)
+    result["lab_run_id"] = run_id
+    return run_id
+
+
+def _normalize_tickers(values: list[str], *, limit: int = MAX_TICKERS) -> list[str]:
+    return normalize_tickers(values, limit=limit)
 
 
 @router.get("/activity")
@@ -191,7 +201,9 @@ async def remove_price_alert(alert_id: int) -> dict:
 
 
 class BacktestInput(BaseModel):
-    tickers: list[str] = Field(default_factory=lambda: ["AAPL", "MSFT", "NVDA"], max_length=30)
+    universe: Universe = "custom"
+    tickers: list[str] = Field(default_factory=lambda: ["AAPL", "MSFT", "NVDA"], max_length=MAX_TICKERS)
+    strategy: Literal["pead"] = "pead"
     holding_days: int = Field(default=5, ge=1, le=60)
     earnings_limit: int = Field(default=8, ge=1, le=20)
     capital: float = Field(default=100_000, gt=0, le=100_000_000)
@@ -202,18 +214,21 @@ def _run_backtest(body: BacktestInput) -> dict:
     from v2.backtesting import BacktestEngine, PEADStrategy
     from v2.data import CachedFDClient
 
-    tickers = _normalize_tickers(body.tickers)
+    tickers, meta = resolve_universe(body.universe, body.tickers)
     with CachedFDClient() as client:
         result = BacktestEngine(capital=body.capital, per_trade=body.per_trade).run(
             PEADStrategy(earnings_limit=body.earnings_limit, holding_days=body.holding_days),
             tickers,
             client,
         )
-    return {"kind": "backtest", "strategy": "pead", "tickers": tickers, **result.model_dump()}
+    return {"kind": "backtest", "strategy": body.strategy, "universe": meta["universe"], "tickers": tickers,
+            "params": {"holding_days": body.holding_days, "earnings_limit": body.earnings_limit, "capital": body.capital, "per_trade": body.per_trade},
+            **result.model_dump()}
 
 
 class EventStudyInput(BaseModel):
-    tickers: list[str] = Field(default_factory=lambda: ["AAPL", "MSFT", "NVDA"], max_length=20)
+    universe: Universe = "custom"
+    tickers: list[str] = Field(default_factory=lambda: ["AAPL", "MSFT", "NVDA"], max_length=MAX_TICKERS)
     earnings_limit: int = Field(default=8, ge=1, le=20)
     n_bootstrap: int = Field(default=2000, ge=100, le=10_000)
     require_eps_surprise: bool = True
@@ -223,7 +238,7 @@ def _run_event_study(body: EventStudyInput) -> dict:
     from v2.data import CachedFDClient
     from v2.event_study import compute_car
 
-    tickers = _normalize_tickers(body.tickers, limit=20)
+    tickers, meta = resolve_universe(body.universe, body.tickers, limit=20)
     with CachedFDClient() as client:
         result = compute_car(
             tickers,
@@ -232,11 +247,14 @@ def _run_event_study(body: EventStudyInput) -> dict:
             n_bootstrap=body.n_bootstrap,
             require_eps_surprise=body.require_eps_surprise,
         )
-    return {"kind": "event_study", "tickers": tickers, **result.model_dump()}
+    return {"kind": "event_study", "universe": meta["universe"], "tickers": tickers,
+            "params": {"earnings_limit": body.earnings_limit, "n_bootstrap": body.n_bootstrap, "require_eps_surprise": body.require_eps_surprise},
+            **result.model_dump()}
 
 
 class ScreeningInput(BaseModel):
-    tickers: list[str] = Field(default_factory=list, max_length=30)
+    universe: Universe = "tech30"
+    tickers: list[str] = Field(default_factory=list, max_length=MAX_TICKERS)
     market_cap_min: float = Field(default=10_000_000_000, ge=0)
     market_cap_max: float = Field(default=5_000_000_000_000, gt=0)
     revenue_growth_min: float = Field(default=0.05, ge=-1, le=10)
@@ -246,9 +264,9 @@ class ScreeningInput(BaseModel):
 
 def _run_screening(body: ScreeningInput) -> dict:
     from v2.data import CachedFDClient
-    from v2.screening import FilterConfig, TECH_30, run_screening
+    from v2.screening import FilterConfig, run_screening
 
-    tickers = _normalize_tickers(body.tickers or list(TECH_30))
+    tickers, meta = resolve_universe(body.universe, body.tickers)
     config = FilterConfig(
         market_cap_min=body.market_cap_min,
         market_cap_max=body.market_cap_max,
@@ -258,7 +276,7 @@ def _run_screening(body: ScreeningInput) -> dict:
     )
     with CachedFDClient() as client:
         result = run_screening(tickers, client, config)
-    return {"kind": "screening", "tickers": tickers, **result.model_dump()}
+    return {"kind": "screening", "universe": meta["universe"], "tickers": tickers, "thresholds": config.model_dump(), **result.model_dump()}
 
 
 async def _lab_call(fn, body) -> dict:
@@ -275,21 +293,21 @@ async def _lab_call(fn, body) -> dict:
 @router.post("/lab/backtest")
 async def run_backtest(body: BacktestInput) -> dict:
     result = await _lab_call(_run_backtest, body)
-    _remember_run("backtest", result)
+    _remember_run("backtest", result, body.model_dump())
     return result
 
 
 @router.post("/lab/event-study")
 async def run_event_study(body: EventStudyInput) -> dict:
     result = await _lab_call(_run_event_study, body)
-    _remember_run("event_study", result)
+    _remember_run("event_study", result, body.model_dump())
     return result
 
 
 @router.post("/lab/screening")
 async def run_screening(body: ScreeningInput) -> dict:
     result = await _lab_call(_run_screening, body)
-    _remember_run("screening", result)
+    _remember_run("screening", result, body.model_dump())
     return result
 
 
@@ -313,5 +331,13 @@ async def signal_candidates() -> dict:
 
 
 @router.get("/lab/runs")
-async def lab_runs() -> dict:
-    return {"kind": "runs", "items": list(_LAB_RUNS)}
+async def lab_runs(limit: int = Query(50, ge=1, le=200), kind: str | None = None) -> dict:
+    return {"kind": "runs", "items": _lab_store().list(limit=limit, kind=kind), "counts": _lab_store().counts()}
+
+
+@router.get("/lab/runs/{run_id}")
+async def lab_run_detail(run_id: str) -> dict:
+    row = _lab_store().get(run_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="lab run not found")
+    return row

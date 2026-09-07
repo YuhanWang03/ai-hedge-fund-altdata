@@ -217,6 +217,22 @@ class PersonaStore:
             for r in rows
         ]
 
+    def signal_counts(self) -> dict[str, int]:
+        """Vote bookkeeping for the scoreboard: totals, scored, pending per horizon."""
+        today = datetime.now(timezone.utc).date()
+        with self._conn() as conn:
+            total = conn.execute("SELECT COUNT(*) FROM persona_signals WHERE abstained = 0").fetchone()[0]
+            scored_1m = conn.execute("SELECT COUNT(*) FROM persona_signals WHERE fwd_1m IS NOT NULL").fetchone()[0]
+            scored_3m = conn.execute("SELECT COUNT(*) FROM persona_signals WHERE fwd_3m IS NOT NULL").fetchone()[0]
+            runs = conn.execute("SELECT COUNT(*) FROM committee_runs").fetchone()[0]
+            tickers = conn.execute("SELECT COUNT(DISTINCT ticker) FROM persona_signals").fetchone()[0]
+        return {
+            "runs": runs, "tickers": tickers, "votes": total,
+            "scored_1m": scored_1m, "scored_3m": scored_3m,
+            "due_1m": len(self.signals_awaiting_forward_returns(older_than_days=30, column="fwd_1m", today=today)),
+            "due_3m": len(self.signals_awaiting_forward_returns(older_than_days=91, column="fwd_3m", today=today)),
+        }
+
     # -- snapshot cache -----------------------------------------------------------
 
     def cached_snapshot(self, ticker: str, as_of: str, *, max_age_hours: float = 24.0) -> PersonaSnapshot | None:

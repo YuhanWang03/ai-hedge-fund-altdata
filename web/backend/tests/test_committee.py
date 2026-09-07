@@ -61,14 +61,12 @@ def fake():
 
 @pytest.fixture()
 def client(tmp_path, monkeypatch, fake):
-    monkeypatch.setattr(committee, "_STORE", PersonaStore(tmp_path / "personas.db"))
 
     @contextmanager
     def _fake_data_client():
         yield fake
 
     monkeypatch.setattr(committee, "_data_client", _fake_data_client)
-    workspace._LAB_RUNS.clear()
     return TestClient(app)
 
 
@@ -168,7 +166,12 @@ def test_personas_and_scoreboard_endpoints(client):
         "key": "warren_buffett", "name": "Warren Buffett", "name_zh": "沃伦·巴菲特",
         "style": "seeks wonderful companies at a fair price", "period": "ttm", "lookback": 10, "needs": [],
     }
-    assert client.get("/api/lab/committee/scoreboard").json() == {"kind": "scoreboard", "items": []}
+    board = client.get("/api/lab/committee/scoreboard").json()
+    assert board["kind"] == "scoreboard" and board["items"] == []
+    assert board["counts"] == {"runs": 0, "tickers": 0, "votes": 0, "scored_1m": 0, "scored_3m": 0, "due_1m": 0, "due_3m": 0}
+    client.post("/api/lab/committee", json={"tickers": ["QLTY"], "as_of": "2026-06-30", "personas": ["warren_buffett", "ben_graham"]})
+    counts = client.get("/api/lab/committee/scoreboard").json()["counts"]
+    assert counts["runs"] == 1 and counts["tickers"] == 1 and counts["votes"] == 2 and counts["due_1m"] == 2
 
 
 def test_store_forward_return_backfill(tmp_path):
@@ -278,3 +281,42 @@ def test_backfill_endpoint_reports_and_returns_scoreboard(client, monkeypatch):
     res = client.post("/api/lab/committee/backfill", json={"columns": ["fwd_1m"]})
     assert res.status_code == 200, res.text
     assert res.json()["kind"] == "backfill" and res.json()["checked"] == 0 and res.json()["scoreboard"] == []
+
+
+
+# ------------------------------------------------------------------- lab store
+
+def test_lab_runs_persist_across_kinds_and_reopen(client, monkeypatch):
+    monkeypatch.setattr(workspace, "_run_screening", lambda body: {"kind": "screening", "universe": body.universe, "tickers": ["QLTY"], "universe_size": 1, "candidates": [{"ticker": "QLTY"}]})
+    scr = client.post("/api/lab/screening", json={"universe": "custom", "tickers": ["qlty"], "revenue_growth_min": 0.1}).json()
+    com = client.post("/api/lab/committee", json={"tickers": ["QLTY"], "as_of": "2026-06-30", "personas": ["warren_buffett"]}).json()
+    assert scr["lab_run_id"] and com["lab_run_id"] and scr["lab_run_id"] != com["lab_run_id"]
+
+    runs = client.get("/api/lab/runs").json()
+    assert [r["kind"] for r in runs["items"]] == ["committee", "screening"]
+    assert runs["counts"] == {"committee": 1, "screening": 1}
+    assert runs["items"][1]["n_candidates"] == 1 and runs["items"][1]["candidates"] == ["QLTY"]
+    assert runs["items"][0]["stances"]["neutral"] + runs["items"][0]["stances"]["bearish"] + runs["items"][0]["stances"]["bullish"] == 1
+
+    detail = client.get(f"/api/lab/runs/{scr['lab_run_id']}").json()
+    assert detail["kind"] == "screening" and detail["params"]["revenue_growth_min"] == 0.1 and detail["result"]["candidates"][0]["ticker"] == "QLTY"
+    assert client.get("/api/lab/runs/nope").status_code == 404
+    assert [r["kind"] for r in client.get("/api/lab/runs?kind=screening").json()["items"]] == ["screening"]
+
+
+def test_universe_resolution_for_lab_engines(client, monkeypatch):
+    import v2.broker.alpaca_client as alpaca
+    from app import sources
+
+    monkeypatch.setattr(alpaca, "get_portfolio", lambda: {"account": {"portfolio_value": 100.0}, "positions": [{"symbol": "AAA", "market_value": 50.0, "side": "long"}, {"symbol": "SHRT", "market_value": 1.0, "side": "short"}]})
+    assert sources.resolve_universe("holdings")[0] == ["AAA"]
+    assert sources.resolve_universe("tech30")[0][:2] == ["AAPL", "MSFT"]
+    assert sources.resolve_universe("custom", ["nvda", "nvda", "amd"])[0] == ["NVDA", "AMD"]
+    with pytest.raises(ValueError):
+        sources.resolve_universe("custom", [])
+
+    seen = {}
+    monkeypatch.setattr(workspace, "_run_backtest", lambda body: seen.setdefault("body", body) and {"kind": "backtest", "strategy": body.strategy, "universe": body.universe, "tickers": ["AAA"], "metrics": {"n_trades": 1}})
+    res = client.post("/api/lab/backtest", json={"universe": "holdings", "holding_days": 7})
+    assert res.status_code == 200 and seen["body"].universe == "holdings" and seen["body"].holding_days == 7
+    assert client.post("/api/lab/backtest", json={"universe": "nowhere"}).status_code == 422

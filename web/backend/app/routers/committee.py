@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 
 from app.auth import require_owner
 from app.routers import workspace
+from app.sources import MAX_TICKERS, holdings as _holdings, normalize_tickers, watchlist as _watchlist
 from v2.personas.committee import CommitteeResult, TickerVerdict, run_committee
 from v2.personas.forward import backfill_forward_returns
 from v2.personas.models import PersonaSignal
@@ -35,7 +36,6 @@ logger = logging.getLogger("web.committee")
 
 router = APIRouter(prefix="/api/lab/committee", tags=["lab"], dependencies=[Depends(require_owner)])
 
-MAX_TICKERS = 60
 _STORE: PersonaStore | None = None
 
 Source = Literal["tickers", "holdings", "watchlist", "screening"]
@@ -68,33 +68,6 @@ def _resolve_personas(keys: list[str] | None) -> list[str]:
     if unknown:
         raise ValueError(f"unknown persona: {', '.join(unknown)}")
     return list(dict.fromkeys(keys))
-
-
-def _holdings() -> tuple[list[str], dict[str, dict[str, Any]]]:
-    """Long positions from Alpaca with their portfolio weight."""
-    from v2.broker.alpaca_client import get_portfolio
-
-    pf = get_portfolio()
-    total = float((pf.get("account") or {}).get("portfolio_value") or 0.0)
-    positions: dict[str, dict[str, Any]] = {}
-    for p in pf.get("positions") or []:
-        symbol = str(p.get("symbol") or "").upper()
-        if not symbol or str(p.get("side", "long")).lower() != "long":
-            continue
-        mv = float(p.get("market_value") or 0.0)
-        positions[symbol] = {
-            "weight": (mv / total) if total > 0 else None,
-            "market_value": mv,
-            "current_price": float(p.get("current_price") or 0.0) or None,
-            "unrealized_pl_pct": p.get("unrealized_pl_pct"),
-        }
-    return list(positions), positions
-
-
-def _watchlist() -> list[str]:
-    from v2.bot.state import watchlist_list
-
-    return [str(item["ticker"]).upper() for item in watchlist_list()]
 
 
 def _screened(body: workspace.ScreeningInput | None) -> tuple[list[str], dict[str, Any]]:
@@ -153,7 +126,7 @@ def _run(body: CommitteeInput) -> dict[str, Any]:
     screening: dict[str, Any] | None = None
 
     if body.source == "tickers":
-        tickers = workspace._normalize_tickers(body.tickers, limit=MAX_TICKERS)
+        tickers = normalize_tickers(body.tickers, limit=MAX_TICKERS)
     elif body.source == "holdings":
         tickers, positions = _holdings()
         if not tickers:
@@ -214,7 +187,7 @@ def _run(body: CommitteeInput) -> dict[str, Any]:
         for v in result.top(body.top_n or max(1, len(result.verdicts)))
     ]
     payload["run_id"] = store.save_run(payload, source=body.source)
-    workspace._remember_run("committee", payload)
+    workspace._remember_run("committee", payload, body.model_dump())
     return payload
 
 
@@ -243,8 +216,15 @@ async def run_detail(run_id: str) -> dict:
 
 @router.get("/scoreboard")
 async def scoreboard() -> dict:
-    """Per-persona hit rate once forward returns have been back-filled."""
-    return {"kind": "scoreboard", "items": _store().persona_scoreboard()}
+    """Per-persona hit rate once forward returns have been back-filled, plus vote counts."""
+    store = _store()
+    items = store.persona_scoreboard()
+    names = {m["key"]: m for m in _persona_meta(list(PERSONAS))}
+    for row in items:
+        meta = names.get(row["persona"], {})
+        row["name_zh"] = meta.get("name_zh", row["persona"])
+        row["name"] = meta.get("name", row["persona"])
+    return {"kind": "scoreboard", "items": items, "counts": store.signal_counts()}
 
 
 # ------------------------------------------------------------------- narration
