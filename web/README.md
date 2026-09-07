@@ -67,23 +67,60 @@ npm run dev          # → http://127.0.0.1:5173  (proxies /api to :8100)
 Open the page, paste your `WEB_OWNER_TOKEN` into the header box (if auth is on),
 click 保存. Left pane = portfolio; right pane = chat.
 
-## Lab · 投资人委员会
+## Lab (实验室)
 
-`routers/committee.py` exposes the thirteen rule-based investor personas
-(`v2/personas/`) to the workbench's Lab section:
+The Lab is one pipeline — 筛选 → 委员会 → 回测 → 观察 → 批准 — implemented
+by deterministic engines behind `routers/workspace.py` and
+`routers/committee.py`. Every run is persisted (`data/lab.db`, override with
+`WEB_LAB_DB`) and can be reopened from 运行记录. Nothing here writes
+production state; the only "approve" action is adding a ticker to the
+watchlist.
+
+All engines share the universe vocabulary in `app/sources.py`:
+`custom` | `tech30` | `holdings` | `watchlist` | `holdings_watchlist`, plus the
+index lists `sp500` | `nasdaq100` | `dow30` (screener only; bundled snapshot
+in `v2/screening/universes.py`, refresh on the VPS with
+`poetry run python -m v2.screening.universes --refresh`, which writes
+`data/universes.json` from Wikipedia). A screen of more than 40 tickers runs
+as a background job — `POST /api/lab/screening` returns `{job_id, done, total}`
+and `GET /api/lab/screening/jobs/{id}` is polled — because nginx cuts requests
+at 90 s. `GET /api/lab/universes` lists sizes and snapshot dates.
+
+Screening rules are individually optional: the UI ticks any subset of the
+criteria (market cap, price, growth, margins, ROE/ROIC, leverage, valuation
+multiples, FCF yield, payout, volatility, 1w/1m/3m returns, distance from the
+52-week high/low) and each rule is `field ≥/≤ value`. A ticker missing a
+field fails that rule; `reject_reasons` counts which rules cut the most.
+The legacy `market_cap_min/…` fields still work and are folded into rules;
+with neither given the four defaults apply. Under yfinance some ratio
+fields (e.g. ROIC, payout) may be empty for part of the universe.
 
 ```
-POST /api/lab/committee            {source: holdings|watchlist|tickers|screening, tickers?, personas?, as_of?, top_n?, max_weight?}
-GET  /api/lab/committee/runs       persisted run log (data/personas.db, override with WEB_PERSONAS_DB)
-GET  /api/lab/committee/runs/{id}  full result of one run
-GET  /api/lab/committee/personas   persona metadata for the picker
-GET  /api/lab/committee/scoreboard per-persona hit rate once forward returns are back-filled
-POST /api/lab/committee/narrate    {run_id, ticker, persona, language} → LLM explanation for one cell, verdict unchanged
-POST /api/lab/committee/backfill   run the forward-return backfill now (scheduler ⑯ does it nightly at 02:30 ET)
+POST /api/lab/screening              {universe, tickers?, data_source: yfinance|fd, with_earnings?, rules: [{field, op: gte|lte, value}]}
+GET  /api/lab/screening/criteria     the 22 rule fields (label, unit, source) + the default rule set
+POST /api/lab/backtest               {universe, tickers?, strategy: "pead", holding_days, earnings_limit, capital, per_trade}
+POST /api/lab/event-study            {universe, tickers?, earnings_limit, n_bootstrap, require_eps_surprise}
+GET  /api/lab/signals                production anomaly thresholds, read-only
+GET  /api/lab/runs[?kind=&limit=]    persisted run log for every tool (+ per-kind counts)
+GET  /api/lab/runs/{id}              params + full result of one run
+
+POST /api/lab/committee              {source: holdings|watchlist|tickers|screening, tickers?, personas?, as_of?, top_n?, max_weight?}
+GET  /api/lab/committee/runs, /runs/{id}, /personas
+GET  /api/lab/committee/scoreboard   per-persona hit rate + vote counts (due / scored per horizon)
+POST /api/lab/committee/narrate      {run_id, ticker, persona, language} → LLM explanation for one cell, verdict unchanged
+POST /api/lab/committee/backfill     run the forward-return backfill now (scheduler ⑯ does it nightly at 02:30 ET)
 ```
 
-Fundamentals snapshots are cached per (ticker, day), so re-running the same
-day costs no API calls. No LLM is involved in the verdicts.
+Cost control (financialdatasets.ai bills per request on the credits plan):
+the screener defaults to yfinance for market cap / revenue growth / gross
+margin (free; FD is a switch), earnings enrichment is opt-in (one FD request
+per candidate), the committee's 省流模式 (default on) skips the news and
+insider-trade fetches, market cap is read from the metrics row instead of a
+separate call, and every run reports `fd_requests` and `fd_cost_usd`.
+`GET /api/lab/committee/pricing` exposes the price table used for estimates.
+
+Frontend: `ai-workbench/app/lab.tsx` (the Lab section), `app/lib/api.ts`
+(owner-token fetch helper shared with `page.tsx`).
 
 ## Env
 
@@ -91,7 +128,9 @@ day costs no API calls. No LLM is involved in the verdicts.
 |---|---|---|
 | `WEB_OWNER_TOKEN` | required header value in prod; empty = auth off (dev) | *(unset)* |
 | `WEB_ARCHIVE_DB` | path to v2's `archive.db` | `<repo>/data/archive.db` |
-| `WEB_PERSONAS_DB` | committee run log + snapshot cache (Lab · 投资人委员会) | `<repo>/data/personas.db` |
+| `WEB_PERSONAS_DB` | committee votes + snapshot cache (Lab · 投资人委员会) | `<repo>/data/personas.db` |
+| `WEB_LAB_DB` | persisted run log for every Lab tool | `<repo>/data/lab.db` |
+| `FD_PRICES` | JSON overriding financialdatasets.ai per-request prices used for Lab cost estimates, e.g. `{"news":0.04}` | $0.02 per request for every stock endpoint (account Billing page, 2026-09) |
 | `WEB_CORS_ORIGINS` | comma-separated allowed origins | `localhost:5173` |
 
 Plus the v2 runtime env (`FINANCIAL_DATASETS_API_KEY`, `DEEPSEEK_API_KEY`,

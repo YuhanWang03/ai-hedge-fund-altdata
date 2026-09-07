@@ -356,3 +356,210 @@ def test_cli_demo_runs_without_network(capsys):
     assert [v["ticker"] for v in body["verdicts"]] == ["QLTY", "DSTR"]
     assert main(["--demo", "--personas", "warren_buffett"]) == 0
     assert "consensus" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("key", PERSONAS)
+def test_every_persona_abstains_when_line_items_are_missing(key):
+    """Ratios without line items must read as 'no data', never as 'scores zero → bearish'."""
+    snap = quality_snapshot()
+    snap.line_items_ttm = []
+    snap.line_items_annual = []
+    snap.gaps.append("line_items_ttm: RuntimeError: HTTP 402 for /financials/search/line-items: payment required")
+    snap.gaps.append("line_items_annual: RuntimeError: HTTP 402 for /financials/search/line-items: payment required")
+    s = get_persona(key).analyze(snap)
+    assert s.abstained and s.confidence == 0, s.reasoning
+    assert "line items" in s.reasoning and "HTTP 402" in s.reasoning
+
+
+@pytest.mark.parametrize("key", PERSONAS)
+def test_every_persona_abstains_on_too_short_history(key):
+    snap = quality_snapshot()
+    snap.line_items_ttm = snap.line_items_ttm[:1]
+    snap.line_items_annual = snap.line_items_annual[:1]
+    s = get_persona(key).analyze(snap)
+    assert s.abstained and "need 3" in s.reasoning
+
+
+def test_price_readers_abstain_without_prices():
+    snap = quality_snapshot()
+    snap.prices = []
+    assert get_persona("nassim_taleb").analyze(snap).abstained
+    assert get_persona("stanley_druckenmiller").analyze(snap).abstained
+    assert not get_persona("warren_buffett").analyze(snap).abstained
+
+
+def test_store_refuses_to_cache_snapshots_with_core_gaps(tmp_path):
+    from v2.personas.store import PersonaStore
+
+    store = PersonaStore(tmp_path / "p.db")
+    good = quality_snapshot()
+    good.fetched_at = ""  # fixture timestamp is months old; let the store stamp now
+    store.save_snapshot(good)
+    assert store.cached_snapshot("QLTY", good.as_of) is not None
+    broken = distressed_snapshot()
+    broken.gaps.append("line_items_ttm: RuntimeError: HTTP 402")
+    store.save_snapshot(broken)
+    assert store.cached_snapshot("DSTR", broken.as_of) is None
+
+
+def test_http_client_sends_a_real_user_agent_and_explains_cloudflare_403(monkeypatch):
+    import io
+    import urllib.error
+    import urllib.request
+
+    from v2.personas.data import USER_AGENT
+
+    seen: list[urllib.request.Request] = []
+
+    def fake_urlopen(request, timeout=0):
+        seen.append(request)
+        body = b'{"type":"https://developers.cloudflare.com/waf","title":"blocked"}'
+        raise urllib.error.HTTPError(request.full_url, 403, "Forbidden", {}, io.BytesIO(body))
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    client = FinancialDatasetsClient("k", max_retries=0)
+    with pytest.raises(RuntimeError) as exc:
+        client.search_line_items("AAPL", ["revenue"], "2026-06-30")
+    assert "HTTP 403" in str(exc.value) and "Cloudflare" in str(exc.value)
+    assert seen[0].get_header("User-agent") == USER_AGENT
+    assert seen[0].get_header("X-api-key") == "k"
+
+
+def test_adapter_survives_a_broken_production_get_market_cap():
+    class Prod:
+        def get_market_cap(self, ticker):
+            raise AttributeError("'CompanyFacts' object has no attribute 'market_cap'")
+
+        def get_financial_metrics(self, ticker, end_date, limit=1):
+            return [{"market_cap": 123.0}]
+
+    fd = adapt_client(Prod())
+    assert fd.get_market_cap("AAPL", "2026-06-30") == 123.0
+
+
+def test_adapter_caps_news_limit():
+    class Prod:
+        def get_news(self, ticker, end, start, limit):
+            assert limit <= 100
+            return [{"title": "x"}] * 3
+
+    assert len(adapt_client(Prod()).get_company_news("AAPL", "2026-06-30", start_date="2025-06-30", limit=250)) == 3
+
+
+
+def test_http_client_drops_line_items_the_api_rejects(monkeypatch):
+    import io
+    import json as _json
+    import urllib.error
+    import urllib.request
+
+    bodies: list[list[str]] = []
+
+    def fake_urlopen(request, timeout=0):
+        items = _json.loads(request.data)["line_items"]
+        bodies.append(items)
+        bad = [n for n in items if n in ("intangible_assets", "made_up")]
+        if bad:
+            body = _json.dumps({"error": f"Invalid line items: {', '.join(bad)}", "message": "x"}).encode()
+            raise urllib.error.HTTPError(request.full_url, 400, "Bad Request", {}, io.BytesIO(body))
+        return io.BytesIO(_json.dumps({"search_results": [{"ticker": "AAPL", "revenue": 1.0}]}).encode())
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    rows = FinancialDatasetsClient("k", max_retries=0).search_line_items("AAPL", ["revenue", "intangible_assets", "made_up"], "2026-06-30")
+    assert rows[0].revenue == 1.0
+    assert bodies[-1] == ["revenue"] and len(bodies) == 2
+
+
+def test_news_limit_steps_down_until_accepted():
+    from v2.personas.data import _with_smaller_news_limit
+
+    tried: list[int] = []
+
+    def fetch(limit):
+        tried.append(limit)
+        if limit > 20:
+            raise RuntimeError('HTTP 400 for /news/: {"error":"Invalid limit"}')
+        return ["n"] * limit
+
+    assert len(_with_smaller_news_limit(fetch, 100)) == 20 and tried == [100, 50, 20]
+    with pytest.raises(ValueError):
+        _with_smaller_news_limit(lambda n: (_ for _ in ()).throw(ValueError("unrelated")), 100)
+
+
+def test_cached_snapshot_rejects_rows_saved_with_core_gaps(tmp_path):
+    import json as _json
+    import sqlite3
+
+    from v2.personas.store import PersonaStore, utc_now
+
+    store = PersonaStore(tmp_path / "p.db")
+    snap = quality_snapshot()
+    snap.gaps.append("line_items_ttm: RuntimeError: HTTP 403")
+    with sqlite3.connect(store.path) as conn:  # simulate a row written before the rule existed
+        conn.execute("INSERT INTO snapshots (ticker, as_of, content_hash, fetched_at, payload_json) VALUES (?,?,?,?,?)",
+                     (snap.ticker, snap.as_of, snap.content_hash, utc_now(), _json.dumps(snap.to_dict(), default=str)))
+    assert store.cached_snapshot("QLTY", snap.as_of) is None
+
+
+
+def test_cagr_uses_report_dates_not_row_count():
+    from v2.personas.base import Persona
+
+    snap = quality_snapshot()  # ~12%/yr growth, quarterly TTM rows 91 days apart, annual rows a year apart
+    ttm = Persona.cagr(snap.line_items_ttm, "revenue")
+    annual = Persona.cagr(snap.line_items_annual, "revenue")
+    assert ttm is not None and annual is not None
+    assert abs(ttm[0] - 0.12) < 0.01 and abs(annual[0] - 0.12) < 0.01
+    assert 2.1 < ttm[1] < 2.4 and 8.9 < annual[1] < 9.1
+    # the old arithmetic would have called ten TTM rows nine years: ~3%/yr
+    assert Persona.cagr(snap.line_items_ttm[:2], "revenue") is None  # one quarter is too short a span
+    undated = [Record(period="ttm", revenue=v) for v in (121.0, 118.0, 115.0, 112.0, 109.0)]
+    fallback = Persona.cagr(undated, "revenue")
+    assert fallback is not None and fallback[1] == 1.0 and abs(fallback[0] - 0.11) < 0.01
+    assert Persona.cagr([Record(revenue=-1.0), Record(revenue=2.0)], "revenue") is None
+
+
+def test_jhunjhunwala_and_damodaran_no_longer_read_ttm_rows_as_years():
+    snap = quality_snapshot()
+    rj = get_persona("rakesh_jhunjhunwala").analyze(snap)
+    details = " ".join(p.details for p in rj.parts)
+    assert "revenue CAGR: 12." in details and "EPS CAGR: 12." in details, details
+    assert "Low EPS CAGR" not in details
+    # with growth read as ~3%/yr the DCF landed near $103B; at the true 12% it clears $120B
+    assert rj.facts["intrinsic_value"] > 120e9
+    ad = get_persona("aswath_damodaran").analyze(snap)
+    growth = ad.parts[0].details
+    assert "12." in growth, growth
+
+
+
+def test_consistency_and_trend_loops_read_newest_first_order():
+    grow, shrink = quality_snapshot(), distressed_snapshot()
+    rj_grow = " ".join(p.details for p in get_persona("rakesh_jhunjhunwala").analyze(grow).parts)
+    rj_shrink = " ".join(p.details for p in get_persona("rakesh_jhunjhunwala").analyze(shrink).parts)
+    assert "Consistent growth pattern (100% of periods)" in rj_grow, rj_grow
+    assert "Inconsistent growth pattern" in rj_shrink or "Insufficient" in rj_shrink, rj_shrink
+    munger_grow = get_persona("charlie_munger").analyze(grow).parts[0].details
+    munger_shrink = get_persona("charlie_munger").analyze(shrink).parts[0].details
+    assert "Gross margins consistently improving" in munger_grow, munger_grow
+    assert "consistently improving" not in munger_shrink, munger_shrink
+
+
+def test_wikipedia_constituents_parser_is_nesting_safe_and_picks_the_best_table():
+    import runpy
+
+    ns = runpy.run_path("v2/screening/universes.py", run_name="not_main")  # avoid importing the production-only screener package
+    html = """
+    <table><tr><th>Year</th><th>Return</th></tr><tr><td>2024</td><td>+25%</td></tr></table>
+    <table class="wikitable"><caption>Constituents</caption>
+    <tr><th>Company<span>sort</span></th><th>Ticker</th><th>GICS Sector</th></tr>
+    <tr><td>Adobe<table><tr><td>inner</td></tr></table></td><td><a href="x">ADBE</a></td><td>IT</td></tr>
+    <tr><td>Alphabet</td><td>GOOGL</td><td>Comm</td></tr>
+    <tr><td>Berkshire</td><td>BRK.B</td><td>Fin</td></tr>
+    <tr><td>Bad</td><td>not a ticker</td><td>x</td></tr>
+    </table>
+    <table><tr><th>Symbol</th></tr><tr><td>ONLY</td></tr></table>"""
+    assert ns["parse_constituents"](html, ("ticker", "symbol")) == ["ADBE", "GOOGL", "BRK.B"]
+    assert len(ns["describe_tables"](html)) == 4
+    sp500, as_of = ns["load_universe"]("sp500")
+    assert len(sp500) > 450 and len(set(sp500)) == len(sp500) and as_of

@@ -183,6 +183,7 @@ def run_committee(
     snapshots: dict[str, PersonaSnapshot] | None = None,
     max_workers: int = 4,
     progress: Progress | None = None,
+    exclude_needs: Iterable[str] = (),
 ) -> CommitteeResult:
     """Build one snapshot per ticker (in parallel) and let the personas vote.
 
@@ -192,7 +193,7 @@ def run_committee(
     started = time.time()
     keys = list(personas or PERSONAS)
     people = list_personas(keys)
-    need = needs_for(people)
+    need = needs_for(people) - set(exclude_needs)
     wanted = []
     for t in tickers:
         t = t.strip().upper()

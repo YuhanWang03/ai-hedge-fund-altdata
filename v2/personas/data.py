@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -29,6 +30,35 @@ from v2.personas.models import Record, as_records
 logger = logging.getLogger(__name__)
 
 FD_BASE_URL = "https://api.financialdatasets.ai"
+#: Cloudflare in front of financialdatasets.ai blocks urllib's default
+#: "Python-urllib/3.x" agent with a 403 whose body is a Cloudflare problem
+#: document. Identify ourselves like an ordinary HTTP client instead.
+USER_AGENT = "ai-hedge-fund-altdata/2026 (+https://github.com/YuhanWang03/ai-hedge-fund-altdata; python)"
+#: financialdatasets.ai rejects large /news/ pages with "Invalid limit"; step down until accepted
+NEWS_LIMIT_STEPS = (100, 50, 20, 10)
+NEWS_MAX_LIMIT = NEWS_LIMIT_STEPS[0]
+_INVALID_ITEMS = re.compile(r"Invalid line items?:\s*([A-Za-z0-9_,\s]+)")
+
+
+def _invalid_line_items(error: Exception) -> list[str]:
+    """Names financialdatasets.ai rejected, parsed from its 400 body."""
+    match = _INVALID_ITEMS.search(str(error))
+    if not match:
+        return []
+    return [n.strip() for n in match.group(1).split(",") if n.strip()]
+
+
+def _with_smaller_news_limit(fn, limit: int):
+    """Call ``fn(limit)`` stepping the page size down on failure."""
+    last: Exception | None = None
+    for step in [limit] + [n for n in NEWS_LIMIT_STEPS if n < limit]:
+        try:
+            return fn(step)
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+            if "limit" not in str(exc).lower() and "400" not in str(exc):
+                raise
+    raise last if last else RuntimeError("news fetch failed")
 
 #: Union of every line item any persona reads. Fetched once per ticker and
 #: period, then shared, so a 13-persona run costs two line-item calls, not 13.
@@ -60,7 +90,6 @@ ALL_LINE_ITEMS: tuple[str, ...] = (
     "shareholders_equity",
     "book_value_per_share",
     "goodwill_and_intangible_assets",
-    "intangible_assets",
     "return_on_invested_capital",
     "debt_to_equity",
 )
@@ -123,7 +152,7 @@ class FinancialDatasetsClient:
         if key in self._cache:
             return self._cache[key]
 
-        headers = {"Accept": "application/json"}
+        headers = {"Accept": "application/json", "User-Agent": USER_AGENT}
         if self.api_key:
             headers["X-API-KEY"] = self.api_key
         data = None
@@ -142,7 +171,12 @@ class FinancialDatasetsClient:
                 return payload
             except urllib.error.HTTPError as exc:
                 detail = exc.read().decode("utf-8", "replace")[:200]
-                last_error = RuntimeError(f"HTTP {exc.code} for {path}: {detail}")
+                hint = ""
+                if exc.code == 403 and "cloudflare" in detail.lower():
+                    hint = " [blocked by Cloudflare in front of the API — check the User-Agent / IP reputation]"
+                elif exc.code in (401, 403):
+                    hint = " [check FINANCIAL_DATASETS_API_KEY and whether the plan includes this endpoint]"
+                last_error = RuntimeError(f"HTTP {exc.code} for {path}: {detail}{hint}")
                 if exc.code == 429 and attempt < self.max_retries:
                     time.sleep(2.0 ** attempt)
                     continue
@@ -167,11 +201,24 @@ class FinancialDatasetsClient:
         return as_records(payload.get("financial_metrics") or [])
 
     def search_line_items(self, ticker: str, line_items: list[str], end_date: str, *, period: str = "ttm", limit: int = 10) -> list[Record]:
-        payload = self._request(
-            "/financials/search/line-items",
-            body={"tickers": [ticker], "line_items": list(line_items), "end_date": _iso(end_date), "period": period, "limit": limit},
-        )
-        return as_records(payload.get("search_results") or [])[:limit]
+        wanted = list(dict.fromkeys(line_items))
+        for _ in range(4):  # the API names only the first offenders; a few rounds settle it
+            try:
+                payload = self._request(
+                    "/financials/search/line-items",
+                    body={"tickers": [ticker], "line_items": wanted, "end_date": _iso(end_date), "period": period, "limit": limit},
+                )
+            except RuntimeError as exc:
+                bad = [n for n in _invalid_line_items(exc) if n in wanted]
+                if not bad:
+                    raise
+                logger.warning("financialdatasets rejected line items %s; retrying without them", bad)
+                wanted = [n for n in wanted if n not in bad]
+                if not wanted:
+                    return []
+                continue
+            return as_records(payload.get("search_results") or [])[:limit]
+        return []
 
     def get_market_cap(self, ticker: str, end_date: str) -> float | None:
         end = _iso(end_date)
@@ -193,11 +240,13 @@ class FinancialDatasetsClient:
         return as_records(payload.get("insider_trades") or [])
 
     def get_company_news(self, ticker: str, end_date: str, *, start_date: str | None = None, limit: int = 100) -> list[Record]:
-        params: dict[str, Any] = {"ticker": ticker, "end_date": _iso(end_date), "limit": limit}
-        if start_date:
-            params["start_date"] = _iso(start_date)
-        payload = self._request("/news/", params=params)
-        return as_records(payload.get("news") or [])
+        def fetch(page: int) -> list[Record]:
+            params: dict[str, Any] = {"ticker": ticker, "end_date": _iso(end_date), "limit": page}
+            if start_date:
+                params["start_date"] = _iso(start_date)
+            return as_records(self._request("/news/", params=params).get("news") or [])
+
+        return _with_smaller_news_limit(fetch, min(limit, NEWS_MAX_LIMIT))
 
     def get_prices(self, ticker: str, start_date: str, end_date: str) -> list[Record]:
         payload = self._request(
@@ -250,10 +299,25 @@ class _Adapted:
     def get_market_cap(self, ticker: str, end_date: str) -> float | None:
         fn = getattr(self.primary, "get_market_cap", None)
         if fn is not None:
-            value = fn(ticker, end_date)
-            return float(value) if value else None
+            # The production client's get_market_cap has been seen to raise from
+            # inside (a CompanyFacts model without market_cap); treat any failure
+            # as "derive it another way" rather than as a snapshot gap.
+            for args in ((ticker, end_date), (ticker,)):
+                try:
+                    value = fn(*args)
+                except TypeError:
+                    continue
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("primary get_market_cap failed for %s: %s", ticker, exc)
+                    break
+                if value:
+                    return float(value)
+                break
         # Cheap derivation the production client always supports.
-        rows = self.get_financial_metrics(ticker, end_date, period="ttm", limit=1)
+        try:
+            rows = self.get_financial_metrics(ticker, end_date, period="ttm", limit=1)
+        except Exception:  # noqa: BLE001
+            rows = []
         value = rows[0].market_cap if rows else None
         if value:
             return float(value)
@@ -266,12 +330,15 @@ class _Adapted:
 
     def get_company_news(self, ticker: str, end_date: str, *, start_date: str | None = None, limit: int = 100) -> list[Record]:
         fn = getattr(self.primary, "get_company_news", None) or getattr(self.primary, "get_news", None)
+        limit = min(limit, NEWS_MAX_LIMIT)
         if fn is not None:
-            try:
-                rows = fn(ticker, end_date, start_date=start_date, limit=limit)
-            except TypeError:
-                rows = fn(ticker, end_date, start_date, limit)
-            return as_records(rows)
+            def fetch(page: int) -> list[Record]:
+                try:
+                    return as_records(fn(ticker, end_date, start_date=start_date, limit=page))
+                except TypeError:
+                    return as_records(fn(ticker, end_date, start_date, page))
+
+            return _with_smaller_news_limit(fetch, limit)
         if self.fallback is not None:
             return self.fallback.get_company_news(ticker, end_date, start_date=start_date, limit=limit)
         raise NotImplementedError("data client has no get_company_news()")

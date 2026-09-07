@@ -40,6 +40,8 @@ class PersonaSnapshot:
     prices: list[Record] = field(default_factory=list)
     gaps: list[str] = field(default_factory=list)
     fetched_at: str = ""
+    #: provider requests made to build this snapshot, by endpoint (for cost accounting)
+    requests: dict[str, int] = field(default_factory=dict)
 
     # -- accessors the personas use --------------------------------------------
 
@@ -80,6 +82,7 @@ class PersonaSnapshot:
             "prices": [r.to_dict() for r in self.prices],
             "gaps": list(self.gaps),
             "fetched_at": self.fetched_at,
+            "requests": dict(self.requests),
         }
 
     @classmethod
@@ -97,6 +100,7 @@ class PersonaSnapshot:
             prices=as_records(data.get("prices")),
             gaps=list(data.get("gaps") or []),
             fetched_at=data.get("fetched_at", ""),
+            requests=dict(data.get("requests") or {}),
         )
 
 
@@ -137,6 +141,10 @@ def build_snapshot(
     snap = PersonaSnapshot(ticker=ticker, as_of=end, fetched_at=datetime.now(timezone.utc).isoformat(timespec="seconds"))
 
     def attempt(label: str, fn, *args, **kwargs):
+        endpoint = {"metrics_ttm": "financial_metrics", "metrics_annual": "financial_metrics", "line_items_ttm": "line_items",
+                    "line_items_annual": "line_items", "market_cap": "company_facts", "insider_trades": "insider_trades",
+                    "news": "news", "prices": "prices"}[label]
+        snap.requests[endpoint] = snap.requests.get(endpoint, 0) + 1
         try:
             return fn(*args, **kwargs)
         except NotImplementedError as exc:
@@ -151,16 +159,17 @@ def build_snapshot(
     snap.metrics_annual = as_records(attempt("metrics_annual", fd.get_financial_metrics, ticker, end, period="annual", limit=limit) or [])
     snap.line_items_ttm = as_records(attempt("line_items_ttm", fd.search_line_items, ticker, wanted_items, end, period="ttm", limit=limit) or [])
     snap.line_items_annual = as_records(attempt("line_items_annual", fd.search_line_items, ticker, wanted_items, end, period="annual", limit=limit) or [])
-    snap.market_cap = attempt("market_cap", fd.get_market_cap, ticker, end)
+    # Market cap rides along in the metrics row; only pay for a separate call when it is absent.
+    for rows in (snap.metrics_ttm, snap.metrics_annual):
+        if rows and rows[0].market_cap:
+            snap.market_cap = float(rows[0].market_cap)
+            break
     if snap.market_cap is None:
-        for rows in (snap.metrics_ttm, snap.metrics_annual):
-            if rows and rows[0].market_cap:
-                snap.market_cap = float(rows[0].market_cap)
-                break
+        snap.market_cap = attempt("market_cap", fd.get_market_cap, ticker, end)
     if "insiders" in need:
         snap.insider_trades = as_records(attempt("insider_trades", fd.get_insider_trades, ticker, end, start_date=start, limit=1000) or [])
     if "news" in need:
-        snap.news = as_records(attempt("news", fd.get_company_news, ticker, end, start_date=start, limit=250) or [])
+        snap.news = as_records(attempt("news", fd.get_company_news, ticker, end, start_date=start, limit=100) or [])
     if "prices" in need:
         snap.prices = _sorted_prices(as_records(attempt("prices", fd.get_prices, ticker, start, end) or []))
     if not snap.has_fundamentals:

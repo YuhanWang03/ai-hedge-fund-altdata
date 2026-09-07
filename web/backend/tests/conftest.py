@@ -95,3 +95,18 @@ except ImportError:
                          ("v2.data.news_provider", news), ("v2.data.yfinance_client", yf)):
         sys.modules[name] = module
     pkg.client, pkg.models, pkg.news_provider, pkg.yfinance_client = client, models, news, yf
+
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _isolated_lab_stores(tmp_path, monkeypatch):
+    """Every test gets fresh lab.db / personas.db instead of the repo's data/."""
+    monkeypatch.setenv("WEB_LAB_DB", str(tmp_path / "lab.db"))
+    monkeypatch.setenv("WEB_PERSONAS_DB", str(tmp_path / "personas.db"))
+    from app.routers import committee, workspace
+
+    monkeypatch.setattr(workspace, "_LAB_STORE", None)
+    monkeypatch.setattr(committee, "_STORE", None)
+    yield

@@ -61,14 +61,12 @@ def fake():
 
 @pytest.fixture()
 def client(tmp_path, monkeypatch, fake):
-    monkeypatch.setattr(committee, "_STORE", PersonaStore(tmp_path / "personas.db"))
 
     @contextmanager
     def _fake_data_client():
         yield fake
 
     monkeypatch.setattr(committee, "_data_client", _fake_data_client)
-    workspace._LAB_RUNS.clear()
     return TestClient(app)
 
 
@@ -83,7 +81,7 @@ def test_committee_on_explicit_tickers_returns_matrix_and_persists(client, fake)
     assert [m["key"] for m in data["personas_meta"]] == ["warren_buffett", "ben_graham", "michael_burry"]
     assert data["personas_meta"][0]["name_zh"] == "沃伦·巴菲特"
     assert data["top"][0]["ticker"] == "QLTY" and len(data["top"]) == 2
-    assert data["cache_hits"] == [] and data["run_id"]
+    assert data["cache_hits"] == [] and data["run_id"] and data["data_gaps"] == []
     assert "position" not in data["verdicts"][0]
     first_calls = fake.calls
     assert first_calls > 0
@@ -117,15 +115,16 @@ def test_committee_on_holdings_labels_actions(client, monkeypatch):
     portfolio = {
         "account": {"portfolio_value": 100_000.0},
         "positions": [
-            {"symbol": "QLTY", "market_value": 20_000.0, "current_price": 150.0, "side": "long", "unrealized_pl_pct": 0.1},
+            {"symbol": "QLTY", "market_value": 20_000.0, "current_price": 150.0, "side": "PositionSide.LONG", "unrealized_pl_pct": 0.1},
             {"symbol": "DSTR", "market_value": 5_000.0, "current_price": 40.0, "side": "long", "unrealized_pl_pct": -0.2},
-            {"symbol": "SHRT", "market_value": 1_000.0, "current_price": 1.0, "side": "short"},
+            {"symbol": "SHRT", "market_value": 1_000.0, "current_price": 1.0, "side": "PositionSide.SHORT"},
         ],
     }
     import v2.broker.alpaca_client as alpaca
 
     monkeypatch.setattr(alpaca, "get_portfolio", lambda: portfolio)
-    res = client.post("/api/lab/committee", json={"source": "holdings", "as_of": "2026-06-30", "personas": ["warren_buffett", "peter_lynch", "phil_fisher"], "max_weight": 0.15})
+    # lean=False: Lynch and Fisher need the news / insider rows to reach their bullish votes
+    res = client.post("/api/lab/committee", json={"source": "holdings", "as_of": "2026-06-30", "personas": ["warren_buffett", "peter_lynch", "phil_fisher"], "max_weight": 0.15, "lean": False})
     assert res.status_code == 200, res.text
     by = {v["ticker"]: v for v in res.json()["verdicts"]}
     assert set(by) == {"QLTY", "DSTR"}  # shorts are skipped
@@ -135,7 +134,7 @@ def test_committee_on_holdings_labels_actions(client, monkeypatch):
     assert by["QLTY"]["action"] == "持有" and "上限" in by["QLTY"]["action_reason"]
     assert by["QLTY"]["price"] == 150.0
 
-    relaxed = client.post("/api/lab/committee", json={"source": "holdings", "as_of": "2026-06-30", "personas": ["warren_buffett", "peter_lynch", "phil_fisher"], "max_weight": 0.5}).json()
+    relaxed = client.post("/api/lab/committee", json={"source": "holdings", "as_of": "2026-06-30", "personas": ["warren_buffett", "peter_lynch", "phil_fisher"], "max_weight": 0.5, "lean": False}).json()
     assert {v["ticker"]: v["action"] for v in relaxed["verdicts"]}["QLTY"] == "增持候选"
 
     monkeypatch.setattr(alpaca, "get_portfolio", lambda: {"account": {}, "positions": []})
@@ -168,7 +167,12 @@ def test_personas_and_scoreboard_endpoints(client):
         "key": "warren_buffett", "name": "Warren Buffett", "name_zh": "沃伦·巴菲特",
         "style": "seeks wonderful companies at a fair price", "period": "ttm", "lookback": 10, "needs": [],
     }
-    assert client.get("/api/lab/committee/scoreboard").json() == {"kind": "scoreboard", "items": []}
+    board = client.get("/api/lab/committee/scoreboard").json()
+    assert board["kind"] == "scoreboard" and board["items"] == []
+    assert board["counts"] == {"runs": 0, "tickers": 0, "votes": 0, "scored_1m": 0, "scored_3m": 0, "due_1m": 0, "due_3m": 0}
+    client.post("/api/lab/committee", json={"tickers": ["QLTY"], "as_of": "2026-06-30", "personas": ["warren_buffett", "ben_graham"]})
+    counts = client.get("/api/lab/committee/scoreboard").json()["counts"]
+    assert counts["runs"] == 1 and counts["tickers"] == 1 and counts["votes"] == 2 and counts["due_1m"] == 2
 
 
 def test_store_forward_return_backfill(tmp_path):
@@ -278,3 +282,222 @@ def test_backfill_endpoint_reports_and_returns_scoreboard(client, monkeypatch):
     res = client.post("/api/lab/committee/backfill", json={"columns": ["fwd_1m"]})
     assert res.status_code == 200, res.text
     assert res.json()["kind"] == "backfill" and res.json()["checked"] == 0 and res.json()["scoreboard"] == []
+
+
+
+# ------------------------------------------------------------------- lab store
+
+def test_lab_runs_persist_across_kinds_and_reopen(client, monkeypatch):
+    monkeypatch.setattr(workspace, "_run_screening", lambda body: {"kind": "screening", "universe": body.universe, "tickers": ["QLTY"], "universe_size": 1, "candidates": [{"ticker": "QLTY"}]})
+    scr = client.post("/api/lab/screening", json={"universe": "custom", "tickers": ["qlty"], "revenue_growth_min": 0.1}).json()
+    com = client.post("/api/lab/committee", json={"tickers": ["QLTY"], "as_of": "2026-06-30", "personas": ["warren_buffett"]}).json()
+    assert scr["lab_run_id"] and com["lab_run_id"] and scr["lab_run_id"] != com["lab_run_id"]
+
+    runs = client.get("/api/lab/runs").json()
+    assert [r["kind"] for r in runs["items"]] == ["committee", "screening"]
+    assert runs["counts"] == {"committee": 1, "screening": 1}
+    assert runs["items"][1]["n_candidates"] == 1 and runs["items"][1]["candidates"] == ["QLTY"]
+    assert runs["items"][0]["stances"]["neutral"] + runs["items"][0]["stances"]["bearish"] + runs["items"][0]["stances"]["bullish"] == 1
+
+    detail = client.get(f"/api/lab/runs/{scr['lab_run_id']}").json()
+    assert detail["kind"] == "screening" and detail["params"]["revenue_growth_min"] == 0.1 and detail["result"]["candidates"][0]["ticker"] == "QLTY"
+    assert client.get("/api/lab/runs/nope").status_code == 404
+    assert [r["kind"] for r in client.get("/api/lab/runs?kind=screening").json()["items"]] == ["screening"]
+
+
+def test_universe_resolution_for_lab_engines(client, monkeypatch):
+    import v2.broker.alpaca_client as alpaca
+    from app import sources
+
+    monkeypatch.setattr(alpaca, "get_portfolio", lambda: {"account": {"portfolio_value": 100.0}, "positions": [{"symbol": "AAA", "market_value": 50.0, "side": "long"}, {"symbol": "SHRT", "market_value": 1.0, "side": "short"}]})
+    assert sources.resolve_universe("holdings")[0] == ["AAA"]
+    assert sources.resolve_universe("tech30")[0][:2] == ["AAPL", "MSFT"]
+    assert sources.resolve_universe("custom", ["nvda", "nvda", "amd"])[0] == ["NVDA", "AMD"]
+    with pytest.raises(ValueError):
+        sources.resolve_universe("custom", [])
+
+    seen = {}
+    monkeypatch.setattr(workspace, "_run_backtest", lambda body: seen.setdefault("body", body) and {"kind": "backtest", "strategy": body.strategy, "universe": body.universe, "tickers": ["AAA"], "metrics": {"n_trades": 1}})
+    res = client.post("/api/lab/backtest", json={"universe": "holdings", "holding_days": 7})
+    assert res.status_code == 200 and seen["body"].universe == "holdings" and seen["body"].holding_days == 7
+    assert client.post("/api/lab/backtest", json={"universe": "nowhere"}).status_code == 422
+
+
+# ------------------------------------------------------------------ universes
+
+def test_index_universes_resolve_only_for_the_screener(client, monkeypatch):
+    from app import sources
+
+    tickers, meta = sources.resolve_universe("dow30", limit=sources.BIG_LIMIT)
+    assert len(tickers) == 30 and "AAPL" in tickers and meta["as_of"]
+    with pytest.raises(ValueError, match="at most 60"):
+        sources.resolve_universe("sp500")  # default cap is the committee/backtest cap
+    from v2.screening.universe import TECH_30
+
+    items = client.get("/api/lab/universes").json()["items"]
+    assert items["sp500"]["size"] > 450 and items["nasdaq100"]["size"] == 100 and items["tech30"]["size"] == len(TECH_30)
+    # backtest refuses an index universe cleanly
+    res = client.post("/api/lab/backtest", json={"universe": "sp500"})
+    assert res.status_code in (400, 503) and "at most 60" in res.json()["detail"]
+
+
+def test_large_screening_runs_as_a_polled_job(client, monkeypatch):
+    import time
+
+    ticks: list[int] = []
+
+    def fake_run(body, on_tick=None):
+        for i in range(3):
+            if on_tick:
+                on_tick(i)
+                ticks.append(i)
+        return {"kind": "screening", "universe": body.universe, "tickers": ["AAA"] * 3, "universe_size": 3, "candidates": [{"ticker": "AAA"}]}
+
+    monkeypatch.setattr(workspace, "_run_screening", fake_run)
+    from v2.screening.universe import TECH_30
+
+    started = client.post("/api/lab/screening?background=true", json={"universe": "tech30"}).json()
+    assert started["status"] in ("running", "completed") and started["job_id"] and started["total"] == len(TECH_30)
+    for _ in range(50):
+        job = client.get(f"/api/lab/screening/jobs/{started['job_id']}").json()
+        if job["status"] == "completed":
+            break
+        time.sleep(0.05)
+    assert job["status"] == "completed" and job["done"] == job["total"] == len(TECH_30)
+    assert job["result"]["candidates"][0]["ticker"] == "AAA" and job["result"]["lab_run_id"]
+    assert ticks == [0, 1, 2]
+    assert client.get("/api/lab/runs").json()["items"][0]["kind"] == "screening"
+    assert client.get("/api/lab/screening/jobs/nope").status_code == 404
+
+    # small universes still answer inline
+    inline = client.post("/api/lab/screening", json={"universe": "custom", "tickers": ["AAA"]}).json()
+    assert inline["kind"] == "screening" and "job_id" not in inline
+
+    def boom(body, on_tick=None):
+        raise RuntimeError("provider down")
+
+    monkeypatch.setattr(workspace, "_run_screening", boom)
+    failed = client.post("/api/lab/screening?background=true", json={"universe": "dow30"}).json()
+    for _ in range(50):
+        job = client.get(f"/api/lab/screening/jobs/{failed['job_id']}").json()
+        if job["status"] == "failed":
+            break
+        time.sleep(0.05)
+    assert job["status"] == "failed" and "provider down" in job["error"]
+
+
+def test_screening_rules_are_optional_and_missing_fields_fail_closed():
+    from app.screening import CRITERIA, DEFAULT_RULES, Rule, screen
+
+    r = Rule(field="gross_margin", op="gte", value=0.5)
+    assert r.passes({"gross_margin": 0.6}) and not r.passes({"gross_margin": 0.4})
+    assert not r.passes({"gross_margin": None}) and not r.passes({"gross_margin": float("nan")}) and not r.passes({})
+    assert r.describe() == "毛利率 ≥ 50%"
+    assert Rule(field="market_cap", op="gte", value=10e9).describe() == "市值 ≥ $10B"
+    assert Rule(field="price_to_earnings_ratio", op="lte", value=25).describe() == "市盈率 ≤ 25"
+    assert all(rule.field in CRITERIA for rule in DEFAULT_RULES)
+
+    # Legacy threshold fields still work and fold into rules; none given → defaults; unknown field → 400.
+    body = workspace.ScreeningInput(universe="custom", tickers=["AAA"])
+    assert [x.model_dump() for x in body.effective_rules()] == [x.model_dump() for x in DEFAULT_RULES]
+    body = workspace.ScreeningInput(universe="custom", tickers=["AAA"], gross_margin_min=0.3)
+    assert [x.describe() for x in body.effective_rules()] == ["毛利率 ≥ 30%"]
+    body = workspace.ScreeningInput(universe="custom", tickers=["AAA"], rules=[{"field": "nope", "op": "gte", "value": 1}])
+    with pytest.raises(ValueError, match="nope"):
+        body.effective_rules()
+
+    # Only the enabled rules are applied; a ticker without enough price history is reported, not silently dropped.
+    class Metrics:
+        def get_financial_metrics(self, ticker, end_date, limit=1, **kw):
+            return [{"market_cap": 5e9 if ticker == "SMALL" else 50e9, "gross_margin": 0.7, "price_to_earnings_ratio": 40 if ticker == "PRICEY" else 15}]
+
+    class Prices:
+        def get_prices(self, ticker, start, end):
+            if ticker == "NEW":
+                return [{"close": 10.0}] * 5
+            return [{"close": 100.0 + (i % 7)} for i in range(300)]
+
+    ticks = []
+    out = screen(["BIG", "SMALL", "PRICEY", "NEW"], Metrics(), Prices(), [Rule(field="price_to_earnings_ratio", op="lte", value=25)], on_tick=ticks.append)
+    assert ticks == [0, 1, 2, 3]
+    assert [c["ticker"] for c in out["candidates"]] == ["BIG", "SMALL"]  # market-cap rule not enabled → SMALL passes
+    assert out["rejected_count"] == 1 and out["no_data"] == ["NEW"]
+    assert out["reject_reasons"] == {"市盈率 ≤ 25": 1} and out["rules_text"] == ["市盈率 ≤ 25"]
+    assert {"volatility", "return_3m", "pct_from_52w_high"} <= set(out["candidates"][0])
+
+
+def test_screening_criteria_endpoint_lists_fields_and_defaults(client):
+    body = client.get("/api/lab/screening/criteria").json()
+    assert body["kind"] == "criteria" and len(body["items"]) >= 20
+    assert body["items"]["gross_margin"] == {"label": "毛利率", "unit": "pct", "source": "metrics"}
+    assert body["defaults"][0] == {"field": "market_cap", "op": "gte", "value": 10e9}
+
+
+
+def test_screen_data_skips_uncovered_tickers_and_counts_fd_requests():
+    class Boom(Exception):
+        pass
+
+    class Metrics:
+        misses = 3
+
+        def get_financial_metrics(self, ticker, end, limit=1):
+            if ticker == "BRK.B":
+                raise Boom("Financial Datasets EMPTY_DATA at /financial-metrics/ (HTTP 404)")
+            return [{"market_cap": 1.0}]
+
+        def close(self):
+            self.closed = True
+
+    class Earnings:
+        def get_earnings(self, ticker):
+            if ticker == "AAPL":
+                raise Boom("no earnings")
+            return {"eps": 1}
+
+    metrics, earnings = Metrics(), Earnings()
+    with workspace._ScreenData(metrics, metrics_is_fd=True, earnings_client=earnings) as fd:
+        assert fd.get_financial_metrics("AAPL", "2026-06-30", limit=1) == [{"market_cap": 1.0}]
+        assert fd.get_financial_metrics("BRK.B", "2026-06-30", limit=1) == []
+        assert fd.get_earnings("AAPL") is None and fd.get_earnings("MSFT") == {"eps": 1}
+        assert fd.misses == 3  # pass-through
+    assert set(fd.skipped) == {"BRK.B", "AAPL"} and "HTTP 404" in fd.skipped["BRK.B"]
+    assert fd.fd_requests == {"financial_metrics": 2, "earnings": 2}
+    assert metrics.closed
+
+    free = workspace._ScreenData(Metrics(), metrics_is_fd=False)
+    free.get_financial_metrics("AAPL", "2026-06-30")
+    assert free.fd_requests == {} and free.get_earnings("AAPL") is None
+
+
+def test_screen_clients_default_to_free_yfinance_and_bill_only_when_asked(monkeypatch):
+    from app.routers.workspace import ScreeningInput, _screen_clients
+
+    free = _screen_clients(ScreeningInput())
+    assert free._metrics_is_fd is False and free._earnings is None
+    paid = _screen_clients(ScreeningInput(data_source="fd", with_earnings=True))
+    assert paid._metrics_is_fd is True and paid._earnings is not None
+    mixed = _screen_clients(ScreeningInput(data_source="yfinance", with_earnings=True))
+    assert mixed._metrics_is_fd is False and mixed._earnings is not None
+
+
+def test_committee_lean_mode_skips_news_and_insiders_and_reports_cost(client, fake):
+    lean = client.post("/api/lab/committee", json={"tickers": ["QLTY"], "as_of": "2026-06-30", "personas": ["charlie_munger"]}).json()
+    assert lean["lean"] is True
+    assert set(lean["fd_requests"]) == {"financial_metrics", "line_items"} and "news" not in lean["fd_requests"]
+    assert lean["fd_cost_usd"] == pytest.approx(0.08)  # 2 metrics + 2 line items at $0.02
+    full = client.post("/api/lab/committee", json={"tickers": ["DSTR"], "as_of": "2026-06-30", "personas": ["charlie_munger"], "lean": False}).json()
+    assert {"news", "insider_trades"} <= set(full["fd_requests"]) and full["fd_cost_usd"] > lean["fd_cost_usd"]
+    assert "company_facts" not in full["fd_requests"]  # market cap comes from the metrics row
+    pricing = client.get("/api/lab/committee/pricing").json()
+    assert pricing["committee_per_ticker"]["lean"] == pytest.approx(0.10) and pricing["committee_per_ticker"]["full"] == pytest.approx(0.14)
+
+
+def test_fd_prices_override(monkeypatch):
+    from app import fd_pricing
+
+    monkeypatch.setenv("FD_PRICES", '{"financial_metrics": 0.02, "bogus": 9}')
+    assert fd_pricing.prices()["financial_metrics"] == 0.02 and "bogus" not in fd_pricing.prices()
+    assert fd_pricing.cost({"financial_metrics": 10, "earnings": 3}) == pytest.approx(0.26)
+    monkeypatch.setenv("FD_PRICES", "not json")
+    assert fd_pricing.prices()["financial_metrics"] == 0.02

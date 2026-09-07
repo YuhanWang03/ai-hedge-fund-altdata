@@ -217,6 +217,22 @@ class PersonaStore:
             for r in rows
         ]
 
+    def signal_counts(self) -> dict[str, int]:
+        """Vote bookkeeping for the scoreboard: totals, scored, pending per horizon."""
+        today = datetime.now(timezone.utc).date()
+        with self._conn() as conn:
+            total = conn.execute("SELECT COUNT(*) FROM persona_signals WHERE abstained = 0").fetchone()[0]
+            scored_1m = conn.execute("SELECT COUNT(*) FROM persona_signals WHERE fwd_1m IS NOT NULL").fetchone()[0]
+            scored_3m = conn.execute("SELECT COUNT(*) FROM persona_signals WHERE fwd_3m IS NOT NULL").fetchone()[0]
+            runs = conn.execute("SELECT COUNT(*) FROM committee_runs").fetchone()[0]
+            tickers = conn.execute("SELECT COUNT(DISTINCT ticker) FROM persona_signals").fetchone()[0]
+        return {
+            "runs": runs, "tickers": tickers, "votes": total,
+            "scored_1m": scored_1m, "scored_3m": scored_3m,
+            "due_1m": len(self.signals_awaiting_forward_returns(older_than_days=30, column="fwd_1m", today=today)),
+            "due_3m": len(self.signals_awaiting_forward_returns(older_than_days=91, column="fwd_3m", today=today)),
+        }
+
     # -- snapshot cache -----------------------------------------------------------
 
     def cached_snapshot(self, ticker: str, as_of: str, *, max_age_hours: float = 24.0) -> PersonaSnapshot | None:
@@ -232,11 +248,14 @@ class PersonaStore:
             fetched = fetched.replace(tzinfo=timezone.utc)
         if datetime.now(timezone.utc) - fetched > timedelta(hours=max_age_hours):
             return None
-        return PersonaSnapshot.from_dict(json.loads(row["payload_json"]))
+        snap = PersonaSnapshot.from_dict(json.loads(row["payload_json"]))
+        if any(g.startswith(("metrics_", "line_items_")) for g in snap.gaps):
+            return None  # cached before the no-gaps rule existed; refetch
+        return snap
 
     def save_snapshot(self, snap: PersonaSnapshot) -> None:
-        if not snap.has_fundamentals:
-            return  # never cache an empty fetch; the next run should retry
+        if not snap.has_fundamentals or any(g.startswith(("metrics_", "line_items_")) for g in snap.gaps):
+            return  # never cache a fetch whose core inputs failed; the next run should retry
         with self._conn() as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO snapshots (ticker, as_of, content_hash, fetched_at, payload_json) VALUES (?,?,?,?,?)",

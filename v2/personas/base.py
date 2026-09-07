@@ -70,6 +70,18 @@ def apply_margin_of_safety(signal: Signal, confidence: int, mos: float | None, *
     return signal, confidence
 
 
+def _as_date(value: Any):
+    """YYYY-MM-DD (or any ISO prefix) → date, else None."""
+    if not value:
+        return None
+    try:
+        from datetime import date
+
+        return date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return None
+
+
 class Persona(ABC):
     """Base class for one simulated investor."""
 
@@ -86,6 +98,12 @@ class Persona(ABC):
     lookback: ClassVar[int] = 10
     #: optional data this persona reads; drives what the snapshot fetches
     needs: ClassVar[frozenset[str]] = frozenset()
+    #: inputs without which the checklist is meaningless — missing any → abstain.
+    #: Every upstream agent scores mostly off line items, so a snapshot with
+    #: ratios but no line items must not be read as "everything scores zero".
+    requires: ClassVar[frozenset[str]] = frozenset({"metrics", "line_items"})
+    #: minimum line-item periods the rules need before a verdict is honest
+    min_periods: ClassVar[int] = 3
     #: upstream system prompt (voice + decision checklist); narration only
     system_prompt: ClassVar[str] = ""
 
@@ -131,10 +149,31 @@ class Persona(ABC):
     # -- helpers subclasses may override --------------------------------------
 
     def missing_inputs(self, snap: PersonaSnapshot) -> list[str]:
-        """Names of required inputs the snapshot lacks; non-empty means abstain."""
+        """Names of required inputs the snapshot lacks; non-empty means abstain.
+
+        Each entry names the input and, when the snapshot recorded why the
+        fetch failed, quotes that reason so the UI can show it.
+        """
         missing: list[str] = []
-        if not snap.metrics(self.period) and not snap.line_items(self.period):
-            missing.append(f"{self.period} fundamentals")
+
+        def gap_for(prefix: str) -> str:
+            for g in snap.gaps:
+                if g.startswith(prefix):
+                    return f" ({g})"
+            return ""
+
+        if "metrics" in self.requires and not snap.metrics(self.period):
+            missing.append(f"{self.period} metrics" + gap_for(f"metrics_{self.period}"))
+        if "line_items" in self.requires:
+            items = snap.line_items(self.period)
+            if not items:
+                missing.append(f"{self.period} line items" + gap_for(f"line_items_{self.period}"))
+            elif len(items) < self.min_periods:
+                missing.append(f"only {len(items)} {self.period} line-item period(s), need {self.min_periods}")
+        if "prices" in self.requires and not snap.prices:
+            missing.append("daily prices" + gap_for("prices"))
+        if "market_cap" in self.requires and not snap.market_cap:
+            missing.append("market cap" + gap_for("market_cap"))
         return missing
 
     def explain(self, ev: Evaluation, signal: Signal, confidence: int) -> str:
@@ -196,6 +235,55 @@ class Persona(ABC):
                     return None
                 return None if f != f else f
         return None
+
+    @staticmethod
+    def years_spanned(rows: list[Any], *, period: str | None = None) -> float | None:
+        """Elapsed years between the newest and oldest row (rows are newest-first).
+
+        Upstream divided growth by ``len(rows) - 1`` — right for annual rows,
+        wrong for TTM rows, where ten periods span about two years, not nine.
+        Use the report dates when the rows carry them; otherwise assume a
+        quarter per step unless the period label says annual.
+        """
+        if len(rows) < 2:
+            return None
+        newest = _as_date(getattr(rows[0], "report_period", None))
+        oldest = _as_date(getattr(rows[-1], "report_period", None))
+        if newest and oldest and newest > oldest:
+            return (newest - oldest).days / 365.25
+        label = str(period or getattr(rows[0], "period", "") or "").lower()
+        step = 1.0 if label in ("annual", "fy", "yearly", "year") else 0.25
+        return (len(rows) - 1) * step
+
+    @classmethod
+    def cagr(cls, rows: list[Any], field: str, *, positive_only: bool = True, min_years: float = 0.5) -> tuple[float, float] | None:
+        """``(annualised growth, years)`` of ``field`` from oldest to newest row, or None.
+
+        Skips rows where the field is missing (or non-positive when
+        ``positive_only``), measures the span in calendar years, and refuses
+        spans shorter than ``min_years`` — a two-quarter CAGR is noise.
+        """
+        picked: list[tuple[Any, float]] = []
+        for row in rows:
+            value = getattr(row, field, None)
+            if value is None:
+                continue
+            try:
+                f = float(value)
+            except (TypeError, ValueError):
+                continue
+            if f != f or (positive_only and f <= 0):
+                continue
+            picked.append((row, f))
+        if len(picked) < 2:
+            return None
+        years = cls.years_spanned([r for r, _ in picked])
+        if not years or years < min_years:
+            return None
+        newest, oldest = picked[0][1], picked[-1][1]
+        if newest <= 0 or oldest <= 0:
+            return None
+        return (newest / oldest) ** (1.0 / years) - 1.0, years
 
     @staticmethod
     def part(name: str, score: float, max_score: float, details: list[str] | str, **data: Any) -> SubScore:

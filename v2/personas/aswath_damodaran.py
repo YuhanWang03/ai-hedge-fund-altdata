@@ -15,6 +15,10 @@ rows, which never carried those fields, so its revenue CAGR, interest
 coverage and the entire DCF silently never ran.  Here each of those values
 is read from the metrics row first and, when absent, from the matching line
 item, so the rules can actually fire.
+
+Deliberate correction shared with the Jhunjhunwala port: revenue CAGR is
+annualised over the rows' actual report-date span (:meth:`Persona.cagr`)
+instead of ``len(rows) - 1``, which on TTM rows treated quarters as years.
 """
 
 from __future__ import annotations
@@ -147,11 +151,8 @@ class AswathDamodaran(Persona):
         if len(metrics) < 2:
             return {"score": 0, "max_score": max_score, "details": "Insufficient history"}
 
-        revs = [m.revenue for m in reversed(metrics) if hasattr(m, "revenue") and m.revenue]
-        if len(revs) >= 2 and revs[0] > 0:
-            cagr = (revs[-1] / revs[0]) ** (1 / (len(revs) - 1)) - 1
-        else:
-            cagr = None
+        growth = Persona.cagr(metrics, "revenue")
+        cagr = growth[0] if growth is not None else None
 
         score, details = 0, []
 
@@ -268,11 +269,8 @@ class AswathDamodaran(Persona):
         if not fcff0 or not shares:
             return {"intrinsic_value": None, "details": ["Missing FCFF or share count"]}
 
-        revs = [m.revenue for m in reversed(metrics) if m.revenue]
-        if len(revs) >= 2 and revs[0] > 0:
-            base_growth = min((revs[-1] / revs[0]) ** (1 / (len(revs) - 1)) - 1, 0.12)
-        else:
-            base_growth = 0.04
+        growth = Persona.cagr(metrics, "revenue")
+        base_growth = min(growth[0], 0.12) if growth is not None else 0.04
 
         terminal_growth = 0.025
         years = 10

@@ -92,3 +92,26 @@ cd web/frontend && npm run build \
   clear.
 - **Ports**: backend 127.0.0.1:8100 (not exposed); only nginx :80 is public.
 - **Memory**: uvicorn ~60 MB; comfortably fits alongside the other services.
+
+## Workbench (ai-workbench) — current UI
+
+The React bundle under `web/frontend` was superseded by the vinext workbench in
+`ai-workbench/`, served by `hedge-fund-workbench.service` on 127.0.0.1:3000;
+`nginx-web.conf` proxies `/` to it and `/api/` to the FastAPI backend.
+
+One-shot redeploy of backend + workbench (+ scheduler when its code changed):
+
+```bash
+cd /root/hedge-fund && bash web/deploy/redeploy.sh            # fast-forwards to origin/main
+cd /root/hedge-fund && bash web/deploy/redeploy.sh origin/<branch>
+cd /root/hedge-fund && bash web/deploy/redeploy.sh --frontend --scheduler   # force rebuild / restart
+```
+
+Then open the site, Lab → 投资人委员会. Smoke-test from the shell:
+
+```bash
+TOKEN=$(sed -n 's/^WEB_OWNER_TOKEN=//p' /etc/hedge-fund/web.env)
+curl -s -H "X-Owner-Token: $TOKEN" http://127.0.0.1:8100/api/lab/committee/personas | head -c 300; echo
+curl -s -H "X-Owner-Token: $TOKEN" -H 'Content-Type: application/json' \
+     -d '{"source":"holdings"}' http://127.0.0.1:8100/api/lab/committee | head -c 600; echo
+```

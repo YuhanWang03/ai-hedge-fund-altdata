@@ -16,7 +16,6 @@ from v2.bot import state as bot_state
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
     monkeypatch.setattr(bot_state, "_DB_PATH", tmp_path / "bot_state.db")
-    workspace._LAB_RUNS.clear()
     portfolio._PRICE_CACHE.clear()
     return TestClient(app)
 

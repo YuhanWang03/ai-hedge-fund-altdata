@@ -23,7 +23,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.auth import require_owner
+from app.fd_pricing import cost as fd_cost, prices as fd_prices
 from app.routers import workspace
+from app.sources import MAX_TICKERS, holdings as _holdings, normalize_tickers, watchlist as _watchlist
 from v2.personas.committee import CommitteeResult, TickerVerdict, run_committee
 from v2.personas.forward import backfill_forward_returns
 from v2.personas.models import PersonaSignal
@@ -35,7 +37,6 @@ logger = logging.getLogger("web.committee")
 
 router = APIRouter(prefix="/api/lab/committee", tags=["lab"], dependencies=[Depends(require_owner)])
 
-MAX_TICKERS = 60
 _STORE: PersonaStore | None = None
 
 Source = Literal["tickers", "holdings", "watchlist", "screening"]
@@ -53,9 +54,12 @@ class CommitteeInput(BaseModel):
     tickers: list[str] = Field(default_factory=list, max_length=MAX_TICKERS)
     personas: list[str] | None = None
     as_of: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
-    top_n: int = Field(default=15, ge=1, le=MAX_TICKERS)
+    top_n: int | None = Field(default=None, ge=1, le=MAX_TICKERS)  # only meaningful for source=screening; None = rank everything
     use_cache: bool = True
     max_weight: float = Field(default=0.15, gt=0, le=1.0)
+    #: 省流模式: skip the news and insider-trade fetches (two paid calls per ticker
+    #: that only feed a few personas' small sentiment sub-scores)
+    lean: bool = True
     screening: workspace.ScreeningInput | None = None
 
 
@@ -68,33 +72,6 @@ def _resolve_personas(keys: list[str] | None) -> list[str]:
     if unknown:
         raise ValueError(f"unknown persona: {', '.join(unknown)}")
     return list(dict.fromkeys(keys))
-
-
-def _holdings() -> tuple[list[str], dict[str, dict[str, Any]]]:
-    """Long positions from Alpaca with their portfolio weight."""
-    from v2.broker.alpaca_client import get_portfolio
-
-    pf = get_portfolio()
-    total = float((pf.get("account") or {}).get("portfolio_value") or 0.0)
-    positions: dict[str, dict[str, Any]] = {}
-    for p in pf.get("positions") or []:
-        symbol = str(p.get("symbol") or "").upper()
-        if not symbol or str(p.get("side", "long")).lower() != "long":
-            continue
-        mv = float(p.get("market_value") or 0.0)
-        positions[symbol] = {
-            "weight": (mv / total) if total > 0 else None,
-            "market_value": mv,
-            "current_price": float(p.get("current_price") or 0.0) or None,
-            "unrealized_pl_pct": p.get("unrealized_pl_pct"),
-        }
-    return list(positions), positions
-
-
-def _watchlist() -> list[str]:
-    from v2.bot.state import watchlist_list
-
-    return [str(item["ticker"]).upper() for item in watchlist_list()]
 
 
 def _screened(body: workspace.ScreeningInput | None) -> tuple[list[str], dict[str, Any]]:
@@ -153,7 +130,7 @@ def _run(body: CommitteeInput) -> dict[str, Any]:
     screening: dict[str, Any] | None = None
 
     if body.source == "tickers":
-        tickers = workspace._normalize_tickers(body.tickers, limit=MAX_TICKERS)
+        tickers = normalize_tickers(body.tickers, limit=MAX_TICKERS)
     elif body.source == "holdings":
         tickers, positions = _holdings()
         if not tickers:
@@ -181,7 +158,8 @@ def _run(body: CommitteeInput) -> dict[str, Any]:
                 cached[t] = snap
 
     with _data_client() as client:
-        result: CommitteeResult = run_committee(tickers, client, personas=keys, as_of=as_of, snapshots=cached, max_workers=4)
+        result: CommitteeResult = run_committee(tickers, client, personas=keys, as_of=as_of, snapshots=cached, max_workers=4,
+                                                exclude_needs=("news", "insiders") if body.lean else ())
 
     for t, snap in result.snapshots.items():
         if t not in cached:
@@ -192,6 +170,20 @@ def _run(body: CommitteeInput) -> dict[str, Any]:
     payload["source"] = body.source
     payload["personas_meta"] = _persona_meta(keys)
     payload["cache_hits"] = sorted(cached)
+    payload["lean"] = body.lean
+    requests: dict[str, int] = {}
+    for t, snap in result.snapshots.items():
+        if t in cached:
+            continue
+        for endpoint, n in snap.requests.items():
+            requests[endpoint] = requests.get(endpoint, 0) + n
+    payload["fd_requests"] = requests
+    payload["fd_cost_usd"] = fd_cost(requests)
+    gaps: dict[str, list[str]] = {}
+    for t, snap in result.snapshots.items():
+        for g in snap.gaps:
+            gaps.setdefault(g, []).append(t)
+    payload["data_gaps"] = [{"gap": g, "tickers": sorted(ts)} for g, ts in sorted(gaps.items(), key=lambda kv: -len(kv[1]))]
     for v_dict, v in zip(payload["verdicts"], result.verdicts):
         snap = result.snapshots.get(v.ticker)
         if snap is not None and snap.prices:
@@ -211,10 +203,10 @@ def _run(body: CommitteeInput) -> dict[str, Any]:
         payload["screening"] = screening
     payload["top"] = [
         {"rank": v.rank, "ticker": v.ticker, "stance": v.stance, "consensus": round(v.consensus, 4), "bullish": v.bullish, "bearish": v.bearish, "neutral": v.neutral, "agreement": round(v.agreement, 4)}
-        for v in result.top(body.top_n)
+        for v in result.top(body.top_n or max(1, len(result.verdicts)))
     ]
     payload["run_id"] = store.save_run(payload, source=body.source)
-    workspace._remember_run("committee", payload)
+    workspace._remember_run("committee", payload, body.model_dump())
     return payload
 
 
@@ -243,8 +235,15 @@ async def run_detail(run_id: str) -> dict:
 
 @router.get("/scoreboard")
 async def scoreboard() -> dict:
-    """Per-persona hit rate once forward returns have been back-filled."""
-    return {"kind": "scoreboard", "items": _store().persona_scoreboard()}
+    """Per-persona hit rate once forward returns have been back-filled, plus vote counts."""
+    store = _store()
+    items = store.persona_scoreboard()
+    names = {m["key"]: m for m in _persona_meta(list(PERSONAS))}
+    for row in items:
+        meta = names.get(row["persona"], {})
+        row["name_zh"] = meta.get("name_zh", row["persona"])
+        row["name"] = meta.get("name", row["persona"])
+    return {"kind": "scoreboard", "items": items, "counts": store.signal_counts()}
 
 
 # ------------------------------------------------------------------- narration
@@ -323,3 +322,17 @@ def _backfill(body: BackfillInput) -> dict[str, Any]:
 async def backfill(body: BackfillInput | None = None) -> dict:
     """Run the forward-return backfill now (the scheduler also does this nightly)."""
     return await workspace._lab_call(_backfill, body or BackfillInput())
+
+
+@router.get("/pricing")
+async def pricing() -> dict:
+    """Per-request prices used for estimates (override with FD_PRICES) and the per-ticker committee recipe."""
+    table = fd_prices()
+    per_ticker_full = {"financial_metrics": 2, "line_items": 2, "prices": 1, "insider_trades": 1, "news": 1}
+    per_ticker_lean = {"financial_metrics": 2, "line_items": 2, "prices": 1}
+    return {
+        "kind": "pricing",
+        "prices_usd": table,
+        "committee_per_ticker": {"full": fd_cost(per_ticker_full), "lean": fd_cost(per_ticker_lean), "requests_full": per_ticker_full, "requests_lean": per_ticker_lean},
+        "note": "estimates only; cached snapshots and the 24h metrics cache cost nothing",
+    }
