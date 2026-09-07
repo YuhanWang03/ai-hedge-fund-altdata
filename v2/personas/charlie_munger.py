@@ -12,6 +12,10 @@ One extension: upstream classified insider trades by ``transaction_type``,
 a field the data provider never returned, so the insider rule never scored.
 Here a trade with no ``transaction_type`` falls back to the sign of
 ``transaction_shares`` (see :func:`_insider_side`).
+
+Second correction: the gross-margin trend loop compared neighbours as if
+rows were oldest-first, crediting "consistently improving" to margins that
+were falling. It now reads the newest-first order the data actually has.
 """
 
 from __future__ import annotations
@@ -173,7 +177,8 @@ class CharlieMunger(Persona):
         # 2. Pricing power - gross margin stability and trend
         gross_margins = [i.gross_margin for i in items if i.gross_margin is not None]
         if gross_margins and len(gross_margins) >= 3:
-            margin_trend = sum(1 for i in range(1, len(gross_margins)) if gross_margins[i] >= gross_margins[i - 1])
+            # rows are newest-first: 'improving' means newer >= older
+            margin_trend = sum(1 for i in range(1, len(gross_margins)) if gross_margins[i - 1] >= gross_margins[i])
             if margin_trend >= len(gross_margins) * 0.7:
                 score += 2
                 details.append("Strong pricing power: Gross margins consistently improving")

@@ -16,7 +16,10 @@ One deliberate correction: upstream annualised every growth rate by
 about two years, so EPS, revenue and income CAGRs came out roughly four
 times too low and the DCF's growth input with them — the persona was bearish
 on nearly everything. Growth now uses :meth:`Persona.cagr`, which measures
-the span from the rows' report dates.
+the span from the rows' report dates.  A second correction: the two
+"consistency" loops compared neighbours as if rows were oldest-first, so a
+company growing every period scored 0% consistent; they now read the
+newest-first order the data actually has.
 """
 
 from __future__ import annotations
@@ -238,7 +241,8 @@ class RakeshJhunjhunwala(Persona):
 
         # Revenue consistency check (period over period)
         if len(revenues) >= 3:
-            declining_years = sum(1 for i in range(1, len(revenues)) if revenues[i - 1] > revenues[i])
+            # rows are newest-first: a decline is newer < older
+            declining_years = sum(1 for i in range(1, len(revenues)) if revenues[i - 1] < revenues[i])
             consistency_ratio = 1 - (declining_years / (len(revenues) - 1))
             if consistency_ratio >= 0.8:
                 score += 1
@@ -378,7 +382,7 @@ class RakeshJhunjhunwala(Persona):
         # Growth consistency
         net_incomes = [i.net_income for i in items[:4] if i.net_income is not None and i.net_income > 0]
         if len(net_incomes) >= 3:
-            declining_years = sum(1 for i in range(1, len(net_incomes)) if net_incomes[i - 1] > net_incomes[i])
+            declining_years = sum(1 for i in range(1, len(net_incomes)) if net_incomes[i - 1] < net_incomes[i])  # newest-first
             consistency = 1 - (declining_years / (len(net_incomes) - 1))
             quality_factors.append(consistency)
         else:

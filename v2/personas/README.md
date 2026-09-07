@@ -77,7 +77,7 @@ v2/personas/
 - **周期语义。** 上游把 10 期 TTM 数据当作 9 年算 CAGR（Jhunjhunwala、Damodaran），
   增长率被压低到约四分之一，两位对几乎所有股票看空。**已修正**：`Persona.cagr()`
   按行的 report_period 实际跨度年化（缺日期时 TTM 按每期 0.25 年），两位的
-  docstring 记录了这次调整。Munger 的毛利率趋势把"最新在前"当"最旧在前"仍按原样保留。
+  docstring 记录了这次调整。Munger 的毛利率趋势和 Jhunjhunwala 的两处增长一致性循环把"最新在前"当"最旧在前"比较，也已修正并记录。
 
 ## 数据客户端
 

@@ -530,3 +530,16 @@ def test_jhunjhunwala_and_damodaran_no_longer_read_ttm_rows_as_years():
     ad = get_persona("aswath_damodaran").analyze(snap)
     growth = ad.parts[0].details
     assert "12." in growth, growth
+
+
+
+def test_consistency_and_trend_loops_read_newest_first_order():
+    grow, shrink = quality_snapshot(), distressed_snapshot()
+    rj_grow = " ".join(p.details for p in get_persona("rakesh_jhunjhunwala").analyze(grow).parts)
+    rj_shrink = " ".join(p.details for p in get_persona("rakesh_jhunjhunwala").analyze(shrink).parts)
+    assert "Consistent growth pattern (100% of periods)" in rj_grow, rj_grow
+    assert "Inconsistent growth pattern" in rj_shrink or "Insufficient" in rj_shrink, rj_shrink
+    munger_grow = get_persona("charlie_munger").analyze(grow).parts[0].details
+    munger_shrink = get_persona("charlie_munger").analyze(shrink).parts[0].details
+    assert "Gross margins consistently improving" in munger_grow, munger_grow
+    assert "consistently improving" not in munger_shrink, munger_shrink
