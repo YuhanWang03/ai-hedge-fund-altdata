@@ -346,6 +346,12 @@ def test_index_universes_resolve_only_for_the_screener(client, monkeypatch):
     monkeypatch.setattr(workspace, "_run_backtest", lambda body, on_tick=None: {"kind": "backtest", "strategy": body.strategy, "universe": body.universe, "tickers": [], "trades": [], "metrics": None, "equity_curve": []})
     job = client.post("/api/lab/backtest", json={"universe": "sp500", "strategy": "momentum"}).json()
     assert job["kind"] == "backtest_job" and job["total"] > 450
+    # a 100-ticker custom list (handed over from the screener) is fine for momentum, refused clearly for paid strategies
+    many = [f"T{i}" for i in range(100)]
+    job = client.post("/api/lab/backtest", json={"universe": "custom", "tickers": many, "strategy": "momentum"}).json()
+    assert job["kind"] == "backtest_job" and job["total"] == 100
+    res = client.post("/api/lab/backtest", json={"universe": "custom", "tickers": many, "strategy": "pead"})
+    assert res.status_code == 400 and "at most 60" in res.json()["detail"]
 
 
 def test_large_screening_runs_as_a_polled_job(client, monkeypatch):

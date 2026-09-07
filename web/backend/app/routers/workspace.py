@@ -210,7 +210,8 @@ async def remove_price_alert(alert_id: int) -> dict:
 
 class BacktestInput(BaseModel):
     universe: Universe = "custom"
-    tickers: list[str] = Field(default_factory=lambda: ["AAPL", "MSFT", "NVDA"], max_length=MAX_TICKERS)
+    #: up to BIG_LIMIT for the free momentum strategy; paid strategies are checked against MAX_TICKERS in _check_backtest_size
+    tickers: list[str] = Field(default_factory=lambda: ["AAPL", "MSFT", "NVDA"], max_length=BIG_LIMIT)
     strategy: Literal["pead", "momentum", "insider", "committee"] = "pead"
     #: where daily prices come from; events / fundamentals are always Financial Datasets
     data_source: Literal["yfinance", "fd"] = "yfinance"
@@ -323,6 +324,15 @@ def _backtest_limit(body: BacktestInput) -> int:
     return BIG_LIMIT if body.strategy == "momentum" else MAX_TICKERS
 
 
+def _check_backtest_size(body: BacktestInput) -> None:
+    """A custom list over the strategy's cap is refused up front instead of silently truncated."""
+    if body.universe == "custom":
+        n = len(normalize_tickers(body.tickers, limit=BIG_LIMIT))
+        limit = _backtest_limit(body)
+        if n > limit:
+            raise ValueError(f"custom list has {n} tickers; the {body.strategy} strategy accepts at most {limit} (only momentum may exceed {MAX_TICKERS})")
+
+
 def _benchmark(data, trades, ticker: str = "SPY") -> dict | None:
     """Buy-and-hold return of ``ticker`` from the first entry to the last exit, for comparison."""
     if not trades:
@@ -361,6 +371,7 @@ def _backtest_total(body: BacktestInput, n_tickers: int) -> int:
 def _run_backtest(body: BacktestInput, on_tick=None) -> dict:
     from v2.backtesting import BacktestEngine
 
+    _check_backtest_size(body)
     tickers, meta = resolve_universe(body.universe, body.tickers, limit=_backtest_limit(body))
     with _backtest_data(body) as data:
         data.progress = on_tick
@@ -582,6 +593,7 @@ async def _lab_call(fn, body) -> dict:
 async def run_backtest(body: BacktestInput, background: bool | None = None) -> dict:
     """Quick runs answer inline; the committee strategy (or ?background=true) returns a job to poll."""
     try:
+        _check_backtest_size(body)
         tickers, _ = await run_in_threadpool(resolve_universe, body.universe, body.tickers, limit=_backtest_limit(body))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
