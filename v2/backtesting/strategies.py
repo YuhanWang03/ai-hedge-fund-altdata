@@ -217,6 +217,7 @@ class MomentumStrategy(Strategy):
         near_high_pct: float | None = None,
         min_momentum: float = 0.0,
         progress: Progress | None = None,
+        universe_at: Callable[[str], list[str]] | None = None,
     ) -> None:
         if skip_days >= lookback_days:
             raise ValueError("skip_days must be smaller than lookback_days")
@@ -224,6 +225,12 @@ class MomentumStrategy(Strategy):
         self.top_n, self.history_days = top_n, history_days
         self.near_high, self.min_momentum = near_high_pct, min_momentum
         self._progress = progress
+        #: date → constituents on that date (point-in-time universe); None = rank every ticker given
+        self.universe_at = universe_at
+        #: one entry per rebalance date: pool size, how many had enough history, what was bought
+        self.periods: list[dict[str, Any]] = []
+        #: tickers the strategy never got a usable price series for
+        self.no_data: list[str] = []
 
     @property
     def name(self) -> str:
@@ -234,12 +241,15 @@ class MomentumStrategy(Strategy):
         # history + lookback in calendar days, with slack for holidays
         start = data.today - timedelta(days=self.history_days + int(self.lookback * 1.6) + 10)
         series: dict[str, list[tuple[str, float]]] = {}
+        self.no_data = []
         for i, t in enumerate(tickers):
             if self._progress:
                 self._progress(i)
             closes = data.prices.closes(t, start)
             if len(closes) > self.lookback:
                 series[t] = closes
+            else:
+                self.no_data.append(t)
         if not series:
             return []
 
@@ -250,10 +260,15 @@ class MomentumStrategy(Strategy):
         signals: list[TradeSignal] = []
         step = max(1, self.holding)
         start_i = next((i for i, d in enumerate(calendar) if d >= first_signal), len(calendar))
+        self.periods = []
         for ci in range(start_i, len(calendar) - 1, step):
             d = calendar[ci]
+            allowed = set(self.universe_at(d)) if self.universe_at else None
             scored: list[tuple[float, str, float | None]] = []
+            ranked = 0
             for t, s in series.items():
+                if allowed is not None and t not in allowed:
+                    continue
                 i = idx_of[t].get(d)
                 if i is None or i < self.lookback:
                     continue
@@ -262,6 +277,7 @@ class MomentumStrategy(Strategy):
                 if then <= 0:
                     continue
                 mom = now / then - 1
+                ranked += 1
                 from_high = None
                 if self.near_high is not None:
                     window = [c for _, c in s[max(0, i - 251): i + 1]]
@@ -273,6 +289,9 @@ class MomentumStrategy(Strategy):
                     scored.append((mom, t, from_high))
             scored.sort(reverse=True)
             entry = (date.fromisoformat(d) + timedelta(days=1)).isoformat()
+            self.periods.append({"signal_date": d, "pool": len(allowed) if allowed is not None else len(tickers),
+                                 "priced": len(allowed & set(series)) if allowed is not None else len(series), "ranked": ranked,
+                                 "picked": [t for _, t, _ in scored[: self.top_n]]})
             for mom, t, from_high in scored[: self.top_n]:
                 meta: dict[str, Any] = {"signal_date": d, "momentum": round(mom, 4)}
                 if from_high is not None:

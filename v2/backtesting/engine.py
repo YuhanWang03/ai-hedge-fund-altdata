@@ -49,9 +49,12 @@ class BacktestEngine:
         *,
         capital: float = 100_000.0,
         per_trade: float = 10_000.0,
+        cost_bps: float = 0.0,
     ) -> None:
         self._capital = capital
         self._per_trade = per_trade
+        #: one-way transaction cost in basis points, charged on entry and exit
+        self._cost_bps = cost_bps
 
     def run(
         self,
@@ -157,6 +160,11 @@ class BacktestEngine:
         else:
             pnl = shares * (entry_price - exit_price)
             return_pct = (entry_price - exit_price) / entry_price
+        # Round-trip transaction cost (entry + exit), on the dollars deployed
+        round_trip = 2 * self._cost_bps / 10_000
+        if round_trip:
+            pnl -= self._per_trade * round_trip
+            return_pct -= round_trip
 
         return Trade(
             ticker=signal.ticker,
@@ -177,11 +185,11 @@ class BacktestEngine:
     # ------------------------------------------------------------------
 
     def _build_equity_curve(self, trades: list[Trade]) -> list[float]:
-        """Portfolio value over time — starting capital + cumulative P&L."""
+        """Portfolio value after each rebalance period (trades sharing an entry date)."""
         equity = self._capital
         curve = [equity]
-        for t in trades:
-            equity += t.pnl
+        for _, pnl in _period_pnl(trades):
+            equity += pnl
             curve.append(round(equity, 2))
         return curve
 
@@ -209,12 +217,22 @@ class BacktestEngine:
         years = max(calendar_days / 365.25, 0.01)
         annualized = (1 + total_return_pct) ** (1 / years) - 1
 
-        # Sharpe ratio (annualized from per-trade returns)
+        # Trade-level Sharpe (kept for reference): treats every trade as independent,
+        # which overstates it when many positions are opened on the same day.
         arr = np.array(returns)
         avg = float(arr.mean())
         std = float(arr.std(ddof=1)) if n > 1 else 1.0
         trades_per_year = n / years if years > 0 else n
-        sharpe = (avg / std) * np.sqrt(trades_per_year) if std > 0 else 0.0
+        sharpe_trades = (avg / std) * np.sqrt(trades_per_year) if std > 0 else 0.0
+
+        # Portfolio Sharpe: one observation per rebalance period (trades sharing an
+        # entry date, equal-dollar → the period return is their mean return).
+        period_returns = np.array([r for _, r in _period_returns(trades)])
+        n_periods = len(period_returns)
+        p_avg = float(period_returns.mean())
+        p_std = float(period_returns.std(ddof=1)) if n_periods > 1 else 0.0
+        periods_per_year = n_periods / years if years > 0 else n_periods
+        sharpe = (p_avg / p_std) * np.sqrt(periods_per_year) if p_std > 0 else 0.0
 
         # Max drawdown from equity curve
         peak = equity_curve[0]
@@ -240,6 +258,9 @@ class BacktestEngine:
             n_short=sum(1 for t in trades if t.direction == "short"),
             avg_return_pct=round(avg, 6),
             avg_holding_days=round(sum(t.holding_days for t in trades) / n, 1),
+            n_periods=n_periods,
+            sharpe_trade_level=round(float(sharpe_trades), 4),
+            cost_bps=self._cost_bps,
         )
 
 
@@ -249,6 +270,22 @@ class BacktestEngine:
 
 def _parse_date(s: str) -> date:
     return datetime.strptime(s[:10], "%Y-%m-%d").date()
+
+
+def _period_pnl(trades: list[Trade]) -> list[tuple[str, float]]:
+    """``(entry_date, total P&L)`` per rebalance period, chronological."""
+    totals: dict[str, float] = {}
+    for t in trades:
+        totals[t.entry_date] = totals.get(t.entry_date, 0.0) + t.pnl
+    return sorted(totals.items())
+
+
+def _period_returns(trades: list[Trade]) -> list[tuple[str, float]]:
+    """``(entry_date, mean trade return)`` per period — the equal-dollar portfolio return."""
+    groups: dict[str, list[float]] = {}
+    for t in trades:
+        groups.setdefault(t.entry_date, []).append(t.return_pct)
+    return sorted((d, float(np.mean(r))) for d, r in groups.items())
 
 
 def _find_next_trading_day(

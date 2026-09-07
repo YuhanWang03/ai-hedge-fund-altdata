@@ -10,6 +10,13 @@ that file on a machine with open internet (the VPS) with::
 A stale snapshot is harmless for screening: a delisted ticker simply fails
 the metrics fetch and is skipped, a newcomer is missing until the next
 refresh.  The snapshot date is reported alongside every screening run.
+
+Backtests need more: the S&P 500 page also carries a table of every addition
+and removal with its effective date.  ``--refresh`` stores it, and
+:func:`members_at` rewinds today's list through those changes to give the
+constituents on any past date (point-in-time membership).  Without that a
+momentum backtest run on today's list "knows" which names were later added
+because they rallied — a look-ahead bias that flatters the result.
 """
 
 from __future__ import annotations
@@ -19,7 +26,8 @@ import logging
 import re
 import sys
 import urllib.request
-from datetime import date
+from datetime import date, datetime
+from typing import Callable
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -142,7 +150,60 @@ def load_universe(name: str) -> tuple[list[str], str]:
 
 
 def universe_status() -> dict[str, dict[str, object]]:
-    return {name: {"size": len(load_universe(name)[0]), "as_of": load_universe(name)[1], "label": UNIVERSE_LABELS[name]} for name in _BUNDLED}
+    out: dict[str, dict[str, object]] = {}
+    for name in _BUNDLED:
+        tickers, as_of = load_universe(name)
+        changes = load_changes(name)
+        out[name] = {"size": len(tickers), "as_of": as_of, "label": UNIVERSE_LABELS[name],
+                     "changes": len(changes), "history_from": changes[-1]["date"] if changes else None}
+    return out
+
+
+# ------------------------------------------------------- point-in-time membership
+
+def load_changes(name: str) -> list[dict[str, str | None]]:
+    """Recorded additions / removals for ``name`` (newest first), or [] when never refreshed."""
+    if not DATA_PATH.exists():
+        return []
+    try:
+        entry = json.loads(DATA_PATH.read_text(encoding="utf-8")).get(name) or {}
+    except (OSError, ValueError):
+        return []
+    rows = [c for c in (entry.get("changes") or []) if c.get("date")]
+    return sorted(rows, key=lambda c: c["date"], reverse=True)
+
+
+def members_at(name: str, on: str | date) -> tuple[list[str], bool]:
+    """``(tickers, point_in_time)`` — the constituents on ``on``.
+
+    Starts from the refreshed list and undoes every change dated after ``on``
+    (drop what was added, restore what was removed). ``point_in_time`` is False
+    when no change history is stored, in which case today's list is returned
+    and the caller should say so.
+    """
+    on_iso = on.isoformat() if isinstance(on, date) else str(on)[:10]
+    current, as_of = load_universe(name)
+    changes = load_changes(name)
+    if not changes:
+        return current, False
+    if as_of and on_iso >= as_of:
+        return current, True
+    members = set(current)
+    for c in changes:  # newest first
+        if c["date"] <= on_iso:
+            break
+        if c.get("added"):
+            members.discard(c["added"])
+        if c.get("removed"):
+            members.add(c["removed"])
+    return sorted(members), True
+
+
+def membership_lookup(name: str) -> Callable[[str], list[str]] | None:
+    """A ``date → tickers`` function for strategies, or None when no history is stored."""
+    if not load_changes(name):
+        return None
+    return lambda on: members_at(name, on)[0]
 
 
 # ----------------------------------------------------------------- refresh from Wikipedia
@@ -191,6 +252,9 @@ _TICKER_RE = re.compile(r"[A-Z][A-Z0-9.\-]{0,7}")
 
 
 def _symbols_from_table(rows: list[list[str]], header_names: tuple[str, ...]) -> list[str]:
+    head = " ".join(" ".join(r) for r in rows[:2]).lower()
+    if "added" in head and "removed" in head:
+        return []  # the additions/removals history, not a constituent list (see parse_changes)
     for h, header in enumerate(rows[:3]):  # header may follow a caption row
         cols = [c.strip().lower() for c in header]
         col = next((i for i, c in enumerate(cols) if c in header_names), None)
@@ -220,6 +284,67 @@ def parse_constituents(html: str, header_names: tuple[str, ...]) -> list[str]:
         if len(found) > len(best):
             best = found
     return _dedupe(best)
+
+
+_DATE_FORMATS = ("%B %d, %Y", "%b %d, %Y", "%Y-%m-%d", "%d %B %Y", "%d %b %Y")
+
+
+def _parse_date(text: str) -> str | None:
+    text = re.sub(r"\[.*?\]", "", text).replace("\u200b", "").strip().rstrip(".")
+    for fmt in _DATE_FORMATS:
+        try:
+            return datetime.strptime(text, fmt).date().isoformat()
+        except ValueError:
+            continue
+    return None
+
+
+def _clean_symbol(cell: str) -> str | None:
+    cell = cell.replace("\u200b", "").strip()
+    if ":" in cell:
+        cell = cell.rsplit(":", 1)[-1]
+    cell = cell.replace(" ", "")
+    return cell if cell and _TICKER_RE.fullmatch(cell) else None
+
+
+def parse_changes(html: str) -> list[dict[str, str | None]]:
+    """Additions / removals from the S&P 500 page's "Selected changes" table.
+
+    The table has a two-row header (Effective Date | Added | Removed | Reason,
+    then Ticker | Security | Ticker | Security). A date cell spanning several
+    rows (rowspan) shows up here as rows with one cell fewer; those inherit the
+    previous date. Either ticker may be empty. Newest first, like the page.
+    """
+    parser = _Tables()
+    parser.feed(html)
+    best: list[dict[str, str | None]] = []
+    for rows in parser.tables:
+        head = " ".join(" ".join(r) for r in rows[:2]).lower()
+        if "added" not in head or "removed" not in head or "date" not in head:
+            continue
+        out: list[dict[str, str | None]] = []
+        last_date: str | None = None
+        for row in rows:
+            cells = [c.strip() for c in row]
+            if not cells or "added" in " ".join(cells).lower() and "removed" in " ".join(cells).lower():
+                continue  # header rows
+            maybe = _parse_date(cells[0])
+            if maybe:
+                last_date, body = maybe, cells[1:]
+            elif len(cells) in (4, 5) and last_date:
+                body = cells  # rowspan continuation: date omitted
+            else:
+                continue
+            if len(body) < 3:
+                continue
+            added = _clean_symbol(body[0])
+            removed = _clean_symbol(body[2]) if len(body) >= 3 else None
+            if added or removed:
+                out.append({"date": last_date, "added": added, "removed": removed,
+                            "added_name": body[1] or None, "removed_name": body[3] if len(body) > 3 and body[3] else None})
+        if len(out) > len(best):
+            best = out
+    return best
 
 
 def describe_tables(html: str) -> list[str]:
@@ -270,7 +395,21 @@ def refresh_from_wikipedia(names: list[str] | None = None, *, path: Path = DATA_
             logger.warning("universe refresh %s failed: %s", name, errors[name])
             continue
         tickers, url = picked
-        data[name] = {"tickers": tickers, "as_of": date.today().isoformat(), "source": url}
+        entry: dict[str, object] = {"tickers": tickers, "as_of": date.today().isoformat(), "source": url}
+        if name == "sp500":
+            try:
+                changes = parse_changes(_fetch(url, timeout))
+            except Exception as exc:  # noqa: BLE001 — the constituent list is still good without history
+                changes, errors[f"{name}_changes"] = [], f"{type(exc).__name__}: {str(exc)[:80]}"
+            if len(changes) >= 50:
+                entry["changes"] = changes
+                sizes[f"{name}_changes"] = len(changes)
+            else:
+                previous = (data.get(name) or {}).get("changes")
+                if previous:
+                    entry["changes"] = previous  # keep what we had rather than losing history
+                errors.setdefault(f"{name}_changes", f"parsed only {len(changes)} change rows; kept previous {len(previous or [])}")
+        data[name] = entry
         sizes[name] = len(tickers)
     if sizes:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -285,7 +424,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--refresh", action="store_true", help="fetch current constituents from Wikipedia into data/universes.json")
     parser.add_argument("--show", choices=sorted(_BUNDLED), help="print the tickers that will be used for one universe")
     parser.add_argument("--dump", choices=sorted(_BUNDLED), help="print every table header found on the Wikipedia page (parser debugging)")
+    parser.add_argument("--show-at", nargs=2, metavar=("UNIVERSE", "DATE"), help="print the constituents on a past date, e.g. --show-at sp500 2024-09-10")
     args = parser.parse_args(argv)
+    if args.show_at:
+        name, on = args.show_at
+        tickers, pit = members_at(name, on)
+        print(f"{name} on {on} · {len(tickers)} tickers · {'point-in-time' if pit else 'NO HISTORY STORED — this is today’s list; run --refresh'}")
+        print(" ".join(tickers))
     if args.dump:
         for url in _WIKI[args.dump]:
             print(f"== {url}")
@@ -303,7 +448,7 @@ def main(argv: list[str] | None = None) -> int:
         tickers, as_of = load_universe(args.show)
         print(f"{args.show} · {len(tickers)} tickers · as of {as_of}")
         print(" ".join(tickers))
-    if not (args.refresh or args.show or args.dump):
+    if not (args.refresh or args.show or args.dump or args.show_at):
         print(json.dumps(universe_status(), ensure_ascii=False, indent=1))
     return 0
 

@@ -347,7 +347,7 @@ def test_index_universes_resolve_only_for_the_screener(client, monkeypatch):
     job = client.post("/api/lab/backtest", json={"universe": "sp500", "strategy": "momentum"}).json()
     assert job["kind"] == "backtest_job" and job["total"] > 450
     # a 100-ticker custom list (handed over from the screener) is fine for momentum, refused clearly for paid strategies
-    many = [f"T{i}" for i in range(100)]
+    many = [f"T{chr(65 + i // 26)}{chr(65 + i % 26)}" for i in range(100)]  # TAA … TDV: valid-looking symbols
     job = client.post("/api/lab/backtest", json={"universe": "custom", "tickers": many, "strategy": "momentum"}).json()
     assert job["kind"] == "backtest_job" and job["total"] == 100
     res = client.post("/api/lab/backtest", json={"universe": "custom", "tickers": many, "strategy": "pead"})
@@ -544,6 +544,7 @@ def test_backtest_strategies_and_data_feeds(client, monkeypatch, tmp_path):
     body = res.json()
     assert body["strategy"] == "momentum" and body["data_source"] == "yfinance" and body["fd_cost_usd"] == 0 and body["fd_requests"] == {}
     assert body["metrics"]["n_trades"] >= 5 and body["params"]["lookback_days"] == 252 and body["notes"]["price_failures"] == {}
+    assert body["params"]["cost_bps"] == 10 and body["metrics"]["cost_bps"] == 10 and body["metrics"]["n_periods"] >= 5
     # SPY buy-and-hold over the same span, and the strategy's excess over it
     assert body["benchmark"]["ticker"] == "SPY" and body["benchmark"]["start"] == body["trades"][0]["entry_date"] and body["benchmark"]["total_return_pct"] > 0
     assert abs(body["excess_return_pct"] - (body["metrics"]["total_return_pct"] - body["benchmark"]["total_return_pct"])) < 1e-6
@@ -570,6 +571,25 @@ def test_backtest_strategies_and_data_feeds(client, monkeypatch, tmp_path):
     assert job["status"] == "completed" and job["result"]["fd_cost_usd"] == 0.32 and job["result"]["params"]["lean"] is True
     assert client.get(f"/api/lab/screening/jobs/{job['job_id']}").status_code == 404  # wrong kind
     assert client.get("/api/lab/runs?kind=backtest").json()["items"][0]["strategy"] == "committee"
+
+
+def test_momentum_index_backtest_uses_point_in_time_members_when_history_exists(monkeypatch, tmp_path):
+    import json
+    from v2.screening import universes as U
+
+    path = tmp_path / "universes.json"
+    monkeypatch.setattr(U, "DATA_PATH", path)
+    body = workspace.BacktestInput(universe="sp500", strategy="momentum", history_days=200, holding_days=63)
+    tickers, meta = workspace._backtest_universe(body)
+    assert meta["membership"] == {"point_in_time": False, "changes": 0} and len(tickers) > 450
+    assert workspace._build_strategy(body).universe_at is None
+
+    changes = [{"date": "2026-06-01", "added": "NEWCO", "removed": "OLDCO"}]
+    path.write_text(json.dumps({"sp500": {"tickers": ["AAA", "BBB", "NEWCO"], "as_of": "2026-09-01", "changes": changes}}))
+    tickers, meta = workspace._backtest_universe(body)
+    assert meta["membership"]["point_in_time"] is True and "OLDCO" in tickers and "NEWCO" in tickers  # union over the window
+    strat = workspace._build_strategy(body)
+    assert strat.universe_at is not None and strat.universe_at("2026-05-01") == ["AAA", "BBB", "OLDCO"] and "NEWCO" in strat.universe_at("2026-07-01")
 
 
 def test_backtest_data_bundle_opens_fd_only_when_needed():

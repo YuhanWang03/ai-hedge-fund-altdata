@@ -218,6 +218,8 @@ class BacktestInput(BaseModel):
     holding_days: int = Field(default=5, ge=1, le=252)
     capital: float = Field(default=100_000, gt=0, le=100_000_000)
     per_trade: float = Field(default=10_000, gt=0, le=10_000_000)
+    #: one-way transaction cost, basis points (10 = 0.1 % per side)
+    cost_bps: float = Field(default=10, ge=0, le=200)
     # pead
     earnings_limit: int = Field(default=8, ge=1, le=20)
     # momentum / insider / committee: how far back signals are generated
@@ -239,7 +241,7 @@ class BacktestInput(BaseModel):
     filing_lag_days: int = Field(default=45, ge=0, le=120)
 
     def params(self) -> dict:
-        common = {"holding_days": self.holding_days, "capital": self.capital, "per_trade": self.per_trade, "data_source": self.data_source}
+        common = {"holding_days": self.holding_days, "capital": self.capital, "per_trade": self.per_trade, "cost_bps": self.cost_bps, "data_source": self.data_source}
         extra = {
             "pead": {"earnings_limit": self.earnings_limit},
             "momentum": {"history_days": self.history_days, "top_n": self.top_n, "lookback_days": self.lookback_days, "skip_days": self.skip_days, "near_high_pct": self.near_high_pct},
@@ -307,8 +309,13 @@ def _build_strategy(body: BacktestInput, on_tick=None):
     if body.strategy == "pead":
         return PEADStrategy(earnings_limit=body.earnings_limit, holding_days=body.holding_days)
     if body.strategy == "momentum":
+        universe_at = None
+        if body.universe in INDEX_UNIVERSES:
+            from v2.screening.universes import membership_lookup
+
+            universe_at = membership_lookup(body.universe)  # None when no change history is stored
         return MomentumStrategy(lookback_days=body.lookback_days, skip_days=body.skip_days, holding_days=body.holding_days, top_n=body.top_n,
-                                history_days=body.history_days, near_high_pct=body.near_high_pct, progress=on_tick)
+                                history_days=body.history_days, near_high_pct=body.near_high_pct, progress=on_tick, universe_at=universe_at)
     if body.strategy == "insider":
         return InsiderClusterStrategy(window_days=body.window_days, min_insiders=body.min_insiders, min_value_usd=body.min_value_usd,
                                       holding_days=body.holding_days, history_days=body.history_days, progress=on_tick)
@@ -368,20 +375,48 @@ def _backtest_total(body: BacktestInput, n_tickers: int) -> int:
     return n_tickers * max(1, len(rebalance_dates(today=datetime.now(timezone.utc).date(), history_days=body.history_days, step_trading_days=body.holding_days)))
 
 
+def _backtest_universe(body: BacktestInput) -> tuple[list[str], dict]:
+    """Tickers to load prices for, plus how the universe was built.
+
+    For an index pool with stored change history the list is the union of the
+    constituents on every rebalance date over the history window, so names that
+    have since left the index are still ranked in the periods they belonged to
+    (prices permitting). The strategy filters per date with ``universe_at``.
+    """
+    tickers, meta = resolve_universe(body.universe, body.tickers, limit=_backtest_limit(body))
+    info: dict = {"point_in_time": False, "changes": 0}
+    if body.strategy == "momentum" and body.universe in INDEX_UNIVERSES:
+        from v2.backtesting.strategies import rebalance_dates
+        from v2.screening.universes import load_changes, members_at
+
+        changes = load_changes(body.universe)
+        info["changes"] = len(changes)
+        if changes:
+            today = datetime.now(timezone.utc).date()
+            union: dict[str, None] = dict.fromkeys(tickers)
+            for d in rebalance_dates(today=today, history_days=body.history_days, step_trading_days=body.holding_days) + [today.isoformat()]:
+                for t in members_at(body.universe, d)[0]:
+                    union.setdefault(t, None)
+            tickers = list(union)[:BIG_LIMIT + 100]
+            info.update({"point_in_time": True, "history_from": changes[-1]["date"], "tickers_incl_former": len(tickers)})
+    return tickers, {**meta, "membership": info}
+
+
 def _run_backtest(body: BacktestInput, on_tick=None) -> dict:
     from v2.backtesting import BacktestEngine
 
     _check_backtest_size(body)
-    tickers, meta = resolve_universe(body.universe, body.tickers, limit=_backtest_limit(body))
+    tickers, meta = _backtest_universe(body)
     with _backtest_data(body) as data:
         data.progress = on_tick
         strategy = _build_strategy(body, on_tick)
-        result = BacktestEngine(capital=body.capital, per_trade=body.per_trade).run(strategy, tickers, data)
+        result = BacktestEngine(capital=body.capital, per_trade=body.per_trade, cost_bps=body.cost_bps).run(strategy, tickers, data)
         benchmark = _benchmark(data, result.trades)
         fd_requests = _fd_bill(data, body.data_source)
         notes = {"price_failures": dict(data.prices.failed), "errors": dict(getattr(strategy, "errors", {}) or {}),
                  "rebalance_dates": list(getattr(strategy, "dates", []) or []), "periods": list(getattr(strategy, "periods", []) or []),
-                 "aborted": getattr(strategy, "aborted", None)}
+                 "aborted": getattr(strategy, "aborted", None), "no_data": list(getattr(strategy, "no_data", []) or []),
+                 "membership": meta.get("membership")}
     excess = None
     if benchmark and result.metrics:
         excess = round(result.metrics.total_return_pct - benchmark["total_return_pct"], 6)
@@ -594,7 +629,7 @@ async def run_backtest(body: BacktestInput, background: bool | None = None) -> d
     """Quick runs answer inline; the committee strategy (or ?background=true) returns a job to poll."""
     try:
         _check_backtest_size(body)
-        tickers, _ = await run_in_threadpool(resolve_universe, body.universe, body.tickers, limit=_backtest_limit(body))
+        tickers, _ = await run_in_threadpool(_backtest_universe, body)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     total = _backtest_total(body, len(tickers))

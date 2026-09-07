@@ -97,7 +97,18 @@ purchases), and `committee` (the 13 personas vote at every rebalance date over
 every rebalance date's votes and picks). Momentum is price-only, so it may
 run over a whole index universe (sp500 / nasdaq100 / dow30, as a job); the
 paid strategies keep the 60-ticker cap. Every result carries `benchmark`
-(SPY buy-and-hold from first entry to last exit) and `excess_return_pct`. `data_source` picks where daily
+(SPY buy-and-hold from first entry to last exit) and `excess_return_pct`.
+Metrics are portfolio-level: `sharpe_ratio` and `max_drawdown_pct` use one
+observation per rebalance period (trades sharing an entry date), with the
+old per-trade figure kept as `sharpe_trade_level`; `cost_bps` (default 10,
+one-way) is charged on both sides of every trade.
+
+**Point-in-time constituents.** `python -m v2.screening.universes --refresh`
+also stores the S&P 500 page's additions/removals table; `members_at(name,
+date)` rewinds today's list through it, and the momentum backtest on an
+index pool ranks only that date's members (loading prices for former members
+too, reporting those without data). Without the table the run is flagged as
+survivorship-biased in the UI. `--show-at sp500 2024-09-10` prints a past list. `data_source` picks where daily
 prices come from — yfinance is free, FD bills per 90-day chunk — while
 earnings, insider trades and fundamentals are always Financial Datasets;
 `fd_requests` / `fd_cost_usd` on the result say what a run cost, and persona

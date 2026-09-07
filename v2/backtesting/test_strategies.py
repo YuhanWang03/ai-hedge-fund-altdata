@@ -114,6 +114,24 @@ def test_momentum_ranks_top_n_and_never_looks_ahead():
     assert picks and all(s.ticker == "UP" and s.metadata["pct_from_52w_high"] >= -0.05 for s in picks)
 
 
+def test_momentum_ranks_only_the_constituents_of_each_date():
+    """A name that joined the index later must not be bought before it joined."""
+    start = TODAY - timedelta(days=1200)
+    series = {"OLD": _bars(lambda i: 100 * (1.001 ** i), start, 800), "NEW": _bars(lambda i: 100 * (1.003 ** i), start, 800), "GONE": _bars(lambda i: 100, start, 5)}
+    joined = (TODAY - timedelta(days=120)).isoformat()
+    members = lambda d: ["OLD", "GONE"] + (["NEW"] if d >= joined else [])  # noqa: E731
+    strat = MomentumStrategy(lookback_days=252, skip_days=21, holding_days=21, top_n=1, history_days=365, universe_at=members)
+    signals = strat.generate_signals(list(series), _data(series))
+    before = [s for s in signals if s.metadata["signal_date"] < joined]
+    after = [s for s in signals if s.metadata["signal_date"] >= joined]
+    assert before and all(s.ticker == "OLD" for s in before)   # NEW had the higher momentum but was not a member yet
+    assert after and all(s.ticker == "NEW" for s in after)
+    assert strat.no_data == ["GONE"]                            # a former member without a usable series is reported
+    first = strat.periods[0]
+    assert first["pool"] == 2 and first["priced"] == 1 and first["ranked"] == 1 and first["picked"] == ["OLD"]
+    assert strat.periods[-1]["pool"] == 3 and strat.periods[-1]["picked"] == ["NEW"]
+
+
 def test_momentum_rejects_bad_params():
     with pytest.raises(ValueError):
         MomentumStrategy(lookback_days=20, skip_days=21)
