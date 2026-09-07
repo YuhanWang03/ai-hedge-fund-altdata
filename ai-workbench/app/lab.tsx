@@ -80,7 +80,7 @@ function useLabData<T>(path: string | null, deps: unknown[] = []) {
   return { data, error, reload };
 }
 
-function Field({ label, children, hint }: { label: string; children: React.ReactNode; hint?: string }) { return <label className="lab-field"><span>{label}</span>{children}{hint ? <small>{hint}</small> : null}</label> }
+function Field({ label, children, hint, block }: { label: string; children: React.ReactNode; hint?: string; block?: boolean }) { const inner = <><span>{label}</span>{children}{hint ? <small>{hint}</small> : null}</>; return block ? <div className="lab-field">{inner}</div> : <label className="lab-field">{inner}</label> }
 function NumberInput({ value, onChange, min, max, step }: { value: string; onChange: (v: string) => void; min?: number; max?: number; step?: number }) { return <input type="number" value={value} min={min} max={max} step={step} onChange={e => onChange(e.target.value)}/> }
 function Chips<T extends string>({ options, value, onChange }: { options: { id: T; label: string }[]; value: T; onChange: (v: T) => void }) { return <div className="lab-chips">{options.map(o => <button key={o.id} type="button" className={o.id === value ? 'active' : ''} onClick={() => onChange(o.id)}>{o.label}</button>)}</div> }
 function UniversePicker({ universe, setUniverse, tickers, setTickers, exclude = [], info }: { universe: Universe; setUniverse: (u: Universe) => void; tickers: string; setTickers: (t: string) => void; exclude?: Universe[]; info?: Record<string, UniverseInfo> | null }) {
@@ -119,7 +119,7 @@ export function LabPage({ tool, selectTool, ask }: { tool: LabTool; selectTool: 
     scoreboard: ['观察记分板', '委员会每一票在 1 个月 / 3 个月后对不对：无前视的逐人命中率。'],
     runs: ['运行记录', '所有工具的历史运行，点开可原样重看。'],
   };
-  return <div className="page lab-page">
+  return <div className={`page lab-page${tool === 'screening' ? ' lab-page-fill' : ''}`}>
     <div className="page-heading"><div><h1>{heading[tool][0]}</h1><p>{heading[tool][1]}</p></div><span className="lab-tag">ISOLATED LAB</span></div>
     {tool === 'overview' && <OverviewTool {...common}/>}
     {tool === 'screening' && <ScreeningTool {...common} result={results.screening as ScreeningResult | undefined} setResult={r => setResult('screening', r)} onHand={hand}/>}
@@ -225,15 +225,19 @@ function ScreeningTool({ result, setResult, onHand, watchlist, refreshWatchlist,
     } catch (e) { setError(errorText(e)) } finally { setBusy(false); setJob(null) }
   };
   const chosen = result ? result.candidates.filter(c => picked.has(c.ticker)).map(c => c.ticker) : [];
-  return <div className="lab-tool">
-    <section className="surface lab-config"><div className="surface-header"><div><h2>筛选条件</h2><span>全部阈值可改，缺数据的股票不通过</span></div></div>
+  return <div className="lab-tool lab-tool-fill lab-big">
+    <section className="surface lab-config lab-config-fill"><div className="surface-header"><div><h2>筛选条件</h2><span>全部阈值可改，缺数据的股票不通过</span></div></div>
+      <div className="lab-config-body lab-scroll">
       <UniversePicker universe={universe} setUniverse={setUniverse} tickers={tickers} setTickers={setTickers} info={info.data?.items}/>
       <Field label="数据源" hint={dataSource === 'yfinance' ? '市值、营收增长、毛利率来自 yfinance，免费；口径：营收增长为最近一季同比，毛利率为 TTM' : `Financial Datasets 按请求计费，约 ${usd(pricing.data?.prices_usd.financial_metrics ?? 0.02)}/只`}><Chips options={[{ id: 'yfinance', label: 'yfinance（免费）' }, { id: 'fd', label: 'Financial Datasets（付费）' }]} value={dataSource} onChange={setDataSource}/></Field>
       {dataSource === 'fd' && <Field label="候选的华尔街财报预期" hint={`每只候选约 ${usd(pricing.data?.prices_usd.earnings ?? 0.02)}`}><Chips options={[{ id: 'no', label: '不取' }, { id: 'yes', label: '取' }]} value={withEarnings ? 'yes' : 'no'} onChange={v => setWithEarnings(v === 'yes')}/></Field>}
-      <Field label={`筛选条件（已启用 ${enabled.size}）`} hint="勾选的条件全部满足才通过；某只股票缺该字段即不通过该条。yfinance 可能缺少部分财务比率，缺失的会显示为 —。"><div className="lab-criteria">{CRITERIA_UI.map(c => { const meta = criteria.data?.items[c.field]; const on = enabled.has(c.field); const unit = meta?.unit || 'x'; return <div key={c.field} className={on ? 'on' : ''}><input type="checkbox" checked={on} onChange={() => setEnabled(cur => { const next = new Set(cur); if (next.has(c.field)) next.delete(c.field); else next.add(c.field); return next })}/><span className="lab-crit-label">{meta?.label || c.field}</span><button type="button" className="lab-op" disabled={!on} onClick={() => setOps(cur => ({ ...cur, [c.field]: cur[c.field] === 'gte' ? 'lte' : 'gte' }))}>{ops[c.field] === 'gte' ? '≥' : '≤'}</button><input type="number" disabled={!on} value={values[c.field]} onChange={e => setValues(cur => ({ ...cur, [c.field]: e.target.value }))}/><small>{unitLabel(unit, c.field)}</small></div> })}</div></Field>
+      <Field block label={`筛选条件（已启用 ${enabled.size}）`} hint="勾选的条件全部满足才通过；某只股票缺该字段即不通过该条。yfinance 可能缺少部分财务比率，缺失的会显示为 —。"><div className="lab-criteria">{CRITERIA_UI.map(c => { const meta = criteria.data?.items[c.field]; const on = enabled.has(c.field); const unit = meta?.unit || 'x'; return <div key={c.field} className={on ? 'on' : ''}><input type="checkbox" checked={on} onChange={() => setEnabled(cur => { const next = new Set(cur); if (next.has(c.field)) next.delete(c.field); else next.add(c.field); return next })}/><span className="lab-crit-label">{meta?.label || c.field}</span><button type="button" className="lab-op" disabled={!on} onClick={() => setOps(cur => ({ ...cur, [c.field]: cur[c.field] === 'gte' ? 'lte' : 'gte' }))}>{ops[c.field] === 'gte' ? '≥' : '≤'}</button><input type="number" disabled={!on} value={values[c.field]} onChange={e => setValues(cur => ({ ...cur, [c.field]: e.target.value }))}/><small>{unitLabel(unit, c.field)}</small></div> })}</div></Field>
+      </div>
+      <div className="lab-config-foot">
       <p className="lab-note">预计 Financial Datasets 费用：{estMetrics > 0 ? `≈ ${usd(estMetrics)}（${poolSize} 次指标请求）` : '$0.00'}{withEarnings ? ` + 每只候选 ${usd(pricing.data?.prices_usd.earnings ?? 0.02)}` : ''}。价格来自 /api/lab/committee/pricing，可用 FD_PRICES 环境变量校正。</p>
       <button className="run-button" disabled={busy || !enabled.size || (universe === 'custom' && !parseTickers(tickers).length)} onClick={() => void run()}>{busy ? (job ? `筛选中… ${job.done} / ${job.total}` : '筛选中…') : '运行筛选'}</button>
       {job && <div className="lab-progress"><i style={{ width: `${job.total ? Math.round((job.done / job.total) * 100) : 0}%` }}/></div>}
+      </div>
     </section>
     <section className="surface lab-result lab-result-clamp">
       {error ? <ErrorBox text={error}/> : !result ? <Empty glyph="⌕" title="等待筛选" text="选一个股票池、勾选条件，结果是全部通过的候选名单。可以整单送进委员会。"/> : <>
@@ -289,7 +293,7 @@ function CommitteeTool({ result, setResult, handoff, clearHandoff, onHand, watch
         <Field label={`参与投票的投资人（${selected.length}/${personas.length}）`}><div className="persona-chips">{personas.map(p => <button key={p.key} type="button" className={selected.includes(p.key) ? 'active' : ''} title={p.style} onClick={() => setSelected(cur => cur.includes(p.key) ? cur.filter(k => k !== p.key) : [...cur, p.key])}>{p.name_zh || p.name}</button>)}<button type="button" className="lab-link" onClick={() => setSelected(allSelected ? [] : personas.map(p => p.key))}>{allSelected ? '全不选' : '全选'}</button></div></Field>
         <Field label="数据"><Chips options={[{ id: 'cache', label: '复用当日快照' }, { id: 'fresh', label: '重新取数' }]} value={useCache ? 'cache' : 'fresh'} onChange={v => setUseCache(v === 'cache')}/></Field>
         <Field label="省流模式" hint={lean ? '跳过新闻和内部人交易两路付费请求；只影响几位投资人的情绪小分项' : '取全部数据，每只多两次付费请求'}><Chips options={[{ id: 'lean', label: '开（省流）' }, { id: 'full', label: '关（全量）' }]} value={lean ? 'lean' : 'full'} onChange={v => setLean(v === 'lean')}/></Field>
-        <p className="lab-note">预计 Financial Datasets 费用：每只约 {usd(perTicker)}{knownCount ? `，${knownCount} 只约 ${usd((perTicker ?? 0) * knownCount)}` : ''}；当日已有快照的股票不再计费。</p>
+      <p className="lab-note">预计 Financial Datasets 费用：每只约 {usd(perTicker)}{knownCount ? `，${knownCount} 只约 ${usd((perTicker ?? 0) * knownCount)}` : ''}；当日已有快照的股票不再计费。</p>
         <button className="run-button" disabled={busy || !selected.length || (source === 'tickers' && !parseTickers(tickers).length)} onClick={() => void run()}>{busy ? '评审中…（首次取数约 5 秒/只）' : '开始评审'}</button>
         {history.data?.items.length ? <div className="lab-history"><span>历史运行</span>{history.data.items.map(h => <button key={h.run_id} type="button" onClick={() => void reopen(h.run_id)} className={result?.run_id === h.run_id ? 'active' : ''}>{when(h.created_at)} · {COMMITTEE_SOURCES.find(s => s.id === h.source)?.label || h.source} · {h.n_tickers} 只</button>)}</div> : null}
       </section>
