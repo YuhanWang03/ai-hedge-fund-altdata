@@ -382,8 +382,13 @@ def _benchmark(data, trades, ticker: str = "SPY") -> dict | None:
             "annualized_return_pct": round(annualized, 6) if annualized is not None else None}
 
 
-def _yearly(data, trades, capital: float, ticker: str = "SPY") -> list[dict]:
-    """Calendar-year rows: strategy return vs. buy-and-hold ``ticker`` over the same span, and the excess."""
+def _yearly(data, trades, capital: float, ticker: str = "SPY", deployed_usd: float | None = None) -> list[dict]:
+    """Calendar-year rows: strategy return vs. buy-and-hold ``ticker`` over the same span, and the excess.
+
+    With ``deployed_usd`` each row also carries the year's P&L on the deployed
+    amount (``return_on_deployed_pct``) and its excess, undoing the dilution /
+    leverage of ``per_trade × positions ≠ capital``.
+    """
     from v2.backtesting import yearly_breakdown
 
     rows = yearly_breakdown(trades, capital)
@@ -391,7 +396,47 @@ def _yearly(data, trades, capital: float, ticker: str = "SPY") -> list[dict]:
         bench = _price_return(data, ticker, row["start"], row["end"])
         row["benchmark_pct"] = round(bench, 6) if bench is not None else None
         row["excess_pct"] = round(row["return_pct"] - bench, 6) if bench is not None and row["return_pct"] is not None else None
+        if deployed_usd:
+            on_dep = row["pnl"] / deployed_usd
+            row["return_on_deployed_pct"] = round(on_dep, 6)
+            row["excess_on_deployed_pct"] = round(on_dep - bench, 6) if bench is not None else None
     return rows
+
+
+def _deployment(trades, capital: float, per_trade: float, benchmark: dict | None) -> dict | None:
+    """How much of ``capital`` the strategy actually put to work, and the same run measured on that amount.
+
+    The engine sizes every position at ``per_trade`` and never checks capital, so
+    5 positions × $10k on $100k leaves half the money idle (returns on capital are
+    diluted) while 30 × $10k is 3× leverage (inflated). ``on_deployed`` restates
+    return, annualized return, drawdown and excess over the benchmark on the peak
+    deployed amount, which is the fair comparison against a fully invested SPY.
+    """
+    from v2.backtesting.engine import _period_pnl
+
+    if not trades:
+        return None
+    per_period: dict[str, int] = {}
+    for t in trades:
+        per_period[t.entry_date] = per_period.get(t.entry_date, 0) + 1
+    positions = max(per_period.values())
+    deployed = positions * per_trade
+    if deployed <= 0:
+        return None
+    equity, peak, max_dd = deployed, deployed, 0.0
+    for _, pnl in _period_pnl(trades):
+        equity += pnl
+        peak = max(peak, equity)
+        max_dd = max(max_dd, (peak - equity) / peak if peak > 0 else 0.0)
+    total = (equity - deployed) / deployed
+    start, end = min(t.entry_date for t in trades), max(t.exit_date for t in trades)
+    years = (datetime.fromisoformat(end) - datetime.fromisoformat(start)).days / 365.25
+    annualized = (1 + total) ** (1 / years) - 1 if years >= 0.1 and total > -1 else None
+    return {"positions_per_period": positions, "per_trade": per_trade, "deployed_usd": round(deployed, 2), "capital": capital,
+            "utilization": round(deployed / capital, 4),
+            "on_deployed": {"total_return_pct": round(total, 6), "annualized_return_pct": round(annualized, 6) if annualized is not None else None,
+                            "max_drawdown_pct": round(max_dd, 6),
+                            "excess_return_pct": round(total - benchmark["total_return_pct"], 6) if benchmark else None}}
 
 
 def _backtest_total(body: BacktestInput, n_tickers: int) -> int:
@@ -445,7 +490,8 @@ def _run_backtest(body: BacktestInput, on_tick=None) -> dict:
         strategy = _build_strategy(body, on_tick)
         result = BacktestEngine(capital=body.capital, per_trade=body.per_trade, cost_bps=body.cost_bps).run(strategy, tickers, data)
         benchmark = _benchmark(data, result.trades)
-        yearly = _yearly(data, result.trades, body.capital)
+        deployment = _deployment(result.trades, body.capital, body.per_trade, benchmark)
+        yearly = _yearly(data, result.trades, body.capital, deployed_usd=deployment["deployed_usd"] if deployment else None)
         fd_requests = _fd_bill(data, body.data_source)
         notes = {"price_failures": dict(data.prices.failed), "errors": dict(getattr(strategy, "errors", {}) or {}),
                  "rebalance_dates": list(getattr(strategy, "dates", []) or []), "periods": list(getattr(strategy, "periods", []) or []),
@@ -456,7 +502,7 @@ def _run_backtest(body: BacktestInput, on_tick=None) -> dict:
         excess = round(result.metrics.total_return_pct - benchmark["total_return_pct"], 6)
     return {"kind": "backtest", "strategy": body.strategy, "data_source": body.data_source, "universe": meta["universe"], "universe_as_of": meta.get("as_of"),
             "tickers": tickers, "params": body.params(), "fd_requests": fd_requests, "fd_cost_usd": fd_cost(fd_requests), "notes": notes,
-            "benchmark": benchmark, "excess_return_pct": excess, "yearly": yearly, **result.model_dump()}
+            "benchmark": benchmark, "excess_return_pct": excess, "yearly": yearly, "deployment": deployment, **result.model_dump()}
 
 
 # ------------------------------------------------------------------ momentum parameter sweep
@@ -465,8 +511,10 @@ class SweepInput(BaseModel):
     """Grid of momentum variants evaluated on one shared price load.
 
     Every combination sees the same universe (point-in-time when history is
-    stored), the same history window, costs and sizing; only ``top_n``,
-    ``holding_days`` and the 52-week-high filter vary.
+    stored), the same history window and costs; only ``top_n``,
+    ``holding_days`` and the 52-week-high filter vary. Each combination is
+    fully invested — ``per_trade = capital / top_n`` — so a 30-name variant is
+    not silently 3× levered against a 10-name one.
     """
 
     universe: Universe = "sp500"
@@ -476,7 +524,6 @@ class SweepInput(BaseModel):
     lookback_days: int = Field(default=252, ge=20, le=504)
     skip_days: int = Field(default=21, ge=0, le=120)
     capital: float = Field(default=100_000, gt=0, le=100_000_000)
-    per_trade: float = Field(default=10_000, gt=0, le=10_000_000)
     cost_bps: float = Field(default=10, ge=0, le=200)
     top_ns: list[int] = Field(default=[10, 20, 30], min_length=1, max_length=6)
     holding_days_list: list[int] = Field(default=[21, 42, 63], min_length=1, max_length=6)
@@ -507,14 +554,15 @@ class SweepInput(BaseModel):
                 for nh in self.near_high_pcts for h in self.holding_days_list for n in self.top_ns]
 
     def as_backtest(self, top_n: int | None = None, holding_days: int | None = None, near_high_pct: float | None = None) -> BacktestInput:
+        n = top_n or self.top_ns[0]
         return BacktestInput(universe=self.universe, tickers=self.tickers or ["AAPL"], strategy="momentum", data_source=self.data_source,
-                             holding_days=holding_days or self.holding_days_list[0], capital=self.capital, per_trade=self.per_trade, cost_bps=self.cost_bps,
+                             holding_days=holding_days or self.holding_days_list[0], capital=self.capital, per_trade=self.capital / n, cost_bps=self.cost_bps,
                              history_days=self.history_days, top_n=top_n or self.top_ns[0], lookback_days=self.lookback_days, skip_days=self.skip_days,
                              near_high_pct=near_high_pct)
 
     def params(self) -> dict:
         return {"history_days": self.history_days, "lookback_days": self.lookback_days, "skip_days": self.skip_days, "capital": self.capital,
-                "per_trade": self.per_trade, "cost_bps": self.cost_bps, "data_source": self.data_source,
+                "sizing": "capital / top_n", "cost_bps": self.cost_bps, "data_source": self.data_source,
                 "grid": {"top_ns": self.top_ns, "holding_days_list": self.holding_days_list, "near_high_pcts": self.near_high_pcts}}
 
 
@@ -538,17 +586,16 @@ def _run_sweep(body: SweepInput, on_tick=None) -> dict:
             tick(i)
             data.prices.closes(t, start)
         data.prices.closes("SPY", start)
-        engine = BacktestEngine(capital=body.capital, per_trade=body.per_trade, cost_bps=body.cost_bps)
         rows = []
         no_data: list[str] = []
         for k, combo in enumerate(combos):
             bt = body.as_backtest(**combo)
             strategy = _build_strategy(bt)
-            result = engine.run(strategy, tickers, data)
+            result = BacktestEngine(capital=bt.capital, per_trade=bt.per_trade, cost_bps=bt.cost_bps).run(strategy, tickers, data)
             benchmark = _benchmark(data, result.trades)
             m = result.metrics
             no_data = list(strategy.no_data)
-            row = {**combo, "n_trades": m.n_trades if m else 0, "n_periods": m.n_periods if m else 0,
+            row = {**combo, "per_trade": round(bt.per_trade, 2), "n_trades": m.n_trades if m else 0, "n_periods": m.n_periods if m else 0,
                    "total_return_pct": m.total_return_pct if m else None, "annualized_return_pct": m.annualized_return_pct if m else None,
                    "sharpe_ratio": m.sharpe_ratio if m else None, "max_drawdown_pct": m.max_drawdown_pct if m else None,
                    "win_rate": m.win_rate if m else None, "avg_return_pct": m.avg_return_pct if m else None,

@@ -105,13 +105,18 @@ one-way) is charged on both sides of every trade. `yearly` breaks the run
 into calendar years (trades grouped by entry year): periods, trades, P&L,
 return on the equity at the start of the year, SPY over the same span and
 the excess — the quick way to see whether the alpha is spread out or comes
-from one year.
+from one year. `deployment` reports capital utilisation — the engine sizes
+every position at `per_trade` and never checks capital, so 5 × $10k on $100k
+leaves half idle (diluted returns) and 30 × $10k is 3× leverage — and
+restates return, annualized return, drawdown and excess on the peak deployed
+amount (`on_deployed`; the yearly rows carry `return_on_deployed_pct` too).
 
 `POST /api/lab/backtest/sweep` runs a momentum parameter grid as one job:
 prices are loaded once (every ticker, plus SPY) and each combination of
 `top_ns` × `holding_days_list` × `near_high_pcts` (defaults 10/20/30 ×
 21/42/63 × none/10 %) is backtested against the in-memory cache with the
-same universe (point-in-time when history is stored), costs and sizing.
+same universe (point-in-time when history is stored) and costs, each fully
+invested (`per_trade = capital / top_n`) so the variants are comparable.
 The result (`kind: "sweep"`) lists one row per combination — total and
 annualized return, per-period Sharpe, max drawdown, win rate, SPY and
 excess — and the UI sorts it by Sharpe / return / excess / drawdown. Picking
@@ -142,7 +147,7 @@ fields (e.g. ROIC, payout) may be empty for part of the universe.
 POST /api/lab/screening              {universe, tickers?, data_source: yfinance|fd, with_earnings?, rules: [{field, op: gte|lte, value}]}
 GET  /api/lab/screening/criteria     the 22 rule fields (label, unit, source) + the default rule set
 POST /api/lab/backtest               {universe, tickers?, strategy: pead|momentum|insider|committee, data_source: yfinance|fd, holding_days, capital, per_trade, …}
-POST /api/lab/backtest/sweep         momentum grid on one price load: {universe, tickers?, history_days, top_ns, holding_days_list, near_high_pcts, cost_bps, …} → job
+POST /api/lab/backtest/sweep         momentum grid on one price load: {universe, tickers?, history_days, capital, top_ns, holding_days_list, near_high_pcts, cost_bps, …} → job
 GET  /api/lab/backtest/jobs/{id}     poll a background backtest or sweep (the committee strategy always runs as one)
 POST /api/lab/event-study            {universe, tickers?, data_source: yfinance|fd, earnings_limit, n_bootstrap, require_eps_surprise, dedupe, group_by: surprise|reaction|source}
 GET  /api/lab/signals                production anomaly thresholds, read-only

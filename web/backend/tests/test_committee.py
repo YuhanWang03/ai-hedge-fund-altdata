@@ -607,6 +607,14 @@ def test_backtest_result_carries_a_yearly_table_against_the_benchmark(client, mo
         assert r["start"][:4] == r["year"] and r["end"] >= r["start"]
     # equity chains: start of year n+1 = start of year n + that year's P&L
     assert abs(yearly[1]["start_equity"] - (yearly[0]["start_equity"] + yearly[0]["pnl"])) < 0.02
+    # 2 positions × $10k on $100k: 20 % utilisation; the same P&L on the deployed $20k is 5× the diluted figure
+    dep = body["deployment"]
+    assert dep["positions_per_period"] == 2 and dep["deployed_usd"] == 20_000 and dep["utilization"] == 0.2
+    assert abs(dep["on_deployed"]["total_return_pct"] - body["metrics"]["total_return_pct"] * 5) < 1e-4
+    assert dep["on_deployed"]["max_drawdown_pct"] >= body["metrics"]["max_drawdown_pct"]
+    assert abs(dep["on_deployed"]["excess_return_pct"] - (dep["on_deployed"]["total_return_pct"] - body["benchmark"]["total_return_pct"])) < 1e-6
+    for r in yearly:
+        assert abs(r["return_on_deployed_pct"] - r["pnl"] / 20_000) < 1e-6 and abs(r["excess_on_deployed_pct"] - (r["return_on_deployed_pct"] - r["benchmark_pct"])) < 1e-6
 
 
 def test_momentum_sweep_runs_the_grid_on_one_price_load(client, monkeypatch):
@@ -647,8 +655,9 @@ def test_momentum_sweep_runs_the_grid_on_one_price_load(client, monkeypatch):
     assert job["status"] == "completed", job
     result = job["result"]
     assert result["kind"] == "sweep" and result["strategy"] == "momentum" and result["fd_cost_usd"] == 0
-    assert result["params"]["grid"] == grid and result["params"]["cost_bps"] == 5
+    assert result["params"]["grid"] == grid and result["params"]["cost_bps"] == 5 and result["params"]["sizing"] == "capital / top_n"
     rows = result["rows"]
+    assert {r["per_trade"] for r in rows} == {100_000.0, 50_000.0}  # fully invested: capital / top_n
     assert len(rows) == 8 and {(r["top_n"], r["holding_days"], r["near_high_pct"]) for r in rows} == {(n, h, nh) for n in (1, 2) for h in (21, 42) for nh in (None, 0.10)}
     # one price fetch per ticker (+ SPY) for the whole grid
     assert sorted(calls) == ["AAA", "BBB", "CCC", "SPY"]
