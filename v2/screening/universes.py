@@ -99,10 +99,21 @@ SP500: list[str] = [
 _BUNDLED: dict[str, list[str]] = {"sp500": SP500, "nasdaq100": NASDAQ100, "dow30": DOW30}
 UNIVERSE_LABELS: dict[str, str] = {"sp500": "标普 500", "nasdaq100": "纳斯达克 100", "dow30": "道琼斯 30"}
 
-_WIKI = {
-    "sp500": ("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies", ("symbol", "ticker")),
-    "nasdaq100": ("https://en.wikipedia.org/wiki/Nasdaq-100", ("ticker", "symbol")),
-    "dow30": ("https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average", ("symbol", "ticker")),
+#: candidate pages per index, tried in order — Wikipedia moves constituent
+#: tables between the index article and a "List of … companies" article.
+_HEADERS = ("symbol", "ticker", "ticker symbol", "stock symbol")
+_WIKI: dict[str, list[str]] = {
+    "sp500": ["https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"],
+    "nasdaq100": [
+        "https://en.wikipedia.org/wiki/List_of_NASDAQ-100_companies",
+        "https://en.wikipedia.org/wiki/List_of_Nasdaq-100_companies",
+        "https://en.wikipedia.org/wiki/Nasdaq-100",
+    ],
+    "dow30": [
+        "https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average",
+        "https://en.wikipedia.org/wiki/List_of_Dow_Jones_Industrial_Average_companies",
+        "https://en.wikipedia.org/wiki/Historical_components_of_the_Dow_Jones_Industrial_Average",
+    ],
 }
 
 
@@ -188,7 +199,11 @@ def _symbols_from_table(rows: list[list[str]], header_names: tuple[str, ...]) ->
         out = []
         for row in rows[h + 1:]:
             if len(row) > col:
-                cell = row[col].replace(" ", "").strip()
+                cell = row[col].strip()
+                # "NYSE: MMM" / "NASDAQ: AAPL" → keep the symbol after the exchange prefix
+                if ":" in cell:
+                    cell = cell.rsplit(":", 1)[-1]
+                cell = cell.replace("\u200b", "").replace(" ", "").strip()
                 if _TICKER_RE.fullmatch(cell):
                     out.append(cell)
         return out
@@ -238,15 +253,23 @@ def refresh_from_wikipedia(names: list[str] | None = None, *, path: Path = DATA_
     errors: dict[str, str] = {}
     minimum = {"sp500": 480, "nasdaq100": 90, "dow30": 28}
     for name in names:
-        url, headers = _WIKI[name]
-        try:
-            tickers = parse_constituents(_fetch(url, timeout), headers)
-            if len(tickers) < minimum[name]:
-                raise RuntimeError(f"parsed only {len(tickers)} symbols (expected ≥ {minimum[name]}); run --dump {name} to see the tables")
-        except Exception as exc:  # noqa: BLE001 — one bad page must not block the rest
-            errors[name] = f"{type(exc).__name__}: {exc}"
-            logger.warning("universe refresh %s failed: %s", name, exc)
+        attempts: list[str] = []
+        picked: tuple[list[str], str] | None = None
+        for url in _WIKI[name]:
+            try:
+                tickers = parse_constituents(_fetch(url, timeout), _HEADERS)
+            except Exception as exc:  # noqa: BLE001 — try the next candidate page
+                attempts.append(f"{url}: {type(exc).__name__}: {str(exc)[:80]}")
+                continue
+            if len(tickers) >= minimum[name]:
+                picked = (tickers, url)
+                break
+            attempts.append(f"{url}: parsed {len(tickers)} symbols")
+        if picked is None:
+            errors[name] = f"no candidate page yielded ≥ {minimum[name]} symbols — " + " | ".join(attempts) + f" — run --dump {name}"
+            logger.warning("universe refresh %s failed: %s", name, errors[name])
             continue
+        tickers, url = picked
         data[name] = {"tickers": tickers, "as_of": date.today().isoformat(), "source": url}
         sizes[name] = len(tickers)
     if sizes:
@@ -264,8 +287,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dump", choices=sorted(_BUNDLED), help="print every table header found on the Wikipedia page (parser debugging)")
     args = parser.parse_args(argv)
     if args.dump:
-        for line in describe_tables(_fetch(_WIKI[args.dump][0], 30.0)):
-            print(line)
+        for url in _WIKI[args.dump]:
+            print(f"== {url}")
+            try:
+                for line in describe_tables(_fetch(url, 30.0)):
+                    print("  " + line)
+            except Exception as exc:  # noqa: BLE001
+                print(f"  fetch failed: {type(exc).__name__}: {exc}")
     if args.refresh:
         report = refresh_from_wikipedia()
         print(json.dumps(report, ensure_ascii=False, indent=1))
