@@ -53,7 +53,7 @@ class CommitteeInput(BaseModel):
     tickers: list[str] = Field(default_factory=list, max_length=MAX_TICKERS)
     personas: list[str] | None = None
     as_of: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
-    top_n: int = Field(default=15, ge=1, le=MAX_TICKERS)
+    top_n: int | None = Field(default=None, ge=1, le=MAX_TICKERS)  # only meaningful for source=screening; None = rank everything
     use_cache: bool = True
     max_weight: float = Field(default=0.15, gt=0, le=1.0)
     screening: workspace.ScreeningInput | None = None
@@ -211,7 +211,7 @@ def _run(body: CommitteeInput) -> dict[str, Any]:
         payload["screening"] = screening
     payload["top"] = [
         {"rank": v.rank, "ticker": v.ticker, "stance": v.stance, "consensus": round(v.consensus, 4), "bullish": v.bullish, "bearish": v.bearish, "neutral": v.neutral, "agreement": round(v.agreement, 4)}
-        for v in result.top(body.top_n)
+        for v in result.top(body.top_n or max(1, len(result.verdicts)))
     ]
     payload["run_id"] = store.save_run(payload, source=body.source)
     workspace._remember_run("committee", payload)

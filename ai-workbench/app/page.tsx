@@ -590,8 +590,8 @@ function LabResultView({ result }: { result: LabResult }) {
 
 const COMMITTEE_SOURCES: { id: CommitteeSource; label: string; hint: string }[] = [
   { id: 'holdings', label: '当前持仓', hint: '审视每只持仓：增持 / 持有 / 减持候选' },
-  { id: 'watchlist', label: 'Watchlist', hint: '给观察名单里的股票打分排序' },
-  { id: 'tickers', label: '自定义', hint: '逗号分隔，最多 60 只' },
+  { id: 'watchlist', label: 'Watchlist', hint: '给观察名单里的股票打分并全部排名' },
+  { id: 'tickers', label: '自定义', hint: '逗号分隔，最多 60 只，全部按共识排名展示' },
   { id: 'screening', label: '先筛选再评审', hint: '用股票筛选的候选作为输入，选出最好的 N 只' },
 ];
 const FALLBACK_PERSONAS: PersonaMeta[] = [['warren_buffett','Warren Buffett','沃伦·巴菲特'],['charlie_munger','Charlie Munger','查理·芒格'],['ben_graham','Ben Graham','本杰明·格雷厄姆'],['peter_lynch','Peter Lynch','彼得·林奇'],['phil_fisher','Phil Fisher','菲利普·费雪'],['bill_ackman','Bill Ackman','比尔·阿克曼'],['cathie_wood','Cathie Wood','凯茜·伍德'],['michael_burry','Michael Burry','迈克尔·伯里'],['mohnish_pabrai','Mohnish Pabrai','莫尼什·帕伯莱'],['stanley_druckenmiller','Stanley Druckenmiller','斯坦利·德鲁肯米勒'],['aswath_damodaran','Aswath Damodaran','阿斯瓦斯·达摩达兰'],['nassim_taleb','Nassim Taleb','纳西姆·塔勒布'],['rakesh_jhunjhunwala','Rakesh Jhunjhunwala','拉克什·金君瓦拉']].map(([key,name,name_zh]) => ({ key, name, name_zh, style: '', period: '', lookback: 0, needs: [] }));
@@ -609,14 +609,14 @@ function CommitteePanel({ ask, run, busy }: { ask: (prompt: string, context: str
   const toggle = (key: string) => setSelected(current => current.includes(key) ? current.filter(k => k !== key) : [...current, key]);
   const allSelected = selected.length === personas.length;
   const tickerList = tickers.split(',').map(t => t.trim().toUpperCase()).filter(Boolean);
-  const payload: Record<string, unknown> = { source, personas: allSelected ? undefined : selected, top_n: Number(topN) || 15, max_weight: (Number(maxWeight) || 15) / 100, ...(source === 'tickers' ? { tickers: tickerList } : {}), ...(source === 'screening' ? { screening: { revenue_growth_min: .05, gross_margin_min: .5, volatility_max: .6 } } : {}) };
+  const payload: Record<string, unknown> = { source, personas: allSelected ? undefined : selected, ...(source === 'screening' ? { top_n: Number(topN) || 15 } : {}), max_weight: (Number(maxWeight) || 15) / 100, ...(source === 'tickers' ? { tickers: tickerList } : {}), ...(source === 'screening' ? { screening: { revenue_growth_min: .05, gross_margin_min: .5, volatility_max: .6 } } : {}) };
   const canRun = !busy && selected.length > 0 && (source !== 'tickers' || tickerList.length > 0);
   const current = COMMITTEE_SOURCES.find(item => item.id === source)!;
   return <div className="lab-tool-grid"><section className="surface experiment-config"><div className="surface-header"><div><h2>投资人委员会</h2><span>每位投资人一份确定性打分清单 · 按置信度加权投票</span></div></div>
     <label><span>输入来源</span><div className="committee-sources">{COMMITTEE_SOURCES.map(item => <button key={item.id} type="button" className={item.id === source ? 'active' : ''} onClick={() => setSource(item.id)}>{item.label}</button>)}</div><small className="committee-hint">{current.hint}</small></label>
     {source === 'tickers' && <label><span>股票代码（逗号分隔）</span><input value={tickers} onChange={e => setTickers(e.target.value.toUpperCase())}/></label>}
     {source === 'holdings' && <label><span>单只持仓权重上限（%）</span><input type="number" min="1" max="100" value={maxWeight} onChange={e => setMaxWeight(e.target.value)}/></label>}
-    {source !== 'holdings' && <label><span>选出前 N 只</span><input type="number" min="1" max="60" value={topN} onChange={e => setTopN(e.target.value)}/></label>}
+    {source === 'screening' && <label><span>从候选中选出前 N 只</span><input type="number" min="1" max="60" value={topN} onChange={e => setTopN(e.target.value)}/></label>}
     <label><span>参与投票的投资人（{selected.length}/{personas.length}）<button type="button" className="committee-link" onClick={() => setSelected(allSelected ? [] : personas.map(p => p.key))}>{allSelected ? '全不选' : '全选'}</button></span><div className="persona-chips">{personas.map(p => <button key={p.key} type="button" className={selected.includes(p.key) ? 'active' : ''} title={p.style} onClick={() => toggle(p.key)}>{p.name_zh || p.name}</button>)}</div></label>
     <button className="run-button" disabled={!canRun} onClick={() => void run('committee', payload, `实验室 · 投资人委员会 · ${current.label}`)}>{busy ? '评审中…（首次取数约 5 秒/只）' : '开始评审'}</button>
     <button className="explain-button" onClick={() => ask('解释投资人委员会的打分规则、共识分的算法和它的局限', '实验室 · 投资人委员会')}>先问 AI</button>
