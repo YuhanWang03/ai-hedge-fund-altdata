@@ -499,3 +499,34 @@ def test_cached_snapshot_rejects_rows_saved_with_core_gaps(tmp_path):
         conn.execute("INSERT INTO snapshots (ticker, as_of, content_hash, fetched_at, payload_json) VALUES (?,?,?,?,?)",
                      (snap.ticker, snap.as_of, snap.content_hash, utc_now(), _json.dumps(snap.to_dict(), default=str)))
     assert store.cached_snapshot("QLTY", snap.as_of) is None
+
+
+
+def test_cagr_uses_report_dates_not_row_count():
+    from v2.personas.base import Persona
+
+    snap = quality_snapshot()  # ~12%/yr growth, quarterly TTM rows 91 days apart, annual rows a year apart
+    ttm = Persona.cagr(snap.line_items_ttm, "revenue")
+    annual = Persona.cagr(snap.line_items_annual, "revenue")
+    assert ttm is not None and annual is not None
+    assert abs(ttm[0] - 0.12) < 0.01 and abs(annual[0] - 0.12) < 0.01
+    assert 2.1 < ttm[1] < 2.4 and 8.9 < annual[1] < 9.1
+    # the old arithmetic would have called ten TTM rows nine years: ~3%/yr
+    assert Persona.cagr(snap.line_items_ttm[:2], "revenue") is None  # one quarter is too short a span
+    undated = [Record(period="ttm", revenue=v) for v in (121.0, 118.0, 115.0, 112.0, 109.0)]
+    fallback = Persona.cagr(undated, "revenue")
+    assert fallback is not None and fallback[1] == 1.0 and abs(fallback[0] - 0.11) < 0.01
+    assert Persona.cagr([Record(revenue=-1.0), Record(revenue=2.0)], "revenue") is None
+
+
+def test_jhunjhunwala_and_damodaran_no_longer_read_ttm_rows_as_years():
+    snap = quality_snapshot()
+    rj = get_persona("rakesh_jhunjhunwala").analyze(snap)
+    details = " ".join(p.details for p in rj.parts)
+    assert "revenue CAGR: 12." in details and "EPS CAGR: 12." in details, details
+    assert "Low EPS CAGR" not in details
+    # with growth read as ~3%/yr the DCF landed near $103B; at the true 12% it clears $120B
+    assert rj.facts["intrinsic_value"] > 120e9
+    ad = get_persona("aswath_damodaran").analyze(snap)
+    growth = ad.parts[0].details
+    assert "12." in growth, growth

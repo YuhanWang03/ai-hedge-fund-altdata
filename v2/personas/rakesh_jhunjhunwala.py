@@ -10,6 +10,13 @@ from ``abs(margin_of_safety) * 150`` (or the score ratio when no intrinsic
 value could be computed); that logic is :meth:`RakeshJhunjhunwala.decide`.
 Upstream also fetched five TTM metrics rows that no rule ever read, so the
 port reads only the line items (TTM, ten periods — the API defaults it used).
+
+One deliberate correction: upstream annualised every growth rate by
+``len(values) - 1``, treating ten TTM rows as nine years. Ten TTM rows span
+about two years, so EPS, revenue and income CAGRs came out roughly four
+times too low and the DCF's growth input with them — the persona was bearish
+on nearly everything. Growth now uses :meth:`Persona.cagr`, which measures
+the span from the rows' report dates.
 """
 
 from __future__ import annotations
@@ -159,11 +166,9 @@ class RakeshJhunjhunwala(Persona):
         # EPS growth consistency
         eps_values = [i.earnings_per_share for i in items if i.earnings_per_share is not None and i.earnings_per_share > 0]
         if len(eps_values) >= 3:
-            initial_eps = eps_values[-1]
-            final_eps = eps_values[0]
-            years = len(eps_values) - 1
-            if initial_eps > 0:
-                eps_cagr = ((final_eps / initial_eps) ** (1 / years) - 1) * 100
+            growth = Persona.cagr(items, "earnings_per_share")
+            if growth is not None:
+                eps_cagr = growth[0] * 100
                 if eps_cagr > 20:
                     score += 3
                     reasoning.append(f"High EPS CAGR: {eps_cagr:.1f}%")
@@ -176,7 +181,7 @@ class RakeshJhunjhunwala(Persona):
                 else:
                     reasoning.append(f"Low EPS CAGR: {eps_cagr:.1f}%")
             else:
-                reasoning.append("Cannot calculate EPS growth from negative base")
+                reasoning.append("Cannot calculate EPS growth (negative base or span under half a year)")
         else:
             reasoning.append("Insufficient EPS data for growth analysis")
 
@@ -191,11 +196,9 @@ class RakeshJhunjhunwala(Persona):
 
         revenues = [i.revenue for i in items if i.revenue is not None and i.revenue > 0]
         if len(revenues) >= 3:
-            initial_revenue = revenues[-1]
-            final_revenue = revenues[0]
-            years = len(revenues) - 1
-            if initial_revenue > 0:
-                revenue_cagr = ((final_revenue / initial_revenue) ** (1 / years) - 1) * 100
+            growth = Persona.cagr(items, "revenue")
+            if growth is not None:
+                revenue_cagr = growth[0] * 100
                 if revenue_cagr > 20:
                     score += 3
                     reasoning.append(f"Excellent revenue CAGR: {revenue_cagr:.1f}%")
@@ -208,17 +211,15 @@ class RakeshJhunjhunwala(Persona):
                 else:
                     reasoning.append(f"Low revenue CAGR: {revenue_cagr:.1f}%")
             else:
-                reasoning.append("Cannot calculate revenue CAGR from zero base")
+                reasoning.append("Cannot calculate revenue CAGR (zero base or span under half a year)")
         else:
             reasoning.append("Insufficient revenue data for CAGR calculation")
 
         net_incomes = [i.net_income for i in items if i.net_income is not None and i.net_income > 0]
         if len(net_incomes) >= 3:
-            initial_income = net_incomes[-1]
-            final_income = net_incomes[0]
-            years = len(net_incomes) - 1
-            if initial_income > 0:
-                income_cagr = ((final_income / initial_income) ** (1 / years) - 1) * 100
+            growth = Persona.cagr(items, "net_income")
+            if growth is not None:
+                income_cagr = growth[0] * 100
                 if income_cagr > 25:
                     score += 3
                     reasoning.append(f"Excellent income CAGR: {income_cagr:.1f}%")
@@ -231,7 +232,7 @@ class RakeshJhunjhunwala(Persona):
                 else:
                     reasoning.append(f"Moderate income CAGR: {income_cagr:.1f}%")
             else:
-                reasoning.append("Cannot calculate income CAGR from zero base")
+                reasoning.append("Cannot calculate income CAGR (zero base or span under half a year)")
         else:
             reasoning.append("Insufficient net income data for CAGR calculation")
 
@@ -241,9 +242,9 @@ class RakeshJhunjhunwala(Persona):
             consistency_ratio = 1 - (declining_years / (len(revenues) - 1))
             if consistency_ratio >= 0.8:
                 score += 1
-                reasoning.append(f"Consistent growth pattern ({consistency_ratio * 100:.0f}% of years)")
+                reasoning.append(f"Consistent growth pattern ({consistency_ratio * 100:.0f}% of periods)")
             else:
-                reasoning.append(f"Inconsistent growth pattern ({consistency_ratio * 100:.0f}% of years)")
+                reasoning.append(f"Inconsistent growth pattern ({consistency_ratio * 100:.0f}% of periods)")
 
         return {"score": score, "details": "; ".join(reasoning)}
 
@@ -399,13 +400,8 @@ class RakeshJhunjhunwala(Persona):
             if len(net_incomes) < 2:
                 return latest.net_income * 12  # conservative P/E of 12
 
-            initial_income = net_incomes[-1]
-            final_income = net_incomes[0]
-            years = len(net_incomes) - 1
-            if initial_income > 0:
-                historical_growth = (final_income / initial_income) ** (1 / years) - 1
-            else:
-                historical_growth = 0.05
+            growth = cls.cagr(items[:5], "net_income")
+            historical_growth = growth[0] if growth is not None else 0.05
 
             if historical_growth > 0.25:
                 sustainable_growth = 0.20

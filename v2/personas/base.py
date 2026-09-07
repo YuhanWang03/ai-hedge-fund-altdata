@@ -70,6 +70,18 @@ def apply_margin_of_safety(signal: Signal, confidence: int, mos: float | None, *
     return signal, confidence
 
 
+def _as_date(value: Any):
+    """YYYY-MM-DD (or any ISO prefix) → date, else None."""
+    if not value:
+        return None
+    try:
+        from datetime import date
+
+        return date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return None
+
+
 class Persona(ABC):
     """Base class for one simulated investor."""
 
@@ -223,6 +235,55 @@ class Persona(ABC):
                     return None
                 return None if f != f else f
         return None
+
+    @staticmethod
+    def years_spanned(rows: list[Any], *, period: str | None = None) -> float | None:
+        """Elapsed years between the newest and oldest row (rows are newest-first).
+
+        Upstream divided growth by ``len(rows) - 1`` — right for annual rows,
+        wrong for TTM rows, where ten periods span about two years, not nine.
+        Use the report dates when the rows carry them; otherwise assume a
+        quarter per step unless the period label says annual.
+        """
+        if len(rows) < 2:
+            return None
+        newest = _as_date(getattr(rows[0], "report_period", None))
+        oldest = _as_date(getattr(rows[-1], "report_period", None))
+        if newest and oldest and newest > oldest:
+            return (newest - oldest).days / 365.25
+        label = str(period or getattr(rows[0], "period", "") or "").lower()
+        step = 1.0 if label in ("annual", "fy", "yearly", "year") else 0.25
+        return (len(rows) - 1) * step
+
+    @classmethod
+    def cagr(cls, rows: list[Any], field: str, *, positive_only: bool = True, min_years: float = 0.5) -> tuple[float, float] | None:
+        """``(annualised growth, years)`` of ``field`` from oldest to newest row, or None.
+
+        Skips rows where the field is missing (or non-positive when
+        ``positive_only``), measures the span in calendar years, and refuses
+        spans shorter than ``min_years`` — a two-quarter CAGR is noise.
+        """
+        picked: list[tuple[Any, float]] = []
+        for row in rows:
+            value = getattr(row, field, None)
+            if value is None:
+                continue
+            try:
+                f = float(value)
+            except (TypeError, ValueError):
+                continue
+            if f != f or (positive_only and f <= 0):
+                continue
+            picked.append((row, f))
+        if len(picked) < 2:
+            return None
+        years = cls.years_spanned([r for r, _ in picked])
+        if not years or years < min_years:
+            return None
+        newest, oldest = picked[0][1], picked[-1][1]
+        if newest <= 0 or oldest <= 0:
+            return None
+        return (newest / oldest) ** (1.0 / years) - 1.0, years
 
     @staticmethod
     def part(name: str, score: float, max_score: float, details: list[str] | str, **data: Any) -> SubScore:
