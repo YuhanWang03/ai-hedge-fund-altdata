@@ -1,6 +1,6 @@
 """v2 backtesting — pluggable strategies and simulation engine."""
 
-from v2.backtesting.engine import BacktestEngine
+from v2.backtesting.engine import BacktestEngine, yearly_breakdown
 from v2.backtesting.models import (
     BacktestResult,
     PerformanceMetrics,
@@ -24,4 +24,5 @@ __all__ = [
     "Strategy",
     "Trade",
     "TradeSignal",
+    "yearly_breakdown",
 ]

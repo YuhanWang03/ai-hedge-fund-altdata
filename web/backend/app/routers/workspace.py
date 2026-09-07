@@ -17,7 +17,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.auth import require_owner
 from app.config import SETTINGS
@@ -43,7 +43,16 @@ def _lab_store() -> LabRunStore:
 def _summarize(kind: str, result: dict) -> dict:
     """Compact, list-friendly view of one run; the full result is stored alongside."""
     summary: dict = {"tickers": result.get("tickers", [])}
-    if kind == "backtest":
+    if kind == "backtest" and result.get("kind") == "sweep":
+        rows = [r for r in (result.get("rows") or []) if r.get("sharpe_ratio") is not None]
+        best = max(rows, key=lambda r: r["sharpe_ratio"], default=None)
+        summary.update({"strategy": "momentum", "sweep": True, "universe": result.get("universe"), "n_combos": len(result.get("rows") or []),
+                        "data_source": result.get("data_source"), "fd_cost_usd": result.get("fd_cost_usd"),
+                        "n_trades": best["n_trades"] if best else 0, "total_return_pct": best["total_return_pct"] if best else None,
+                        "sharpe_ratio": best["sharpe_ratio"] if best else None, "max_drawdown_pct": best["max_drawdown_pct"] if best else None,
+                        "excess_return_pct": best["excess_return_pct"] if best else None,
+                        "best": {k: best[k] for k in ("top_n", "holding_days", "near_high_pct")} if best else None})
+    elif kind == "backtest":
         m = result.get("metrics") or {}
         summary.update({"strategy": result.get("strategy"), "universe": result.get("universe"), "n_trades": m.get("n_trades", 0),
                         "total_return_pct": m.get("total_return_pct"), "sharpe_ratio": m.get("sharpe_ratio"), "max_drawdown_pct": m.get("max_drawdown_pct"),
@@ -340,12 +349,8 @@ def _check_backtest_size(body: BacktestInput) -> None:
             raise ValueError(f"custom list has {n} tickers; the {body.strategy} strategy accepts at most {limit} (only momentum may exceed {MAX_TICKERS})")
 
 
-def _benchmark(data, trades, ticker: str = "SPY") -> dict | None:
-    """Buy-and-hold return of ``ticker`` from the first entry to the last exit, for comparison."""
-    if not trades:
-        return None
-    start = min(t.entry_date for t in trades)
-    end = max(t.exit_date for t in trades)
+def _price_return(data, ticker: str, start: str, end: str) -> float | None:
+    """Close-to-close return of ``ticker`` over ``[start, end]``; None without at least two bars."""
     rows = data.get_prices(ticker, start, end) or []
     closes = []
     for r in rows:
@@ -358,12 +363,35 @@ def _benchmark(data, trades, ticker: str = "SPY") -> dict | None:
             closes.append(close)
     if len(closes) < 2:
         return None
-    total = closes[-1] / closes[0] - 1
+    return closes[-1] / closes[0] - 1
+
+
+def _benchmark(data, trades, ticker: str = "SPY") -> dict | None:
+    """Buy-and-hold return of ``ticker`` from the first entry to the last exit, for comparison."""
+    if not trades:
+        return None
+    start = min(t.entry_date for t in trades)
+    end = max(t.exit_date for t in trades)
+    total = _price_return(data, ticker, start, end)
+    if total is None:
+        return None
     days = (datetime.fromisoformat(end) - datetime.fromisoformat(start)).days
     years = days / 365.25
     annualized = (1 + total) ** (1 / years) - 1 if years >= 0.1 else None
     return {"ticker": ticker, "start": start, "end": end, "total_return_pct": round(total, 6),
             "annualized_return_pct": round(annualized, 6) if annualized is not None else None}
+
+
+def _yearly(data, trades, capital: float, ticker: str = "SPY") -> list[dict]:
+    """Calendar-year rows: strategy return vs. buy-and-hold ``ticker`` over the same span, and the excess."""
+    from v2.backtesting import yearly_breakdown
+
+    rows = yearly_breakdown(trades, capital)
+    for row in rows:
+        bench = _price_return(data, ticker, row["start"], row["end"])
+        row["benchmark_pct"] = round(bench, 6) if bench is not None else None
+        row["excess_pct"] = round(row["return_pct"] - bench, 6) if bench is not None and row["return_pct"] is not None else None
+    return rows
 
 
 def _backtest_total(body: BacktestInput, n_tickers: int) -> int:
@@ -375,13 +403,14 @@ def _backtest_total(body: BacktestInput, n_tickers: int) -> int:
     return n_tickers * max(1, len(rebalance_dates(today=datetime.now(timezone.utc).date(), history_days=body.history_days, step_trading_days=body.holding_days)))
 
 
-def _backtest_universe(body: BacktestInput) -> tuple[list[str], dict]:
+def _backtest_universe(body: BacktestInput, holding_steps: list[int] | None = None) -> tuple[list[str], dict]:
     """Tickers to load prices for, plus how the universe was built.
 
     For an index pool with stored change history the list is the union of the
     constituents on every rebalance date over the history window, so names that
     have since left the index are still ranked in the periods they belonged to
     (prices permitting). The strategy filters per date with ``universe_at``.
+    ``holding_steps`` widens the union to several rebalance grids (the sweep).
     """
     tickers, meta = resolve_universe(body.universe, body.tickers, limit=_backtest_limit(body))
     info: dict = {"point_in_time": False, "changes": 0}
@@ -395,7 +424,10 @@ def _backtest_universe(body: BacktestInput) -> tuple[list[str], dict]:
         if mode != "none":
             today = datetime.now(timezone.utc).date()
             union: dict[str, None] = dict.fromkeys(tickers)
-            for d in rebalance_dates(today=today, history_days=body.history_days, step_trading_days=body.holding_days) + [today.isoformat()]:
+            dates = {today.isoformat()}
+            for step in holding_steps or [body.holding_days]:
+                dates.update(rebalance_dates(today=today, history_days=body.history_days, step_trading_days=step))
+            for d in sorted(dates):
                 for t in members_at(body.universe, d)[0]:
                     union.setdefault(t, None)
             tickers = list(union)[:BIG_LIMIT + 100]
@@ -413,6 +445,7 @@ def _run_backtest(body: BacktestInput, on_tick=None) -> dict:
         strategy = _build_strategy(body, on_tick)
         result = BacktestEngine(capital=body.capital, per_trade=body.per_trade, cost_bps=body.cost_bps).run(strategy, tickers, data)
         benchmark = _benchmark(data, result.trades)
+        yearly = _yearly(data, result.trades, body.capital)
         fd_requests = _fd_bill(data, body.data_source)
         notes = {"price_failures": dict(data.prices.failed), "errors": dict(getattr(strategy, "errors", {}) or {}),
                  "rebalance_dates": list(getattr(strategy, "dates", []) or []), "periods": list(getattr(strategy, "periods", []) or []),
@@ -423,7 +456,111 @@ def _run_backtest(body: BacktestInput, on_tick=None) -> dict:
         excess = round(result.metrics.total_return_pct - benchmark["total_return_pct"], 6)
     return {"kind": "backtest", "strategy": body.strategy, "data_source": body.data_source, "universe": meta["universe"], "universe_as_of": meta.get("as_of"),
             "tickers": tickers, "params": body.params(), "fd_requests": fd_requests, "fd_cost_usd": fd_cost(fd_requests), "notes": notes,
-            "benchmark": benchmark, "excess_return_pct": excess, **result.model_dump()}
+            "benchmark": benchmark, "excess_return_pct": excess, "yearly": yearly, **result.model_dump()}
+
+
+# ------------------------------------------------------------------ momentum parameter sweep
+
+class SweepInput(BaseModel):
+    """Grid of momentum variants evaluated on one shared price load.
+
+    Every combination sees the same universe (point-in-time when history is
+    stored), the same history window, costs and sizing; only ``top_n``,
+    ``holding_days`` and the 52-week-high filter vary.
+    """
+
+    universe: Universe = "sp500"
+    tickers: list[str] = Field(default_factory=list, max_length=BIG_LIMIT)
+    data_source: Literal["yfinance", "fd"] = "yfinance"
+    history_days: int = Field(default=1825, ge=60, le=3650)
+    lookback_days: int = Field(default=252, ge=20, le=504)
+    skip_days: int = Field(default=21, ge=0, le=120)
+    capital: float = Field(default=100_000, gt=0, le=100_000_000)
+    per_trade: float = Field(default=10_000, gt=0, le=10_000_000)
+    cost_bps: float = Field(default=10, ge=0, le=200)
+    top_ns: list[int] = Field(default=[10, 20, 30], min_length=1, max_length=6)
+    holding_days_list: list[int] = Field(default=[21, 42, 63], min_length=1, max_length=6)
+    #: None = no filter; 0.10 = only names within 10 % of their 52-week high
+    near_high_pcts: list[float | None] = Field(default=[None, 0.10], min_length=1, max_length=4)
+
+    @field_validator("top_ns", "holding_days_list")
+    @classmethod
+    def _positive_grid(cls, values: list[int]) -> list[int]:
+        out = sorted({int(v) for v in values})
+        if any(v < 1 or v > 252 for v in out):
+            raise ValueError("grid values must be between 1 and 252")
+        return out
+
+    @field_validator("near_high_pcts")
+    @classmethod
+    def _near_high_grid(cls, values: list[float | None]) -> list[float | None]:
+        out: list[float | None] = []
+        for v in values:
+            if v is not None and not 0 <= v <= 1:
+                raise ValueError("near_high_pct must be between 0 and 1")
+            if v not in out:
+                out.append(v)
+        return out
+
+    def combos(self) -> list[dict]:
+        return [{"top_n": n, "holding_days": h, "near_high_pct": nh}
+                for nh in self.near_high_pcts for h in self.holding_days_list for n in self.top_ns]
+
+    def as_backtest(self, top_n: int | None = None, holding_days: int | None = None, near_high_pct: float | None = None) -> BacktestInput:
+        return BacktestInput(universe=self.universe, tickers=self.tickers or ["AAPL"], strategy="momentum", data_source=self.data_source,
+                             holding_days=holding_days or self.holding_days_list[0], capital=self.capital, per_trade=self.per_trade, cost_bps=self.cost_bps,
+                             history_days=self.history_days, top_n=top_n or self.top_ns[0], lookback_days=self.lookback_days, skip_days=self.skip_days,
+                             near_high_pct=near_high_pct)
+
+    def params(self) -> dict:
+        return {"history_days": self.history_days, "lookback_days": self.lookback_days, "skip_days": self.skip_days, "capital": self.capital,
+                "per_trade": self.per_trade, "cost_bps": self.cost_bps, "data_source": self.data_source,
+                "grid": {"top_ns": self.top_ns, "holding_days_list": self.holding_days_list, "near_high_pcts": self.near_high_pcts}}
+
+
+def _sweep_universe(body: SweepInput) -> tuple[list[str], dict]:
+    base = body.as_backtest()
+    _check_backtest_size(base)
+    return _backtest_universe(base, holding_steps=body.holding_days_list)
+
+
+def _run_sweep(body: SweepInput, on_tick=None) -> dict:
+    """Load every price series once, then run the whole grid against the in-memory cache."""
+    from v2.backtesting import BacktestEngine
+
+    tickers, meta = _sweep_universe(body)
+    combos = body.combos()
+    tick = on_tick or (lambda i: None)
+    with _data_bundle(body.data_source, needs_fd=False) as data:
+        # Same start MomentumStrategy computes, so the strategies below never fetch again.
+        start = data.today - timedelta(days=body.history_days + int(body.lookback_days * 1.6) + 10)
+        for i, t in enumerate(tickers):
+            tick(i)
+            data.prices.closes(t, start)
+        data.prices.closes("SPY", start)
+        engine = BacktestEngine(capital=body.capital, per_trade=body.per_trade, cost_bps=body.cost_bps)
+        rows = []
+        no_data: list[str] = []
+        for k, combo in enumerate(combos):
+            bt = body.as_backtest(**combo)
+            strategy = _build_strategy(bt)
+            result = engine.run(strategy, tickers, data)
+            benchmark = _benchmark(data, result.trades)
+            m = result.metrics
+            no_data = list(strategy.no_data)
+            row = {**combo, "n_trades": m.n_trades if m else 0, "n_periods": m.n_periods if m else 0,
+                   "total_return_pct": m.total_return_pct if m else None, "annualized_return_pct": m.annualized_return_pct if m else None,
+                   "sharpe_ratio": m.sharpe_ratio if m else None, "max_drawdown_pct": m.max_drawdown_pct if m else None,
+                   "win_rate": m.win_rate if m else None, "avg_return_pct": m.avg_return_pct if m else None,
+                   "benchmark_pct": benchmark["total_return_pct"] if benchmark else None,
+                   "excess_return_pct": round(m.total_return_pct - benchmark["total_return_pct"], 6) if m and benchmark else None,
+                   "start": benchmark["start"] if benchmark else None, "end": benchmark["end"] if benchmark else None}
+            rows.append(row)
+            tick(len(tickers) + k + 1)
+        fd_requests = _fd_bill(data, body.data_source)
+        notes = {"price_failures": dict(data.prices.failed), "membership": meta.get("membership"), "no_data": no_data}
+    return {"kind": "sweep", "strategy": "momentum", "data_source": body.data_source, "universe": meta["universe"], "universe_as_of": meta.get("as_of"),
+            "tickers": tickers, "params": body.params(), "fd_requests": fd_requests, "fd_cost_usd": fd_cost(fd_requests), "notes": notes, "rows": rows}
 
 
 class EventStudyInput(BaseModel):
@@ -639,6 +776,16 @@ async def run_backtest(body: BacktestInput, background: bool | None = None) -> d
     result = await _lab_call(_run_backtest, body)
     _remember_run("backtest", result, body.model_dump())
     return result
+
+
+@router.post("/lab/backtest/sweep")
+async def run_backtest_sweep(body: SweepInput) -> dict:
+    """Momentum parameter grid on one price load; always a job (poll /lab/backtest/jobs/{id})."""
+    try:
+        tickers, _ = await run_in_threadpool(_sweep_universe, body)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _start_job("backtest", body, len(tickers) + len(body.combos()), _run_sweep)
 
 
 @router.get("/lab/backtest/jobs/{job_id}")

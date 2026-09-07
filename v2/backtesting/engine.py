@@ -288,6 +288,42 @@ def _period_returns(trades: list[Trade]) -> list[tuple[str, float]]:
     return sorted((d, float(np.mean(r))) for d, r in groups.items())
 
 
+def yearly_breakdown(trades: list[Trade], capital: float) -> list[dict]:
+    """One row per calendar year, trades grouped by the year they were *entered*.
+
+    ``return_pct`` is that year's P&L over the equity at the start of the year
+    (the engine sizes every trade at a fixed dollar amount, so equity is
+    additive). ``start`` / ``end`` are the first entry and the last exit of the
+    year's trades — the span a benchmark should be measured over; a December
+    entry exits in January, so consecutive spans overlap by one period.
+    """
+    if not trades:
+        return []
+    equity = float(capital)
+    years: dict[str, dict] = {}
+    for entry_date, pnl in _period_pnl(trades):
+        year = entry_date[:4]
+        row = years.setdefault(year, {"year": year, "periods": 0, "trades": 0, "pnl": 0.0, "start_equity": equity,
+                                      "start": entry_date, "end": entry_date, "wins": 0})
+        row["periods"] += 1
+        row["pnl"] += pnl
+        equity += pnl
+    for t in trades:
+        row = years[t.entry_date[:4]]
+        row["trades"] += 1
+        row["wins"] += 1 if t.return_pct > 0 else 0
+        if t.exit_date > row["end"]:
+            row["end"] = t.exit_date
+    out = []
+    for year in sorted(years):
+        r = years[year]
+        out.append({"year": year, "periods": r["periods"], "trades": r["trades"], "start": r["start"], "end": r["end"],
+                    "pnl": round(r["pnl"], 2), "start_equity": round(r["start_equity"], 2),
+                    "return_pct": round(r["pnl"] / r["start_equity"], 6) if r["start_equity"] > 0 else None,
+                    "win_rate": round(r["wins"] / r["trades"], 4) if r["trades"] else None})
+    return out
+
+
 def _find_next_trading_day(
     date_str: str,
     trading_days: list[str],

@@ -48,7 +48,12 @@ type PeriodVote = { ticker: string; consensus: number; agreement: number; voters
 type BacktestAbort = { signal_date: string; as_of: string; failed: number; of: number; reason: string; remaining_dates: string[] };
 type BacktestPeriod = { signal_date: string; as_of: string; picked: string[]; verdicts: PeriodVote[]; missing: string[] };
 type Membership = { point_in_time: boolean; changes: number; mode?: 'full' | 'additions' | 'none'; history_from?: string | null; tickers_incl_former?: number };
-type BacktestResult = { kind: 'backtest'; lab_run_id?: string; strategy: string; data_source?: string; universe: string; tickers: string[]; params: Record<string, unknown>; fd_requests?: Record<string, number>; fd_cost_usd?: number; notes?: { price_failures?: Record<string, string>; errors?: Record<string, string>; rebalance_dates?: string[]; periods?: BacktestPeriod[]; aborted?: BacktestAbort | null; no_data?: string[]; membership?: Membership | null }; benchmark?: { ticker: string; start: string; end: string; total_return_pct: number; annualized_return_pct: number | null } | null; excess_return_pct?: number | null; universe_as_of?: string | null; trades: Trade[]; metrics: { total_return_pct: number; annualized_return_pct: number; sharpe_ratio: number; max_drawdown_pct: number; win_rate: number; n_trades: number; n_long: number; n_short: number; avg_return_pct: number; avg_holding_days: number; n_periods?: number; sharpe_trade_level?: number; cost_bps?: number } | null; equity_curve: number[] };
+type YearRow = { year: string; periods: number; trades: number; start: string; end: string; pnl: number; start_equity: number; return_pct: number | null; win_rate: number | null; benchmark_pct: number | null; excess_pct: number | null };
+type BacktestResult = { kind: 'backtest'; lab_run_id?: string; yearly?: YearRow[]; strategy: string; data_source?: string; universe: string; tickers: string[]; params: Record<string, unknown>; fd_requests?: Record<string, number>; fd_cost_usd?: number; notes?: { price_failures?: Record<string, string>; errors?: Record<string, string>; rebalance_dates?: string[]; periods?: BacktestPeriod[]; aborted?: BacktestAbort | null; no_data?: string[]; membership?: Membership | null }; benchmark?: { ticker: string; start: string; end: string; total_return_pct: number; annualized_return_pct: number | null } | null; excess_return_pct?: number | null; universe_as_of?: string | null; trades: Trade[]; metrics: { total_return_pct: number; annualized_return_pct: number; sharpe_ratio: number; max_drawdown_pct: number; win_rate: number; n_trades: number; n_long: number; n_short: number; avg_return_pct: number; avg_holding_days: number; n_periods?: number; sharpe_trade_level?: number; cost_bps?: number } | null; equity_curve: number[] };
+
+type SweepRow = { top_n: number; holding_days: number; near_high_pct: number | null; n_trades: number; n_periods: number; total_return_pct: number | null; annualized_return_pct: number | null; sharpe_ratio: number | null; max_drawdown_pct: number | null; win_rate: number | null; avg_return_pct: number | null; benchmark_pct: number | null; excess_return_pct: number | null; start: string | null; end: string | null };
+type SweepResult = { kind: 'sweep'; lab_run_id?: string; strategy: string; data_source?: string; universe: string; universe_as_of?: string | null; tickers: string[]; params: { history_days: number; lookback_days: number; skip_days: number; capital: number; per_trade: number; cost_bps: number; grid: { top_ns: number[]; holding_days_list: number[]; near_high_pcts: (number | null)[] } }; fd_requests?: Record<string, number>; fd_cost_usd?: number; notes?: { price_failures?: Record<string, string>; membership?: Membership | null; no_data?: string[] }; rows: SweepRow[] };
+type BacktestPanelResult = BacktestResult | SweepResult;
 
 type WindowStats = { window: string; n_events: number; mean_car: number; std_car: number; t_stat: number; p_value: number; ci: { lower: number; upper: number; confidence: number } };
 type EventCAR = { ticker: string; event_date: string; source_type: string; eps_surprise: string | null; car_0_1: number | null; car_0_5: number | null; car_0_20: number | null; car_2_20?: number | null; market_model: { alpha: number; beta: number; r_squared: number; n_obs?: number } };
@@ -60,7 +65,7 @@ type Scoreboard = { items: ScoreboardRow[]; counts: { runs: number; tickers: num
 type RunSummary = { id: string; kind: string; ran_at: string; tickers?: string[]; [key: string]: unknown };
 type WatchlistItem = { ticker: string; added_at: string; note: string };
 
-type ToolResult = ScreeningResult | CommitteeResult | BacktestResult | EventStudyResult;
+type ToolResult = ScreeningResult | CommitteeResult | BacktestPanelResult | EventStudyResult;
 type Handoff = { tickers: string[]; from: string };
 
 // --------------------------------------------------------------------------- helpers
@@ -130,7 +135,7 @@ export function LabPage({ tool, selectTool, ask }: { tool: LabTool; selectTool: 
     {tool === 'overview' && <OverviewTool {...common}/>}
     {tool === 'screening' && <ScreeningTool {...common} result={results.screening as ScreeningResult | undefined} setResult={r => setResult('screening', r)} onHand={hand}/>}
     {tool === 'committee' && <CommitteeTool {...common} result={results.committee as CommitteeResult | undefined} setResult={r => setResult('committee', r)} handoff={handoff} clearHandoff={() => setHandoff(null)} onHand={hand}/>}
-    {tool === 'backtest' && <BacktestTool {...common} result={results.backtest as BacktestResult | undefined} setResult={r => setResult('backtest', r)} handoff={handoff} clearHandoff={() => setHandoff(null)}/>}
+    {tool === 'backtest' && <BacktestTool {...common} result={results.backtest as BacktestPanelResult | undefined} setResult={r => setResult('backtest', r)} handoff={handoff} clearHandoff={() => setHandoff(null)}/>}
     {tool === 'event-study' && <EventStudyTool {...common} result={results.event_study as EventStudyResult | undefined} setResult={r => setResult('event_study', r)} handoff={handoff} clearHandoff={() => setHandoff(null)}/>}
     {tool === 'scoreboard' && <ScoreboardTool {...common}/>}
     {tool === 'runs' && <RunsTool {...common} onOpen={(kind, result) => { setResult(kind === 'event_study' ? 'event_study' : kind, result as ToolResult); selectTool(kind === 'event_study' ? 'event-study' : kind as LabTool) }}/>}
@@ -176,6 +181,7 @@ function RunRow({ run, onOpen }: { run: RunSummary; onOpen: () => void }) {
   const costTag = typeof run.fd_cost_usd === 'number' ? ` · FD ${usd(run.fd_cost_usd)}` : '';
   const line = run.kind === 'screening' ? `${UNIVERSE_LABEL[String(run.universe)] || run.universe} ${run.universe_size} → ${run.n_candidates} 只${costTag}`
     : run.kind === 'committee' ? `${run.n_tickers} 只 · 偏多 ${(run.stances as Record<string, number>)?.bullish ?? 0} 偏空 ${(run.stances as Record<string, number>)?.bearish ?? 0}${(run.top as string[])?.length ? ` · 榜首 ${(run.top as string[])[0]}` : ''}${costTag}`
+    : run.kind === 'backtest' && run.sweep ? `参数扫描 ${run.n_combos} 组 · 最佳夏普 ${num(run.sharpe_ratio as number)}${run.best ? `（每期 ${(run.best as SweepRow).top_n} 只 · 持有 ${(run.best as SweepRow).holding_days} 日）` : ''}`
     : run.kind === 'backtest' ? `${run.n_trades} 笔 · ${pct(run.total_return_pct as number)} · 夏普 ${num(run.sharpe_ratio as number)}`
     : run.kind === 'event_study' ? `${run.n_events} 个事件 · ${run.n_groups} 组`
     : run.kind === 'backfill' ? `回填 ${run.filled} / ${run.checked}` : '';
@@ -378,7 +384,30 @@ function signalText(strategy: string, meta?: Record<string, unknown>): string {
   return `${String(meta.eps_surprise || '')} ${String(meta.source_type || '')}`.trim();
 }
 
-function BacktestTool({ result, setResult, handoff, clearHandoff, ask }: ToolProps & { result?: BacktestResult; setResult: (r?: BacktestResult) => void; handoff: Handoff | null; clearHandoff: () => void }) {
+const SWEEP_GRID = { top_ns: [10, 20, 30], holding: [21, 42, 63], nearHigh: [null, 0.10] as (number | null)[] };
+type SweepSort = 'sharpe_ratio' | 'total_return_pct' | 'excess_return_pct' | 'max_drawdown_pct';
+function SweepView({ result, ask }: { result: SweepResult; ask: Ask }) {
+  const [sort, setSort] = useState<SweepSort>('sharpe_ratio');
+  const rows = [...result.rows].sort((a, b) => sort === 'max_drawdown_pct' ? (a.max_drawdown_pct ?? 1) - (b.max_drawdown_pct ?? 1) : (b[sort] ?? -Infinity) - (a[sort] ?? -Infinity));
+  const best = rows[0]; const g = result.params.grid; const ms = result.notes?.membership;
+  const combo = (r: SweepRow) => `每期 ${r.top_n} 只 · 持有 ${r.holding_days} 日 · ${r.near_high_pct == null ? '不限' : `距新高 ≤ ${Math.round(r.near_high_pct * 100)}%`}`;
+  const beat = result.rows.filter(r => (r.excess_return_pct ?? 0) > 0).length;
+  return <>
+    <div className="surface-header"><div><h2>动量参数扫描 · {result.rows.length} 组 · {result.tickers.length} 只</h2><span>{UNIVERSE_LABEL[result.universe] || result.universe}{result.universe_as_of ? `（成分股 ${result.universe_as_of}）` : ''} · 回看历史 {result.params.history_days} 天 · 动量回看 {result.params.lookback_days} 日 · 跳过 {result.params.skip_days} 日 · 单笔 ${Number(result.params.per_trade).toLocaleString()} · 成本 {result.params.cost_bps} bp/边 · 价格 {result.data_source === 'fd' ? 'Financial Datasets' : 'yfinance'} · FD 费用 {usd(result.fd_cost_usd ?? 0)}</span></div></div>
+    <div className="lab-scroll">
+      {best && <><div className="lab-subhead lab-best">最佳（按{SWEEP_SORT_LABEL[sort]}）：{combo(best)}</div><div className="lab-stats"><Stat label="总收益" value={pct(best.total_return_pct)} tone={(best.total_return_pct ?? 0) >= 0 ? 'positive' : 'negative'}/><Stat label="夏普（按期）" value={num(best.sharpe_ratio)}/><Stat label="最大回撤" value={pct(best.max_drawdown_pct)} tone="negative"/><Stat label="超额收益" value={pct(best.excess_return_pct)} tone={(best.excess_return_pct ?? 0) >= 0 ? 'positive' : 'negative'}/></div></>}
+      <p className="lab-note">{beat} / {result.rows.length} 组跑赢同期 SPY。网格：每期 {g.top_ns.join(' / ')} 只 × 持有 {g.holding_days_list.join(' / ')} 日 × 52 周高点过滤 {g.near_high_pcts.map(v => v == null ? '不限' : `≤ ${Math.round(v * 100)}%`).join(' / ')}。所有组用同一份价格数据和同一股票池；{ms?.point_in_time ? `已按历史成分股回测（变动记录 ${ms.changes} 条）` : INDEX_UNIVERSES.includes(result.universe as Universe) ? '股票池是当前成分股快照，存在幸存者偏差' : '自定义股票池'}{result.notes?.no_data?.length ? `，${result.notes.no_data.length} 只无价格数据被跳过` : ''}。注意：在同一段历史上挑选表现最好的参数本身就是过拟合，相邻参数的结果是否平滑比最佳值更重要。</p>
+      <div className="lab-table-wrap"><div className="lab-subhead lab-subhead-row"><span>对比表</span><div className="lab-chips">{(Object.keys(SWEEP_SORT_LABEL) as SweepSort[]).map(k => <button key={k} type="button" className={k === sort ? 'active' : ''} onClick={() => setSort(k)}>按{SWEEP_SORT_LABEL[k]}</button>)}</div></div>
+        <table className="lab-table"><thead><tr><th>#</th><th>参数组合</th><th>期数</th><th>笔数</th><th>总收益</th><th>年化</th><th>夏普（按期）</th><th>最大回撤</th><th>胜率</th><th>平均单笔</th><th>SPY 同期</th><th>超额</th></tr></thead>
+          <tbody>{rows.map((r, i) => <tr key={`${r.top_n}-${r.holding_days}-${r.near_high_pct}`} className={i === 0 ? 'picked' : ''}><td>{i + 1}</td><td>{combo(r)}</td><td>{r.n_periods}</td><td>{r.n_trades}</td><td className={(r.total_return_pct ?? 0) >= 0 ? 'positive' : 'negative'}>{pct(r.total_return_pct)}</td><td>{pct(r.annualized_return_pct)}</td><td><strong>{num(r.sharpe_ratio)}</strong></td><td className="negative">{pct(r.max_drawdown_pct)}</td><td>{pctAbs(r.win_rate)}</td><td>{pct(r.avg_return_pct, 2)}</td><td>{pct(r.benchmark_pct)}</td><td className={(r.excess_return_pct ?? 0) >= 0 ? 'positive' : 'negative'}><strong>{pct(r.excess_return_pct)}</strong></td></tr>)}</tbody></table></div>
+    </div>
+    <div className="lab-foot"><button type="button" className="explain-button" onClick={() => ask(`动量策略参数扫描（${UNIVERSE_LABEL[result.universe] || result.universe}，${result.tickers.length} 只，回看历史 ${result.params.history_days} 天，成本 ${result.params.cost_bps} bp/边）。${result.rows.length} 组里 ${beat} 组跑赢 SPY。按夏普排序前 5 组：${[...result.rows].sort((a, b) => (b.sharpe_ratio ?? -9) - (a.sharpe_ratio ?? -9)).slice(0, 5).map(r => `${combo(r)}：总收益 ${pct(r.total_return_pct)}，夏普 ${num(r.sharpe_ratio)}，回撤 ${pct(r.max_drawdown_pct)}，超额 ${pct(r.excess_return_pct)}`).join('；')}。请判断参数面是否平滑、哪些结论稳健、哪些只是过拟合。`, '实验室 · 参数扫描')}>问 AI 评价参数稳健性</button><RawJson data={result}/></div>
+  </>;
+}
+const SWEEP_SORT_LABEL: Record<SweepSort, string> = { sharpe_ratio: '夏普', total_return_pct: '总收益', excess_return_pct: '超额', max_drawdown_pct: '回撤（小→大）' };
+
+function BacktestTool({ result: panel, setResult, handoff, clearHandoff, ask }: ToolProps & { result?: BacktestPanelResult; setResult: (r?: BacktestPanelResult) => void; handoff: Handoff | null; clearHandoff: () => void }) {
+  const result = panel?.kind === 'backtest' ? panel : undefined; const sweep = panel?.kind === 'sweep' ? panel : undefined;
   const [universe, setUniverse] = useState<Universe>('custom'); const [tickers, setTickers] = useState('AAPL, MSFT, NVDA');
   const [tier, setTierRaw] = useState<DataTier>('free'); const [strategy, setStrategyRaw] = useState<StrategyId>('momentum'); const [dataSource, setDataSource] = useState<'yfinance' | 'fd'>('yfinance');
   const [holding, setHolding] = useState('21'); const [earnings, setEarnings] = useState('8'); const [capital, setCapital] = useState('100000'); const [perTrade, setPerTrade] = useState('10000'); const [costBps, setCostBps] = useState('10');
@@ -413,20 +442,30 @@ function BacktestTool({ result, setResult, handoff, clearHandoff, ask }: ToolPro
     window_days: Number(window), min_insiders: Number(minInsiders), min_value_usd: Number(minValue),
     min_consensus: Number(minConsensus), min_agreement: Number(minAgreement), lean, filing_lag_days: Number(lag),
   });
+  const poll = async <T,>(first: T | LabJob<T>): Promise<T> => {
+    let r = first;
+    while (typeof r === 'object' && r !== null && 'job_id' in r) {
+      const j = r as LabJob<T>; setJob(j as LabJob<BacktestResult>);
+      if (j.status === 'failed') throw new Error(j.error || '回测任务失败');
+      if (j.status === 'completed' && j.result) { r = j.result; break }
+      await new Promise<void>(resolve => globalThis.setTimeout(resolve, 2000));
+      r = await apiJson<LabJob<T>>(`/api/lab/backtest/jobs/${encodeURIComponent(j.job_id)}`);
+    }
+    return r as T;
+  };
   const run = async () => {
     setBusy(true); setError(''); setJob(null);
-    try {
-      let r = await apiJson<BacktestResult | LabJob<BacktestResult>>('/api/lab/backtest', { method: 'POST', body: JSON.stringify(body()) });
-      while ('job_id' in r) {
-        setJob(r);
-        if (r.status === 'failed') throw new Error(r.error || '回测任务失败');
-        if (r.status === 'completed' && r.result) { r = r.result; break }
-        await new Promise<void>(resolve => globalThis.setTimeout(resolve, 2000));
-        r = await apiJson<LabJob<BacktestResult>>(`/api/lab/backtest/jobs/${encodeURIComponent(r.job_id)}`);
-      }
-      setResult(r as BacktestResult);
-    } catch (e) { setError(errorText(e)) } finally { setBusy(false); setJob(null) }
+    try { setResult(await poll(await apiJson<BacktestResult | LabJob<BacktestResult>>('/api/lab/backtest', { method: 'POST', body: JSON.stringify(body()) }))) }
+    catch (e) { setError(errorText(e)) } finally { setBusy(false); setJob(null) }
   };
+  const runSweep = async () => {
+    setBusy(true); setError(''); setJob(null);
+    const sweepBody = { universe, tickers: universe === 'custom' ? parseTickers(tickers) : [], data_source: dataSource, history_days: Number(history), lookback_days: Number(lookback), skip_days: Number(skip),
+      capital: Number(capital), per_trade: Number(perTrade), cost_bps: Number(costBps), top_ns: SWEEP_GRID.top_ns, holding_days_list: SWEEP_GRID.holding, near_high_pcts: SWEEP_GRID.nearHigh };
+    try { setResult(await poll(await apiJson<LabJob<SweepResult>>('/api/lab/backtest/sweep', { method: 'POST', body: JSON.stringify(sweepBody) }))) }
+    catch (e) { setError(errorText(e)) } finally { setBusy(false); setJob(null) }
+  };
+  const sweepCombos = SWEEP_GRID.top_ns.length * SWEEP_GRID.holding.length * SWEEP_GRID.nearHigh.length;
   const m = result?.metrics;
   const p = (result?.params || {}) as Record<string, unknown>;
   const paramText = result ? (
@@ -462,11 +501,13 @@ function BacktestTool({ result, setResult, handoff, clearHandoff, ask }: ToolPro
         {tier === 'paid' && <p className="lab-note">预计 Financial Datasets 费用：{estimate ? `≈ ${usd(estimate.total)}${estimate.note ? `（${estimate.note}${estimate.prices ? ` + 价格 ${usd(estimate.prices)}` : ''}）` : ''}` : '$0.00'}{strategy === 'committee' ? '。已缓存的时点不重复计费；委员会回测在后台运行，可以看进度。' : strategy === 'pead' && dataSource === 'fd' ? '，另加每笔交易 1 次价格请求。' : '。'}</p>}
         {tier === 'free' && <p className="lab-note">免费档不调用 Financial Datasets，费用 $0.00。</p>}
         <button className="run-button" disabled={busy || (universe === 'custom' && !parseTickers(tickers).length)} onClick={() => void run()}>{busy ? (job ? `回测中… ${job.done} / ${job.total}` : '回测中…') : '运行回测'}</button>
+        {strategy === 'momentum' && <><button type="button" className="run-button lab-secondary" disabled={busy || (universe === 'custom' && !parseTickers(tickers).length)} onClick={() => void runSweep()}>{busy ? '运行中…' : `参数扫描（${sweepCombos} 组）`}</button>
+          <p className="lab-note">扫描固定网格：每期 {SWEEP_GRID.top_ns.join(' / ')} 只 × 持有 {SWEEP_GRID.holding.join(' / ')} 日 × 是否要求距 52 周高点 ≤ 10%；沿用上面的股票池、回看历史、动量回看、跳过、资金和成本，价格只取一次。</p></>}
         {job && <div className="lab-progress"><i style={{ width: `${job.total ? Math.round((job.done / job.total) * 100) : 0}%` }}/></div>}
         </div>
       </section>
       <section className="surface lab-result lab-result-clamp">
-        {error ? <ErrorBox text={error}/> : !result ? <Empty glyph="↗" title="等待回测" text={meta.empty}/> : <>
+        {error ? <ErrorBox text={error}/> : sweep ? <SweepView result={sweep} ask={ask}/> : !result ? <Empty glyph="↗" title="等待回测" text={meta.empty}/> : <>
           <div className="surface-header"><div><h2>{STRATEGY_LABEL[result.strategy] || result.strategy.toUpperCase()} · {result.tickers.length} 只 · {m?.n_trades ?? 0} 笔{m?.n_periods ? ` · ${m.n_periods} 期` : ''}</h2><span>{UNIVERSE_LABEL[result.universe] || result.universe}{result.universe_as_of ? `（成分股 ${result.universe_as_of}）` : ''} · 持有 {String(p.holding_days)} 日 · {paramText} · 单笔 ${Number(p.per_trade || 0).toLocaleString()} · 成本 {String(p.cost_bps ?? 0)} bp/边 · 价格 {result.data_source === 'fd' ? 'Financial Datasets' : 'yfinance'} · FD 费用 {usd(result.fd_cost_usd ?? 0)}</span></div></div>
           <div className="lab-scroll">
           {m ? <div className="lab-stats"><Stat label="总收益" value={pct(m.total_return_pct)} tone={m.total_return_pct >= 0 ? 'positive' : 'negative'}/><Stat label="年化" value={pct(m.annualized_return_pct)}/><Stat label="夏普（按期）" value={`${num(m.sharpe_ratio)}${m.sharpe_trade_level ? ` / 逐笔 ${num(m.sharpe_trade_level)}` : ''}`}/><Stat label="最大回撤" value={pct(m.max_drawdown_pct)} tone="negative"/><Stat label="胜率" value={pctAbs(m.win_rate)}/><Stat label="平均单笔" value={pct(m.avg_return_pct)}/><Stat label="多 / 空" value={`${m.n_long} / ${m.n_short}`}/><Stat label="平均持有" value={`${num(m.avg_holding_days, 1)} 日`}/><Stat label={`${result.benchmark?.ticker || 'SPY'} 同期`} value={pct(result.benchmark?.total_return_pct)}/><Stat label="超额收益" value={pct(result.excess_return_pct)} tone={(result.excess_return_pct ?? 0) >= 0 ? 'positive' : 'negative'}/></div> : <p className="lab-note">没有产生交易：{result.strategy === 'pead' ? '股票池里可能没有可用的财报事件。' : result.strategy === 'insider' ? '这段历史里没有满足条件的内部人集中买入。' : result.strategy === 'committee' ? '没有股票达到共识与一致度门槛，或财务数据不足；下方「每期投票」列出了每个换仓日的情况。' : '没有股票满足动量条件，或价格历史不够长。'}</p>}
@@ -478,6 +519,7 @@ function BacktestTool({ result, setResult, handoff, clearHandoff, ask }: ToolPro
           {result.notes?.aborted && <div className="lab-error"><strong>提前停止</strong><span>{result.notes.aborted.signal_date} 这期 {result.notes.aborted.of} 只里有 {result.notes.aborted.failed} 只取不到核心数据（{result.notes.aborted.reason}），后面 {result.notes.aborted.remaining_dates.length} 个换仓日没有跑。常见原因是 Financial Datasets 余额用完；充值后重跑只会补取失败的时点。</span></div>}
           {(failures > 0 || errs > 0) && <p className="lab-note">{failures > 0 ? `${failures} 只取不到价格已跳过` : ''}{failures > 0 && errs > 0 ? '；' : ''}{errs > 0 ? `${errs} 个（股票, 时点）取数失败` : ''}，详见原始结果。</p>}
           <EquityLine values={result.equity_curve || []}/>
+          {(result.yearly?.length || 0) > 0 && <div className="lab-table-wrap"><div className="lab-subhead">按年拆分（按入场年份归类；{result.benchmark?.ticker || 'SPY'} 取同一时间段）</div><table className="lab-table"><thead><tr><th>年份</th><th>时间段</th><th>期数</th><th>笔数</th><th>胜率</th><th>年初权益</th><th>盈亏</th><th>策略收益</th><th>{result.benchmark?.ticker || 'SPY'}</th><th>超额</th></tr></thead><tbody>{result.yearly!.map(y => <tr key={y.year}><td><strong>{y.year}</strong></td><td>{y.start.slice(5)} → {y.end}</td><td>{y.periods}</td><td>{y.trades}</td><td>{pctAbs(y.win_rate)}</td><td>${Math.round(y.start_equity).toLocaleString()}</td><td className={y.pnl >= 0 ? 'positive' : 'negative'}>${Math.round(y.pnl).toLocaleString()}</td><td className={(y.return_pct ?? 0) >= 0 ? 'positive' : 'negative'}>{pct(y.return_pct)}</td><td>{pct(y.benchmark_pct)}</td><td className={(y.excess_pct ?? 0) >= 0 ? 'positive' : 'negative'}><strong>{pct(y.excess_pct)}</strong></td></tr>)}</tbody></table><p className="lab-note">策略收益 = 当年盈亏 ÷ 年初权益（每笔固定 ${Number(p.per_trade || 0).toLocaleString()}，未满仓时会稀释）；12 月入场的仓位在次年 1 月平仓，仍计入前一年。</p></div>}
           {result.strategy === 'committee' && (result.notes?.periods?.length || 0) > 0 && <div className="lab-table-wrap"><div className="lab-subhead">每期投票（{result.notes!.periods!.length} 个换仓日）</div><table className="lab-table"><thead><tr><th>换仓日</th><th>数据截至</th><th>股票</th><th>投票 / 弃权</th><th>多 / 空 / 中</th><th>共识</th><th>一致度</th><th>入选</th><th>弃权原因</th></tr></thead><tbody>{result.notes!.periods!.flatMap(pd => [...pd.verdicts.map(v => <tr key={`${pd.signal_date}-${v.ticker}`} className={v.picked ? 'picked' : ''}><td>{pd.signal_date}</td><td>{pd.as_of}</td><td><strong>{v.ticker}</strong></td><td>{v.voters} / {v.abstained}{v.gaps ? ` · ${v.gaps} 处缺数据` : ''}</td><td>{v.bullish} / {v.bearish} / {v.neutral}</td><td className={v.consensus >= 0 ? 'positive' : 'negative'}>{num(v.consensus)}</td><td>{pctAbs(v.agreement)}</td><td>{v.picked ? '✓' : v.voters === 0 ? '全部弃权' : '—'}</td><td className="lab-reasons">{(v.reasons || []).join('；')}</td></tr>), ...pd.missing.map(t => <tr key={`${pd.signal_date}-${t}-x`}><td>{pd.signal_date}</td><td>{pd.as_of}</td><td><strong>{t}</strong></td><td colSpan={6}>取数失败</td></tr>)])}</tbody></table></div>}
           {result.trades.length > 0 && <div className="lab-table-wrap"><div className="lab-subhead">成交明细</div><table className="lab-table"><thead><tr><th>股票</th><th>方向</th><th>入场</th><th>出场</th><th>入场价</th><th>出场价</th><th>收益</th><th>盈亏</th><th>信号</th></tr></thead><tbody>{result.trades.slice(0, 60).map((t, i) => <tr key={i}><td><strong>{t.ticker}</strong></td><td>{t.direction === 'long' ? '多' : '空'}</td><td>{t.entry_date}</td><td>{t.exit_date}</td><td>${num(t.entry_price)}</td><td>${num(t.exit_price)}</td><td className={t.return_pct >= 0 ? 'positive' : 'negative'}>{pct(t.return_pct)}</td><td className={t.pnl >= 0 ? 'positive' : 'negative'}>${t.pnl.toFixed(0)}</td><td>{signalText(result.strategy, t.metadata)}</td></tr>)}</tbody></table>{result.trades.length > 60 && <p className="lab-note">只显示前 60 笔，共 {result.trades.length} 笔；完整列表在原始结果里。</p>}</div>}
           </div>

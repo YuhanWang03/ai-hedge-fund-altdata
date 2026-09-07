@@ -573,6 +573,103 @@ def test_backtest_strategies_and_data_feeds(client, monkeypatch, tmp_path):
     assert client.get("/api/lab/runs?kind=backtest").json()["items"][0]["strategy"] == "committee"
 
 
+def test_backtest_result_carries_a_yearly_table_against_the_benchmark(client, monkeypatch):
+    from v2.backtesting.strategies import BacktestData, PriceCache
+    from datetime import date, timedelta
+
+    class Bar:
+        def __init__(self, t, c):
+            self.time, self.close = t, c
+
+    class Src:
+        def get_prices(self, ticker, start, end):
+            d, out, i = date.fromisoformat(start), [], 0
+            rate = 1.0005 if ticker == "SPY" else 1.001
+            while d <= date.fromisoformat(end):
+                if d.weekday() < 5:
+                    out.append(Bar(d.isoformat(), 100 * (rate ** i))); i += 1
+                d += timedelta(days=1)
+            return out
+
+    @contextmanager
+    def fake_data(body):
+        yield BacktestData(prices=PriceCache(Src()), fd=None, raw=None)
+
+    monkeypatch.setattr(workspace, "_backtest_data", fake_data)
+    res = client.post("/api/lab/backtest", json={"universe": "custom", "tickers": ["AAA", "BBB"], "strategy": "momentum", "history_days": 800, "holding_days": 63, "top_n": 2, "cost_bps": 0})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    yearly = body["yearly"]
+    assert len(yearly) >= 2 and [r["year"] for r in yearly] == sorted(r["year"] for r in yearly)
+    assert sum(r["periods"] for r in yearly) == body["metrics"]["n_periods"] and sum(r["trades"] for r in yearly) == body["metrics"]["n_trades"]
+    for r in yearly:
+        assert r["return_pct"] > 0 and r["benchmark_pct"] > 0 and abs(r["excess_pct"] - (r["return_pct"] - r["benchmark_pct"])) < 1e-6  # 2 × $10k on $100k: equity return is diluted
+        assert r["start"][:4] == r["year"] and r["end"] >= r["start"]
+    # equity chains: start of year n+1 = start of year n + that year's P&L
+    assert abs(yearly[1]["start_equity"] - (yearly[0]["start_equity"] + yearly[0]["pnl"])) < 0.02
+
+
+def test_momentum_sweep_runs_the_grid_on_one_price_load(client, monkeypatch):
+    from v2.backtesting.strategies import BacktestData, PriceCache
+    from datetime import date, timedelta
+
+    class Bar:
+        def __init__(self, t, c):
+            self.time, self.close = t, c
+
+    calls: list[str] = []
+
+    class Src:
+        def get_prices(self, ticker, start, end):
+            calls.append(ticker)
+            d, out, i = date.fromisoformat(start), [], 0
+            rate = {"AAA": 1.0012, "BBB": 1.0006, "CCC": 0.9995, "SPY": 1.0004}.get(ticker, 1.0)
+            while d <= date.fromisoformat(end):
+                if d.weekday() < 5:
+                    out.append(Bar(d.isoformat(), 100 * (rate ** i))); i += 1
+                d += timedelta(days=1)
+            return out
+
+    @contextmanager
+    def fake_bundle(data_source, *, needs_fd, persona_client=False):
+        assert needs_fd is False
+        yield BacktestData(prices=PriceCache(Src()), fd=None, raw=None)
+
+    monkeypatch.setattr(workspace, "_data_bundle", fake_bundle)
+    grid = {"top_ns": [1, 2], "holding_days_list": [21, 42], "near_high_pcts": [None, 0.10]}
+    job = client.post("/api/lab/backtest/sweep", json={"universe": "custom", "tickers": ["AAA", "BBB", "CCC"], "history_days": 400, "cost_bps": 5, **grid}).json()
+    assert job["kind"] == "backtest_job" and job["total"] == 3 + 8  # tickers to load + 8 combos
+    for _ in range(100):
+        job = client.get(f"/api/lab/backtest/jobs/{job['job_id']}").json()
+        if job["status"] != "running":
+            break
+        time.sleep(0.05)
+    assert job["status"] == "completed", job
+    result = job["result"]
+    assert result["kind"] == "sweep" and result["strategy"] == "momentum" and result["fd_cost_usd"] == 0
+    assert result["params"]["grid"] == grid and result["params"]["cost_bps"] == 5
+    rows = result["rows"]
+    assert len(rows) == 8 and {(r["top_n"], r["holding_days"], r["near_high_pct"]) for r in rows} == {(n, h, nh) for n in (1, 2) for h in (21, 42) for nh in (None, 0.10)}
+    # one price fetch per ticker (+ SPY) for the whole grid
+    assert sorted(calls) == ["AAA", "BBB", "CCC", "SPY"]
+    for r in rows:
+        assert r["n_trades"] > 0 and r["n_periods"] > 0 and r["benchmark_pct"] is not None
+        assert abs(r["excess_return_pct"] - (r["total_return_pct"] - r["benchmark_pct"])) < 1e-6
+    by_key = {(r["top_n"], r["holding_days"], r["near_high_pct"]): r for r in rows}
+    assert by_key[(1, 21, None)]["n_trades"] < by_key[(2, 21, None)]["n_trades"]           # more names per period → more trades
+    assert by_key[(2, 21, None)]["n_periods"] > by_key[(2, 42, None)]["n_periods"]         # shorter holding → more periods
+    # the run is listed with the best combination
+    run = client.get("/api/lab/runs?kind=backtest").json()["items"][0]
+    assert run["sweep"] is True and run["n_combos"] == 8 and run["best"]["top_n"] in (1, 2) and run["strategy"] == "momentum"
+    reopened = client.get(f"/api/lab/runs/{run['id']}").json()
+    assert reopened["kind"] == "backtest" and reopened["result"]["kind"] == "sweep"
+
+    # grid validation
+    assert client.post("/api/lab/backtest/sweep", json={"tickers": ["AAA"], "top_ns": []}).status_code == 422
+    assert client.post("/api/lab/backtest/sweep", json={"tickers": ["AAA"], "near_high_pcts": [1.5]}).status_code == 422
+    assert client.post("/api/lab/backtest/sweep", json={"tickers": [f"T{chr(65 + i // 26)}{chr(65 + i % 26)}" for i in range(601)]}).status_code == 422
+
+
 def test_momentum_index_backtest_uses_point_in_time_members_when_history_exists(monkeypatch, tmp_path):
     import json
     from v2.screening import universes as U
@@ -588,6 +685,10 @@ def test_momentum_index_backtest_uses_point_in_time_members_when_history_exists(
     path.write_text(json.dumps({"sp500": {"tickers": ["AAA", "BBB", "NEWCO"], "as_of": "2026-09-01", "changes": changes}}))
     tickers, meta = workspace._backtest_universe(body)
     assert meta["membership"]["point_in_time"] is True and "OLDCO" in tickers and "NEWCO" in tickers  # union over the window
+    sweep = workspace.SweepInput(universe="sp500", history_days=200, holding_days_list=[21, 63])
+    sweep_tickers, sweep_meta = workspace._sweep_universe(sweep)
+    assert set(sweep_tickers) >= set(tickers) and sweep_meta["membership"]["point_in_time"] is True
+    assert sweep.combos()[0] == {"top_n": 10, "holding_days": 21, "near_high_pct": None} and len(sweep.combos()) == 3 * 2 * 2
     strat = workspace._build_strategy(body)
     assert strat.universe_at is not None and strat.universe_at("2026-05-01") == ["AAA", "BBB", "OLDCO"] and "NEWCO" in strat.universe_at("2026-07-01")
 
