@@ -120,7 +120,7 @@ export function LabPage({ tool, selectTool, ask }: { tool: LabTool; selectTool: 
     scoreboard: ['观察记分板', '委员会每一票在 1 个月 / 3 个月后对不对：无前视的逐人命中率。'],
     runs: ['运行记录', '所有工具的历史运行，点开可原样重看。'],
   };
-  return <div className={`page lab-page lab-big${tool === 'screening' ? ' lab-page-fill' : ''}`}>
+  return <div className={`page lab-page lab-big${tool === 'screening' || tool === 'backtest' ? ' lab-page-fill' : ''}`}>
     <div className="page-heading"><div><h1>{heading[tool][0]}</h1><p>{heading[tool][1]}</p></div><span className="lab-tag">ISOLATED LAB</span></div>
     {tool === 'overview' && <OverviewTool {...common}/>}
     {tool === 'screening' && <ScreeningTool {...common} result={results.screening as ScreeningResult | undefined} setResult={r => setResult('screening', r)} onHand={hand}/>}
@@ -431,8 +431,9 @@ function BacktestTool({ result, setResult, handoff, clearHandoff, ask }: ToolPro
   const failures = Object.keys(result?.notes?.price_failures || {}).length; const errs = Object.keys(result?.notes?.errors || {}).length;
   return <>
     {handoff && <HandoffBanner handoff={handoff} onUse={() => { setUniverse('custom'); setTickers(handoff.tickers.join(', ')); clearHandoff() }} onClear={clearHandoff}/>}
-    <div className="lab-tool">
-      <section className="surface lab-config"><div className="surface-header"><div><h2>回测参数</h2><span>先选免费还是付费数据，再选该档位下的策略；四个策略共用一个引擎</span></div></div>
+    <div className="lab-tool lab-tool-fill">
+      <section className="surface lab-config lab-config-fill"><div className="surface-header"><div><h2>回测参数</h2><span>先选免费还是付费数据，再选该档位下的策略；四个策略共用一个引擎</span></div></div>
+        <div className="lab-config-body lab-scroll">
         <Field label="数据" hint={tier === 'free' ? '只用 yfinance 的日线价格，不产生任何费用；可用的策略是纯价格策略。' : '财报、内部人交易和财务数据来自 Financial Datasets，按请求计费（每次约 $0.02）；下方会给出费用预估。'}><Chips options={[{ id: 'free', label: '免费（yfinance）' }, { id: 'paid', label: '付费（Financial Datasets）' }]} value={tier} onChange={setTier}/></Field>
         <Field label="策略" hint={meta.hint}><Chips options={tierStrategies.map(s => ({ id: s.id, label: s.label }))} value={strategy} onChange={setStrategy}/></Field>
         <UniversePicker universe={universe} setUniverse={setUniverse} tickers={tickers} setTickers={setTickers} exclude={INDEX_UNIVERSES}/>
@@ -447,18 +448,23 @@ function BacktestTool({ result, setResult, handoff, clearHandoff, ask }: ToolPro
           <Field label="初始资金（$）"><NumberInput value={capital} onChange={setCapital} min={1000} step={10000}/></Field><Field label="单笔资金（$）"><NumberInput value={perTrade} onChange={setPerTrade} min={100} step={1000}/></Field>
         </div>
         {strategy === 'committee' && <Field label="省流模式" hint={lean ? '跳过新闻和内部人交易两路请求；只影响几位投资人的情绪小分项' : '取全部数据，每个时点每只约 6 次请求'}><Chips options={[{ id: 'on', label: '开（省流）' }, { id: 'off', label: '关（全量）' }]} value={lean ? 'on' : 'off'} onChange={v => setLean(v === 'on')}/></Field>}
+        </div>
+        <div className="lab-config-foot">
         {tier === 'paid' && <p className="lab-note">预计 Financial Datasets 费用：{estimate ? `≈ ${usd(estimate.total)}${estimate.note ? `（${estimate.note}${estimate.prices ? ` + 价格 ${usd(estimate.prices)}` : ''}）` : ''}` : '$0.00'}{strategy === 'committee' ? '。已缓存的时点不重复计费；委员会回测在后台运行，可以看进度。' : strategy === 'pead' && dataSource === 'fd' ? '，另加每笔交易 1 次价格请求。' : '。'}</p>}
         {tier === 'free' && <p className="lab-note">免费档不调用 Financial Datasets，费用 $0.00。</p>}
         <button className="run-button" disabled={busy || (universe === 'custom' && !parseTickers(tickers).length)} onClick={() => void run()}>{busy ? (job ? `回测中… ${job.done} / ${job.total}` : '回测中…') : '运行回测'}</button>
         {job && <div className="lab-progress"><i style={{ width: `${job.total ? Math.round((job.done / job.total) * 100) : 0}%` }}/></div>}
+        </div>
       </section>
-      <section className="surface lab-result">
+      <section className="surface lab-result lab-result-clamp">
         {error ? <ErrorBox text={error}/> : !result ? <Empty glyph="↗" title="等待回测" text={meta.empty}/> : <>
           <div className="surface-header"><div><h2>{STRATEGY_LABEL[result.strategy] || result.strategy.toUpperCase()} · {result.tickers.length} 只 · {m?.n_trades ?? 0} 笔</h2><span>{UNIVERSE_LABEL[result.universe] || result.universe} · 持有 {String(p.holding_days)} 日 · {paramText} · 单笔 ${Number(p.per_trade || 0).toLocaleString()} · 价格 {result.data_source === 'fd' ? 'Financial Datasets' : 'yfinance'} · FD 费用 {usd(result.fd_cost_usd ?? 0)}</span></div></div>
+          <div className="lab-scroll">
           {m ? <div className="lab-stats"><Stat label="总收益" value={pct(m.total_return_pct)} tone={m.total_return_pct >= 0 ? 'positive' : 'negative'}/><Stat label="年化" value={pct(m.annualized_return_pct)}/><Stat label="夏普" value={num(m.sharpe_ratio)}/><Stat label="最大回撤" value={pct(m.max_drawdown_pct)} tone="negative"/><Stat label="胜率" value={pctAbs(m.win_rate)}/><Stat label="平均单笔" value={pct(m.avg_return_pct)}/><Stat label="多 / 空" value={`${m.n_long} / ${m.n_short}`}/><Stat label="平均持有" value={`${num(m.avg_holding_days, 1)} 日`}/></div> : <p className="lab-note">没有产生交易：{result.strategy === 'pead' ? '股票池里可能没有可用的财报事件。' : result.strategy === 'insider' ? '这段历史里没有满足条件的内部人集中买入。' : result.strategy === 'committee' ? '没有股票达到共识与一致度门槛，或财务数据不足。' : '没有股票满足动量条件，或价格历史不够长。'}</p>}
           {(failures > 0 || errs > 0) && <p className="lab-note">{failures > 0 ? `${failures} 只取不到价格已跳过` : ''}{failures > 0 && errs > 0 ? '；' : ''}{errs > 0 ? `${errs} 个（股票, 时点）取数失败` : ''}，详见原始结果。</p>}
           <EquityLine values={result.equity_curve || []}/>
           {result.trades.length > 0 && <div className="lab-table-wrap"><table className="lab-table"><thead><tr><th>股票</th><th>方向</th><th>入场</th><th>出场</th><th>入场价</th><th>出场价</th><th>收益</th><th>盈亏</th><th>信号</th></tr></thead><tbody>{result.trades.slice(0, 60).map((t, i) => <tr key={i}><td><strong>{t.ticker}</strong></td><td>{t.direction === 'long' ? '多' : '空'}</td><td>{t.entry_date}</td><td>{t.exit_date}</td><td>${num(t.entry_price)}</td><td>${num(t.exit_price)}</td><td className={t.return_pct >= 0 ? 'positive' : 'negative'}>{pct(t.return_pct)}</td><td className={t.pnl >= 0 ? 'positive' : 'negative'}>${t.pnl.toFixed(0)}</td><td>{signalText(result.strategy, t.metadata)}</td></tr>)}</tbody></table>{result.trades.length > 60 && <p className="lab-note">只显示前 60 笔，共 {result.trades.length} 笔；完整列表在原始结果里。</p>}</div>}
+          </div>
           <div className="lab-foot"><button type="button" className="explain-button" onClick={() => ask(`${STRATEGY_LABEL[result.strategy] || result.strategy} 回测结果：${result.tickers.join(', ')}，${m?.n_trades ?? 0} 笔，总收益 ${pct(m?.total_return_pct)}，夏普 ${num(m?.sharpe_ratio)}，最大回撤 ${pct(m?.max_drawdown_pct)}，胜率 ${pctAbs(m?.win_rate)}（${paramText}）。请评价这组指标的稳健性和样本量问题。`, '实验室 · 策略回测')}>问 AI 评价稳健性</button><RawJson data={result}/></div>
         </>}
       </section>

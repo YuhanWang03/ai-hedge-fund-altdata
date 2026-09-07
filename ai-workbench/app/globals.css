@@ -192,3 +192,6 @@
 .lab-big .lab-ask{padding:10px 16px}
 @media(max-width:760px){.lab-big .lab-run{grid-template-columns:90px minmax(0,1fr) auto}}
 .lab-big .lab-tag{white-space:nowrap}
+.lab-result-clamp>.lab-error{flex:0 0 auto}
+.lab-big .lab-stat strong{white-space:nowrap}
+.lab-result-clamp>.lab-scroll .lab-table-wrap{overflow-x:auto}
