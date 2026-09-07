@@ -29,6 +29,12 @@ from v2.personas.models import Record, as_records
 logger = logging.getLogger(__name__)
 
 FD_BASE_URL = "https://api.financialdatasets.ai"
+#: Cloudflare in front of financialdatasets.ai blocks urllib's default
+#: "Python-urllib/3.x" agent with a 403 whose body is a Cloudflare problem
+#: document. Identify ourselves like an ordinary HTTP client instead.
+USER_AGENT = "ai-hedge-fund-altdata/2026 (+https://github.com/YuhanWang03/ai-hedge-fund-altdata; python)"
+#: financialdatasets.ai caps /news/ page size
+NEWS_MAX_LIMIT = 100
 
 #: Union of every line item any persona reads. Fetched once per ticker and
 #: period, then shared, so a 13-persona run costs two line-item calls, not 13.
@@ -123,7 +129,7 @@ class FinancialDatasetsClient:
         if key in self._cache:
             return self._cache[key]
 
-        headers = {"Accept": "application/json"}
+        headers = {"Accept": "application/json", "User-Agent": USER_AGENT}
         if self.api_key:
             headers["X-API-KEY"] = self.api_key
         data = None
@@ -142,7 +148,12 @@ class FinancialDatasetsClient:
                 return payload
             except urllib.error.HTTPError as exc:
                 detail = exc.read().decode("utf-8", "replace")[:200]
-                last_error = RuntimeError(f"HTTP {exc.code} for {path}: {detail}")
+                hint = ""
+                if exc.code == 403 and "cloudflare" in detail.lower():
+                    hint = " [blocked by Cloudflare in front of the API — check the User-Agent / IP reputation]"
+                elif exc.code in (401, 403):
+                    hint = " [check FINANCIAL_DATASETS_API_KEY and whether the plan includes this endpoint]"
+                last_error = RuntimeError(f"HTTP {exc.code} for {path}: {detail}{hint}")
                 if exc.code == 429 and attempt < self.max_retries:
                     time.sleep(2.0 ** attempt)
                     continue
@@ -193,7 +204,7 @@ class FinancialDatasetsClient:
         return as_records(payload.get("insider_trades") or [])
 
     def get_company_news(self, ticker: str, end_date: str, *, start_date: str | None = None, limit: int = 100) -> list[Record]:
-        params: dict[str, Any] = {"ticker": ticker, "end_date": _iso(end_date), "limit": limit}
+        params: dict[str, Any] = {"ticker": ticker, "end_date": _iso(end_date), "limit": min(limit, NEWS_MAX_LIMIT)}
         if start_date:
             params["start_date"] = _iso(start_date)
         payload = self._request("/news/", params=params)
@@ -250,10 +261,25 @@ class _Adapted:
     def get_market_cap(self, ticker: str, end_date: str) -> float | None:
         fn = getattr(self.primary, "get_market_cap", None)
         if fn is not None:
-            value = fn(ticker, end_date)
-            return float(value) if value else None
+            # The production client's get_market_cap has been seen to raise from
+            # inside (a CompanyFacts model without market_cap); treat any failure
+            # as "derive it another way" rather than as a snapshot gap.
+            for args in ((ticker, end_date), (ticker,)):
+                try:
+                    value = fn(*args)
+                except TypeError:
+                    continue
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("primary get_market_cap failed for %s: %s", ticker, exc)
+                    break
+                if value:
+                    return float(value)
+                break
         # Cheap derivation the production client always supports.
-        rows = self.get_financial_metrics(ticker, end_date, period="ttm", limit=1)
+        try:
+            rows = self.get_financial_metrics(ticker, end_date, period="ttm", limit=1)
+        except Exception:  # noqa: BLE001
+            rows = []
         value = rows[0].market_cap if rows else None
         if value:
             return float(value)
@@ -266,6 +292,7 @@ class _Adapted:
 
     def get_company_news(self, ticker: str, end_date: str, *, start_date: str | None = None, limit: int = 100) -> list[Record]:
         fn = getattr(self.primary, "get_company_news", None) or getattr(self.primary, "get_news", None)
+        limit = min(limit, NEWS_MAX_LIMIT)
         if fn is not None:
             try:
                 rows = fn(ticker, end_date, start_date=start_date, limit=limit)

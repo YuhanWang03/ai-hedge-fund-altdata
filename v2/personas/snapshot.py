@@ -160,7 +160,7 @@ def build_snapshot(
     if "insiders" in need:
         snap.insider_trades = as_records(attempt("insider_trades", fd.get_insider_trades, ticker, end, start_date=start, limit=1000) or [])
     if "news" in need:
-        snap.news = as_records(attempt("news", fd.get_company_news, ticker, end, start_date=start, limit=250) or [])
+        snap.news = as_records(attempt("news", fd.get_company_news, ticker, end, start_date=start, limit=100) or [])
     if "prices" in need:
         snap.prices = _sorted_prices(as_records(attempt("prices", fd.get_prices, ticker, start, end) or []))
     if not snap.has_fundamentals:

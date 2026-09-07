@@ -400,3 +400,47 @@ def test_store_refuses_to_cache_snapshots_with_core_gaps(tmp_path):
     broken.gaps.append("line_items_ttm: RuntimeError: HTTP 402")
     store.save_snapshot(broken)
     assert store.cached_snapshot("DSTR", broken.as_of) is None
+
+
+def test_http_client_sends_a_real_user_agent_and_explains_cloudflare_403(monkeypatch):
+    import io
+    import urllib.error
+    import urllib.request
+
+    from v2.personas.data import USER_AGENT
+
+    seen: list[urllib.request.Request] = []
+
+    def fake_urlopen(request, timeout=0):
+        seen.append(request)
+        body = b'{"type":"https://developers.cloudflare.com/waf","title":"blocked"}'
+        raise urllib.error.HTTPError(request.full_url, 403, "Forbidden", {}, io.BytesIO(body))
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    client = FinancialDatasetsClient("k", max_retries=0)
+    with pytest.raises(RuntimeError) as exc:
+        client.search_line_items("AAPL", ["revenue"], "2026-06-30")
+    assert "HTTP 403" in str(exc.value) and "Cloudflare" in str(exc.value)
+    assert seen[0].get_header("User-agent") == USER_AGENT
+    assert seen[0].get_header("X-api-key") == "k"
+
+
+def test_adapter_survives_a_broken_production_get_market_cap():
+    class Prod:
+        def get_market_cap(self, ticker):
+            raise AttributeError("'CompanyFacts' object has no attribute 'market_cap'")
+
+        def get_financial_metrics(self, ticker, end_date, limit=1):
+            return [{"market_cap": 123.0}]
+
+    fd = adapt_client(Prod())
+    assert fd.get_market_cap("AAPL", "2026-06-30") == 123.0
+
+
+def test_adapter_caps_news_limit():
+    class Prod:
+        def get_news(self, ticker, end, start, limit):
+            assert limit <= 100
+            return [{"title": "x"}] * 3
+
+    assert len(adapt_client(Prod()).get_company_news("AAPL", "2026-06-30", start_date="2025-06-30", limit=250)) == 3
