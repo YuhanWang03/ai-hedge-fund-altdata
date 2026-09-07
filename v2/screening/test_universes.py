@@ -42,11 +42,32 @@ def test_parse_changes_tolerates_footnotes_nbsp_and_iso_dates():
     assert U.describe_changes(html)[0].startswith("candidate table 0: 4 rows")
 
 
+def test_join_dates_give_additions_only_membership(tmp_path, monkeypatch):
+    html = """<table><tr><th>Symbol</th><th>Security</th><th>GICS Sector</th><th>Date added</th><th>CIK</th></tr>
+    <tr><td>AAPL</td><td>Apple</td><td>IT</td><td>1982-11-30</td><td>1</td></tr>
+    <tr><td>PLTR</td><td>Palantir</td><td>IT</td><td>2024-09-23</td><td>2</td></tr>
+    <tr><td>APP</td><td>AppLovin</td><td>IT</td><td>2025-09-22</td><td>3</td></tr>
+    <tr><td>BRK.B</td><td>Berkshire</td><td>Fin</td><td></td><td>4</td></tr></table>"""
+    pairs = U.parse_constituents_with_dates(html, U._HEADERS)
+    assert pairs == [("AAPL", "1982-11-30"), ("PLTR", "2024-09-23"), ("APP", "2025-09-22"), ("BRK.B", None)]
+    assert U.parse_constituents(html, U._HEADERS) == ["AAPL", "PLTR", "APP", "BRK.B"]
+
+    path = tmp_path / "universes.json"
+    monkeypatch.setattr(U, "DATA_PATH", path)
+    path.write_text(json.dumps({"sp500": {"tickers": [t for t, _ in pairs], "as_of": "2026-09-01", "date_added": {t: d for t, d in pairs if d}}}))
+    assert U.membership_mode("sp500") == "additions"
+    assert U.members_at("sp500", "2024-09-10") == (["AAPL", "BRK.B"], True)      # PLTR / APP had not joined; unknown date is kept
+    assert U.members_at("sp500", "2025-01-01") == (["AAPL", "PLTR", "BRK.B"], True)
+    assert U.members_at("sp500", "2026-09-01")[0] == ["AAPL", "PLTR", "APP", "BRK.B"]
+    assert U.membership_lookup("sp500")("2024-09-10") == ["AAPL", "BRK.B"]
+    assert U.universe_status()["sp500"]["membership"] == "additions"
+
+
 def test_members_at_rewinds_todays_list_through_the_changes(tmp_path, monkeypatch):
     path = tmp_path / "universes.json"
     monkeypatch.setattr(U, "DATA_PATH", path)
     assert U.members_at("sp500", "2024-06-01") == (U._dedupe(U.SP500), False)  # no history → today's list, flagged
-    assert U.membership_lookup("sp500") is None
+    assert U.membership_lookup("sp500") is None and U.membership_mode("sp500") == "none"
 
     today = ["AAPL", "PLTR", "DELL", "DASH", "BRK.B"]
     path.write_text(json.dumps({"sp500": {"tickers": today, "as_of": "2025-09-01", "changes": U.parse_changes(HTML)}}))

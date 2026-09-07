@@ -581,7 +581,7 @@ def test_momentum_index_backtest_uses_point_in_time_members_when_history_exists(
     monkeypatch.setattr(U, "DATA_PATH", path)
     body = workspace.BacktestInput(universe="sp500", strategy="momentum", history_days=200, holding_days=63)
     tickers, meta = workspace._backtest_universe(body)
-    assert meta["membership"] == {"point_in_time": False, "changes": 0} and len(tickers) > 450
+    assert meta["membership"] == {"point_in_time": False, "changes": 0, "mode": "none"} and len(tickers) > 450
     assert workspace._build_strategy(body).universe_at is None
 
     changes = [{"date": "2026-06-01", "added": "NEWCO", "removed": "OLDCO"}]

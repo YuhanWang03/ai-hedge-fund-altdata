@@ -155,7 +155,8 @@ def universe_status() -> dict[str, dict[str, object]]:
         tickers, as_of = load_universe(name)
         changes = load_changes(name)
         out[name] = {"size": len(tickers), "as_of": as_of, "label": UNIVERSE_LABELS[name],
-                     "changes": len(changes), "history_from": changes[-1]["date"] if changes else None}
+                     "changes": len(changes), "history_from": changes[-1]["date"] if changes else None,
+                     "membership": membership_mode(name), "date_added": len(load_date_added(name))}
     return out
 
 
@@ -173,23 +174,53 @@ def load_changes(name: str) -> list[dict[str, str | None]]:
     return sorted(rows, key=lambda c: c["date"], reverse=True)
 
 
+def load_date_added(name: str) -> dict[str, str]:
+    """``ticker → date it joined`` for the current constituents (from the list's "Date added" column)."""
+    if not DATA_PATH.exists():
+        return {}
+    try:
+        entry = json.loads(DATA_PATH.read_text(encoding="utf-8")).get(name) or {}
+    except (OSError, ValueError):
+        return {}
+    return {t: d for t, d in (entry.get("date_added") or {}).items() if d}
+
+
+def membership_mode(name: str) -> str:
+    """How well past membership can be reconstructed.
+
+    ``"full"``      – an additions/removals history is stored: exact membership on any date.
+    ``"additions"`` – only each current member's join date is known: names that joined after a
+                      date are excluded (removes the look-ahead), but names removed since cannot
+                      be restored (some survivorship remains).
+    ``"none"``      – today's list only.
+    """
+    if load_changes(name):
+        return "full"
+    if load_date_added(name):
+        return "additions"
+    return "none"
+
+
 def members_at(name: str, on: str | date) -> tuple[list[str], bool]:
     """``(tickers, point_in_time)`` — the constituents on ``on``.
 
-    Starts from the refreshed list and undoes every change dated after ``on``
-    (drop what was added, restore what was removed). ``point_in_time`` is False
-    when no change history is stored, in which case today's list is returned
-    and the caller should say so.
+    With a stored change history, today's list is rewound through every change
+    dated after ``on`` (drop what was added, restore what was removed). With
+    only join dates, members that joined after ``on`` are dropped. Otherwise
+    today's list is returned with ``point_in_time`` False.
     """
     on_iso = on.isoformat() if isinstance(on, date) else str(on)[:10]
     current, as_of = load_universe(name)
-    changes = load_changes(name)
-    if not changes:
+    mode = membership_mode(name)
+    if mode == "none":
         return current, False
     if as_of and on_iso >= as_of:
         return current, True
+    if mode == "additions":
+        joined = load_date_added(name)
+        return [t for t in current if not joined.get(t) or joined[t] <= on_iso], True
     members = set(current)
-    for c in changes:  # newest first
+    for c in load_changes(name):  # newest first
         if c["date"] <= on_iso:
             break
         if c.get("added"):
@@ -200,8 +231,8 @@ def members_at(name: str, on: str | date) -> tuple[list[str], bool]:
 
 
 def membership_lookup(name: str) -> Callable[[str], list[str]] | None:
-    """A ``date → tickers`` function for strategies, or None when no history is stored."""
-    if not load_changes(name):
+    """A ``date → tickers`` function for strategies, or None when nothing about past membership is stored."""
+    if membership_mode(name) == "none":
         return None
     return lambda on: members_at(name, on)[0]
 
@@ -276,14 +307,38 @@ def _symbols_from_table(rows: list[list[str]], header_names: tuple[str, ...]) ->
 
 def parse_constituents(html: str, header_names: tuple[str, ...]) -> list[str]:
     """Symbols from whichever table has a matching header and the most valid tickers."""
+    return [t for t, _ in parse_constituents_with_dates(html, header_names)]
+
+
+def parse_constituents_with_dates(html: str, header_names: tuple[str, ...]) -> list[tuple[str, str | None]]:
+    """``(symbol, date_added)`` pairs; the date comes from a "Date added" column when the table has one."""
     parser = _Tables()
     parser.feed(html)
-    best: list[str] = []
+    best: list[tuple[str, str | None]] = []
     for rows in parser.tables:
         found = _symbols_from_table(rows, header_names)
-        if len(found) > len(best):
-            best = found
-    return _dedupe(best)
+        if len(found) <= len(best):
+            continue
+        dates: dict[str, str | None] = {}
+        for h, header in enumerate(rows[:3]):
+            cols = [c.strip().lower() for c in header]
+            sym_col = next((i for i, c in enumerate(cols) if c in header_names), None)
+            date_col = next((i for i, c in enumerate(cols) if c.startswith("date added") or c.startswith("date first added")), None)
+            if sym_col is None or date_col is None:
+                continue
+            for row in rows[h + 1:]:
+                if len(row) > max(sym_col, date_col):
+                    sym = _clean_symbol(row[sym_col])
+                    if sym:
+                        dates[sym] = _parse_date(row[date_col])
+            break
+        seen: set[str] = set()
+        best = []
+        for t in found:
+            if t not in seen:
+                seen.add(t)
+                best.append((t, dates.get(t)))
+    return best
 
 
 _DATE_FORMATS = ("%B %d, %Y", "%b %d, %Y", "%Y-%m-%d", "%d %B %Y", "%d %b %Y", "%b. %d, %Y")
@@ -305,15 +360,66 @@ def _parse_date(text: str) -> str | None:
 
 
 def _changes_tables(html: str) -> list[list[list[str]]]:
-    """Every table whose first rows mention both Added and Removed."""
+    """Every table whose first rows mention additions and removals."""
     parser = _Tables()
     parser.feed(html)
     out = []
     for rows in parser.tables:
         head = " ".join(" ".join(r) for r in rows[:3]).lower()
-        if "added" in head and "removed" in head:
+        if any(w in head for w in ("added", "addition")) and any(w in head for w in ("removed", "removal", "deleted", "deletion")):
             out.append(rows)
     return out
+
+
+#: where the S&P 500 additions/removals table has lived; the list page itself dropped it in 2026
+_CHANGES_URLS = [
+    "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
+    "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies_changes",
+    "https://en.wikipedia.org/wiki/Changes_to_the_S%26P_500",
+    "https://en.wikipedia.org/wiki/List_of_changes_to_the_S%26P_500",
+    "https://en.wikipedia.org/wiki/S%26P_500_component_changes",
+    "https://en.wikipedia.org/wiki/Historical_components_of_the_S%26P_500",
+]
+_SEARCH_API = "https://en.wikipedia.org/w/api.php?action=query&list=search&format=json&srlimit=15&srsearch="
+
+
+def discover_changes_pages(timeout: float = 30.0) -> list[str]:
+    """Article URLs the search API returns for S&P 500 component changes (titles containing 'S&P 500')."""
+    import urllib.parse
+
+    urls: list[str] = []
+    for query in ("S&P 500 components changes added removed", "S&P 500 list changes history"):
+        try:
+            payload = json.loads(_fetch(_SEARCH_API + urllib.parse.quote(query), timeout))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("wikipedia search failed: %s", exc)
+            continue
+        for hit in payload.get("query", {}).get("search", []):
+            title = hit.get("title", "")
+            if "s&p 500" in title.lower() or "s&p500" in title.lower():
+                url = "https://en.wikipedia.org/wiki/" + urllib.parse.quote(title.replace(" ", "_"))
+                if url not in urls:
+                    urls.append(url)
+    return urls
+
+
+def fetch_changes(timeout: float = 30.0) -> tuple[list[dict[str, str | None]], str | None, list[str]]:
+    """``(changes, source_url, attempts)`` — first candidate page whose table parses to ≥ 50 rows."""
+    attempts: list[str] = []
+    candidates = list(_CHANGES_URLS)
+    for url in discover_changes_pages(timeout):
+        if url not in candidates:
+            candidates.append(url)
+    for url in candidates:
+        try:
+            rows = parse_changes(_fetch(url, timeout))
+        except Exception as exc:  # noqa: BLE001
+            attempts.append(f"{url}: {type(exc).__name__}: {str(exc)[:60]}")
+            continue
+        if len(rows) >= 50:
+            return rows, url, attempts
+        attempts.append(f"{url}: {len(rows)} rows")
+    return [], None, attempts
 
 
 def _clean_symbol(cell: str) -> str | None:
@@ -403,9 +509,11 @@ def refresh_from_wikipedia(names: list[str] | None = None, *, path: Path = DATA_
     for name in names:
         attempts: list[str] = []
         picked: tuple[list[str], str] | None = None
+        dated: list[tuple[str, str | None]] = []
         for url in _WIKI[name]:
             try:
-                tickers = parse_constituents(_fetch(url, timeout), _HEADERS)
+                dated = parse_constituents_with_dates(_fetch(url, timeout), _HEADERS)
+                tickers = _dedupe([t for t, _ in dated])
             except Exception as exc:  # noqa: BLE001 — try the next candidate page
                 attempts.append(f"{url}: {type(exc).__name__}: {str(exc)[:80]}")
                 continue
@@ -419,19 +527,23 @@ def refresh_from_wikipedia(names: list[str] | None = None, *, path: Path = DATA_
             continue
         tickers, url = picked
         entry: dict[str, object] = {"tickers": tickers, "as_of": date.today().isoformat(), "source": url}
+        date_added = {t: d for t, d in dated if d}
+        if date_added:
+            entry["date_added"] = date_added
+            sizes[f"{name}_date_added"] = len(date_added)
         if name == "sp500":
-            try:
-                changes = parse_changes(_fetch(url, timeout))
-            except Exception as exc:  # noqa: BLE001 — the constituent list is still good without history
-                changes, errors[f"{name}_changes"] = [], f"{type(exc).__name__}: {str(exc)[:80]}"
-            if len(changes) >= 50:
+            changes, source, attempts_c = fetch_changes(timeout)
+            if changes:
                 entry["changes"] = changes
+                entry["changes_source"] = source
                 sizes[f"{name}_changes"] = len(changes)
             else:
                 previous = (data.get(name) or {}).get("changes")
                 if previous:
                     entry["changes"] = previous  # keep what we had rather than losing history
-                errors.setdefault(f"{name}_changes", f"parsed only {len(changes)} change rows; kept previous {len(previous or [])}")
+                    entry["changes_source"] = (data.get(name) or {}).get("changes_source")
+                errors[f"{name}_changes"] = ("no page yielded an additions/removals table — " + " | ".join(attempts_c)
+                                             + (f" — kept previous {len(previous)}" if previous else " — membership falls back to join dates (additions only)"))
         data[name] = entry
         sizes[name] = len(tickers)
     if sizes:
@@ -451,7 +563,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dump-changes", action="store_true", help="print the raw first rows of the S&P 500 additions/removals table (parser debugging)")
     args = parser.parse_args(argv)
     if args.dump_changes:
-        for url in _WIKI["sp500"]:
+        for url in _CHANGES_URLS + discover_changes_pages(30.0):
             print(f"== {url}")
             try:
                 for line in describe_changes(_fetch(url, 30.0)):
@@ -461,7 +573,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.show_at:
         name, on = args.show_at
         tickers, pit = members_at(name, on)
-        print(f"{name} on {on} · {len(tickers)} tickers · {'point-in-time' if pit else 'NO HISTORY STORED — this is today’s list; run --refresh'}")
+        mode = membership_mode(name)
+        label = {"full": "point-in-time (additions/removals history)", "additions": "additions-only (members that joined later are excluded; removed names cannot be restored)",
+                 "none": "NO HISTORY STORED — this is today’s list; run --refresh"}[mode]
+        print(f"{name} on {on} · {len(tickers)} tickers · {label}")
         print(" ".join(tickers))
     if args.dump:
         for url in _WIKI[args.dump]:

@@ -387,18 +387,19 @@ def _backtest_universe(body: BacktestInput) -> tuple[list[str], dict]:
     info: dict = {"point_in_time": False, "changes": 0}
     if body.strategy == "momentum" and body.universe in INDEX_UNIVERSES:
         from v2.backtesting.strategies import rebalance_dates
-        from v2.screening.universes import load_changes, members_at
+        from v2.screening.universes import load_changes, members_at, membership_mode
 
         changes = load_changes(body.universe)
-        info["changes"] = len(changes)
-        if changes:
+        mode = membership_mode(body.universe)
+        info.update({"changes": len(changes), "mode": mode})
+        if mode != "none":
             today = datetime.now(timezone.utc).date()
             union: dict[str, None] = dict.fromkeys(tickers)
             for d in rebalance_dates(today=today, history_days=body.history_days, step_trading_days=body.holding_days) + [today.isoformat()]:
                 for t in members_at(body.universe, d)[0]:
                     union.setdefault(t, None)
             tickers = list(union)[:BIG_LIMIT + 100]
-            info.update({"point_in_time": True, "history_from": changes[-1]["date"], "tickers_incl_former": len(tickers)})
+            info.update({"point_in_time": True, "history_from": changes[-1]["date"] if changes else None, "tickers_incl_former": len(tickers)})
     return tickers, {**meta, "membership": info}
 
 
