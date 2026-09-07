@@ -151,9 +151,27 @@ class PriceCache:
         lo, hi = bisect_left(dates, s), bisect_right(dates, e)
         return [Bar(t, c) for t, c in zip(dates[lo:hi], closes[lo:hi])]
 
+    def series(self, ticker: str, start: Any) -> tuple[list[str], list[float]]:
+        """``(dates, closes)`` ascending from ``start`` to today, bad rows dropped.
+
+        Two parallel lists rather than one tuple per bar: for a 10-year index
+        run the strategy's working set is otherwise several times the cache.
+        """
+        self.warm(ticker, start)
+        dates, closes = self._dates.get(ticker, []), self._closes.get(ticker, [])
+        lo = bisect_left(dates, _iso(start))
+        out_d: list[str] = []
+        out_c: list[float] = []
+        for t, c in zip(dates[lo:], closes[lo:]):
+            if c is not None and c > 0:
+                out_d.append(t)
+                out_c.append(c)
+        return out_d, out_c
+
     def closes(self, ticker: str, start: Any) -> list[tuple[str, float]]:
         """``(date, close)`` ascending from ``start`` to today, skipping bad rows."""
-        return [(b.time, b.close) for b in self.get_prices(ticker, start, self._today) if b.close is not None and b.close > 0]
+        dates, closes = self.series(ticker, start)
+        return list(zip(dates, closes))
 
 
 @dataclass
@@ -253,23 +271,23 @@ class MomentumStrategy(Strategy):
         data = _as_data(data)
         # history + lookback in calendar days, with slack for holidays
         start = data.today - timedelta(days=self.history_days + int(self.lookback * 1.6) + 10)
-        series: dict[str, list[tuple[str, float]]] = {}
+        # ticker -> (dates, closes), two parallel lists sharing the cache's date strings
+        series: dict[str, tuple[list[str], list[float]]] = {}
         self.no_data = []
         for i, t in enumerate(tickers):
             if self._progress:
                 self._progress(i)
-            closes = data.prices.closes(t, start)
-            if len(closes) > self.lookback:
-                series[t] = closes
+            dates, closes = _series(data.prices, t, start)
+            if len(dates) > self.lookback:
+                series[t] = (dates, closes)
             else:
                 self.no_data.append(t)
         if not series:
             return []
 
         # Trading calendar = union of dates; rebalance every `holding` trading days
-        calendar = sorted({d for s in series.values() for d, _ in s})
+        calendar = sorted({d for ds, _ in series.values() for d in ds})
         first_signal = (data.today - timedelta(days=self.history_days)).isoformat()
-        idx_of = {t: {d: i for i, (d, _) in enumerate(s)} for t, s in series.items()}
         signals: list[TradeSignal] = []
         step = max(1, self.holding)
         start_i = next((i for i, d in enumerate(calendar) if d >= first_signal), len(calendar))
@@ -279,23 +297,22 @@ class MomentumStrategy(Strategy):
             allowed = set(self.universe_at(d)) if self.universe_at else None
             scored: list[tuple[float, str, float | None]] = []
             ranked = 0
-            for t, s in series.items():
+            for t, (dates, closes) in series.items():
                 if allowed is not None and t not in allowed:
                     continue
-                i = idx_of[t].get(d)
-                if i is None or i < self.lookback:
-                    continue
-                now = s[i - self.skip][1] if self.skip else s[i][1]
-                then = s[i - self.lookback][1]
+                i = bisect_left(dates, d)
+                if i >= len(dates) or dates[i] != d or i < self.lookback:
+                    continue  # no bar on this date, or not enough history yet
+                now = closes[i - self.skip] if self.skip else closes[i]
+                then = closes[i - self.lookback]
                 if then <= 0:
                     continue
                 mom = now / then - 1
                 ranked += 1
                 from_high = None
                 if self.near_high is not None:
-                    window = [c for _, c in s[max(0, i - 251): i + 1]]
-                    high = max(window)
-                    from_high = s[i][1] / high - 1
+                    high = max(closes[max(0, i - 251): i + 1])
+                    from_high = closes[i] / high - 1
                     if from_high < -self.near_high:
                         continue
                 if mom > self.min_momentum:
@@ -538,6 +555,14 @@ def abstain_reasons(verdict: Any, limit: int = 2) -> list[str]:
             counts[note] = counts.get(note, 0) + 1
     ranked = sorted(counts.items(), key=lambda kv: -kv[1])[:limit]
     return [f"{n} × {c}" if c > 1 else n for n, c in ranked]
+
+
+def _series(prices: Any, ticker: str, start: Any) -> tuple[list[str], list[float]]:
+    """``(dates, closes)`` from a :class:`PriceCache`, or built from ``closes()`` on anything else."""
+    if hasattr(prices, "series"):
+        return prices.series(ticker, start)
+    pairs = prices.closes(ticker, start)
+    return [d for d, _ in pairs], [c for _, c in pairs]
 
 
 def _as_data(data: Any) -> BacktestData:

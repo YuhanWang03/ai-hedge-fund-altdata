@@ -584,8 +584,8 @@ def _run_sweep(body: SweepInput, on_tick=None) -> dict:
         start = data.today - timedelta(days=body.history_days + int(body.lookback_days * 1.6) + 10)
         for i, t in enumerate(tickers):
             tick(i)
-            data.prices.closes(t, start)
-        data.prices.closes("SPY", start)
+            data.prices.warm(t, start)
+        data.prices.warm("SPY", start)
         rows = []
         no_data: list[str] = []
         for k, combo in enumerate(combos):
@@ -780,6 +780,21 @@ def _run_job(job_id: str, kind: str, body, fn) -> None:
             _JOBS[job_id].update({"status": "failed", "error": f"{type(exc).__name__}: {str(exc)[:200]}"})
 
 
+def _running_job(kind: str) -> dict | None:
+    """The job of this kind still running, if any — heavy jobs run one at a time on a small box."""
+    with _JOBS_LOCK:
+        for job in _JOBS.values():
+            if job["kind"] == f"{kind}_job" and job["status"] == "running":
+                return dict(job)
+    return None
+
+
+def _refuse_if_busy(kind: str) -> None:
+    job = _running_job(kind)
+    if job:
+        raise HTTPException(status_code=409, detail=f"已有一个回测任务在运行（{job['done']} / {job['total']}），等它结束再启动新的；同时跑两个会把内存用完。")
+
+
 def _start_job(kind: str, body, total: int, fn) -> dict:
     job_id = uuid.uuid4().hex[:12]
     with _JOBS_LOCK:
@@ -819,6 +834,7 @@ async def run_backtest(body: BacktestInput, background: bool | None = None) -> d
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     total = _backtest_total(body, len(tickers))
     if background or (background is None and (body.strategy == "committee" or total > BACKTEST_SYNC_MAX)):
+        _refuse_if_busy("backtest")
         return _start_job("backtest", body, total, _run_backtest)
     result = await _lab_call(_run_backtest, body)
     _remember_run("backtest", result, body.model_dump())
@@ -832,6 +848,7 @@ async def run_backtest_sweep(body: SweepInput) -> dict:
         tickers, _ = await run_in_threadpool(_sweep_universe, body)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _refuse_if_busy("backtest")
     return _start_job("backtest", body, len(tickers) + len(body.combos()), _run_sweep)
 
 

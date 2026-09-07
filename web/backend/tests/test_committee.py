@@ -346,6 +346,10 @@ def test_index_universes_resolve_only_for_the_screener(client, monkeypatch):
     monkeypatch.setattr(workspace, "_run_backtest", lambda body, on_tick=None: {"kind": "backtest", "strategy": body.strategy, "universe": body.universe, "tickers": [], "trades": [], "metrics": None, "equity_curve": []})
     job = client.post("/api/lab/backtest", json={"universe": "sp500", "strategy": "momentum"}).json()
     assert job["kind"] == "backtest_job" and job["total"] > 450
+    for _ in range(100):  # heavy jobs run one at a time, so let this one finish before starting the next
+        if client.get(f"/api/lab/backtest/jobs/{job['job_id']}").json()["status"] != "running":
+            break
+        time.sleep(0.02)
     # a 100-ticker custom list (handed over from the screener) is fine for momentum, refused clearly for paid strategies
     many = [f"T{chr(65 + i // 26)}{chr(65 + i % 26)}" for i in range(100)]  # TAA … TDV: valid-looking symbols
     job = client.post("/api/lab/backtest", json={"universe": "custom", "tickers": many, "strategy": "momentum"}).json()
@@ -672,6 +676,17 @@ def test_momentum_sweep_runs_the_grid_on_one_price_load(client, monkeypatch):
     assert run["sweep"] is True and run["n_combos"] == 8 and run["best"]["top_n"] in (1, 2) and run["strategy"] == "momentum"
     reopened = client.get(f"/api/lab/runs/{run['id']}").json()
     assert reopened["kind"] == "backtest" and reopened["result"]["kind"] == "sweep"
+
+    # one heavy job at a time: a second sweep / big backtest while one runs is refused with 409
+    with workspace._JOBS_LOCK:
+        workspace._JOBS["busy"] = {"job_id": "busy", "kind": "backtest_job", "status": "running", "done": 3, "total": 21, "universe": "sp500", "started_at": "2026-09-07T00:00:00"}
+    try:
+        res = client.post("/api/lab/backtest/sweep", json={"universe": "custom", "tickers": ["AAA"], "history_days": 400})
+        assert res.status_code == 409 and "3 / 21" in res.json()["detail"]
+        assert client.post("/api/lab/backtest", json={"tickers": ["AAA"], "strategy": "committee"}).status_code == 409
+    finally:
+        with workspace._JOBS_LOCK:
+            workspace._JOBS.pop("busy", None)
 
     # grid validation
     assert client.post("/api/lab/backtest/sweep", json={"tickers": ["AAA"], "top_ns": []}).status_code == 422
