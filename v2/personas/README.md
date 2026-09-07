@@ -112,6 +112,6 @@ v2/personas/
 
 ## 未做的事
 
-- 历史回测：LLM 层做回测有前视偏差；确定性打分层可以包成 `v2/backtesting.Strategy`，尚未实现。
+- 历史回测：已实现为 `v2/backtesting/strategies.py` 的 `CommitteeStrategy`（实验室「策略回测」→「投资人委员会」）：每个换仓日用信号日前 `filing_lag_days` 天的财务数据打分，买入共识最强的前 N 只；LLM 解读层不参与回测。
 - 接口是同步的（沿用实验室 240 秒超时）。规则层有缓存时几秒即返；解读一次一格，
   也在超时内。批量解读应照 `routers/research.py` 的异步任务模式。

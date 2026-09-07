@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from contextlib import contextmanager
 
 import pytest
@@ -504,3 +505,71 @@ def test_fd_prices_override(monkeypatch):
     assert fd_pricing.cost({"financial_metrics": 10, "earnings": 3}) == pytest.approx(0.26)
     monkeypatch.setenv("FD_PRICES", "not json")
     assert fd_pricing.prices()["financial_metrics"] == 0.02
+
+
+def test_backtest_strategies_and_data_feeds(client, monkeypatch, tmp_path):
+    """Strategy names validate; momentum on yfinance costs nothing; the committee runs as a job."""
+    from v2.backtesting.strategies import BacktestData, PriceCache
+    from datetime import date, timedelta
+
+    class Bar:
+        def __init__(self, t, c):
+            self.time, self.close = t, c
+
+    class Src:
+        def get_prices(self, ticker, start, end):
+            d, out, i = date.fromisoformat(start), [], 0
+            while d <= date.fromisoformat(end):
+                if d.weekday() < 5:
+                    out.append(Bar(d.isoformat(), 100 * (1.001 ** i))); i += 1
+                d += timedelta(days=1)
+            return out
+
+    @contextmanager
+    def fake_data(body):
+        yield BacktestData(prices=PriceCache(Src()), fd=None, raw=None)
+
+    monkeypatch.setattr(workspace, "_backtest_data", fake_data)
+    res = client.post("/api/lab/backtest", json={"universe": "custom", "tickers": ["AAA", "BBB"], "strategy": "momentum", "history_days": 200, "holding_days": 21, "top_n": 1})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["strategy"] == "momentum" and body["data_source"] == "yfinance" and body["fd_cost_usd"] == 0 and body["fd_requests"] == {}
+    assert body["metrics"]["n_trades"] >= 5 and body["params"]["lookback_days"] == 252 and body["notes"]["price_failures"] == {}
+    assert client.get("/api/lab/runs?kind=backtest").json()["items"][0]["fd_cost_usd"] == 0
+
+    assert client.post("/api/lab/backtest", json={"tickers": ["AAA"], "strategy": "bollinger"}).status_code == 422
+    assert client.post("/api/lab/backtest", json={"tickers": ["AAA"], "strategy": "momentum", "data_source": "bloomberg"}).status_code == 422
+
+    # the committee strategy always runs as a polled job (it is slow and paid)
+    def fake_run(body, on_tick=None):
+        for i in range(3):
+            on_tick(i)
+        return {"kind": "backtest", "strategy": body.strategy, "data_source": body.data_source, "universe": body.universe, "tickers": ["AAA"],
+                "params": body.params(), "fd_requests": {"financial_metrics": 8, "line_items": 8}, "fd_cost_usd": 0.32, "notes": {}, "trades": [], "metrics": None, "equity_curve": []}
+
+    monkeypatch.setattr(workspace, "_run_backtest", fake_run)
+    job = client.post("/api/lab/backtest", json={"tickers": ["AAA"], "strategy": "committee", "history_days": 365, "holding_days": 63}).json()
+    assert job["kind"] == "backtest_job" and job["status"] == "running" and job["total"] == 4  # 1 ticker × 4 quarterly dates
+    for _ in range(50):
+        job = client.get(f"/api/lab/backtest/jobs/{job['job_id']}").json()
+        if job["status"] != "running":
+            break
+        time.sleep(0.05)
+    assert job["status"] == "completed" and job["result"]["fd_cost_usd"] == 0.32 and job["result"]["params"]["lean"] is True
+    assert client.get(f"/api/lab/screening/jobs/{job['job_id']}").status_code == 404  # wrong kind
+    assert client.get("/api/lab/runs?kind=backtest").json()["items"][0]["strategy"] == "committee"
+
+
+def test_backtest_data_bundle_opens_fd_only_when_needed():
+    from v2.backtesting.strategies import PriceCache
+
+    free = workspace.BacktestInput(tickers=["AAA"], strategy="momentum", data_source="yfinance")
+    with workspace._backtest_data(free) as data:
+        assert data.raw is None and data.fd is None and isinstance(data.prices, PriceCache)
+    paid_prices = workspace.BacktestInput(tickers=["AAA"], strategy="momentum", data_source="fd")
+    with workspace._backtest_data(paid_prices) as data:
+        assert data.raw is not None and data.fd is None and data.prices._chunk == workspace.FD_PRICE_CHUNK_DAYS
+    pead = workspace.BacktestInput(tickers=["AAA"], strategy="pead")
+    with workspace._backtest_data(pead) as data:
+        assert data.raw is not None and data.fd is None  # PEAD reads earnings through the raw client
+    assert free.params()["top_n"] == 5 and "earnings_limit" not in free.params() and pead.params()["earnings_limit"] == 8

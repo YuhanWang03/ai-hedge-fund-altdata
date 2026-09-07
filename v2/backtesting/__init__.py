@@ -7,10 +7,17 @@ from v2.backtesting.models import (
     Trade,
     TradeSignal,
 )
+from v2.backtesting.strategies import STRATEGY_KEYS, BacktestData, CommitteeStrategy, InsiderClusterStrategy, MomentumStrategy, PriceCache
 from v2.backtesting.strategy import PEADStrategy, Strategy
 
 __all__ = [
+    "BacktestData",
     "BacktestEngine",
+    "CommitteeStrategy",
+    "InsiderClusterStrategy",
+    "MomentumStrategy",
+    "PriceCache",
+    "STRATEGY_KEYS",
     "BacktestResult",
     "PerformanceMetrics",
     "PEADStrategy",

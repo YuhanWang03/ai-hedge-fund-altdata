@@ -8,6 +8,7 @@ already-existing offline research engines a small, validated HTTP surface.
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 import sqlite3
 import threading
 import uuid
@@ -45,7 +46,8 @@ def _summarize(kind: str, result: dict) -> dict:
     if kind == "backtest":
         m = result.get("metrics") or {}
         summary.update({"strategy": result.get("strategy"), "universe": result.get("universe"), "n_trades": m.get("n_trades", 0),
-                        "total_return_pct": m.get("total_return_pct"), "sharpe_ratio": m.get("sharpe_ratio"), "max_drawdown_pct": m.get("max_drawdown_pct")})
+                        "total_return_pct": m.get("total_return_pct"), "sharpe_ratio": m.get("sharpe_ratio"), "max_drawdown_pct": m.get("max_drawdown_pct"),
+                        "data_source": result.get("data_source"), "fd_cost_usd": result.get("fd_cost_usd")})
     elif kind == "event_study":
         summary.update({"universe": result.get("universe"), "n_events": len(result.get("events") or []), "n_groups": len(result.get("aggregates") or [])})
     elif kind == "screening":
@@ -208,27 +210,122 @@ async def remove_price_alert(alert_id: int) -> dict:
 class BacktestInput(BaseModel):
     universe: Universe = "custom"
     tickers: list[str] = Field(default_factory=lambda: ["AAPL", "MSFT", "NVDA"], max_length=MAX_TICKERS)
-    strategy: Literal["pead"] = "pead"
-    holding_days: int = Field(default=5, ge=1, le=60)
-    earnings_limit: int = Field(default=8, ge=1, le=20)
+    strategy: Literal["pead", "momentum", "insider", "committee"] = "pead"
+    #: where daily prices come from; events / fundamentals are always Financial Datasets
+    data_source: Literal["yfinance", "fd"] = "yfinance"
+    holding_days: int = Field(default=5, ge=1, le=252)
     capital: float = Field(default=100_000, gt=0, le=100_000_000)
     per_trade: float = Field(default=10_000, gt=0, le=10_000_000)
+    # pead
+    earnings_limit: int = Field(default=8, ge=1, le=20)
+    # momentum / insider / committee: how far back signals are generated
+    history_days: int = Field(default=730, ge=60, le=3650)
+    top_n: int = Field(default=5, ge=1, le=60)
+    # momentum
+    lookback_days: int = Field(default=252, ge=20, le=504)
+    skip_days: int = Field(default=21, ge=0, le=120)
+    near_high_pct: float | None = Field(default=None, ge=0, le=1)
+    # insider cluster
+    window_days: int = Field(default=30, ge=1, le=180)
+    min_insiders: int = Field(default=2, ge=1, le=20)
+    min_value_usd: float = Field(default=100_000, ge=0)
+    # committee
+    min_consensus: float = Field(default=0.2, ge=-1, le=1)
+    min_agreement: float = Field(default=0.5, ge=0, le=1)
+    personas: list[str] | None = Field(default=None, max_length=20)
+    lean: bool = True
+    filing_lag_days: int = Field(default=45, ge=0, le=120)
+
+    def params(self) -> dict:
+        common = {"holding_days": self.holding_days, "capital": self.capital, "per_trade": self.per_trade, "data_source": self.data_source}
+        extra = {
+            "pead": {"earnings_limit": self.earnings_limit},
+            "momentum": {"history_days": self.history_days, "top_n": self.top_n, "lookback_days": self.lookback_days, "skip_days": self.skip_days, "near_high_pct": self.near_high_pct},
+            "insider": {"history_days": self.history_days, "window_days": self.window_days, "min_insiders": self.min_insiders, "min_value_usd": self.min_value_usd},
+            "committee": {"history_days": self.history_days, "top_n": self.top_n, "min_consensus": self.min_consensus, "min_agreement": self.min_agreement,
+                          "personas": self.personas, "lean": self.lean, "filing_lag_days": self.filing_lag_days},
+        }[self.strategy]
+        return {**common, **extra}
 
 
-def _run_backtest(body: BacktestInput) -> dict:
-    from v2.backtesting import BacktestEngine, PEADStrategy
-    from v2.data import CachedFDClient
+#: FD's /prices endpoint returns at most ~100 bars per request
+FD_PRICE_CHUNK_DAYS = 90
+
+
+@contextmanager
+def _backtest_data(body: BacktestInput):
+    """Price feed per ``data_source``; the FD client only when the run needs it."""
+    from v2.backtesting.strategies import BacktestData, PriceCache
+
+    needs_fd = body.strategy != "momentum" or body.data_source == "fd"
+    raw = None
+    if needs_fd:
+        from v2.data import CachedFDClient
+
+        raw = CachedFDClient()
+        raw.__enter__()
+    try:
+        if body.data_source == "fd":
+            from v2.data.price_source import FDPriceSource
+
+            prices = PriceCache(FDPriceSource(raw), chunk_days=FD_PRICE_CHUNK_DAYS)
+        else:
+            from v2.data.price_source import YFinancePriceSource
+
+            prices = PriceCache(YFinancePriceSource())
+        fd = None
+        if raw is not None and body.strategy in ("insider", "committee"):
+            from v2.personas.data import adapt_client
+
+            fd = adapt_client(raw)
+        yield BacktestData(prices=prices, fd=fd, raw=raw)
+    finally:
+        if raw is not None:
+            raw.__exit__(None, None, None)
+
+
+def _build_strategy(body: BacktestInput, on_tick=None):
+    from v2.backtesting import CommitteeStrategy, InsiderClusterStrategy, MomentumStrategy, PEADStrategy
+
+    if body.strategy == "pead":
+        return PEADStrategy(earnings_limit=body.earnings_limit, holding_days=body.holding_days)
+    if body.strategy == "momentum":
+        return MomentumStrategy(lookback_days=body.lookback_days, skip_days=body.skip_days, holding_days=body.holding_days, top_n=body.top_n,
+                                history_days=body.history_days, near_high_pct=body.near_high_pct, progress=on_tick)
+    if body.strategy == "insider":
+        return InsiderClusterStrategy(window_days=body.window_days, min_insiders=body.min_insiders, min_value_usd=body.min_value_usd,
+                                      holding_days=body.holding_days, history_days=body.history_days, progress=on_tick)
+    from app.routers.committee import _store  # lazy: committee imports this module
+
+    return CommitteeStrategy(holding_days=body.holding_days, history_days=body.history_days, top_n=body.top_n, min_consensus=body.min_consensus,
+                             min_agreement=body.min_agreement, personas=body.personas, lean=body.lean, filing_lag_days=body.filing_lag_days,
+                             store=_store(), progress=on_tick)
+
+
+def _backtest_total(body: BacktestInput, n_tickers: int) -> int:
+    """Progress units: tickers, or tickers × rebalance dates for the committee."""
+    if body.strategy != "committee":
+        return n_tickers
+    from v2.backtesting.strategies import rebalance_dates
+
+    return n_tickers * max(1, len(rebalance_dates(today=datetime.now(timezone.utc).date(), history_days=body.history_days, step_trading_days=body.holding_days)))
+
+
+def _run_backtest(body: BacktestInput, on_tick=None) -> dict:
+    from v2.backtesting import BacktestEngine
 
     tickers, meta = resolve_universe(body.universe, body.tickers)
-    with CachedFDClient() as client:
-        result = BacktestEngine(capital=body.capital, per_trade=body.per_trade).run(
-            PEADStrategy(earnings_limit=body.earnings_limit, holding_days=body.holding_days),
-            tickers,
-            client,
-        )
-    return {"kind": "backtest", "strategy": body.strategy, "universe": meta["universe"], "tickers": tickers,
-            "params": {"holding_days": body.holding_days, "earnings_limit": body.earnings_limit, "capital": body.capital, "per_trade": body.per_trade},
-            **result.model_dump()}
+    with _backtest_data(body) as data:
+        data.progress = on_tick
+        strategy = _build_strategy(body, on_tick)
+        result = BacktestEngine(capital=body.capital, per_trade=body.per_trade).run(strategy, tickers, data)
+        fd_requests = dict(data.fd_requests)
+        if body.data_source == "fd" and data.prices.requests:
+            fd_requests["prices"] = fd_requests.get("prices", 0) + data.prices.requests
+        notes = {"price_failures": dict(data.prices.failed), "errors": dict(getattr(strategy, "errors", {}) or {}),
+                 "rebalance_dates": list(getattr(strategy, "dates", []) or [])}
+    return {"kind": "backtest", "strategy": body.strategy, "data_source": body.data_source, "universe": meta["universe"], "tickers": tickers,
+            "params": body.params(), "fd_requests": fd_requests, "fd_cost_usd": fd_cost(fd_requests), "notes": notes, **result.model_dump()}
 
 
 class EventStudyInput(BaseModel):
@@ -369,40 +466,42 @@ def _run_screening(body: ScreeningInput, on_tick=None) -> dict:
 
 #: screens bigger than this run as a background job (nginx cuts requests at 90 s)
 SCREEN_SYNC_MAX = 40
-_SCREEN_JOBS: dict[str, dict] = {}
-_SCREEN_LOCK = threading.Lock()
+#: backtests with more progress units than this run as a background job
+BACKTEST_SYNC_MAX = 30
+_JOBS: dict[str, dict] = {}
+_JOBS_LOCK = threading.Lock()
 
 
-def _screen_job(job_id: str, body: ScreeningInput) -> None:
+def _run_job(job_id: str, kind: str, body, fn) -> None:
     def tick(i: int) -> None:
-        with _SCREEN_LOCK:
-            _SCREEN_JOBS[job_id]["done"] = i
+        with _JOBS_LOCK:
+            _JOBS[job_id]["done"] = i
 
     try:
-        result = _run_screening(body, on_tick=tick)
-        _remember_run("screening", result, body.model_dump())
-        with _SCREEN_LOCK:
-            _SCREEN_JOBS[job_id].update({"status": "completed", "done": _SCREEN_JOBS[job_id]["total"], "result": result})
+        result = fn(body, on_tick=tick)
+        _remember_run(kind, result, body.model_dump())
+        with _JOBS_LOCK:
+            _JOBS[job_id].update({"status": "completed", "done": _JOBS[job_id]["total"], "result": result})
     except Exception as exc:  # noqa: BLE001
-        with _SCREEN_LOCK:
-            _SCREEN_JOBS[job_id].update({"status": "failed", "error": f"{type(exc).__name__}: {str(exc)[:200]}"})
+        with _JOBS_LOCK:
+            _JOBS[job_id].update({"status": "failed", "error": f"{type(exc).__name__}: {str(exc)[:200]}"})
 
 
-def _start_screen_job(body: ScreeningInput, total: int) -> dict:
+def _start_job(kind: str, body, total: int, fn) -> dict:
     job_id = uuid.uuid4().hex[:12]
-    with _SCREEN_LOCK:
-        if len(_SCREEN_JOBS) > 50:  # keep the in-memory table small
-            for old in sorted(_SCREEN_JOBS, key=lambda k: _SCREEN_JOBS[k]["started_at"])[:25]:
-                _SCREEN_JOBS.pop(old, None)
-        _SCREEN_JOBS[job_id] = {"job_id": job_id, "kind": "screening_job", "status": "running", "done": 0, "total": total,
-                                "universe": body.universe, "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
-    threading.Thread(target=_screen_job, args=(job_id, body), name=f"screen-{job_id}", daemon=True).start()
+    with _JOBS_LOCK:
+        if len(_JOBS) > 50:  # keep the in-memory table small
+            for old in sorted(_JOBS, key=lambda k: _JOBS[k]["started_at"])[:25]:
+                _JOBS.pop(old, None)
+        _JOBS[job_id] = {"job_id": job_id, "kind": f"{kind}_job", "status": "running", "done": 0, "total": total,
+                         "universe": body.universe, "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    threading.Thread(target=_run_job, args=(job_id, kind, body, fn), name=f"{kind}-{job_id}", daemon=True).start()
     return _job_view(job_id)
 
 
 def _job_view(job_id: str) -> dict:
-    with _SCREEN_LOCK:
-        job = _SCREEN_JOBS.get(job_id)
+    with _JOBS_LOCK:
+        job = _JOBS.get(job_id)
         return dict(job) if job else {}
 
 
@@ -418,10 +517,26 @@ async def _lab_call(fn, body) -> dict:
 
 
 @router.post("/lab/backtest")
-async def run_backtest(body: BacktestInput) -> dict:
+async def run_backtest(body: BacktestInput, background: bool | None = None) -> dict:
+    """Quick runs answer inline; the committee strategy (or ?background=true) returns a job to poll."""
+    try:
+        tickers, _ = await run_in_threadpool(resolve_universe, body.universe, body.tickers)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    total = _backtest_total(body, len(tickers))
+    if background or (background is None and (body.strategy == "committee" or total > BACKTEST_SYNC_MAX)):
+        return _start_job("backtest", body, total, _run_backtest)
     result = await _lab_call(_run_backtest, body)
     _remember_run("backtest", result, body.model_dump())
     return result
+
+
+@router.get("/lab/backtest/jobs/{job_id}")
+async def backtest_job(job_id: str) -> dict:
+    job = _job_view(job_id)
+    if not job or job.get("kind") != "backtest_job":
+        raise HTTPException(status_code=404, detail="backtest job not found")
+    return job
 
 
 @router.post("/lab/event-study")
@@ -439,7 +554,7 @@ async def run_screening(body: ScreeningInput, background: bool | None = None) ->
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if background or (background is None and len(tickers) > SCREEN_SYNC_MAX):
-        return _start_screen_job(body, len(tickers))
+        return _start_job("screening", body, len(tickers), _run_screening)
     result = await _lab_call(_run_screening, body)
     _remember_run("screening", result, body.model_dump())
     return result
@@ -448,7 +563,7 @@ async def run_screening(body: ScreeningInput, background: bool | None = None) ->
 @router.get("/lab/screening/jobs/{job_id}")
 async def screening_job(job_id: str) -> dict:
     job = _job_view(job_id)
-    if not job:
+    if not job or job.get("kind") != "screening_job":
         raise HTTPException(status_code=404, detail="screening job not found")
     return job
 

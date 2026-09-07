@@ -86,6 +86,20 @@ as a background job — `POST /api/lab/screening` returns `{job_id, done, total}
 and `GET /api/lab/screening/jobs/{id}` is polled — because nginx cuts requests
 at 90 s. `GET /api/lab/universes` lists sizes and snapshot dates.
 
+Backtest strategies (all in `v2/backtesting/strategies.py`, one engine):
+`pead` (EPS beat/miss after the filing, `earnings_limit`), `momentum` (12-1
+momentum ranked every `holding_days`, `lookback_days`, `skip_days`, `top_n`,
+optional `near_high_pct` for the 52-week-high variant), `insider`
+(`min_insiders` distinct buyers inside `window_days` with `min_value_usd` of
+purchases), and `committee` (the 13 personas vote at every rebalance date over
+`history_days`; fundamentals as of `filing_lag_days` earlier; `top_n`,
+`min_consensus`, `min_agreement`, `lean`). `data_source` picks where daily
+prices come from — yfinance is free, FD bills per 90-day chunk — while
+earnings, insider trades and fundamentals are always Financial Datasets;
+`fd_requests` / `fd_cost_usd` on the result say what a run cost, and persona
+snapshots for historical dates are cached in `data/personas.db` so a re-run
+of the same dates is free.
+
 Screening rules are individually optional: the UI ticks any subset of the
 criteria (market cap, price, growth, margins, ROE/ROIC, leverage, valuation
 multiples, FCF yield, payout, volatility, 1w/1m/3m returns, distance from the
@@ -98,7 +112,8 @@ fields (e.g. ROIC, payout) may be empty for part of the universe.
 ```
 POST /api/lab/screening              {universe, tickers?, data_source: yfinance|fd, with_earnings?, rules: [{field, op: gte|lte, value}]}
 GET  /api/lab/screening/criteria     the 22 rule fields (label, unit, source) + the default rule set
-POST /api/lab/backtest               {universe, tickers?, strategy: "pead", holding_days, earnings_limit, capital, per_trade}
+POST /api/lab/backtest               {universe, tickers?, strategy: pead|momentum|insider|committee, data_source: yfinance|fd, holding_days, capital, per_trade, …}
+GET  /api/lab/backtest/jobs/{id}     poll a background backtest (the committee strategy always runs as one)
 POST /api/lab/event-study            {universe, tickers?, earnings_limit, n_bootstrap, require_eps_surprise}
 GET  /api/lab/signals                production anomaly thresholds, read-only
 GET  /api/lab/runs[?kind=&limit=]    persisted run log for every tool (+ per-kind counts)

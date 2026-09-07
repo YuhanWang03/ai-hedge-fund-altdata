@@ -30,7 +30,8 @@ type ScreenCandidate = { ticker: string; price: number; price_change: number | n
 type ScreenRule = { field: string; op: 'gte' | 'lte'; value: number };
 type CriterionMeta = { label: string; unit: 'pct' | 'usd' | 'x'; source: 'metrics' | 'prices' };
 type CriteriaResp = { items: Record<string, CriterionMeta>; defaults: ScreenRule[] };
-type ScreeningJob = { job_id: string; status: 'running' | 'completed' | 'failed'; done: number; total: number; universe: string; error?: string; result?: ScreeningResult };
+type LabJob<T> = { job_id: string; status: 'running' | 'completed' | 'failed'; done: number; total: number; universe: string; error?: string; result?: T };
+type ScreeningJob = LabJob<ScreeningResult>;
 type UniverseInfo = { size: number; as_of: string | null; label: string };
 type Pricing = { prices_usd: Record<string, number>; committee_per_ticker: { full: number; lean: number } };
 type ScreeningResult = { kind: 'screening'; lab_run_id?: string; universe: string; universe_as_of?: string | null; skipped?: Record<string, string>; data_source?: 'yfinance' | 'fd'; with_earnings?: boolean; fd_requests?: Record<string, number>; fd_cost_usd?: number; tickers: string[]; rules?: ScreenRule[]; rules_text?: string[]; rejected_count?: number; no_data?: string[]; reject_reasons?: Record<string, number>; date: string; universe_size: number; candidates: ScreenCandidate[] };
@@ -42,8 +43,8 @@ type CommitteeSignal = { persona: string; ticker: string; as_of: string; signal:
 type CommitteeVerdict = { ticker: string; stance: 'bullish' | 'bearish' | 'neutral' | 'abstain'; consensus: number; bullish: number; bearish: number; neutral: number; abstained: number; voters: number; agreement: number; avg_confidence: number; rank: number | null; signals: CommitteeSignal[]; position?: { weight: number | null; market_value: number; current_price: number | null; unrealized_pl_pct: number | null }; action?: string; action_reason?: string; price?: number | null };
 type CommitteeResult = { kind: 'committee'; run_id: string; lab_run_id?: string; source: CommitteeSource; as_of: string; personas: string[]; personas_meta: PersonaMeta[]; elapsed_s: number; errors: Record<string, string>; cache_hits: string[]; data_gaps?: { gap: string; tickers: string[] }[]; lean?: boolean; fd_requests?: Record<string, number>; fd_cost_usd?: number; verdicts: CommitteeVerdict[]; top: { rank: number; ticker: string; stance: string; consensus: number }[]; screening?: { universe_size: number | null; n_candidates: number } };
 
-type Trade = { ticker: string; direction: string; entry_date: string; exit_date: string; entry_price: number; exit_price: number; pnl: number; return_pct: number; holding_days: number };
-type BacktestResult = { kind: 'backtest'; lab_run_id?: string; strategy: string; universe: string; tickers: string[]; params: Record<string, number>; trades: Trade[]; metrics: { total_return_pct: number; annualized_return_pct: number; sharpe_ratio: number; max_drawdown_pct: number; win_rate: number; n_trades: number; n_long: number; n_short: number; avg_return_pct: number; avg_holding_days: number } | null; equity_curve: number[] };
+type Trade = { ticker: string; direction: string; entry_date: string; exit_date: string; entry_price: number; exit_price: number; pnl: number; return_pct: number; holding_days: number; metadata?: Record<string, unknown> };
+type BacktestResult = { kind: 'backtest'; lab_run_id?: string; strategy: string; data_source?: string; universe: string; tickers: string[]; params: Record<string, unknown>; fd_requests?: Record<string, number>; fd_cost_usd?: number; notes?: { price_failures?: Record<string, string>; errors?: Record<string, string>; rebalance_dates?: string[] }; trades: Trade[]; metrics: { total_return_pct: number; annualized_return_pct: number; sharpe_ratio: number; max_drawdown_pct: number; win_rate: number; n_trades: number; n_long: number; n_short: number; avg_return_pct: number; avg_holding_days: number } | null; equity_curve: number[] };
 
 type WindowStats = { window: string; n_events: number; mean_car: number; std_car: number; t_stat: number; p_value: number; ci: { lower: number; upper: number; confidence: number } };
 type EventCAR = { ticker: string; event_date: string; source_type: string; eps_surprise: string | null; car_0_1: number | null; car_0_5: number | null; car_0_20: number | null; market_model: { alpha: number; beta: number; r_squared: number } };
@@ -114,7 +115,7 @@ export function LabPage({ tool, selectTool, ask }: { tool: LabTool; selectTool: 
     overview: ['实验室', '筛选 → 委员会 → 回测 → 观察 → 批准。每一步都是确定性的引擎，结果全部落库；实验室不写任何生产状态。'],
     screening: ['股票筛选', '基本面硬规则过滤股票池，得到候选名单，可直接送入委员会。'],
     committee: ['投资人委员会', '13 位模拟投资人各按一份确定性清单打分，按置信度加权投票；LLM 只在你点「解读」时写文字。'],
-    backtest: ['策略回测', '在历史财报事件上模拟交易，给出收益、回撤和胜率。'],
+    backtest: ['策略回测', '四个策略（PEAD、价格动量、内部人集中买入、投资人委员会）在历史上模拟交易，给出收益、回撤和胜率。'],
     'event-study': ['事件研究', '财报公布后的累计异常收益（CAR）及其显著性。'],
     scoreboard: ['观察记分板', '委员会每一票在 1 个月 / 3 个月后对不对：无前视的逐人命中率。'],
     runs: ['运行记录', '所有工具的历史运行，点开可原样重看。'],
@@ -157,7 +158,7 @@ function OverviewTool({ selectTool, watchlist, ask }: ToolProps) {
       </section>
       <section className="surface"><div className="surface-header"><div><h2>引擎</h2><span>全部确定性，无 LLM 判决</span></div></div>
         <div className="lab-engines">
-          {[['股票筛选', '市值 / 营收增长 / 毛利率 / 波动率硬规则', 'screening'], ['投资人委员会', '13 套打分清单 · 置信度加权投票', 'committee'], ['PEAD 回测', '财报后漂移策略 · 逐笔交易', 'backtest'], ['事件研究', '市场模型 + bootstrap 置信区间', 'event-study'], ['前向记分', '每天 02:30 ET 回填真实收益', 'scoreboard']].map(([n, d, t]) => <button key={n} type="button" onClick={() => selectTool(t as LabTool)}><strong>{n}</strong><span>{d}</span></button>)}
+          {[['股票筛选', '市值 / 营收增长 / 毛利率 / 波动率硬规则', 'screening'], ['投资人委员会', '13 套打分清单 · 置信度加权投票', 'committee'], ['策略回测', 'PEAD · 动量 · 内部人 · 委员会 · 逐笔交易', 'backtest'], ['事件研究', '市场模型 + bootstrap 置信区间', 'event-study'], ['前向记分', '每天 02:30 ET 回填真实收益', 'scoreboard']].map(([n, d, t]) => <button key={n} type="button" onClick={() => selectTool(t as LabTool)}><strong>{n}</strong><span>{d}</span></button>)}
         </div>
         <div className="guardrail"><strong>生产保护</strong><span>实验室不创建告警、不下单、不改监控阈值；唯一的「批准」动作是把股票加进 Watchlist。</span></div>
       </section>
@@ -351,28 +352,109 @@ function EquityLine({ values }: { values: number[] }) {
   return <svg className="lab-equity" viewBox="0 0 760 160" role="img" aria-label="回测净值曲线"><polyline className="chart-line" points={pts}/></svg>;
 }
 
+type StrategyId = 'pead' | 'momentum' | 'insider' | 'committee';
+const STRATEGIES: { id: StrategyId; label: string; short: string; holding: number; hint: string; empty: string }[] = [
+  { id: 'pead', label: 'PEAD 财报后漂移', short: 'PEAD', holding: 5, hint: '财报 EPS 超预期做多、不及预期做空，财报日后入场持有 N 日。财报历史来自 Financial Datasets，每只 1 次请求。', empty: '在选定股票池的历史财报事件上按 PEAD 规则入场、持有 N 日出场，得到逐笔交易与净值曲线。' },
+  { id: 'momentum', label: '价格动量', short: '动量', holding: 21, hint: '12-1 动量：按「跳过最近 M 日后的 N 日涨幅」排名，每期买入前 K 只、持有一期。只用价格，yfinance 下免费。可选只买接近 52 周新高的股票。', empty: '每个换仓日按过去一年的涨幅排名，买入最强的几只，持有一期后换仓。' },
+  { id: 'insider', label: '内部人集中买入', short: '内部人', holding: 63, hint: '窗口期内有多位不同内部人（高管、董事）净买入且合计金额达标，即在最后一笔申报日次日买入。内部人交易来自 Financial Datasets，每只 1 次请求。', empty: '找出历史上多位内部人在短窗口内集中买入的时点，买入并持有一段时间。' },
+  { id: 'committee', label: '投资人委员会', short: '委员会', holding: 63, hint: '每个换仓日让 13 位模拟投资人按当时可得的财务数据打分，买入共识最强的前 K 只。每只股票每个时点约 4 次付费请求（省流模式），快照会缓存，重跑同一时点不再计费。', empty: '在历史上每个季度让投资人委员会投票，买入共识最强的几只，看这套打分规则过去是否赚钱。' },
+];
+const STRATEGY_LABEL: Record<string, string> = Object.fromEntries(STRATEGIES.map(s => [s.id, s.label]));
+
+function signalText(strategy: string, meta?: Record<string, unknown>): string {
+  if (!meta) return '';
+  const n = (k: string) => typeof meta[k] === 'number' ? (meta[k] as number) : null;
+  if (strategy === 'momentum') { const m = n('momentum'); const h = n('pct_from_52w_high'); return `动量 ${pct(m)}${h != null ? ` · 距高点 ${pct(h)}` : ''}`; }
+  if (strategy === 'insider') return `${n('insiders') ?? '?'} 位内部人 · $${Math.round(n('cluster_value_usd') ?? 0).toLocaleString()}`;
+  if (strategy === 'committee') return `共识 ${num(n('consensus'))} · ${n('bullish') ?? 0}多/${n('bearish') ?? 0}空 · 数据截至 ${String(meta.as_of || '')}`;
+  return `${String(meta.eps_surprise || '')} ${String(meta.source_type || '')}`.trim();
+}
+
 function BacktestTool({ result, setResult, handoff, clearHandoff, ask }: ToolProps & { result?: BacktestResult; setResult: (r?: BacktestResult) => void; handoff: Handoff | null; clearHandoff: () => void }) {
   const [universe, setUniverse] = useState<Universe>('custom'); const [tickers, setTickers] = useState('AAPL, MSFT, NVDA');
+  const [strategy, setStrategyRaw] = useState<StrategyId>('pead'); const [dataSource, setDataSource] = useState<'yfinance' | 'fd'>('yfinance');
   const [holding, setHolding] = useState('5'); const [earnings, setEarnings] = useState('8'); const [capital, setCapital] = useState('100000'); const [perTrade, setPerTrade] = useState('10000');
-  const [busy, setBusy] = useState(false); const [error, setError] = useState('');
-  const run = async () => { setBusy(true); setError(''); try { setResult(await apiJson<BacktestResult>('/api/lab/backtest', { method: 'POST', body: JSON.stringify({ universe, tickers: universe === 'custom' ? parseTickers(tickers) : [], strategy: 'pead', holding_days: Number(holding), earnings_limit: Number(earnings), capital: Number(capital), per_trade: Number(perTrade) }) })) } catch (e) { setError(errorText(e)) } finally { setBusy(false) } };
+  const [history, setHistory] = useState('730'); const [topN, setTopN] = useState('5'); const [lookback, setLookback] = useState('252'); const [skip, setSkip] = useState('21'); const [nearHigh, setNearHigh] = useState('');
+  const [window, setWindowDays] = useState('30'); const [minInsiders, setMinInsiders] = useState('2'); const [minValue, setMinValue] = useState('100000');
+  const [minConsensus, setMinConsensus] = useState('0.2'); const [minAgreement, setMinAgreement] = useState('0.5'); const [lean, setLean] = useState(true); const [lag, setLag] = useState('45');
+  const [busy, setBusy] = useState(false); const [error, setError] = useState(''); const [job, setJob] = useState<LabJob<BacktestResult> | null>(null);
+  const info = useLabData<{ items: Record<string, UniverseInfo> }>('/api/lab/universes');
+  const pricing = useLabData<Pricing>('/api/lab/committee/pricing');
+  const meta = STRATEGIES.find(s => s.id === strategy)!;
+  const setStrategy = (id: StrategyId) => { setStrategyRaw(id); setHolding(String(STRATEGIES.find(s => s.id === id)!.holding)); };
+  const price = (k: string) => pricing.data?.prices_usd[k] ?? 0.02;
+  const poolSize = universe === 'custom' ? parseTickers(tickers).length : (info.data?.items[universe]?.size ?? 0);
+  const step = Math.max(1, Math.round(Number(holding) * 365 / 252));
+  const periods = Math.max(0, Math.floor((Number(history) - step) / step) + 1);
+  const priceChunks = Math.ceil((Number(history) + (strategy === 'momentum' ? Number(lookback) * 1.6 : 0) + 10) / 90);
+  const estimate = (() => {
+    if (!poolSize) return null;
+    let events = 0; let note = '';
+    if (strategy === 'pead') { events = poolSize * price('earnings'); note = '财报历史'; }
+    else if (strategy === 'insider') { events = poolSize * price('insider_trades'); note = '内部人交易'; }
+    else if (strategy === 'committee') { events = poolSize * periods * (lean ? 4 : 6) * price('financial_metrics'); note = `${periods} 个换仓日 × ${poolSize} 只 × ${lean ? 4 : 6} 次`; }
+    const prices = dataSource === 'fd' ? poolSize * priceChunks * price('prices') : 0;
+    return { total: events + prices, note, prices };
+  })();
+  const body = () => ({
+    universe, tickers: universe === 'custom' ? parseTickers(tickers) : [], strategy, data_source: dataSource,
+    holding_days: Number(holding), capital: Number(capital), per_trade: Number(perTrade), earnings_limit: Number(earnings),
+    history_days: Number(history), top_n: Number(topN), lookback_days: Number(lookback), skip_days: Number(skip), near_high_pct: nearHigh === '' ? null : Number(nearHigh) / 100,
+    window_days: Number(window), min_insiders: Number(minInsiders), min_value_usd: Number(minValue),
+    min_consensus: Number(minConsensus), min_agreement: Number(minAgreement), lean, filing_lag_days: Number(lag),
+  });
+  const run = async () => {
+    setBusy(true); setError(''); setJob(null);
+    try {
+      let r = await apiJson<BacktestResult | LabJob<BacktestResult>>('/api/lab/backtest', { method: 'POST', body: JSON.stringify(body()) });
+      while ('job_id' in r) {
+        setJob(r);
+        if (r.status === 'failed') throw new Error(r.error || '回测任务失败');
+        if (r.status === 'completed' && r.result) { r = r.result; break }
+        await new Promise<void>(resolve => globalThis.setTimeout(resolve, 2000));
+        r = await apiJson<LabJob<BacktestResult>>(`/api/lab/backtest/jobs/${encodeURIComponent(r.job_id)}`);
+      }
+      setResult(r as BacktestResult);
+    } catch (e) { setError(errorText(e)) } finally { setBusy(false); setJob(null) }
+  };
   const m = result?.metrics;
+  const p = (result?.params || {}) as Record<string, unknown>;
+  const paramText = result ? (
+    result.strategy === 'pead' ? `每只 ${String(p.earnings_limit)} 份财报` :
+    result.strategy === 'momentum' ? `回看 ${String(p.lookback_days)} 日 · 跳过 ${String(p.skip_days)} 日 · 每期 ${String(p.top_n)} 只${p.near_high_pct != null ? ` · 距 52 周高点 ≤ ${Math.round(Number(p.near_high_pct) * 100)}%` : ''}` :
+    result.strategy === 'insider' ? `${String(p.window_days)} 日内 ≥ ${String(p.min_insiders)} 人 · ≥ $${Number(p.min_value_usd || 0).toLocaleString()}` :
+    `每期前 ${String(p.top_n)} 只 · 共识 ≥ ${String(p.min_consensus)} · 一致度 ≥ ${String(p.min_agreement)} · ${p.lean ? '省流' : '全量'}`
+  ) : '';
+  const failures = Object.keys(result?.notes?.price_failures || {}).length; const errs = Object.keys(result?.notes?.errors || {}).length;
   return <>
     {handoff && <HandoffBanner handoff={handoff} onUse={() => { setUniverse('custom'); setTickers(handoff.tickers.join(', ')); clearHandoff() }} onClear={clearHandoff}/>}
     <div className="lab-tool">
-      <section className="surface lab-config"><div className="surface-header"><div><h2>回测参数</h2><span>策略：PEAD 财报后漂移（目前唯一已实现的策略）</span></div></div>
+      <section className="surface lab-config"><div className="surface-header"><div><h2>回测参数</h2><span>四个策略共用一个引擎：策略只产生信号，引擎负责成交、持有与统计</span></div></div>
+        <Field label="策略" hint={meta.hint}><Chips options={STRATEGIES.map(s => ({ id: s.id, label: s.label }))} value={strategy} onChange={setStrategy}/></Field>
         <UniversePicker universe={universe} setUniverse={setUniverse} tickers={tickers} setTickers={setTickers} exclude={INDEX_UNIVERSES}/>
-        <div className="lab-grid2"><Field label="每只回看财报数" hint="每份财报是一个入场事件"><NumberInput value={earnings} onChange={setEarnings} min={1} max={20}/></Field><Field label="持有交易日"><NumberInput value={holding} onChange={setHolding} min={1} max={60}/></Field><Field label="初始资金（$）"><NumberInput value={capital} onChange={setCapital} min={1000} step={10000}/></Field><Field label="单笔资金（$）"><NumberInput value={perTrade} onChange={setPerTrade} min={100} step={1000}/></Field></div>
-        <button className="run-button" disabled={busy || (universe === 'custom' && !parseTickers(tickers).length)} onClick={() => void run()}>{busy ? '回测中…' : '运行回测'}</button>
-        <p className="lab-note">13 位投资人的打分规则尚未接入回测；接入后这里会多出一个「策略」下拉。</p>
+        <Field label="价格数据源" hint={dataSource === 'yfinance' ? '日线价格来自 yfinance，免费；财报、内部人交易和财务数据始终来自 Financial Datasets。' : `日线价格也从 Financial Datasets 取，每只每 90 天一段、每段 ${usd(price('prices'))}；只在需要与线上口径完全一致时用。`}><Chips options={[{ id: 'yfinance', label: 'yfinance（免费）' }, { id: 'fd', label: 'Financial Datasets（付费）' }]} value={dataSource} onChange={setDataSource}/></Field>
+        <div className="lab-grid2">
+          <Field label="持有交易日" hint={strategy === 'momentum' || strategy === 'committee' ? '也是换仓周期' : undefined}><NumberInput value={holding} onChange={setHolding} min={1} max={252}/></Field>
+          {strategy === 'pead' ? <Field label="每只回看财报数" hint="每份财报是一个入场事件"><NumberInput value={earnings} onChange={setEarnings} min={1} max={20}/></Field>
+            : <Field label="回看历史（天）" hint="在这段历史里产生信号"><NumberInput value={history} onChange={setHistory} min={60} max={3650} step={30}/></Field>}
+          {strategy === 'momentum' && <><Field label="动量回看（交易日）"><NumberInput value={lookback} onChange={setLookback} min={20} max={504}/></Field><Field label="跳过最近（交易日）" hint="避开短期反转"><NumberInput value={skip} onChange={setSkip} min={0} max={120}/></Field><Field label="每期买入只数"><NumberInput value={topN} onChange={setTopN} min={1} max={60}/></Field><Field label="距 52 周高点 ≤ %" hint="留空 = 不限制；填 5 即只买离新高 5% 以内的"><NumberInput value={nearHigh} onChange={setNearHigh} min={0} max={100}/></Field></>}
+          {strategy === 'insider' && <><Field label="窗口（天）"><NumberInput value={window} onChange={setWindowDays} min={1} max={180}/></Field><Field label="最少内部人数"><NumberInput value={minInsiders} onChange={setMinInsiders} min={1} max={20}/></Field><Field label="合计买入 ≥ $"><NumberInput value={minValue} onChange={setMinValue} min={0} step={50000}/></Field></>}
+          {strategy === 'committee' && <><Field label="每期买入只数"><NumberInput value={topN} onChange={setTopN} min={1} max={60}/></Field><Field label="最低共识" hint="-1 到 1"><NumberInput value={minConsensus} onChange={setMinConsensus} min={-1} max={1} step={0.1}/></Field><Field label="最低一致度" hint="多数派占投票人的比例"><NumberInput value={minAgreement} onChange={setMinAgreement} min={0} max={1} step={0.1}/></Field><Field label="财报滞后（天）" hint="只用信号日之前这么多天已公布的财务数据"><NumberInput value={lag} onChange={setLag} min={0} max={120}/></Field></>}
+          <Field label="初始资金（$）"><NumberInput value={capital} onChange={setCapital} min={1000} step={10000}/></Field><Field label="单笔资金（$）"><NumberInput value={perTrade} onChange={setPerTrade} min={100} step={1000}/></Field>
+        </div>
+        {strategy === 'committee' && <Field label="省流模式" hint={lean ? '跳过新闻和内部人交易两路请求；只影响几位投资人的情绪小分项' : '取全部数据，每个时点每只约 6 次请求'}><Chips options={[{ id: 'on', label: '开（省流）' }, { id: 'off', label: '关（全量）' }]} value={lean ? 'on' : 'off'} onChange={v => setLean(v === 'on')}/></Field>}
+        <p className="lab-note">预计 Financial Datasets 费用：{estimate ? `≈ ${usd(estimate.total)}${estimate.note ? `（${estimate.note}${estimate.prices ? ` + 价格 ${usd(estimate.prices)}` : ''}）` : ''}` : '$0.00'}{strategy === 'committee' ? '。已缓存的时点不重复计费；委员会回测在后台运行，可以看进度。' : strategy === 'pead' && dataSource === 'fd' ? '，另加每笔交易 1 次价格请求。' : '。'}</p>
+        <button className="run-button" disabled={busy || (universe === 'custom' && !parseTickers(tickers).length)} onClick={() => void run()}>{busy ? (job ? `回测中… ${job.done} / ${job.total}` : '回测中…') : '运行回测'}</button>
+        {job && <div className="lab-progress"><i style={{ width: `${job.total ? Math.round((job.done / job.total) * 100) : 0}%` }}/></div>}
       </section>
       <section className="surface lab-result">
-        {error ? <ErrorBox text={error}/> : !result ? <Empty glyph="↗" title="等待回测" text="在选定股票池的历史财报事件上按 PEAD 规则入场、持有 N 日出场，得到逐笔交易与净值曲线。"/> : <>
-          <div className="surface-header"><div><h2>{result.strategy.toUpperCase()} · {result.tickers.length} 只 · {m?.n_trades ?? 0} 笔</h2><span>{UNIVERSE_LABEL[result.universe] || result.universe} · 持有 {result.params?.holding_days} 日 · 每只 {result.params?.earnings_limit} 份财报 · 单笔 ${Number(result.params?.per_trade || 0).toLocaleString()}</span></div></div>
-          {m ? <div className="lab-stats"><Stat label="总收益" value={pct(m.total_return_pct)} tone={m.total_return_pct >= 0 ? 'positive' : 'negative'}/><Stat label="年化" value={pct(m.annualized_return_pct)}/><Stat label="夏普" value={num(m.sharpe_ratio)}/><Stat label="最大回撤" value={pct(m.max_drawdown_pct)} tone="negative"/><Stat label="胜率" value={pctAbs(m.win_rate)}/><Stat label="平均单笔" value={pct(m.avg_return_pct)}/><Stat label="多 / 空" value={`${m.n_long} / ${m.n_short}`}/><Stat label="平均持有" value={`${num(m.avg_holding_days, 1)} 日`}/></div> : <p className="lab-note">没有产生交易：股票池里可能没有可用的财报事件。</p>}
+        {error ? <ErrorBox text={error}/> : !result ? <Empty glyph="↗" title="等待回测" text={meta.empty}/> : <>
+          <div className="surface-header"><div><h2>{STRATEGY_LABEL[result.strategy] || result.strategy.toUpperCase()} · {result.tickers.length} 只 · {m?.n_trades ?? 0} 笔</h2><span>{UNIVERSE_LABEL[result.universe] || result.universe} · 持有 {String(p.holding_days)} 日 · {paramText} · 单笔 ${Number(p.per_trade || 0).toLocaleString()} · 价格 {result.data_source === 'fd' ? 'Financial Datasets' : 'yfinance'} · FD 费用 {usd(result.fd_cost_usd ?? 0)}</span></div></div>
+          {m ? <div className="lab-stats"><Stat label="总收益" value={pct(m.total_return_pct)} tone={m.total_return_pct >= 0 ? 'positive' : 'negative'}/><Stat label="年化" value={pct(m.annualized_return_pct)}/><Stat label="夏普" value={num(m.sharpe_ratio)}/><Stat label="最大回撤" value={pct(m.max_drawdown_pct)} tone="negative"/><Stat label="胜率" value={pctAbs(m.win_rate)}/><Stat label="平均单笔" value={pct(m.avg_return_pct)}/><Stat label="多 / 空" value={`${m.n_long} / ${m.n_short}`}/><Stat label="平均持有" value={`${num(m.avg_holding_days, 1)} 日`}/></div> : <p className="lab-note">没有产生交易：{result.strategy === 'pead' ? '股票池里可能没有可用的财报事件。' : result.strategy === 'insider' ? '这段历史里没有满足条件的内部人集中买入。' : result.strategy === 'committee' ? '没有股票达到共识与一致度门槛，或财务数据不足。' : '没有股票满足动量条件，或价格历史不够长。'}</p>}
+          {(failures > 0 || errs > 0) && <p className="lab-note">{failures > 0 ? `${failures} 只取不到价格已跳过` : ''}{failures > 0 && errs > 0 ? '；' : ''}{errs > 0 ? `${errs} 个（股票, 时点）取数失败` : ''}，详见原始结果。</p>}
           <EquityLine values={result.equity_curve || []}/>
-          {result.trades.length > 0 && <div className="lab-table-wrap"><table className="lab-table"><thead><tr><th>股票</th><th>方向</th><th>入场</th><th>出场</th><th>入场价</th><th>出场价</th><th>收益</th><th>盈亏</th></tr></thead><tbody>{result.trades.slice(0, 40).map((t, i) => <tr key={i}><td><strong>{t.ticker}</strong></td><td>{t.direction === 'long' ? '多' : '空'}</td><td>{t.entry_date}</td><td>{t.exit_date}</td><td>${num(t.entry_price)}</td><td>${num(t.exit_price)}</td><td className={t.return_pct >= 0 ? 'positive' : 'negative'}>{pct(t.return_pct)}</td><td className={t.pnl >= 0 ? 'positive' : 'negative'}>${t.pnl.toFixed(0)}</td></tr>)}</tbody></table>{result.trades.length > 40 ? <p className="lab-note">只显示前 40 笔，共 {result.trades.length} 笔。</p> : null}</div>}
-          <div className="lab-foot"><button type="button" className="explain-button" onClick={() => ask(`PEAD 回测结果：${result.tickers.join(', ')}，${m?.n_trades ?? 0} 笔，总收益 ${pct(m?.total_return_pct)}，夏普 ${num(m?.sharpe_ratio)}，最大回撤 ${pct(m?.max_drawdown_pct)}，胜率 ${pctAbs(m?.win_rate)}。请评价这组指标的稳健性和样本量问题。`, '实验室 · 策略回测')}>问 AI 评价稳健性</button><RawJson data={result}/></div>
+          {result.trades.length > 0 && <div className="lab-table-wrap"><table className="lab-table"><thead><tr><th>股票</th><th>方向</th><th>入场</th><th>出场</th><th>入场价</th><th>出场价</th><th>收益</th><th>盈亏</th><th>信号</th></tr></thead><tbody>{result.trades.slice(0, 60).map((t, i) => <tr key={i}><td><strong>{t.ticker}</strong></td><td>{t.direction === 'long' ? '多' : '空'}</td><td>{t.entry_date}</td><td>{t.exit_date}</td><td>${num(t.entry_price)}</td><td>${num(t.exit_price)}</td><td className={t.return_pct >= 0 ? 'positive' : 'negative'}>{pct(t.return_pct)}</td><td className={t.pnl >= 0 ? 'positive' : 'negative'}>${t.pnl.toFixed(0)}</td><td>{signalText(result.strategy, t.metadata)}</td></tr>)}</tbody></table>{result.trades.length > 60 && <p className="lab-note">只显示前 60 笔，共 {result.trades.length} 笔；完整列表在原始结果里。</p>}</div>}
+          <div className="lab-foot"><button type="button" className="explain-button" onClick={() => ask(`${STRATEGY_LABEL[result.strategy] || result.strategy} 回测结果：${result.tickers.join(', ')}，${m?.n_trades ?? 0} 笔，总收益 ${pct(m?.total_return_pct)}，夏普 ${num(m?.sharpe_ratio)}，最大回撤 ${pct(m?.max_drawdown_pct)}，胜率 ${pctAbs(m?.win_rate)}（${paramText}）。请评价这组指标的稳健性和样本量问题。`, '实验室 · 策略回测')}>问 AI 评价稳健性</button><RawJson data={result}/></div>
         </>}
       </section>
     </div>
