@@ -16,6 +16,18 @@ from datetime import date, timedelta
 from v2.personas.data import ALL_LINE_ITEMS, FinancialDatasetsClient, adapt_client
 
 
+def _load_env() -> None:
+    """Pick up the repo's .env like the services do (systemd EnvironmentFile)."""
+    try:
+        from pathlib import Path
+
+        from dotenv import load_dotenv
+
+        load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+    except Exception:  # noqa: BLE001 — python-dotenv is a dependency, but stay quiet if not
+        pass
+
+
 def _try(label: str, fn, *args, **kwargs) -> None:
     started = time.time()
     try:
@@ -32,6 +44,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--as-of", default=date.today().isoformat())
     parser.add_argument("--http-only", action="store_true", help="skip the production FDClient, test only the built-in HTTP client")
     args = parser.parse_args(argv)
+    _load_env()
     ticker, end = args.ticker.upper(), args.as_of
     start = (date.fromisoformat(end) - timedelta(days=365)).isoformat()
     key = os.environ.get("FINANCIAL_DATASETS_API_KEY", "")

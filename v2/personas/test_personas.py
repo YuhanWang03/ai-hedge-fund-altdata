@@ -444,3 +444,58 @@ def test_adapter_caps_news_limit():
             return [{"title": "x"}] * 3
 
     assert len(adapt_client(Prod()).get_company_news("AAPL", "2026-06-30", start_date="2025-06-30", limit=250)) == 3
+
+
+
+def test_http_client_drops_line_items_the_api_rejects(monkeypatch):
+    import io
+    import json as _json
+    import urllib.error
+    import urllib.request
+
+    bodies: list[list[str]] = []
+
+    def fake_urlopen(request, timeout=0):
+        items = _json.loads(request.data)["line_items"]
+        bodies.append(items)
+        bad = [n for n in items if n in ("intangible_assets", "made_up")]
+        if bad:
+            body = _json.dumps({"error": f"Invalid line items: {', '.join(bad)}", "message": "x"}).encode()
+            raise urllib.error.HTTPError(request.full_url, 400, "Bad Request", {}, io.BytesIO(body))
+        return io.BytesIO(_json.dumps({"search_results": [{"ticker": "AAPL", "revenue": 1.0}]}).encode())
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    rows = FinancialDatasetsClient("k", max_retries=0).search_line_items("AAPL", ["revenue", "intangible_assets", "made_up"], "2026-06-30")
+    assert rows[0].revenue == 1.0
+    assert bodies[-1] == ["revenue"] and len(bodies) == 2
+
+
+def test_news_limit_steps_down_until_accepted():
+    from v2.personas.data import _with_smaller_news_limit
+
+    tried: list[int] = []
+
+    def fetch(limit):
+        tried.append(limit)
+        if limit > 20:
+            raise RuntimeError('HTTP 400 for /news/: {"error":"Invalid limit"}')
+        return ["n"] * limit
+
+    assert len(_with_smaller_news_limit(fetch, 100)) == 20 and tried == [100, 50, 20]
+    with pytest.raises(ValueError):
+        _with_smaller_news_limit(lambda n: (_ for _ in ()).throw(ValueError("unrelated")), 100)
+
+
+def test_cached_snapshot_rejects_rows_saved_with_core_gaps(tmp_path):
+    import json as _json
+    import sqlite3
+
+    from v2.personas.store import PersonaStore, utc_now
+
+    store = PersonaStore(tmp_path / "p.db")
+    snap = quality_snapshot()
+    snap.gaps.append("line_items_ttm: RuntimeError: HTTP 403")
+    with sqlite3.connect(store.path) as conn:  # simulate a row written before the rule existed
+        conn.execute("INSERT INTO snapshots (ticker, as_of, content_hash, fetched_at, payload_json) VALUES (?,?,?,?,?)",
+                     (snap.ticker, snap.as_of, snap.content_hash, utc_now(), _json.dumps(snap.to_dict(), default=str)))
+    assert store.cached_snapshot("QLTY", snap.as_of) is None

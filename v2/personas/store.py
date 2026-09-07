@@ -248,7 +248,10 @@ class PersonaStore:
             fetched = fetched.replace(tzinfo=timezone.utc)
         if datetime.now(timezone.utc) - fetched > timedelta(hours=max_age_hours):
             return None
-        return PersonaSnapshot.from_dict(json.loads(row["payload_json"]))
+        snap = PersonaSnapshot.from_dict(json.loads(row["payload_json"]))
+        if any(g.startswith(("metrics_", "line_items_")) for g in snap.gaps):
+            return None  # cached before the no-gaps rule existed; refetch
+        return snap
 
     def save_snapshot(self, snap: PersonaSnapshot) -> None:
         if not snap.has_fundamentals or any(g.startswith(("metrics_", "line_items_")) for g in snap.gaps):
