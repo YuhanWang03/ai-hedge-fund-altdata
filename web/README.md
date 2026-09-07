@@ -77,7 +77,14 @@ production state; the only "approve" action is adding a ticker to the
 watchlist.
 
 All engines share the universe vocabulary in `app/sources.py`:
-`custom` | `tech30` | `holdings` | `watchlist` | `holdings_watchlist`.
+`custom` | `tech30` | `holdings` | `watchlist` | `holdings_watchlist`, plus the
+index lists `sp500` | `nasdaq100` | `dow30` (screener only; bundled snapshot
+in `v2/screening/universes.py`, refresh on the VPS with
+`poetry run python -m v2.screening.universes --refresh`, which writes
+`data/universes.json` from Wikipedia). A screen of more than 40 tickers runs
+as a background job — `POST /api/lab/screening` returns `{job_id, done, total}`
+and `GET /api/lab/screening/jobs/{id}` is polled — because nginx cuts requests
+at 90 s. `GET /api/lab/universes` lists sizes and snapshot dates.
 
 ```
 POST /api/lab/screening              {universe, tickers?, market_cap_min/max, revenue_growth_min, gross_margin_min, volatility_max}

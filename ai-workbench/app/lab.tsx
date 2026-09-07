@@ -19,14 +19,17 @@ export const labMenu: { id: LabTool; label: string; icon: string }[] = [
   { id: 'runs', label: '运行记录', icon: '◷' },
 ];
 
-type Universe = 'custom' | 'tech30' | 'holdings' | 'watchlist' | 'holdings_watchlist';
+type Universe = 'custom' | 'tech30' | 'sp500' | 'nasdaq100' | 'dow30' | 'holdings' | 'watchlist' | 'holdings_watchlist';
+const INDEX_UNIVERSES: Universe[] = ['sp500', 'nasdaq100', 'dow30'];
 const UNIVERSES: { id: Universe; label: string }[] = [
-  { id: 'holdings', label: '当前持仓' }, { id: 'watchlist', label: 'Watchlist' }, { id: 'holdings_watchlist', label: '持仓 + Watchlist' }, { id: 'tech30', label: 'TECH_30 监控池' }, { id: 'custom', label: '自定义' },
+  { id: 'holdings', label: '当前持仓' }, { id: 'watchlist', label: 'Watchlist' }, { id: 'holdings_watchlist', label: '持仓 + Watchlist' }, { id: 'tech30', label: 'TECH_30 监控池' }, { id: 'dow30', label: '道琼斯 30' }, { id: 'nasdaq100', label: '纳斯达克 100' }, { id: 'sp500', label: '标普 500' }, { id: 'custom', label: '自定义' },
 ];
 const UNIVERSE_LABEL: Record<string, string> = Object.fromEntries(UNIVERSES.map(u => [u.id, u.label]));
 
 type ScreenCandidate = { ticker: string; price: number; price_change: number | null; market_cap: number | null; revenue_growth: number | null; gross_margin: number | null; volatility: number | null; high_52w: number | null; return_1w?: number | null; revenue_actual?: number | null; revenue_estimate?: number | null };
-type ScreeningResult = { kind: 'screening'; lab_run_id?: string; universe: string; tickers: string[]; thresholds: Record<string, number>; date: string; universe_size: number; candidates: ScreenCandidate[]; fd_calls?: number };
+type ScreeningJob = { job_id: string; status: 'running' | 'completed' | 'failed'; done: number; total: number; universe: string; error?: string; result?: ScreeningResult };
+type UniverseInfo = { size: number; as_of: string | null; label: string };
+type ScreeningResult = { kind: 'screening'; lab_run_id?: string; universe: string; universe_as_of?: string | null; tickers: string[]; thresholds: Record<string, number>; date: string; universe_size: number; candidates: ScreenCandidate[]; fd_calls?: number };
 
 type CommitteeSource = 'tickers' | 'holdings' | 'watchlist' | 'screening';
 type PersonaMeta = { key: string; name: string; name_zh: string; style: string; period: string; lookback: number; needs: string[] };
@@ -75,8 +78,9 @@ function useLabData<T>(path: string | null, deps: unknown[] = []) {
 function Field({ label, children, hint }: { label: string; children: React.ReactNode; hint?: string }) { return <label className="lab-field"><span>{label}</span>{children}{hint ? <small>{hint}</small> : null}</label> }
 function NumberInput({ value, onChange, min, max, step }: { value: string; onChange: (v: string) => void; min?: number; max?: number; step?: number }) { return <input type="number" value={value} min={min} max={max} step={step} onChange={e => onChange(e.target.value)}/> }
 function Chips<T extends string>({ options, value, onChange }: { options: { id: T; label: string }[]; value: T; onChange: (v: T) => void }) { return <div className="lab-chips">{options.map(o => <button key={o.id} type="button" className={o.id === value ? 'active' : ''} onClick={() => onChange(o.id)}>{o.label}</button>)}</div> }
-function UniversePicker({ universe, setUniverse, tickers, setTickers, exclude = [] }: { universe: Universe; setUniverse: (u: Universe) => void; tickers: string; setTickers: (t: string) => void; exclude?: Universe[] }) {
-  return <><Field label="股票池"><Chips options={UNIVERSES.filter(u => !exclude.includes(u.id))} value={universe} onChange={setUniverse}/></Field>{universe === 'custom' && <Field label="股票代码" hint="逗号或空格分隔，最多 60 只"><input value={tickers} onChange={e => setTickers(e.target.value.toUpperCase())} placeholder="AAPL, MSFT, NVDA"/></Field>}</>;
+function UniversePicker({ universe, setUniverse, tickers, setTickers, exclude = [], info }: { universe: Universe; setUniverse: (u: Universe) => void; tickers: string; setTickers: (t: string) => void; exclude?: Universe[]; info?: Record<string, UniverseInfo> | null }) {
+  const meta = info?.[universe];
+  return <><Field label="股票池" hint={meta ? `${meta.size} 只${meta.as_of ? ` · 成分股快照 ${meta.as_of}` : ''}${INDEX_UNIVERSES.includes(universe) ? ' · 超过 40 只会转为后台任务，可离开页面' : ''}` : undefined}><Chips options={UNIVERSES.filter(u => !exclude.includes(u.id))} value={universe} onChange={setUniverse}/></Field>{universe === 'custom' && <Field label="股票代码" hint="逗号或空格分隔，最多 60 只"><input value={tickers} onChange={e => setTickers(e.target.value.toUpperCase())} placeholder="AAPL, MSFT, NVDA"/></Field>}</>;
 }
 function Empty({ glyph, title, text }: { glyph: string; title: string; text: string }) { return <div className="lab-empty"><span>{glyph}</span><h3>{title}</h3><p>{text}</p></div> }
 function ErrorBox({ text }: { text: string }) { return <div className="lab-error"><strong>请求失败</strong><span>{text}</span></div> }
@@ -171,25 +175,35 @@ function RunRow({ run, onOpen }: { run: RunSummary; onOpen: () => void }) {
 function ScreeningTool({ result, setResult, onHand, watchlist, refreshWatchlist, ask }: ToolProps & { result?: ScreeningResult; setResult: (r?: ScreeningResult) => void; onHand: (t: string[], from: string, to: LabTool) => void }) {
   const [universe, setUniverse] = useState<Universe>('tech30'); const [tickers, setTickers] = useState('');
   const [capMin, setCapMin] = useState('10'); const [capMax, setCapMax] = useState('5000'); const [rev, setRev] = useState('5'); const [gm, setGm] = useState('50'); const [vol, setVol] = useState('60');
-  const [busy, setBusy] = useState(false); const [error, setError] = useState(''); const [picked, setPicked] = useState<Set<string>>(new Set());
+  const [busy, setBusy] = useState(false); const [error, setError] = useState(''); const [picked, setPicked] = useState<Set<string>>(new Set()); const [job, setJob] = useState<ScreeningJob | null>(null);
+  const info = useLabData<{ items: Record<string, UniverseInfo> }>('/api/lab/universes');
   const run = async () => {
-    setBusy(true); setError('');
+    setBusy(true); setError(''); setJob(null);
     try {
       const body = { universe, tickers: universe === 'custom' ? parseTickers(tickers) : [], market_cap_min: Number(capMin) * 1e9, market_cap_max: Number(capMax) * 1e9, revenue_growth_min: Number(rev) / 100, gross_margin_min: Number(gm) / 100, volatility_max: Number(vol) / 100 };
-      const r = await apiJson<ScreeningResult>('/api/lab/screening', { method: 'POST', body: JSON.stringify(body) }); setResult(r); setPicked(new Set(r.candidates.map(c => c.ticker)));
-    } catch (e) { setError(errorText(e)) } finally { setBusy(false) }
+      let r = await apiJson<ScreeningResult | ScreeningJob>('/api/lab/screening', { method: 'POST', body: JSON.stringify(body) });
+      while ('job_id' in r) {
+        setJob(r);
+        if (r.status === 'failed') throw new Error(r.error || '筛选任务失败');
+        if (r.status === 'completed' && r.result) { r = r.result; break }
+        await new Promise<void>(resolve => window.setTimeout(resolve, 2000));
+        r = await apiJson<ScreeningJob>(`/api/lab/screening/jobs/${encodeURIComponent(r.job_id)}`);
+      }
+      const done = r as ScreeningResult; setResult(done); setPicked(new Set(done.candidates.map(c => c.ticker)));
+    } catch (e) { setError(errorText(e)) } finally { setBusy(false); setJob(null) }
   };
   const chosen = result ? result.candidates.filter(c => picked.has(c.ticker)).map(c => c.ticker) : [];
   return <div className="lab-tool">
     <section className="surface lab-config"><div className="surface-header"><div><h2>筛选条件</h2><span>全部阈值可改，缺数据的股票不通过</span></div></div>
-      <UniversePicker universe={universe} setUniverse={setUniverse} tickers={tickers} setTickers={setTickers}/>
+      <UniversePicker universe={universe} setUniverse={setUniverse} tickers={tickers} setTickers={setTickers} info={info.data?.items}/>
       <div className="lab-grid2"><Field label="市值下限（十亿美元）"><NumberInput value={capMin} onChange={setCapMin} min={0} step={1}/></Field><Field label="市值上限（十亿美元）"><NumberInput value={capMax} onChange={setCapMax} min={1} step={10}/></Field>
         <Field label="营收增长 ≥（%）"><NumberInput value={rev} onChange={setRev} step={1}/></Field><Field label="毛利率 ≥（%）"><NumberInput value={gm} onChange={setGm} min={0} max={100} step={5}/></Field><Field label="年化波动率 ≤（%）"><NumberInput value={vol} onChange={setVol} min={1} step={5}/></Field></div>
-      <button className="run-button" disabled={busy || (universe === 'custom' && !parseTickers(tickers).length)} onClick={() => void run()}>{busy ? '筛选中…' : '运行筛选'}</button>
+      <button className="run-button" disabled={busy || (universe === 'custom' && !parseTickers(tickers).length)} onClick={() => void run()}>{busy ? (job ? `筛选中… ${job.done} / ${job.total}` : '筛选中…') : '运行筛选'}</button>
+      {job && <div className="lab-progress"><i style={{ width: `${job.total ? Math.round((job.done / job.total) * 100) : 0}%` }}/></div>}
     </section>
     <section className="surface lab-result">
       {error ? <ErrorBox text={error}/> : !result ? <Empty glyph="⌕" title="等待筛选" text="选一个股票池、调好阈值，结果是通过硬规则的候选名单。可以整单送进委员会。"/> : <>
-        <div className="surface-header"><div><h2>{result.candidates.length} / {result.universe_size} 只通过</h2><span>{UNIVERSE_LABEL[result.universe] || result.universe} · {result.date} · 市值 ≥ {money(result.thresholds.market_cap_min)} · 营收增长 ≥ {pctAbs(result.thresholds.revenue_growth_min)} · 毛利率 ≥ {pctAbs(result.thresholds.gross_margin_min)} · 波动 ≤ {pctAbs(result.thresholds.volatility_max)}</span></div>
+        <div className="surface-header"><div><h2>{result.candidates.length} / {result.universe_size} 只通过</h2><span>{UNIVERSE_LABEL[result.universe] || result.universe}{result.universe_as_of ? `（成分股 ${result.universe_as_of}）` : ''} · {result.date} · 市值 ≥ {money(result.thresholds.market_cap_min)} · 营收增长 ≥ {pctAbs(result.thresholds.revenue_growth_min)} · 毛利率 ≥ {pctAbs(result.thresholds.gross_margin_min)} · 波动 ≤ {pctAbs(result.thresholds.volatility_max)}</span></div>
           <div className="lab-actions"><button type="button" disabled={!chosen.length} onClick={() => onHand(chosen, '股票筛选', 'committee')}>送入委员会（{chosen.length}）</button><button type="button" disabled={!chosen.length} onClick={() => onHand(chosen, '股票筛选', 'backtest')}>送入回测</button></div></div>
         {result.candidates.length === 0 ? <p className="lab-note">没有股票通过。放宽阈值，或换一个股票池。</p> : <div className="lab-table-wrap"><table className="lab-table"><thead><tr><th><input type="checkbox" checked={picked.size === result.candidates.length} onChange={e => setPicked(e.target.checked ? new Set(result.candidates.map(c => c.ticker)) : new Set())}/></th><th>股票</th><th>价格</th><th>1 日</th><th>1 周</th><th>市值</th><th>营收增长</th><th>毛利率</th><th>波动率</th><th></th></tr></thead><tbody>
           {result.candidates.map(c => <tr key={c.ticker}><td><input type="checkbox" checked={picked.has(c.ticker)} onChange={() => setPicked(cur => { const next = new Set(cur); if (next.has(c.ticker)) next.delete(c.ticker); else next.add(c.ticker); return next })}/></td><td><strong>{c.ticker}</strong></td><td>${num(c.price)}</td><td className={(c.price_change || 0) >= 0 ? 'positive' : 'negative'}>{pct(c.price_change)}</td><td className={(c.return_1w || 0) >= 0 ? 'positive' : 'negative'}>{pct(c.return_1w)}</td><td>{money(c.market_cap)}</td><td>{pct(c.revenue_growth)}</td><td>{pctAbs(c.gross_margin)}</td><td>{pctAbs(c.volatility)}</td><td><AddToWatchlist ticker={c.ticker} watchlist={watchlist} onAdded={refreshWatchlist}/></td></tr>)}
@@ -304,7 +318,7 @@ function BacktestTool({ result, setResult, handoff, clearHandoff, ask }: ToolPro
     {handoff && <HandoffBanner handoff={handoff} onUse={() => { setUniverse('custom'); setTickers(handoff.tickers.join(', ')); clearHandoff() }} onClear={clearHandoff}/>}
     <div className="lab-tool">
       <section className="surface lab-config"><div className="surface-header"><div><h2>回测参数</h2><span>策略：PEAD 财报后漂移（目前唯一已实现的策略）</span></div></div>
-        <UniversePicker universe={universe} setUniverse={setUniverse} tickers={tickers} setTickers={setTickers}/>
+        <UniversePicker universe={universe} setUniverse={setUniverse} tickers={tickers} setTickers={setTickers} exclude={INDEX_UNIVERSES}/>
         <div className="lab-grid2"><Field label="每只回看财报数" hint="每份财报是一个入场事件"><NumberInput value={earnings} onChange={setEarnings} min={1} max={20}/></Field><Field label="持有交易日"><NumberInput value={holding} onChange={setHolding} min={1} max={60}/></Field><Field label="初始资金（$）"><NumberInput value={capital} onChange={setCapital} min={1000} step={10000}/></Field><Field label="单笔资金（$）"><NumberInput value={perTrade} onChange={setPerTrade} min={100} step={1000}/></Field></div>
         <button className="run-button" disabled={busy || (universe === 'custom' && !parseTickers(tickers).length)} onClick={() => void run()}>{busy ? '回测中…' : '运行回测'}</button>
         <p className="lab-note">13 位投资人的打分规则尚未接入回测；接入后这里会多出一个「策略」下拉。</p>
@@ -333,7 +347,7 @@ function EventStudyTool({ result, setResult, handoff, clearHandoff, ask }: ToolP
     {handoff && <HandoffBanner handoff={handoff} onUse={() => { setUniverse('custom'); setTickers(handoff.tickers.join(', ')); clearHandoff() }} onClear={clearHandoff}/>}
     <div className="lab-tool">
       <section className="surface lab-config"><div className="surface-header"><div><h2>事件研究参数</h2><span>事件 = 财报公布；基准 = 市场模型（SPY）</span></div></div>
-        <UniversePicker universe={universe} setUniverse={setUniverse} tickers={tickers} setTickers={setTickers}/>
+        <UniversePicker universe={universe} setUniverse={setUniverse} tickers={tickers} setTickers={setTickers} exclude={INDEX_UNIVERSES}/>
         <div className="lab-grid2"><Field label="每只回看财报数"><NumberInput value={earnings} onChange={setEarnings} min={1} max={20}/></Field><Field label="Bootstrap 次数"><NumberInput value={boot} onChange={setBoot} min={100} max={10000} step={500}/></Field></div>
         <Field label="只统计有 EPS surprise 标注的事件"><Chips options={[{ id: 'yes', label: '是' }, { id: 'no', label: '否' }]} value={surprise ? 'yes' : 'no'} onChange={v => setSurprise(v === 'yes')}/></Field>
         <button className="run-button" disabled={busy || (universe === 'custom' && !parseTickers(tickers).length)} onClick={() => void run()}>{busy ? '计算中…' : '开始计算'}</button>

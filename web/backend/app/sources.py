@@ -5,18 +5,24 @@ question first — *which tickers?* — so the answer lives in one place:
 
 * ``custom``               the list the user typed
 * ``tech30``               the production TECH_30 monitoring pool
+* ``sp500`` / ``nasdaq100`` / ``dow30``   index constituents (``v2/screening/universes.py``)
 * ``holdings``             long positions in the Alpaca account
 * ``watchlist``            the bot's watchlist
 * ``holdings_watchlist``   union of the two
+
+Index universes are large; only the screener accepts them (``BIG_LIMIT``).
 """
 
 from __future__ import annotations
 
 from typing import Any, Literal
 
-Universe = Literal["custom", "tech30", "holdings", "watchlist", "holdings_watchlist"]
+Universe = Literal["custom", "tech30", "sp500", "nasdaq100", "dow30", "holdings", "watchlist", "holdings_watchlist"]
 
 MAX_TICKERS = 60
+#: cap for the screener, which is the only engine that may take an index
+BIG_LIMIT = 600
+INDEX_UNIVERSES = ("sp500", "nasdaq100", "dow30")
 
 
 def normalize_tickers(values: list[str], *, limit: int = MAX_TICKERS) -> list[str]:
@@ -70,6 +76,14 @@ def resolve_universe(universe: Universe, tickers: list[str] | None = None, *, li
         from v2.screening.universe import TECH_30
 
         return list(TECH_30)[:limit], meta
+    if universe in INDEX_UNIVERSES:
+        from v2.screening.universes import load_universe
+
+        tickers, as_of = load_universe(universe)
+        if len(tickers) > limit:
+            raise ValueError(f"{universe} has {len(tickers)} tickers; this tool accepts at most {limit}")
+        meta["as_of"] = as_of
+        return tickers, meta
     picked: list[str] = []
     if universe in ("holdings", "holdings_watchlist"):
         held, positions = holdings()

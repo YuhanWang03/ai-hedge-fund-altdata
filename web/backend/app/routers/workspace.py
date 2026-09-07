@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+import threading
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
@@ -19,7 +21,7 @@ from pydantic import BaseModel, Field
 from app.auth import require_owner
 from app.config import SETTINGS
 from app.lab_store import LabRunStore
-from app.sources import MAX_TICKERS, Universe, normalize_tickers, resolve_universe
+from app.sources import BIG_LIMIT, INDEX_UNIVERSES, MAX_TICKERS, Universe, normalize_tickers, resolve_universe
 from v2.archive.store import recent_trading_day_cutoff_iso
 
 router = APIRouter(prefix="/api", tags=["workspace"], dependencies=[Depends(require_owner)])
@@ -262,11 +264,24 @@ class ScreeningInput(BaseModel):
     volatility_max: float = Field(default=0.60, gt=0, le=10)
 
 
-def _run_screening(body: ScreeningInput) -> dict:
+class _Ticking(list):
+    """A ticker list that reports progress as the screener iterates it."""
+
+    def __init__(self, items, on_tick):
+        super().__init__(items)
+        self._on_tick = on_tick
+
+    def __iter__(self):
+        for i, item in enumerate(list.__iter__(self)):
+            self._on_tick(i)
+            yield item
+
+
+def _run_screening(body: ScreeningInput, on_tick=None) -> dict:
     from v2.data import CachedFDClient
     from v2.screening import FilterConfig, run_screening
 
-    tickers, meta = resolve_universe(body.universe, body.tickers)
+    tickers, meta = resolve_universe(body.universe, body.tickers, limit=BIG_LIMIT)
     config = FilterConfig(
         market_cap_min=body.market_cap_min,
         market_cap_max=body.market_cap_max,
@@ -275,8 +290,47 @@ def _run_screening(body: ScreeningInput) -> dict:
         volatility_max=body.volatility_max,
     )
     with CachedFDClient() as client:
-        result = run_screening(tickers, client, config)
-    return {"kind": "screening", "universe": meta["universe"], "tickers": tickers, "thresholds": config.model_dump(), **result.model_dump()}
+        result = run_screening(_Ticking(tickers, on_tick) if on_tick else tickers, client, config)
+    return {"kind": "screening", "universe": meta["universe"], "universe_as_of": meta.get("as_of"), "tickers": tickers, "thresholds": config.model_dump(), **result.model_dump()}
+
+
+#: screens bigger than this run as a background job (nginx cuts requests at 90 s)
+SCREEN_SYNC_MAX = 40
+_SCREEN_JOBS: dict[str, dict] = {}
+_SCREEN_LOCK = threading.Lock()
+
+
+def _screen_job(job_id: str, body: ScreeningInput) -> None:
+    def tick(i: int) -> None:
+        with _SCREEN_LOCK:
+            _SCREEN_JOBS[job_id]["done"] = i
+
+    try:
+        result = _run_screening(body, on_tick=tick)
+        _remember_run("screening", result, body.model_dump())
+        with _SCREEN_LOCK:
+            _SCREEN_JOBS[job_id].update({"status": "completed", "done": _SCREEN_JOBS[job_id]["total"], "result": result})
+    except Exception as exc:  # noqa: BLE001
+        with _SCREEN_LOCK:
+            _SCREEN_JOBS[job_id].update({"status": "failed", "error": f"{type(exc).__name__}: {str(exc)[:200]}"})
+
+
+def _start_screen_job(body: ScreeningInput, total: int) -> dict:
+    job_id = uuid.uuid4().hex[:12]
+    with _SCREEN_LOCK:
+        if len(_SCREEN_JOBS) > 50:  # keep the in-memory table small
+            for old in sorted(_SCREEN_JOBS, key=lambda k: _SCREEN_JOBS[k]["started_at"])[:25]:
+                _SCREEN_JOBS.pop(old, None)
+        _SCREEN_JOBS[job_id] = {"job_id": job_id, "kind": "screening_job", "status": "running", "done": 0, "total": total,
+                                "universe": body.universe, "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    threading.Thread(target=_screen_job, args=(job_id, body), name=f"screen-{job_id}", daemon=True).start()
+    return _job_view(job_id)
+
+
+def _job_view(job_id: str) -> dict:
+    with _SCREEN_LOCK:
+        job = _SCREEN_JOBS.get(job_id)
+        return dict(job) if job else {}
 
 
 async def _lab_call(fn, body) -> dict:
@@ -305,10 +359,36 @@ async def run_event_study(body: EventStudyInput) -> dict:
 
 
 @router.post("/lab/screening")
-async def run_screening(body: ScreeningInput) -> dict:
+async def run_screening(body: ScreeningInput, background: bool | None = None) -> dict:
+    """Small universes answer inline; large ones (or ?background=true) return a job to poll."""
+    try:
+        tickers, _ = await run_in_threadpool(resolve_universe, body.universe, body.tickers, limit=BIG_LIMIT)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if background or (background is None and len(tickers) > SCREEN_SYNC_MAX):
+        return _start_screen_job(body, len(tickers))
     result = await _lab_call(_run_screening, body)
     _remember_run("screening", result, body.model_dump())
     return result
+
+
+@router.get("/lab/screening/jobs/{job_id}")
+async def screening_job(job_id: str) -> dict:
+    job = _job_view(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="screening job not found")
+    return job
+
+
+@router.get("/lab/universes")
+async def universes() -> dict:
+    """Named universes with sizes and snapshot dates (index lists refreshable on the VPS)."""
+    from v2.screening.universe import TECH_30
+    from v2.screening.universes import universe_status
+
+    items = {"tech30": {"size": len(TECH_30), "as_of": None, "label": "TECH_30 监控池"}}
+    items.update(universe_status())
+    return {"kind": "universes", "items": items}
 
 
 @router.get("/lab/signals")

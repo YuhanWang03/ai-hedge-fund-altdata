@@ -320,3 +320,72 @@ def test_universe_resolution_for_lab_engines(client, monkeypatch):
     res = client.post("/api/lab/backtest", json={"universe": "holdings", "holding_days": 7})
     assert res.status_code == 200 and seen["body"].universe == "holdings" and seen["body"].holding_days == 7
     assert client.post("/api/lab/backtest", json={"universe": "nowhere"}).status_code == 422
+
+
+# ------------------------------------------------------------------ universes
+
+def test_index_universes_resolve_only_for_the_screener(client, monkeypatch):
+    from app import sources
+
+    tickers, meta = sources.resolve_universe("dow30", limit=sources.BIG_LIMIT)
+    assert len(tickers) == 30 and "AAPL" in tickers and meta["as_of"]
+    with pytest.raises(ValueError, match="at most 60"):
+        sources.resolve_universe("sp500")  # default cap is the committee/backtest cap
+    from v2.screening.universe import TECH_30
+
+    items = client.get("/api/lab/universes").json()["items"]
+    assert items["sp500"]["size"] > 450 and items["nasdaq100"]["size"] == 100 and items["tech30"]["size"] == len(TECH_30)
+    # backtest refuses an index universe cleanly
+    res = client.post("/api/lab/backtest", json={"universe": "sp500"})
+    assert res.status_code in (400, 503) and "at most 60" in res.json()["detail"]
+
+
+def test_large_screening_runs_as_a_polled_job(client, monkeypatch):
+    import time
+
+    ticks: list[int] = []
+
+    def fake_run(body, on_tick=None):
+        for i in range(3):
+            if on_tick:
+                on_tick(i)
+                ticks.append(i)
+        return {"kind": "screening", "universe": body.universe, "tickers": ["AAA"] * 3, "universe_size": 3, "candidates": [{"ticker": "AAA"}]}
+
+    monkeypatch.setattr(workspace, "_run_screening", fake_run)
+    from v2.screening.universe import TECH_30
+
+    started = client.post("/api/lab/screening?background=true", json={"universe": "tech30"}).json()
+    assert started["status"] in ("running", "completed") and started["job_id"] and started["total"] == len(TECH_30)
+    for _ in range(50):
+        job = client.get(f"/api/lab/screening/jobs/{started['job_id']}").json()
+        if job["status"] == "completed":
+            break
+        time.sleep(0.05)
+    assert job["status"] == "completed" and job["done"] == job["total"] == len(TECH_30)
+    assert job["result"]["candidates"][0]["ticker"] == "AAA" and job["result"]["lab_run_id"]
+    assert ticks == [0, 1, 2]
+    assert client.get("/api/lab/runs").json()["items"][0]["kind"] == "screening"
+    assert client.get("/api/lab/screening/jobs/nope").status_code == 404
+
+    # small universes still answer inline
+    inline = client.post("/api/lab/screening", json={"universe": "custom", "tickers": ["AAA"]}).json()
+    assert inline["kind"] == "screening" and "job_id" not in inline
+
+    def boom(body, on_tick=None):
+        raise RuntimeError("provider down")
+
+    monkeypatch.setattr(workspace, "_run_screening", boom)
+    failed = client.post("/api/lab/screening?background=true", json={"universe": "dow30"}).json()
+    for _ in range(50):
+        job = client.get(f"/api/lab/screening/jobs/{failed['job_id']}").json()
+        if job["status"] == "failed":
+            break
+        time.sleep(0.05)
+    assert job["status"] == "failed" and "provider down" in job["error"]
+
+
+def test_ticking_list_reports_each_index():
+    seen = []
+    items = workspace._Ticking(["A", "B", "C"], seen.append)
+    assert list(items) == ["A", "B", "C"] and seen == [0, 1, 2] and len(items) == 3
