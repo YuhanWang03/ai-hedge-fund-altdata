@@ -165,6 +165,11 @@ def _run(body: CommitteeInput) -> dict[str, Any]:
     payload["source"] = body.source
     payload["personas_meta"] = _persona_meta(keys)
     payload["cache_hits"] = sorted(cached)
+    gaps: dict[str, list[str]] = {}
+    for t, snap in result.snapshots.items():
+        for g in snap.gaps:
+            gaps.setdefault(g, []).append(t)
+    payload["data_gaps"] = [{"gap": g, "tickers": sorted(ts)} for g, ts in sorted(gaps.items(), key=lambda kv: -len(kv[1]))]
     for v_dict, v in zip(payload["verdicts"], result.verdicts):
         snap = result.snapshots.get(v.ticker)
         if snap is not None and snap.prices:

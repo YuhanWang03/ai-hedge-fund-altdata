@@ -356,3 +356,47 @@ def test_cli_demo_runs_without_network(capsys):
     assert [v["ticker"] for v in body["verdicts"]] == ["QLTY", "DSTR"]
     assert main(["--demo", "--personas", "warren_buffett"]) == 0
     assert "consensus" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("key", PERSONAS)
+def test_every_persona_abstains_when_line_items_are_missing(key):
+    """Ratios without line items must read as 'no data', never as 'scores zero → bearish'."""
+    snap = quality_snapshot()
+    snap.line_items_ttm = []
+    snap.line_items_annual = []
+    snap.gaps.append("line_items_ttm: RuntimeError: HTTP 402 for /financials/search/line-items: payment required")
+    snap.gaps.append("line_items_annual: RuntimeError: HTTP 402 for /financials/search/line-items: payment required")
+    s = get_persona(key).analyze(snap)
+    assert s.abstained and s.confidence == 0, s.reasoning
+    assert "line items" in s.reasoning and "HTTP 402" in s.reasoning
+
+
+@pytest.mark.parametrize("key", PERSONAS)
+def test_every_persona_abstains_on_too_short_history(key):
+    snap = quality_snapshot()
+    snap.line_items_ttm = snap.line_items_ttm[:1]
+    snap.line_items_annual = snap.line_items_annual[:1]
+    s = get_persona(key).analyze(snap)
+    assert s.abstained and "need 3" in s.reasoning
+
+
+def test_price_readers_abstain_without_prices():
+    snap = quality_snapshot()
+    snap.prices = []
+    assert get_persona("nassim_taleb").analyze(snap).abstained
+    assert get_persona("stanley_druckenmiller").analyze(snap).abstained
+    assert not get_persona("warren_buffett").analyze(snap).abstained
+
+
+def test_store_refuses_to_cache_snapshots_with_core_gaps(tmp_path):
+    from v2.personas.store import PersonaStore
+
+    store = PersonaStore(tmp_path / "p.db")
+    good = quality_snapshot()
+    good.fetched_at = ""  # fixture timestamp is months old; let the store stamp now
+    store.save_snapshot(good)
+    assert store.cached_snapshot("QLTY", good.as_of) is not None
+    broken = distressed_snapshot()
+    broken.gaps.append("line_items_ttm: RuntimeError: HTTP 402")
+    store.save_snapshot(broken)
+    assert store.cached_snapshot("DSTR", broken.as_of) is None

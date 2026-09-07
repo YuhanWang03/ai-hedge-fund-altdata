@@ -44,6 +44,7 @@ class StanleyDruckenmiller(Persona):
     period = "annual"
     lookback = 5
     needs = frozenset({"insiders", "news", "prices"})
+    requires = frozenset({"metrics", "line_items", "prices"})
     system_prompt = (
         "You are Stanley Druckenmiller. Use only the provided facts.\n"
         "Principles: 1) seek asymmetric risk-reward (large upside, limited downside); 2) emphasize growth, "

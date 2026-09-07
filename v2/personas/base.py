@@ -86,6 +86,12 @@ class Persona(ABC):
     lookback: ClassVar[int] = 10
     #: optional data this persona reads; drives what the snapshot fetches
     needs: ClassVar[frozenset[str]] = frozenset()
+    #: inputs without which the checklist is meaningless — missing any → abstain.
+    #: Every upstream agent scores mostly off line items, so a snapshot with
+    #: ratios but no line items must not be read as "everything scores zero".
+    requires: ClassVar[frozenset[str]] = frozenset({"metrics", "line_items"})
+    #: minimum line-item periods the rules need before a verdict is honest
+    min_periods: ClassVar[int] = 3
     #: upstream system prompt (voice + decision checklist); narration only
     system_prompt: ClassVar[str] = ""
 
@@ -131,10 +137,31 @@ class Persona(ABC):
     # -- helpers subclasses may override --------------------------------------
 
     def missing_inputs(self, snap: PersonaSnapshot) -> list[str]:
-        """Names of required inputs the snapshot lacks; non-empty means abstain."""
+        """Names of required inputs the snapshot lacks; non-empty means abstain.
+
+        Each entry names the input and, when the snapshot recorded why the
+        fetch failed, quotes that reason so the UI can show it.
+        """
         missing: list[str] = []
-        if not snap.metrics(self.period) and not snap.line_items(self.period):
-            missing.append(f"{self.period} fundamentals")
+
+        def gap_for(prefix: str) -> str:
+            for g in snap.gaps:
+                if g.startswith(prefix):
+                    return f" ({g})"
+            return ""
+
+        if "metrics" in self.requires and not snap.metrics(self.period):
+            missing.append(f"{self.period} metrics" + gap_for(f"metrics_{self.period}"))
+        if "line_items" in self.requires:
+            items = snap.line_items(self.period)
+            if not items:
+                missing.append(f"{self.period} line items" + gap_for(f"line_items_{self.period}"))
+            elif len(items) < self.min_periods:
+                missing.append(f"only {len(items)} {self.period} line-item period(s), need {self.min_periods}")
+        if "prices" in self.requires and not snap.prices:
+            missing.append("daily prices" + gap_for("prices"))
+        if "market_cap" in self.requires and not snap.market_cap:
+            missing.append("market cap" + gap_for("market_cap"))
         return missing
 
     def explain(self, ev: Evaluation, signal: Signal, confidence: int) -> str:

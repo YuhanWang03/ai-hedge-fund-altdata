@@ -81,7 +81,7 @@ def test_committee_on_explicit_tickers_returns_matrix_and_persists(client, fake)
     assert [m["key"] for m in data["personas_meta"]] == ["warren_buffett", "ben_graham", "michael_burry"]
     assert data["personas_meta"][0]["name_zh"] == "沃伦·巴菲特"
     assert data["top"][0]["ticker"] == "QLTY" and len(data["top"]) == 2
-    assert data["cache_hits"] == [] and data["run_id"]
+    assert data["cache_hits"] == [] and data["run_id"] and data["data_gaps"] == []
     assert "position" not in data["verdicts"][0]
     first_calls = fake.calls
     assert first_calls > 0

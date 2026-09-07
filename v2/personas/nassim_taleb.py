@@ -64,6 +64,7 @@ class NassimTaleb(Persona):
     #: upstream fetched at most 100 news rows
     news_limit = 100
     needs = frozenset({"insiders", "news", "prices"})
+    requires = frozenset({"metrics", "line_items", "prices"})
     system_prompt = (
         "You are Nassim Taleb. Decide bullish, bearish, or neutral using only the provided facts.\n"
         "Checklist: antifragility (benefits from disorder); tail risk (fat tails, skewness); convexity "

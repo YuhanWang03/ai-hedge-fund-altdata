@@ -251,8 +251,8 @@ class PersonaStore:
         return PersonaSnapshot.from_dict(json.loads(row["payload_json"]))
 
     def save_snapshot(self, snap: PersonaSnapshot) -> None:
-        if not snap.has_fundamentals:
-            return  # never cache an empty fetch; the next run should retry
+        if not snap.has_fundamentals or any(g.startswith(("metrics_", "line_items_")) for g in snap.gaps):
+            return  # never cache a fetch whose core inputs failed; the next run should retry
         with self._conn() as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO snapshots (ticker, as_of, content_hash, fetched_at, payload_json) VALUES (?,?,?,?,?)",
