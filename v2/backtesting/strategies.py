@@ -25,10 +25,11 @@ from __future__ import annotations
 
 import logging
 import re
+from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, NamedTuple
 
 from v2.backtesting.models import TradeSignal
 from v2.backtesting.strategy import Strategy
@@ -72,6 +73,18 @@ def _num(value: Any) -> float | None:
 
 # ----------------------------------------------------------------------- price cache
 
+class Bar(NamedTuple):
+    """What the cache keeps of a provider row: the date and the close.
+
+    Every consumer (engine fills, momentum ranking, the event study) reads only
+    ``time`` and ``close``; a full pydantic row is ~5× the memory, which is the
+    difference between a 10-year S&P 500 run fitting in RAM or swapping.
+    """
+
+    time: str
+    close: float | None
+
+
 class PriceCache:
     """One wide fetch per ticker, then serve every sub-range from memory.
 
@@ -80,13 +93,15 @@ class PriceCache:
     splits the wide fetch into consecutive windows for providers that cap the
     number of bars per request (Financial Datasets returns ~100), and every
     provider call is counted in ``requests`` so the run can be priced.
+    Rows are stored as :class:`Bar` (date + close), sorted once per ticker.
     """
 
     def __init__(self, source: Any, *, chunk_days: int | None = None, today: date | None = None) -> None:
         self._source = source
         self._chunk = chunk_days
         self._today = today or date.today()
-        self._rows: dict[str, dict[str, Any]] = {}     # ticker -> {date: price row}
+        self._dates: dict[str, list[str]] = {}         # ticker -> dates ascending
+        self._closes: dict[str, list[float | None]] = {}  # ticker -> closes aligned with _dates
         self._covered: dict[str, date] = {}            # ticker -> earliest date fetched
         self.requests = 0
         self.failed: dict[str, str] = {}
@@ -120,27 +135,25 @@ class PriceCache:
             logger.warning("prices %s failed: %s", ticker, exc)
             self.failed[ticker] = f"{type(exc).__name__}: {str(exc)[:120]}"
             rows = []
-        table = self._rows.setdefault(ticker, {})
+        merged = dict(zip(self._dates.get(ticker, []), self._closes.get(ticker, [])))
         for p in rows:
             t = _iso(_field(p, "time") or _field(p, "date") or "")
             if t:
-                table[t] = p
+                merged[t] = _num(_field(p, "close"))
+        dates = sorted(merged)
+        self._dates[ticker], self._closes[ticker] = dates, [merged[t] for t in dates]
         self._covered[ticker] = start_d
 
-    def get_prices(self, ticker: str, start: Any, end: Any) -> list[Any]:
+    def get_prices(self, ticker: str, start: Any, end: Any) -> list[Bar]:
         self.warm(ticker, start)
         s, e = _iso(start), _iso(end)
-        table = self._rows.get(ticker, {})
-        return [table[t] for t in sorted(table) if s <= t <= e]
+        dates, closes = self._dates.get(ticker, []), self._closes.get(ticker, [])
+        lo, hi = bisect_left(dates, s), bisect_right(dates, e)
+        return [Bar(t, c) for t, c in zip(dates[lo:hi], closes[lo:hi])]
 
     def closes(self, ticker: str, start: Any) -> list[tuple[str, float]]:
         """``(date, close)`` ascending from ``start`` to today, skipping bad rows."""
-        out = []
-        for p in self.get_prices(ticker, start, self._today):
-            c = _num(_field(p, "close"))
-            if c is not None and c > 0:
-                out.append((_iso(_field(p, "time") or _field(p, "date")), c))
-        return out
+        return [(b.time, b.close) for b in self.get_prices(ticker, start, self._today) if b.close is not None and b.close > 0]
 
 
 @dataclass

@@ -92,6 +92,25 @@ function useLabData<T>(path: string | null, deps: unknown[] = []) {
   return { data, error, reload };
 }
 
+/** Poll a Lab job until it settles. A status poll that fails transiently (nginx 502/504 while the
+ *  backend is saturated, a dropped connection) is retried with backoff — the job keeps running
+ *  server-side, so giving up on the first error would orphan a result that lands minutes later. */
+async function pollJob<T>(first: T | LabJob<T>, path: string, onJob: (j: LabJob<T>) => void, failText: string): Promise<T> {
+  let r = first; let misses = 0;
+  while (typeof r === 'object' && r !== null && 'job_id' in r) {
+    const j = r as LabJob<T>; onJob(j);
+    if (j.status === 'failed') throw new Error(j.error || failText);
+    if (j.status === 'completed' && j.result) { r = j.result; break }
+    await new Promise<void>(resolve => globalThis.setTimeout(resolve, Math.min(2000 + misses * 3000, 15000)));
+    try { r = await apiJson<LabJob<T>>(`${path}/${encodeURIComponent(j.job_id)}`); misses = 0 }
+    catch (e) {
+      if (e instanceof ApiError && e.status === 404) throw new Error('任务已不在后端内存里（服务可能重启过）；如果它跑完了，结果会在「运行记录」里。');
+      misses += 1;
+      if (misses >= 20) throw new Error(`连续 ${misses} 次查询任务状态失败（${errorText(e)}）。任务仍在后台运行，稍后到「运行记录」里查看结果。`);
+    }
+  }
+  return r as T;
+}
 function Field({ label, children, hint, block }: { label: string; children: React.ReactNode; hint?: string; block?: boolean }) { const inner = <><span>{label}</span>{children}{hint ? <small>{hint}</small> : null}</>; return block ? <div className="lab-field">{inner}</div> : <label className="lab-field">{inner}</label> }
 function NumberInput({ value, onChange, min, max, step }: { value: string; onChange: (v: string) => void; min?: number; max?: number; step?: number }) { return <input type="number" value={value} min={min} max={max} step={step} onChange={e => onChange(e.target.value)}/> }
 function Chips<T extends string>({ options, value, onChange }: { options: { id: T; label: string }[]; value: T; onChange: (v: T) => void }) { return <div className="lab-chips">{options.map(o => <button key={o.id} type="button" className={o.id === value ? 'active' : ''} onClick={() => onChange(o.id)}>{o.label}</button>)}</div> }
@@ -226,15 +245,8 @@ function ScreeningTool({ result, setResult, onHand, watchlist, refreshWatchlist,
     setBusy(true); setError(''); setJob(null);
     try {
       const body = { universe, tickers: universe === 'custom' ? parseTickers(tickers) : [], data_source: dataSource, with_earnings: dataSource === 'fd' && withEarnings, rules: activeRules() };
-      let r = await apiJson<ScreeningResult | ScreeningJob>('/api/lab/screening', { method: 'POST', body: JSON.stringify(body) });
-      while ('job_id' in r) {
-        setJob(r);
-        if (r.status === 'failed') throw new Error(r.error || '筛选任务失败');
-        if (r.status === 'completed' && r.result) { r = r.result; break }
-        await new Promise<void>(resolve => window.setTimeout(resolve, 2000));
-        r = await apiJson<ScreeningJob>(`/api/lab/screening/jobs/${encodeURIComponent(r.job_id)}`);
-      }
-      const done = r as ScreeningResult; setResult(done); setPicked(new Set(done.candidates.map(c => c.ticker)));
+      const first = await apiJson<ScreeningResult | ScreeningJob>('/api/lab/screening', { method: 'POST', body: JSON.stringify(body) });
+      const done = await pollJob<ScreeningResult>(first, '/api/lab/screening/jobs', setJob, '筛选任务失败'); setResult(done); setPicked(new Set(done.candidates.map(c => c.ticker)));
     } catch (e) { setError(errorText(e)) } finally { setBusy(false); setJob(null) }
   };
   const chosen = result ? result.candidates.filter(c => picked.has(c.ticker)).map(c => c.ticker) : [];
@@ -443,17 +455,7 @@ function BacktestTool({ result: panel, setResult, handoff, clearHandoff, ask }: 
     window_days: Number(window), min_insiders: Number(minInsiders), min_value_usd: Number(minValue),
     min_consensus: Number(minConsensus), min_agreement: Number(minAgreement), lean, filing_lag_days: Number(lag),
   });
-  const poll = async <T,>(first: T | LabJob<T>): Promise<T> => {
-    let r = first;
-    while (typeof r === 'object' && r !== null && 'job_id' in r) {
-      const j = r as LabJob<T>; setJob(j as LabJob<BacktestResult>);
-      if (j.status === 'failed') throw new Error(j.error || '回测任务失败');
-      if (j.status === 'completed' && j.result) { r = j.result; break }
-      await new Promise<void>(resolve => globalThis.setTimeout(resolve, 2000));
-      r = await apiJson<LabJob<T>>(`/api/lab/backtest/jobs/${encodeURIComponent(j.job_id)}`);
-    }
-    return r as T;
-  };
+  const poll = <T,>(first: T | LabJob<T>) => pollJob<T>(first, '/api/lab/backtest/jobs', j => setJob(j as LabJob<BacktestResult>), '回测任务失败');
   const run = async () => {
     setBusy(true); setError(''); setJob(null);
     try { setResult(await poll(await apiJson<BacktestResult | LabJob<BacktestResult>>('/api/lab/backtest', { method: 'POST', body: JSON.stringify(body()) }))) }

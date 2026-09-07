@@ -277,3 +277,33 @@ def test_committee_strategy_stops_when_a_date_fails_wholesale(monkeypatch):
 def test_committee_strategy_full_mode_and_missing_client():
     with pytest.raises(ValueError, match="Financial Datasets"):
         CommitteeStrategy().generate_signals(["AAA"], _data({}))
+
+
+def test_price_cache_keeps_only_date_and_close_and_slices_by_bisect():
+    """A 10-year S&P 500 run holds ~2M bars; storing full provider rows would swap a small VPS."""
+    from datetime import date, timedelta
+
+    from v2.backtesting.strategies import Bar, PriceCache
+
+    class Row:
+        def __init__(self, t, c):
+            self.time, self.close, self.open, self.high, self.low, self.volume = t, c, c, c, c, 1_000_000
+
+    class Src:
+        def get_prices(self, ticker, start, end):
+            d, out, i = date.fromisoformat(start), [], 0
+            while d <= date.fromisoformat(end):
+                if d.weekday() < 5:
+                    out.append(Row(d.isoformat() + "T00:00:00Z", 100 + i)); i += 1
+                d += timedelta(days=1)
+            return out
+
+    cache = PriceCache(Src(), today=date(2026, 3, 31))
+    rows = cache.get_prices("AAA", "2026-03-02", "2026-03-06")
+    assert [type(r) for r in rows] == [Bar] * 5 and rows[0].time == "2026-03-02" and rows[-1].time == "2026-03-06"
+    assert not hasattr(rows[0], "volume")                                      # only what consumers read
+    assert cache.get_prices("AAA", "2026-03-07", "2026-03-08") == []            # weekend → empty slice
+    assert [d for d, _ in cache.closes("AAA", "2026-03-27")] == ["2026-03-27", "2026-03-30", "2026-03-31"]
+    assert cache.requests == 1                                                 # one fetch covered every call above
+    cache.get_prices("AAA", "2026-01-05", "2026-01-06")                        # earlier start → one more fetch, merged in order
+    assert cache.requests == 2 and cache._dates["AAA"] == sorted(cache._dates["AAA"]) and len(set(cache._dates["AAA"])) == len(cache._dates["AAA"])
