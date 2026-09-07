@@ -350,7 +350,9 @@ class NewsDataService:
             attempts.append({"provider": "Financial Datasets", "query": ticker, "raw_count": len(raw), "filtered_count": len(normalized), "dedup_count": 0, "error": None, "warning": "provider returned zero results" if not raw else None})
             rows.extend(normalized)
         except Exception as exc:
-            attempts.append({"provider": "Financial Datasets", "query": ticker, "raw_count": 0, "filtered_count": 0, "dedup_count": 0, "error": f"{type(exc).__name__}: {sanitize_error(exc)}", "warning": None})
+            attempts.append({"provider": "Financial Datasets", "query": ticker, "raw_count": 0, "filtered_count": 0, "dedup_count": 0,
+                             "error": f"{type(exc).__name__}: {sanitize_error(exc)}",
+                             "error_type": str(getattr(exc, "error_type", "PROVIDER_ERROR")), "warning": None})
         if not rows:
             provider = self.provider
             if provider is None:

@@ -99,8 +99,9 @@ def test_core_data_failure_marks_run_failed_without_crashing(tmp_path):
     result = ResearchEngine(fd=FakeFD(missing=True), prices=ns(get_prices=lambda *_: []), cache=ResearchCache(tmp_path / "research.db"), services=fake_services()).run("NVDA")
 
     assert result["status"] == "FAILED"
-    assert result["modules"]["fundamental"]["status"] == "FAILED"
-    assert result["modules"]["valuation"]["status"] == "FAILED"
+    assert result["modules"]["fundamental"]["status"] == "PARTIAL_DATA"
+    assert result["modules"]["valuation"]["status"] == "PARTIAL_DATA"
+    assert result["modules"]["earnings"]["provider_errors"][0]["type"] == "EMPTY_DATA"
 
 
 def test_research_cache_prevents_duplicate_provider_calls(tmp_path):

@@ -12,7 +12,8 @@ from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_PATH = PROJECT_ROOT / "data" / "research_cache.db"
-ENGINE_VERSION = "research-v3.3"
+ENGINE_VERSION = "research-v1.0"
+FEATURE_FREEZE = True
 
 
 def utc_now() -> str:
@@ -217,6 +218,18 @@ class ResearchStore:
         started = now if status == "RUNNING" else None
         completed = now if status not in {"PENDING", "RUNNING"} else None
         error = result.get("error") or ((result.get("errors") or [None])[0])
+        provider_error = ((result.get("provider_errors") or [None])[0])
+        recorded_error_type = (
+            provider_error.get("type") if isinstance(provider_error, dict)
+            else type(error).__name__ if error and not isinstance(error, str)
+            else "EXECUTION_ERROR" if error
+            else None
+        )
+        recorded_error_message = (
+            provider_error.get("message") if isinstance(provider_error, dict)
+            else str(error) if error
+            else None
+        )
         with self._conn() as conn:
             conn.execute(
                 """UPDATE research_module_runs SET status=?, updated_at=?,
@@ -227,8 +240,7 @@ class ResearchStore:
                 confidence=?, completeness=?, cache_hit=?, cache_expires_at=?, source_freshness=?, result_json=?
                 WHERE run_id=? AND module=?""",
                 (status, now, started, completed, completed, now,
-                 type(error).__name__ if error and not isinstance(error, str) else ("PROVIDER_ERROR" if error else None),
-                 str(error) if error else None, _json(result.get("missing_fields", [])),
+                 recorded_error_type, recorded_error_message, _json(result.get("missing_fields", [])),
                  int(result.get("source_count", 0) or 0), int(result.get("verified_source_count", 0) or 0),
                  float(result.get("confidence", 0) or 0), float(result.get("completeness", 0) or 0),
                  int(bool(result.get("cache_hit"))), result.get("cache_expires_at"),
@@ -274,6 +286,10 @@ class ResearchStore:
             snapshot_id = cur.lastrowid
             if not snapshot_id:
                 snapshot_id = conn.execute("SELECT id FROM research_snapshots WHERE run_id=?", (run_id,)).fetchone()[0]
+            result["snapshot_id"] = int(snapshot_id)
+            for evidence in result.get("evidence_index", []):
+                evidence["snapshot_id"] = int(snapshot_id)
+            conn.execute("UPDATE research_snapshots SET result_json=? WHERE id=?", (_json(result), snapshot_id))
             conn.execute(
                 """INSERT INTO latest_research_results VALUES (?,?,?,?,?)
                 ON CONFLICT(ticker) DO UPDATE SET snapshot_id=excluded.snapshot_id,

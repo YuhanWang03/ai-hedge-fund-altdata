@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -20,8 +21,9 @@ from v2.data.price_source import default_price_source
 from v2.research.cache import CACHE_POLICY, ResearchCache
 from v2.research.depth import EXPECTATIONS_CAPABILITY, classify_catalysts, sanitize_error
 from v2.research.intelligence import build_intelligence
+from v2.research.provider_health import ProviderHealthService
 from v2.research.services import ResearchServices
-from v2.research.store import ENGINE_VERSION
+from v2.research.store import ENGINE_VERSION, FEATURE_FREEZE
 
 Progress = Callable[[str, str], None]
 MODULES = ("fundamental", "valuation", "earnings", "expectations", "institutional", "fund_flow", "technical", "catalyst", "sec", "macro", "supply_chain", "risk")
@@ -137,6 +139,7 @@ class StockResearchDataset:
     supply_chain_raw: dict = field(default_factory=dict)
     sources: list[dict] = field(default_factory=list)
     errors: dict[str, str] = field(default_factory=dict)
+    provider_error_types: dict[str, str] = field(default_factory=dict)
     fetched_at: str = field(default_factory=_now)
 
 
@@ -234,10 +237,22 @@ class ResearchEngine:
         for name in MODULES:
             if name not in results:
                 results[name] = self._finalize_module(self._module(ticker, name, "SKIPPED", "本次未请求该模块。"), dataset)
-        result = self._aggregate(dataset, results)
+        provider_health = ProviderHealthService().check_all() if isinstance(self.fd, CachedFDClient) else []
+        result = self._aggregate(dataset, results, provider_health)
+        result.setdefault("production_diagnostics", {})["raw_data_cache"] = {
+            "hits": int(getattr(self.fd, "hits", 0)),
+            "misses": int(getattr(self.fd, "misses", 0)),
+        }
         scoped_statuses = [results[name]["status"] for name in required]
         core_statuses = [results[name]["status"] for name in ("fundamental", "valuation", "earnings") if name in required]
-        if len(core_statuses) == 3 and all(status == "FAILED" for status in core_statuses):
+        core_unavailable = [
+            results[name]["status"] == "FAILED" or (
+                results[name]["status"] == "PARTIAL_DATA"
+                and not results[name].get("data_sources_used")
+            )
+            for name in ("fundamental", "valuation", "earnings") if name in required
+        ]
+        if len(core_unavailable) == 3 and all(core_unavailable):
             result["status"] = "FAILED"
         elif scoped_statuses and all(status == "FAILED" for status in scoped_statuses):
             result["status"] = "FAILED"
@@ -255,12 +270,24 @@ class ResearchEngine:
         return result
 
     def _safe(self, dataset: StockResearchDataset, key: str, fn: Callable[[], Any], default: Any) -> Any:
-        try:
-            value = fn()
-            return default if value is None else value
-        except Exception as exc:
-            dataset.errors[key] = sanitize_error(exc)
-            return default
+        for attempt in range(3):
+            try:
+                value = fn()
+                if value is None or (key in {"company", "metrics", "earnings", "prices"} and not value):
+                    dataset.errors[key] = f"{key} provider returned no data"
+                    dataset.provider_error_types[key] = "EMPTY_DATA"
+                    return default
+                return value
+            except Exception as exc:
+                error_type = str(getattr(exc, "error_type", "PROVIDER_ERROR"))
+                retryable = error_type in {"TIMEOUT", "UNREACHABLE", "DEGRADED"}
+                if retryable and attempt < 2:
+                    time.sleep(.25 * (4 ** attempt))
+                    continue
+                dataset.errors[key] = sanitize_error(exc)
+                dataset.provider_error_types[key] = error_type
+                return default
+        return default
 
     def _collect(self, ticker: str, progress: Progress | None, required: set[str] | None = None, force_refresh: bool = False) -> StockResearchDataset:
         d = StockResearchDataset(ticker=ticker)
@@ -309,7 +336,8 @@ class ResearchEngine:
                 try:
                     service_results[name] = future.result() or {}
                 except Exception as exc:
-                    d.errors[name] = str(exc)
+                    d.errors[name] = sanitize_error(exc)
+                    d.provider_error_types[name] = str(getattr(exc, "error_type", "PROVIDER_ERROR"))
                     service_results[name] = {}
         earnings_sec = service_results.get("earnings_sec", {})
         news_diagnostics = d.expectations.get("news_diagnostics")
@@ -380,13 +408,28 @@ class ResearchEngine:
         }
         for key, message in dataset.errors.items():
             if key in error_dependencies.get(result.get("module", ""), set()):
-                provider_errors.append({"provider": key, "type": "PROVIDER_ERROR", "message": message, "retryable": True})
+                error_type = dataset.provider_error_types.get(key, "PROVIDER_ERROR")
+                provider_errors.append({"provider": key, "type": error_type, "message": message, "retryable": error_type not in {"AUTH_ERROR", "EMPTY_DATA"}})
         if result.get("error"):
-            provider_errors.append({"provider": result.get("module"), "type": "EXECUTION_ERROR", "message": str(result["error"]), "retryable": True})
-            if status != "FAILED":
+            dependency_error_types = {str(item.get("type") or "PROVIDER_ERROR") for item in provider_errors}
+            if dependency_error_types == {"EMPTY_DATA"}:
+                # Do not duplicate a provider's empty response as a code
+                # execution failure merely because a legacy builder mirrors
+                # the same condition through its `error` field.
+                status = "PARTIAL_DATA"
+            else:
+                provider_errors.append({"provider": result.get("module"), "type": "EXECUTION_ERROR", "message": str(result["error"]), "retryable": True})
+                if status != "FAILED":
+                    status = "PARTIAL_ERROR"
+        elif provider_errors:
+            error_types = {str(item.get("type") or "PROVIDER_ERROR") for item in provider_errors}
+            if error_types == {"EMPTY_DATA"}:
+                status = "PARTIAL_DATA"
+            else:
+                # Authentication and transport failures degrade every module,
+                # including core modules. They must never masquerade as data
+                # incompleteness.
                 status = "PARTIAL_ERROR"
-        elif provider_errors and result.get("module") not in {"fundamental", "valuation", "earnings"}:
-            status = "PARTIAL_ERROR"
         elif status == "FAILED" and result.get("module") not in {"fundamental", "valuation", "earnings"}:
             # Optional modules with a successful code path but no provider data
             # are data-incomplete, not execution failures.
@@ -493,7 +536,7 @@ class ResearchEngine:
     def _earnings(self, d: StockResearchDataset) -> dict:
         quarters = self._quarters(d)
         if not quarters:
-            return self._module(d.ticker, "earnings", "FAILED", "暂无可靠财报历史。", error=d.errors.get("earnings"))
+            return self._module(d.ticker, "earnings", "FAILED", "暂无可靠财报历史。", metrics={"latest_eps_surprise": None, "latest_revenue_surprise": None, "beat_rate": None}, error=d.errors.get("earnings"))
         rows = []
         for record in quarters:
             q = record.quarterly
@@ -591,7 +634,11 @@ class ResearchEngine:
         status = "COMPLETED" if items else "PARTIAL"
         score = 55 if d.upcoming_earnings else None
         diagnostics = d.expectations.get("news_diagnostics", {})
-        provider_errors = [{"provider": attempt.get("provider"), "type": "PROVIDER_ERROR", "message": attempt.get("error"), "retryable": True} for attempt in diagnostics.get("provider_attempts", []) if attempt.get("error")]
+        attempts = diagnostics.get("provider_attempts", [])
+        fallback_recovered = any(attempt.get("provider") != "Financial Datasets" and int(attempt.get("filtered_count") or 0) > 0 for attempt in attempts)
+        provider_errors = [{"provider": attempt.get("provider"), "type": attempt.get("error_type") or "PROVIDER_ERROR", "message": attempt.get("error"),
+                            "retryable": (attempt.get("error_type") or "PROVIDER_ERROR") not in {"AUTH_ERROR", "EMPTY_DATA"}}
+                           for attempt in attempts if attempt.get("error") and not (fallback_recovered and attempt.get("provider") == "Financial Datasets")]
         result = self._module(d.ticker, "catalyst", status, f"识别到 {len(items)} 条去重记录，并区分新闻、事件与催化剂。" if items else "暂无可靠催化剂数据。", score=score, metrics={"known_events": len(items), "news_count": sum(i["item_type"] == "NEWS" for i in items), "event_count": sum(i["item_type"] == "EVENT" for i in items), "catalyst_count": sum(i["item_type"] == "CATALYST" for i in items)}, sources=list({item["source_id"] for item in items}), confidence=.7 if items else .2, details={"timeline": items, "news_diagnostics": diagnostics})
         result["provider_errors"] = provider_errors
         return result
@@ -604,7 +651,7 @@ class ResearchEngine:
         findings = d.sec_depth.get("findings", [])
         risk_changes = d.sec_depth.get("risk_factor_changes", [])
         parsed_forms = d.sec_depth.get("parsed_forms", [])
-        return self._module(d.ticker, "sec", status, f"已索引 {len(filings)} 份文件并解析 {len(findings)} 条发现。", metrics={"filing_count": len(filings), "direct_sec_count": len(direct), "finding_count": len(findings), "risk_change_count": len(risk_changes)}, findings=findings, sources=list(dict.fromkeys(sources)), confidence=.9 if findings else .7 if direct else .5 if filings else .1, details={"filings": filings, "sec_findings": findings, "risk_factor_changes": risk_changes, "guidance": d.sec_depth.get("guidance", []), "parsed_forms": parsed_forms, "status_note": "已完成正文解析。" if findings else "已获得文件元数据；正文暂未成功解析。"})
+        return self._module(d.ticker, "sec", status, f"已索引 {len(filings)} 份文件并解析 {len(findings)} 条发现。", metrics={"filing_count": len(filings), "direct_sec_count": len(direct), "finding_count": len(findings), "risk_change_count": len(risk_changes)}, findings=findings, sources=list(dict.fromkeys(sources)), confidence=.9 if findings else .7 if direct else .5 if filings else .1, details={"filings": filings, "sec_findings": findings, "industry_evidence": d.sec_depth.get("industry_evidence", []), "risk_factor_changes": risk_changes, "guidance": d.sec_depth.get("guidance", []), "parsed_forms": parsed_forms, "status_note": "已完成正文解析。" if findings else "已获得文件元数据；正文暂未成功解析。"})
 
     def _macro(self, d: StockResearchDataset) -> dict:
         snapshot = d.macro.get("snapshot") or {}
@@ -677,7 +724,7 @@ class ResearchEngine:
         score = _clamp(sum({"LOW": 85, "MEDIUM": 55, "HIGH": 20}[r["level"]] for r in known) / len(known)) if known else None
         return self._module(d.ticker, "risk", "COMPLETED" if len(known) >= 4 else "PARTIAL", f"8 类风险中 {len(known)} 类有证据；缺失项明确标记 UNKNOWN。", score=score, risks=risks, sources=sorted({source for risk in risks for source in risk["evidence"]}), confidence=.78 if len(known) >= 4 else .45, details={"radar": risks, "risk_factor_changes": risk_changes})
 
-    def _aggregate(self, d: StockResearchDataset, modules: dict[str, dict]) -> dict:
+    def _aggregate(self, d: StockResearchDataset, modules: dict[str, dict], provider_health: list[dict] | None = None) -> dict:
         core = [modules[name] for name in ("fundamental", "valuation", "earnings")]
         if all(item["status"] in {"FAILED", "SKIPPED"} for item in core):
             status = "FAILED"
@@ -692,12 +739,15 @@ class ResearchEngine:
         e = modules["expectations"]
         risk = modules["risk"]
         company = f["details"].get("company", {})
-        intelligence = build_intelligence(d.ticker, modules, company)
+        run_id = f"research-{d.ticker}-{int(datetime.now(timezone.utc).timestamp())}"
+        intelligence = build_intelligence(d.ticker, modules, company, sources=d.sources, snapshot_id=run_id, provider_health=provider_health or [])
         scores = {"fundamental": f["score"], "growth": f["metrics"].get("growth_score"), "profitability": f["metrics"].get("profitability_score"), "financial_health": f["metrics"].get("financial_health_score"), "valuation": v["score"], "earnings_momentum": e["score"], "institutional": modules["institutional"]["score"], "technical": modules["technical"]["score"], "catalyst": modules["catalyst"]["score"], "sector_aware": intelligence["scoring_profile"].get("overall")}
         known_risks = [item for item in risk["details"].get("radar", []) if item["level"] != "UNKNOWN"][:5]
         high_count = sum(item["level"] == "HIGH" for item in known_risks)
         risk_level = "High" if high_count >= 2 else "Medium" if high_count or any(item["level"] == "MEDIUM" for item in known_risks) else "Low" if known_risks else "Unknown"
-        return {"run_id": f"research-{d.ticker}-{int(datetime.now(timezone.utc).timestamp())}", "engine_version": ENGINE_VERSION, "status": status, "ticker": d.ticker, "from_cache": False, "generated_at": _now(), "dataset": {"ticker": d.ticker, "fetched_at": d.fetched_at, "errors": d.errors, "available": {"company": bool(d.company), "metrics": len(d.metrics), "earnings": len(d.earnings), "expectations": bool(d.expectations), "filings": len(d.filings), "institutional_holdings": len(d.institutional.get("institutional_holdings", [])), "insiders": len(d.insiders), "news": len(d.news), "macro": bool(d.macro.get("snapshot")), "supply_chain_relationships": len(modules["supply_chain"].get("details", {}).get("relationships", [])), "prices": len(d.prices)}}, "module_status": {name: result["status"] for name, result in modules.items()}, "modules": modules, "scores": scores, "risk_level": risk_level, "investment_thesis": intelligence["core_thesis"], "core_thesis": intelligence["core_thesis"], "why_now": intelligence["why_now"], "bull_case": intelligence["scenarios"]["BULL"]["narrative"], "base_case": intelligence["scenarios"]["BASE"]["narrative"], "bear_case": intelligence["scenarios"]["BEAR"]["narrative"], "key_catalysts": intelligence["key_catalysts"], "key_risks": intelligence["key_risks_v2"] or known_risks, "thesis_invalidation": intelligence["thesis_invalidation"], "sources": d.sources, **intelligence}
+        return {"run_id": f"research-{d.ticker}-{int(datetime.now(timezone.utc).timestamp())}", "engine_version": ENGINE_VERSION,
+                "research_engine_feature_freeze": FEATURE_FREEZE, "release_status": "RESEARCH ENGINE V1.0 FEATURE FREEZE",
+                "status": status, "ticker": d.ticker, "from_cache": False, "generated_at": _now(), "dataset": {"ticker": d.ticker, "fetched_at": d.fetched_at, "errors": d.errors, "available": {"company": bool(d.company), "metrics": len(d.metrics), "earnings": len(d.earnings), "expectations": bool(d.expectations), "filings": len(d.filings), "institutional_holdings": len(d.institutional.get("institutional_holdings", [])), "insiders": len(d.insiders), "news": len(d.news), "macro": bool(d.macro.get("snapshot")), "supply_chain_relationships": len(modules["supply_chain"].get("details", {}).get("relationships", [])), "prices": len(d.prices)}}, "module_status": {name: result["status"] for name, result in modules.items()}, "modules": modules, "scores": scores, "risk_level": risk_level, "investment_thesis": intelligence["core_thesis"], "core_thesis": intelligence["core_thesis"], "why_now": intelligence["why_now"], "bull_case": intelligence["scenarios"]["BULL"]["narrative"], "base_case": intelligence["scenarios"]["BASE"]["narrative"], "bear_case": intelligence["scenarios"]["BEAR"]["narrative"], "key_catalysts": intelligence["key_catalysts"], "key_risks": intelligence["key_risks_v2"] or known_risks, "thesis_invalidation": intelligence["thesis_invalidation"], "sources": d.sources, **intelligence}
 
 
 _PEERS = {

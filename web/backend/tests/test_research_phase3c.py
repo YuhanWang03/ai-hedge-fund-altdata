@@ -3,6 +3,9 @@ from copy import deepcopy
 from v2.research.depth import _guidance_from_text
 from v2.research.intelligence import build_intelligence
 from v2.research.store import ResearchStore
+from v2.research.provider_health import ProviderHealthService, classify_provider_error
+from v2.research.engine import ResearchEngine, StockResearchDataset
+from v2.data.client import FDClient, ProviderRequestError
 
 
 def module(status="COMPLETED", confidence=.9, completeness=1.0, *, metrics=None, details=None, sources=None, score=70):
@@ -92,3 +95,73 @@ def test_what_changed_v2_detects_new_driver_and_risk(tmp_path):
     comparison = store.compare_latest("AAPL")
     assert comparison["driver_changes"]["negative"]["added"]
     assert comparison["risk_changes"]["findings"]["added"]
+
+
+def test_provider_error_semantics_and_secret_safe_health(monkeypatch):
+    class Response:
+        status_code = 401
+        content = b"denied"
+        text = "denied"
+    monkeypatch.setattr("requests.request", lambda *args, **kwargs: Response())
+    monkeypatch.setenv("FINANCIAL_DATASETS_API_KEY", "never-return-this-secret")
+    row = ProviderHealthService().check("Financial Datasets")
+    assert row["status"] == "AUTH_ERROR" and row["configured"] and row["reachable"]
+    assert "never-return-this-secret" not in str(row)
+    client = FDClient(api_key="never-return-this-secret")
+    monkeypatch.setattr(client._session, "request", lambda *args, **kwargs: Response())
+    try:
+        client.get_company_facts("AAPL")
+        assert False, "AUTH_ERROR must not silently become empty data"
+    except ProviderRequestError as exc:
+        assert exc.error_type == "AUTH_ERROR" and "never-return-this-secret" not in str(exc)
+    assert classify_provider_error(status_code=429) == "RATE_LIMITED"
+
+
+def test_empty_data_semantics_for_missing_ticker(monkeypatch):
+    class Response:
+        status_code = 404
+        content = b""
+        text = ""
+
+    client = FDClient(api_key="never-return-this-secret")
+    monkeypatch.setattr(client._session, "request", lambda *args, **kwargs: Response())
+    try:
+        client.get_company_facts("NOTREAL")
+        assert False, "404 must retain EMPTY_DATA semantics"
+    except ProviderRequestError as exc:
+        assert exc.error_type == "EMPTY_DATA"
+
+    engine = object.__new__(ResearchEngine)
+    dataset = StockResearchDataset(ticker="JPM")
+    dataset.errors["earnings"] = "earnings provider returned no data"
+    dataset.provider_error_types["earnings"] = "EMPTY_DATA"
+    result = engine._finalize_module(engine._module("JPM", "earnings", "FAILED", "no history", metrics={"latest_eps_surprise": None}, error=dataset.errors["earnings"]), dataset)
+    assert result["status"] == "PARTIAL_DATA"
+    assert result["completeness"] == 0.0
+    assert [item["type"] for item in result["provider_errors"]] == ["EMPTY_DATA"]
+
+
+def test_run_metadata_prefers_typed_provider_error(tmp_path):
+    store = ResearchStore(tmp_path / "research.db")
+    store.create_run("empty-run", "JPM", ["earnings"], "FULL")
+    store.update_module("empty-run", "earnings", "PARTIAL_DATA", {
+        "error": "earnings provider returned no data",
+        "errors": ["earnings provider returned no data"],
+        "provider_errors": [{"provider": "earnings", "type": "EMPTY_DATA", "message": "earnings provider returned no data"}],
+    })
+    row = store.get_run("empty-run")["module_runs"][0]
+    assert row["error_type"] == "EMPTY_DATA"
+
+
+def test_provider_health_penalty_provenance_and_capability_audits():
+    modules, company = modules_for("AAPL")
+    sources = [{"id": "fd_metrics", "provider": "Financial Datasets", "published_at": "2026-06-30", "fetched_at": "2026-09-05T00:00:00Z"}]
+    result = build_intelligence("AAPL", modules, company, sources=sources, snapshot_id="run-1", provider_health=[{"provider": "Financial Datasets", "status": "AUTH_ERROR"}])
+    assert result["research_confidence"]["modules"]["fundamental"]["score"] <= 34
+    evidence = next(row for row in result["evidence_index"] if "fd_metrics" in row["source_ids"])
+    assert evidence["data_period"] == "2026-06-30" and evidence["fetched_at"] == "2026-09-05T00:00:00Z"
+    assert evidence["snapshot_id"] == "run-1" and evidence["provider"] == ["Financial Datasets"]
+    jpm_modules, jpm_company = modules_for("JPM")
+    xom_modules, xom_company = modules_for("XOM")
+    assert build_intelligence("JPM", jpm_modules, jpm_company)["data_capability_audit"]["matrix"]
+    assert build_intelligence("XOM", xom_modules, xom_company)["data_capability_audit"]["matrix"]

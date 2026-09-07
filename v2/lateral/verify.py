@@ -6,7 +6,7 @@ from __future__ import annotations
 import logging
 import os
 
-from v2.data.client import FDClient
+from v2.data.client import FDClient, ProviderRequestError
 from v2.lateral.models import Neighbor
 
 logger = logging.getLogger(__name__)
@@ -28,7 +28,12 @@ def verify(neighbor: Neighbor, fd: FDClient, universe: set[str]) -> int:
         neighbor.already_in_universe = True
         return 0
 
-    facts = fd.get_company_facts(neighbor.ticker)
+    try:
+        facts = fd.get_company_facts(neighbor.ticker)
+    except ProviderRequestError as exc:
+        if exc.error_type != "EMPTY_DATA":
+            raise
+        facts = None
     if facts is None:
         neighbor.exists = False
         return 1

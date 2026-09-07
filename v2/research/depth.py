@@ -30,6 +30,39 @@ class SecFinding:
 _SPACE = re.compile(r"\s+")
 _HEADING = re.compile(r"(?m)^(?:#{1,5}\s+|\*\*)([^\n*]{8,180})(?:\*\*)?\s*$")
 _SENTENCE = re.compile(r"(?<=[.!?])\s+")
+_INDUSTRY_METRIC = re.compile(
+    r"\b(?:net interest (?:margin|yield)|NIM|CET1|common equity tier 1|average loans?|average deposits?|"
+    r"loan growth|deposit growth|provision for (?:credit|loan) losses|net charge[- ]offs?|NCOs?|"
+    r"nonperforming (?:assets?|loans?)|efficiency ratio|production|oil-equivalent production|"
+    r"(?:realized (?:oil|gas|crude|liquids?)|(?:crude|liquids?|natural gas) realizations?)|upstream earnings|downstream earnings|energy products earnings|"
+    r"chemical products earnings|capital expenditure|capital spending|cash capex|capex|free cash flow|"
+    r"vehicle deliveries|cash deliveries|wholesale units|wholesales|vehicle sales|automotive (?:sales )?revenues?|"
+    r"automotive gross margin|average selling price|ASP|inventory|regulatory credits?|"
+    r"energy generation and storage revenues?|energy revenues?)\b",
+    re.I,
+)
+_QUANTIFIED = re.compile(
+    r"(?:\$\s*\(?-?\d|\(?-?\d[\d,]*(?:\.\d+)?\)?\s*(?:%|ppts?|bps?|billion|million|thousand|bn|mm|m|b|"
+    r"mboe/?d|mboe/day|boe/?d|boe/day|mmcf/?d|mmcf/day|bcf/?d|bcf/day|barrels? per day|"
+    r"oil-equivalent barrels? per day|vehicles?|units?))",
+    re.I,
+)
+
+
+def _industry_family(text: str) -> str:
+    lower = text.lower()
+    groups = {
+        "capital": ("cet1", "common equity tier 1"),
+        "margin": ("net interest margin", "net interest yield", "nim", "efficiency ratio"),
+        "credit": ("provision for", "charge-off", "charge off", "nco", "nonperforming"),
+        "balance": ("loan", "deposit"),
+        "production": ("production", "realized oil", "realized gas", "realized crude", "realized liquids"),
+        "segments": ("upstream", "downstream", "energy products", "chemical products"),
+        "cashflow": ("capital expenditure", "capital spending", "cash capex", "capex", "free cash flow"),
+        "auto": ("deliver", "wholesale", "vehicle sales", "automotive", "average selling price", "inventory"),
+        "energy_business": ("regulatory credit", "energy generation", "energy revenue"),
+    }
+    return next((name for name, terms in groups.items() if any(term in lower for term in terms)), "other")
 
 
 def _text(value: Any, limit: int = 1200) -> str:
@@ -115,6 +148,57 @@ def _profile_from_business(text: str) -> dict:
     return {"description": description, "business_model": model, "core_products": products, "primary_markets": markets, "segments": []}
 
 
+def _industry_evidence_from_text(text: str, filing_date: str, source_url: str | None) -> list[dict]:
+    """Retain a small, auditable set of quantified industry-driver sentences.
+
+    The general SEC findings intentionally contain short section introductions.
+    Industry metrics need the relevant quantified sentences deeper in MD&A, but
+    should not persist an entire filing or infer missing values.
+    """
+    if not text:
+        return []
+    source = str(text)[:600_000]
+    sentence_candidates = list(_SENTENCE.split(_SPACE.sub(" ", source)))
+    window_candidates: list[str] = []
+    # SEC tables are frequently flattened by edgartools without sentence
+    # punctuation.  Add bounded semantic windows around every metric label so
+    # those rows remain machine-readable instead of silently disappearing.
+    for match in _INDUSTRY_METRIC.finditer(source):
+        previous = max(source.rfind(mark, 0, match.start()) for mark in (".", "!", "?", "\n"))
+        following = [position for mark in (".", "!", "?", "\n") if (position := source.find(mark, match.end())) >= 0]
+        next_boundary = min(following) if following else len(source)
+        if "|" not in source[max(0, match.start() - 300):match.end() + 500] and next_boundary - previous <= 1400:
+            continue
+        # Keep table headers/units and the current-period columns with the
+        # matched row.  Shorter windows lost qualifiers such as "in millions"
+        # and caused numerically plausible but dimensionally wrong values.
+        start = max(0, match.start() - 700)
+        end = min(len(source), match.end() + 5000)
+        window_candidates.append(source[start:end])
+    # Prefer self-contained table windows.  Otherwise short narrative matches
+    # can exhaust the per-family cap before a unit header and Total row arrive.
+    candidates = window_candidates + sentence_candidates
+    rows: list[dict] = []
+    seen: set[str] = set()
+    family_counts: dict[str, int] = {}
+    for candidate in candidates:
+        sentence = _text(candidate, 6000)
+        if len(sentence) < 25 or not _INDUSTRY_METRIC.search(sentence) or not _QUANTIFIED.search(sentence):
+            continue
+        key = re.sub(r"\W+", "", sentence.lower())[:360]
+        family = _industry_family(sentence)
+        if key in seen or family_counts.get(family, 0) >= 12:
+            continue
+        seen.add(key)
+        family_counts[family] = family_counts.get(family, 0) + 1
+        rows.append({"evidence_text": sentence, "filing_date": filing_date,
+                     "source_url": source_url, "source": "SEC filing", "confidence": .86,
+                     "evidence_family": family})
+        if len(rows) >= 80:
+            break
+    return rows
+
+
 def _guidance_from_text(text: str, filing_date: str, source_url: str | None) -> list[dict]:
     if not text:
         return []
@@ -161,6 +245,7 @@ def parse_sec_filings(ticker: str, filings_by_form: dict[str, list[Any]]) -> dic
     findings: list[SecFinding] = []
     risk_changes: list[dict] = []
     guidance: list[dict] = []
+    industry_evidence: list[dict] = []
     profile = {"description": None, "business_model": None, "core_products": [], "primary_markets": [], "segments": []}
     parsed_forms: list[str] = []
 
@@ -174,6 +259,15 @@ def parse_sec_filings(ticker: str, filings_by_form: dict[str, list[Any]]) -> dic
             business = _item(obj, [(None, "Item 1"), ("Part I", "Item 1")]) if form == "10-K" else ""
             risk = _item(obj, [(None, "Item 1A"), ("Part II", "Item 1A")])
             mda = _item(obj, [(None, "Item 7"), ("Part I", "Item 2")])
+            full_text = ""
+            for method_name in ("markdown", "text"):
+                try:
+                    method = getattr(filing, method_name, None)
+                    candidate = method() if callable(method) else ""
+                    if isinstance(candidate, str) and len(candidate) > 5_000 and not full_text:
+                        full_text = candidate
+                except Exception:
+                    continue
             meta = {
                 "date": str(_attr(filing, "filing_date")),
                 "accession": str(_attr(filing, "accession_number", _attr(filing, "accession_no"))),
@@ -188,6 +282,8 @@ def parse_sec_filings(ticker: str, filings_by_form: dict[str, list[Any]]) -> dic
                 if content:
                     findings.append(SecFinding(form, meta["date"], meta["accession"], category, title, _text(content, 420), _text(content, 900), meta["url"], .82))
             guidance.extend(_guidance_from_text(mda, meta["date"], meta["url"]))
+            industry_source = full_text if len(full_text) > max(5_000, len(mda) * 2) else mda
+            industry_evidence.extend(_industry_evidence_from_text(industry_source, meta["date"], meta["url"]))
         if len(parsed) >= 2:
             for change in compare_risk_sections(parsed[0]["risk"], parsed[1]["risk"]):
                 risk_changes.append({**change, "filing_type": form, "filing_date": parsed[0]["date"], "source_url": parsed[0]["url"], "confidence": .72})
@@ -212,6 +308,7 @@ def parse_sec_filings(ticker: str, filings_by_form: dict[str, list[Any]]) -> dic
         "findings": [asdict(item) for item in findings],
         "risk_factor_changes": risk_changes,
         "guidance": guidance,
+        "industry_evidence": industry_evidence[:160],
         "company_profile": profile,
         "parsed_forms": sorted(set(parsed_forms)),
     }

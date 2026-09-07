@@ -13,6 +13,7 @@ from app.auth import require_owner
 from v2.research import ResearchEngine, normalize_ticker
 from v2.research.engine import MODULES, resolve_modules
 from v2.research.depth import sanitize_error
+from v2.research.provider_health import ProviderHealthService
 from v2.research.store import ResearchStore
 
 router = APIRouter(prefix="/api/research", tags=["research"], dependencies=[Depends(require_owner)])
@@ -22,6 +23,7 @@ _STORE: ResearchStore | None = None
 # persisted SQLite state replaced them in Phase 3A.
 _JOBS: dict[str, dict] = {}
 _ACTIVE_BY_TICKER: dict[str, str] = {}
+_PROVIDER_HEALTH = ProviderHealthService()
 
 
 def _store() -> ResearchStore:
@@ -45,6 +47,12 @@ class RetryInput(BaseModel):
 
 class PeerPreferenceInput(BaseModel):
     peer_ticker: str
+
+
+@router.get("/health/providers")
+async def get_provider_health(force: bool = Query(default=False)) -> dict:
+    providers = await run_in_threadpool(_PROVIDER_HEALTH.check_all, force=force)
+    return {"providers": providers, "secrets_exposed": False}
 
 
 def _new_engine() -> ResearchEngine:

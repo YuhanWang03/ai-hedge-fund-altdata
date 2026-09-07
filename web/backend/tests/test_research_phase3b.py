@@ -9,7 +9,7 @@ import pytest
 from v2.research.cache import ResearchCache
 from v2.research.depth import classify_catalysts, compare_risk_sections, parse_sec_filings, sanitize_error
 from v2.research.engine import ResearchEngine
-from v2.research.store import ENGINE_VERSION, ResearchStore
+from v2.research.store import ENGINE_VERSION, FEATURE_FREEZE, ResearchStore
 from web.backend.tests.test_research import FakeFD, FakePrices, fake_services
 
 
@@ -76,4 +76,5 @@ def test_five_industries_have_distinct_peer_sets(tmp_path: Path, ticker: str, ex
 def test_error_redaction_and_engine_version():
     cleaned = sanitize_error("request failed?api_key=secret123&token=abc")
     assert "secret123" not in cleaned and "abc" not in cleaned
-    assert ENGINE_VERSION == "research-v3.3"
+    assert ENGINE_VERSION == "research-v1.0"
+    assert FEATURE_FREEZE is True
