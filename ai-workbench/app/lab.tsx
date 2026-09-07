@@ -51,7 +51,7 @@ type BacktestResult = { kind: 'backtest'; lab_run_id?: string; strategy: string;
 
 type WindowStats = { window: string; n_events: number; mean_car: number; std_car: number; t_stat: number; p_value: number; ci: { lower: number; upper: number; confidence: number } };
 type EventCAR = { ticker: string; event_date: string; source_type: string; eps_surprise: string | null; car_0_1: number | null; car_0_5: number | null; car_0_20: number | null; market_model: { alpha: number; beta: number; r_squared: number } };
-type EventStudyResult = { kind: 'event_study'; lab_run_id?: string; universe: string; tickers: string[]; params: Record<string, unknown>; events: EventCAR[]; aggregates: { source_type: string; n_events: number; windows: WindowStats[] }[]; skipped_tickers: string[] };
+type EventStudyResult = { kind: 'event_study'; lab_run_id?: string; universe: string; tickers: string[]; data_source?: string; fd_requests?: Record<string, number>; fd_cost_usd?: number; price_failures?: Record<string, string>; params: Record<string, unknown>; events: EventCAR[]; aggregates: { source_type: string; n_events: number; windows: WindowStats[] }[]; skipped_tickers: string[] };
 
 type ScoreboardRow = { persona: string; name_zh?: string; n: number; hits: number; hit_rate: number | null; avg_directional_1m: number | null };
 type Scoreboard = { items: ScoreboardRow[]; counts: { runs: number; tickers: number; votes: number; scored_1m: number; scored_3m: number; due_1m: number; due_3m: number } };
@@ -481,9 +481,15 @@ function BacktestTool({ result, setResult, handoff, clearHandoff, ask }: ToolPro
 
 function EventStudyTool({ result, setResult, handoff, clearHandoff, ask }: ToolProps & { result?: EventStudyResult; setResult: (r?: EventStudyResult) => void; handoff: Handoff | null; clearHandoff: () => void }) {
   const [universe, setUniverse] = useState<Universe>('custom'); const [tickers, setTickers] = useState('AAPL, MSFT, NVDA');
-  const [earnings, setEarnings] = useState('8'); const [boot, setBoot] = useState('2000'); const [surprise, setSurprise] = useState(true);
+  const [earnings, setEarnings] = useState('8'); const [boot, setBoot] = useState('2000'); const [surprise, setSurprise] = useState(true); const [dataSource, setDataSource] = useState<'yfinance' | 'fd'>('yfinance');
   const [busy, setBusy] = useState(false); const [error, setError] = useState('');
-  const run = async () => { setBusy(true); setError(''); try { setResult(await apiJson<EventStudyResult>('/api/lab/event-study', { method: 'POST', body: JSON.stringify({ universe, tickers: universe === 'custom' ? parseTickers(tickers) : [], earnings_limit: Number(earnings), n_bootstrap: Number(boot), require_eps_surprise: surprise }) })) } catch (e) { setError(errorText(e)) } finally { setBusy(false) } };
+  const info = useLabData<{ items: Record<string, UniverseInfo> }>('/api/lab/universes');
+  const pricing = useLabData<Pricing>('/api/lab/committee/pricing');
+  const price = (k: string) => pricing.data?.prices_usd[k] ?? 0.02;
+  const poolSize = Math.min(20, universe === 'custom' ? parseTickers(tickers).length : (info.data?.items[universe]?.size ?? 0));
+  const estEarnings = poolSize * price('earnings');
+  const estPrices = dataSource === 'fd' ? (poolSize * 5 + 11) * price('prices') : 0;  // ~400 days per ticker + SPY since 2023, in 90-day chunks
+  const run = async () => { setBusy(true); setError(''); try { setResult(await apiJson<EventStudyResult>('/api/lab/event-study', { method: 'POST', body: JSON.stringify({ universe, tickers: universe === 'custom' ? parseTickers(tickers) : [], data_source: dataSource, earnings_limit: Number(earnings), n_bootstrap: Number(boot), require_eps_surprise: surprise }) })) } catch (e) { setError(errorText(e)) } finally { setBusy(false) } };
   return <>
     {handoff && <HandoffBanner handoff={handoff} onUse={() => { setUniverse('custom'); setTickers(handoff.tickers.join(', ')); clearHandoff() }} onClear={clearHandoff}/>}
     <div className="lab-tool">
@@ -491,11 +497,14 @@ function EventStudyTool({ result, setResult, handoff, clearHandoff, ask }: ToolP
         <UniversePicker universe={universe} setUniverse={setUniverse} tickers={tickers} setTickers={setTickers} exclude={INDEX_UNIVERSES}/>
         <div className="lab-grid2"><Field label="每只回看财报数"><NumberInput value={earnings} onChange={setEarnings} min={1} max={20}/></Field><Field label="Bootstrap 次数"><NumberInput value={boot} onChange={setBoot} min={100} max={10000} step={500}/></Field></div>
         <Field label="只统计有 EPS surprise 标注的事件"><Chips options={[{ id: 'yes', label: '是' }, { id: 'no', label: '否' }]} value={surprise ? 'yes' : 'no'} onChange={v => setSurprise(v === 'yes')}/></Field>
+        <Field label="价格来源" hint={dataSource === 'yfinance' ? '股票和 SPY 的日线价格来自 yfinance，免费且已复权；财报历史始终来自 Financial Datasets。' : `日线价格也从 Financial Datasets 取（未复权），每只每 90 天一段、每段 ${usd(price('prices'))}。`}><Chips options={[{ id: 'yfinance', label: 'yfinance（免费）' }, { id: 'fd', label: 'Financial Datasets（付费）' }]} value={dataSource} onChange={setDataSource}/></Field>
+        <p className="lab-note">预计 Financial Datasets 费用：≈ {usd(estEarnings + estPrices)}（财报历史 {usd(estEarnings)}{estPrices ? ` + 价格 ${usd(estPrices)}` : ''}）。股票池最多取前 20 只。</p>
         <button className="run-button" disabled={busy || (universe === 'custom' && !parseTickers(tickers).length)} onClick={() => void run()}>{busy ? '计算中…' : '开始计算'}</button>
       </section>
       <section className="surface lab-result">
         {error ? <ErrorBox text={error}/> : !result ? <Empty glyph="∿" title="等待计算" text="对每次财报公布，用市场模型剔除大盘影响后累计 [0,+1]、[0,+5]、[0,+20] 日的异常收益，并给出 t 检验和 bootstrap 置信区间。"/> : <>
-          <div className="surface-header"><div><h2>{result.events.length} 个事件 · {result.aggregates.length} 组</h2><span>{UNIVERSE_LABEL[result.universe] || result.universe} · {result.tickers.join(' ')}{result.skipped_tickers.length ? ` · 跳过 ${result.skipped_tickers.join(' ')}` : ''}</span></div></div>
+          <div className="surface-header"><div><h2>{result.events.length} 个事件 · {result.aggregates.length} 组</h2><span>{UNIVERSE_LABEL[result.universe] || result.universe} · {result.tickers.join(' ')}{result.skipped_tickers.length ? ` · 跳过 ${result.skipped_tickers.join(' ')}` : ''} · 价格 {result.data_source === 'fd' ? 'Financial Datasets' : 'yfinance'} · FD 费用 {usd(result.fd_cost_usd ?? 0)}</span></div></div>
+          {Object.keys(result.price_failures || {}).length > 0 && <p className="lab-note">{Object.keys(result.price_failures!).length} 只取不到价格：{Object.keys(result.price_failures!).join(' ')}。</p>}
           {result.aggregates.map(g => <div key={g.source_type} className="lab-table-wrap"><div className="lab-subhead">{g.source_type} · {g.n_events} 个事件</div><table className="lab-table"><thead><tr><th>窗口</th><th>n</th><th>平均 CAR</th><th>标准差</th><th>t</th><th>p</th><th>95% CI</th></tr></thead><tbody>{g.windows.map(w => <tr key={w.window}><td><strong>{w.window}</strong></td><td>{w.n_events}</td><td className={w.mean_car >= 0 ? 'positive' : 'negative'}>{pct(w.mean_car, 2)}</td><td>{pctAbs(w.std_car, 2)}</td><td>{num(w.t_stat)}</td><td className={w.p_value < 0.05 ? 'positive' : ''}>{num(w.p_value, 3)}</td><td>[{pct(w.ci.lower, 2)}, {pct(w.ci.upper, 2)}]</td></tr>)}</tbody></table></div>)}
           {result.events.length > 0 && <div className="lab-table-wrap"><div className="lab-subhead">逐事件</div><table className="lab-table"><thead><tr><th>股票</th><th>日期</th><th>类型</th><th>EPS</th><th>CAR [0,1]</th><th>CAR [0,5]</th><th>CAR [0,20]</th><th>β</th></tr></thead><tbody>{result.events.slice(0, 40).map((e, i) => <tr key={i}><td><strong>{e.ticker}</strong></td><td>{e.event_date}</td><td>{e.source_type}</td><td>{e.eps_surprise || '—'}</td><td className={(e.car_0_1 || 0) >= 0 ? 'positive' : 'negative'}>{pct(e.car_0_1, 2)}</td><td className={(e.car_0_5 || 0) >= 0 ? 'positive' : 'negative'}>{pct(e.car_0_5, 2)}</td><td className={(e.car_0_20 || 0) >= 0 ? 'positive' : 'negative'}>{pct(e.car_0_20, 2)}</td><td>{num(e.market_model.beta)}</td></tr>)}</tbody></table></div>}
           <div className="lab-foot"><button type="button" className="explain-button" onClick={() => ask(`事件研究：${result.tickers.join(', ')}，${result.events.length} 个财报事件。${result.aggregates.map(g => `${g.source_type}: ${g.windows.map(w => `${w.window} 平均CAR ${pct(w.mean_car, 2)} (p=${num(w.p_value, 3)})`).join('，')}`).join('；')}。请解释这些窗口的统计显著性意味着什么。`, '实验室 · 事件研究')}>问 AI 解释显著性</button><RawJson data={result}/></div>

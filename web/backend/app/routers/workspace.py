@@ -49,7 +49,8 @@ def _summarize(kind: str, result: dict) -> dict:
                         "total_return_pct": m.get("total_return_pct"), "sharpe_ratio": m.get("sharpe_ratio"), "max_drawdown_pct": m.get("max_drawdown_pct"),
                         "data_source": result.get("data_source"), "fd_cost_usd": result.get("fd_cost_usd")})
     elif kind == "event_study":
-        summary.update({"universe": result.get("universe"), "n_events": len(result.get("events") or []), "n_groups": len(result.get("aggregates") or [])})
+        summary.update({"universe": result.get("universe"), "n_events": len(result.get("events") or []), "n_groups": len(result.get("aggregates") or []),
+                        "data_source": result.get("data_source"), "fd_cost_usd": result.get("fd_cost_usd")})
     elif kind == "screening":
         summary.update({"universe": result.get("universe"), "universe_size": result.get("universe_size"), "n_candidates": len(result.get("candidates") or []),
                         "candidates": [c.get("ticker") for c in (result.get("candidates") or [])][:20],
@@ -253,19 +254,22 @@ FD_PRICE_CHUNK_DAYS = 90
 
 
 @contextmanager
-def _backtest_data(body: BacktestInput):
-    """Price feed per ``data_source``; the FD client only when the run needs it."""
+def _data_bundle(data_source: str, *, needs_fd: bool, persona_client: bool = False):
+    """Price feed per ``data_source``; the FD client only when the run needs it.
+
+    Shared by the backtest and the event study: prices come from yfinance (free)
+    or FD (paid, chunked), events / fundamentals always from FD via ``raw``.
+    """
     from v2.backtesting.strategies import BacktestData, PriceCache
 
-    needs_fd = body.strategy != "momentum" or body.data_source == "fd"
     raw = None
-    if needs_fd:
+    if needs_fd or data_source == "fd":
         from v2.data import CachedFDClient
 
         raw = CachedFDClient()
         raw.__enter__()
     try:
-        if body.data_source == "fd":
+        if data_source == "fd":
             from v2.data.price_source import FDPriceSource
 
             prices = PriceCache(FDPriceSource(raw), chunk_days=FD_PRICE_CHUNK_DAYS)
@@ -274,7 +278,7 @@ def _backtest_data(body: BacktestInput):
 
             prices = PriceCache(YFinancePriceSource())
         fd = None
-        if raw is not None and body.strategy in ("insider", "committee"):
+        if raw is not None and persona_client:
             from v2.personas.data import adapt_client
 
             fd = adapt_client(raw)
@@ -282,6 +286,18 @@ def _backtest_data(body: BacktestInput):
     finally:
         if raw is not None:
             raw.__exit__(None, None, None)
+
+
+def _backtest_data(body: BacktestInput):
+    return _data_bundle(body.data_source, needs_fd=body.strategy != "momentum", persona_client=body.strategy in ("insider", "committee"))
+
+
+def _fd_bill(data, data_source: str) -> dict[str, int]:
+    """Paid requests by endpoint, including FD price chunks when FD served prices."""
+    counts = dict(data.fd_requests)
+    if data_source == "fd" and data.prices.requests:
+        counts["prices"] = counts.get("prices", 0) + data.prices.requests
+    return counts
 
 
 def _build_strategy(body: BacktestInput, on_tick=None):
@@ -319,9 +335,7 @@ def _run_backtest(body: BacktestInput, on_tick=None) -> dict:
         data.progress = on_tick
         strategy = _build_strategy(body, on_tick)
         result = BacktestEngine(capital=body.capital, per_trade=body.per_trade).run(strategy, tickers, data)
-        fd_requests = dict(data.fd_requests)
-        if body.data_source == "fd" and data.prices.requests:
-            fd_requests["prices"] = fd_requests.get("prices", 0) + data.prices.requests
+        fd_requests = _fd_bill(data, body.data_source)
         notes = {"price_failures": dict(data.prices.failed), "errors": dict(getattr(strategy, "errors", {}) or {}),
                  "rebalance_dates": list(getattr(strategy, "dates", []) or []), "periods": list(getattr(strategy, "periods", []) or []),
                  "aborted": getattr(strategy, "aborted", None)}
@@ -332,27 +346,31 @@ def _run_backtest(body: BacktestInput, on_tick=None) -> dict:
 class EventStudyInput(BaseModel):
     universe: Universe = "custom"
     tickers: list[str] = Field(default_factory=lambda: ["AAPL", "MSFT", "NVDA"], max_length=MAX_TICKERS)
+    #: where daily prices (stock and SPY) come from; earnings history is always Financial Datasets
+    data_source: Literal["yfinance", "fd"] = "yfinance"
     earnings_limit: int = Field(default=8, ge=1, le=20)
     n_bootstrap: int = Field(default=2000, ge=100, le=10_000)
     require_eps_surprise: bool = True
 
 
 def _run_event_study(body: EventStudyInput) -> dict:
-    from v2.data import CachedFDClient
     from v2.event_study import compute_car
 
     tickers, meta = resolve_universe(body.universe, body.tickers, limit=20)
-    with CachedFDClient() as client:
+    # The bundle answers get_prices (chosen feed) and get_earnings_history (FD, counted), which is all compute_car reads.
+    with _data_bundle(body.data_source, needs_fd=True) as data:
         result = compute_car(
             tickers,
-            client,
+            data,
             earnings_limit=body.earnings_limit,
             n_bootstrap=body.n_bootstrap,
             require_eps_surprise=body.require_eps_surprise,
         )
-    return {"kind": "event_study", "universe": meta["universe"], "tickers": tickers,
-            "params": {"earnings_limit": body.earnings_limit, "n_bootstrap": body.n_bootstrap, "require_eps_surprise": body.require_eps_surprise},
-            **result.model_dump()}
+        fd_requests = _fd_bill(data, body.data_source)
+        price_failures = dict(data.prices.failed)
+    return {"kind": "event_study", "universe": meta["universe"], "tickers": tickers, "data_source": body.data_source,
+            "params": {"earnings_limit": body.earnings_limit, "n_bootstrap": body.n_bootstrap, "require_eps_surprise": body.require_eps_surprise, "data_source": body.data_source},
+            "fd_requests": fd_requests, "fd_cost_usd": fd_cost(fd_requests), "price_failures": price_failures, **result.model_dump()}
 
 
 class ScreeningInput(BaseModel):

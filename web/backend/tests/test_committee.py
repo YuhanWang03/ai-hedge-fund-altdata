@@ -573,3 +573,28 @@ def test_backtest_data_bundle_opens_fd_only_when_needed():
     with workspace._backtest_data(pead) as data:
         assert data.raw is not None and data.fd is None  # PEAD reads earnings through the raw client
     assert free.params()["top_n"] == 5 and "earnings_limit" not in free.params() and pead.params()["earnings_limit"] == 8
+
+
+def test_event_study_takes_prices_from_the_chosen_feed_and_bills_earnings(client, monkeypatch):
+    """Earnings history is always FD (one request per ticker); prices follow data_source."""
+    import v2.event_study as es
+    from v2.event_study.models import EventStudyResult
+    from v2.backtesting.strategies import BacktestData
+
+    seen = {}
+
+    def fake_compute_car(tickers, data, *, earnings_limit, n_bootstrap, require_eps_surprise):
+        assert isinstance(data, BacktestData)
+        seen["chunk"] = data.prices._chunk
+        for t in tickers:
+            data.count("earnings")            # what get_earnings_history does per ticker
+        data.prices.requests = 3              # pretend three price fetches happened
+        return EventStudyResult(events=[], aggregates=[], skipped_tickers=list(tickers))
+
+    monkeypatch.setattr(es, "compute_car", fake_compute_car)
+    free = client.post("/api/lab/event-study", json={"tickers": ["AAA", "BBB"]}).json()
+    assert free["data_source"] == "yfinance" and free["fd_requests"] == {"earnings": 2} and free["fd_cost_usd"] == 0.04 and seen["chunk"] is None
+    paid = client.post("/api/lab/event-study", json={"tickers": ["AAA", "BBB"], "data_source": "fd"}).json()
+    assert paid["fd_requests"] == {"earnings": 2, "prices": 3} and paid["fd_cost_usd"] == 0.1 and seen["chunk"] == workspace.FD_PRICE_CHUNK_DAYS
+    assert client.get("/api/lab/runs?kind=event_study").json()["items"][0]["fd_cost_usd"] == 0.1
+    assert client.post("/api/lab/event-study", json={"tickers": ["AAA"], "data_source": "nope"}).status_code == 422
