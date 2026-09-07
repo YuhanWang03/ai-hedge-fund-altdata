@@ -264,6 +264,46 @@ class ScreeningInput(BaseModel):
     volatility_max: float = Field(default=0.60, gt=0, le=10)
 
 
+class _TolerantFD:
+    """Wrap a data client so one uncovered ticker cannot abort a whole screen.
+
+    The production FDClient raises ProviderRequestError on a 404 (ticker not
+    covered). The screener iterates tickers sequentially and does not catch,
+    so a single BRK.B-style miss in an index universe killed the run. Here the
+    per-ticker fetches return empty instead and the ticker is recorded.
+    """
+
+    _SOFT = ("get_financial_metrics", "get_prices", "get_earnings", "get_earnings_history", "get_news", "get_insider_trades")
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.skipped: dict[str, str] = {}
+
+    def __getattr__(self, name):
+        attr = getattr(self._inner, name)
+        if name not in self._SOFT or not callable(attr):
+            return attr
+
+        def soft(*args, **kwargs):
+            try:
+                return attr(*args, **kwargs)
+            except Exception as exc:  # noqa: BLE001 — provider miss for one ticker
+                ticker = str(args[0]) if args else "?"
+                self.skipped.setdefault(ticker, f"{name}: {type(exc).__name__}: {str(exc)[:120]}")
+                return [] if name != "get_earnings" else None
+
+        return soft
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        close = getattr(self._inner, "close", None)
+        if callable(close):
+            close()
+        return False
+
+
 class _Ticking(list):
     """A ticker list that reports progress as the screener iterates it."""
 
@@ -289,9 +329,11 @@ def _run_screening(body: ScreeningInput, on_tick=None) -> dict:
         gross_margin_min=body.gross_margin_min,
         volatility_max=body.volatility_max,
     )
-    with CachedFDClient() as client:
+    with _TolerantFD(CachedFDClient()) as client:
         result = run_screening(_Ticking(tickers, on_tick) if on_tick else tickers, client, config)
-    return {"kind": "screening", "universe": meta["universe"], "universe_as_of": meta.get("as_of"), "tickers": tickers, "thresholds": config.model_dump(), **result.model_dump()}
+        skipped = dict(client.skipped)
+    return {"kind": "screening", "universe": meta["universe"], "universe_as_of": meta.get("as_of"), "tickers": tickers,
+            "thresholds": config.model_dump(), "skipped": skipped, **result.model_dump()}
 
 
 #: screens bigger than this run as a background job (nginx cuts requests at 90 s)

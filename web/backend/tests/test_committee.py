@@ -389,3 +389,32 @@ def test_ticking_list_reports_each_index():
     seen = []
     items = workspace._Ticking(["A", "B", "C"], seen.append)
     assert list(items) == ["A", "B", "C"] and seen == [0, 1, 2] and len(items) == 3
+
+
+
+def test_tolerant_fd_skips_uncovered_tickers_instead_of_aborting():
+    class Boom(Exception):
+        pass
+
+    class Inner:
+        misses = 3
+
+        def get_financial_metrics(self, ticker, end, limit=1):
+            if ticker == "BRK.B":
+                raise Boom("Financial Datasets EMPTY_DATA at /financial-metrics/ (HTTP 404)")
+            return [{"market_cap": 1.0}]
+
+        def get_earnings(self, ticker):
+            raise Boom("no earnings")
+
+        def close(self):
+            self.closed = True
+
+    inner = Inner()
+    with workspace._TolerantFD(inner) as fd:
+        assert fd.get_financial_metrics("AAPL", "2026-06-30", limit=1) == [{"market_cap": 1.0}]
+        assert fd.get_financial_metrics("BRK.B", "2026-06-30", limit=1) == []
+        assert fd.get_earnings("AAPL") is None
+        assert fd.misses == 3  # non-wrapped attributes pass through
+    assert set(fd.skipped) == {"BRK.B", "AAPL"} and "HTTP 404" in fd.skipped["BRK.B"]
+    assert inner.closed
