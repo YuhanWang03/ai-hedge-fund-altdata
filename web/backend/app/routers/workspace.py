@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 
 from app.auth import require_owner
 from app.config import SETTINGS
+from app.fd_pricing import cost as fd_cost
 from app.lab_store import LabRunStore
 from app.sources import BIG_LIMIT, INDEX_UNIVERSES, MAX_TICKERS, Universe, normalize_tickers, resolve_universe
 from v2.archive.store import recent_trading_day_cutoff_iso
@@ -48,10 +49,11 @@ def _summarize(kind: str, result: dict) -> dict:
         summary.update({"universe": result.get("universe"), "n_events": len(result.get("events") or []), "n_groups": len(result.get("aggregates") or [])})
     elif kind == "screening":
         summary.update({"universe": result.get("universe"), "universe_size": result.get("universe_size"), "n_candidates": len(result.get("candidates") or []),
-                        "candidates": [c.get("ticker") for c in (result.get("candidates") or [])][:20]})
+                        "candidates": [c.get("ticker") for c in (result.get("candidates") or [])][:20],
+                        "data_source": result.get("data_source"), "fd_cost_usd": result.get("fd_cost_usd")})
     elif kind == "committee":
         verdicts = result.get("verdicts") or []
-        summary.update({"run_id": result.get("run_id"), "source": result.get("source"), "n_tickers": len(verdicts),
+        summary.update({"run_id": result.get("run_id"), "source": result.get("source"), "n_tickers": len(verdicts), "fd_cost_usd": result.get("fd_cost_usd"),
                         "tickers": [v.get("ticker") for v in verdicts], "top": [t.get("ticker") for t in (result.get("top") or [])[:5]],
                         "stances": {k: sum(1 for v in verdicts if v.get("stance") == k) for k in ("bullish", "bearish", "neutral", "abstain")}})
     elif kind == "backfill":
@@ -257,6 +259,11 @@ def _run_event_study(body: EventStudyInput) -> dict:
 class ScreeningInput(BaseModel):
     universe: Universe = "tech30"
     tickers: list[str] = Field(default_factory=list, max_length=MAX_TICKERS)
+    #: where the four screening inputs come from. yfinance is free and covers
+    #: market cap / revenue growth / gross margin; FD bills per request.
+    data_source: Literal["yfinance", "fd"] = "yfinance"
+    #: enrich candidates with Wall-Street earnings estimates (one FD request per candidate)
+    with_earnings: bool = False
     market_cap_min: float = Field(default=10_000_000_000, ge=0)
     market_cap_max: float = Field(default=5_000_000_000_000, gt=0)
     revenue_growth_min: float = Field(default=0.05, ge=-1, le=10)
@@ -264,44 +271,72 @@ class ScreeningInput(BaseModel):
     volatility_max: float = Field(default=0.60, gt=0, le=10)
 
 
-class _TolerantFD:
-    """Wrap a data client so one uncovered ticker cannot abort a whole screen.
+class _ScreenData:
+    """Metrics from one client, earnings (optional) from another, both tolerant.
 
-    The production FDClient raises ProviderRequestError on a 404 (ticker not
-    covered). The screener iterates tickers sequentially and does not catch,
-    so a single BRK.B-style miss in an index universe killed the run. Here the
-    per-ticker fetches return empty instead and the ticker is recorded.
+    Wraps the screener's data dependency so that a ticker the provider does not
+    cover is skipped instead of aborting the run, and so that FD requests can be
+    counted for the cost line. ``metrics_is_fd`` says whether metrics calls bill.
     """
 
-    _SOFT = ("get_financial_metrics", "get_prices", "get_earnings", "get_earnings_history", "get_news", "get_insider_trades")
-
-    def __init__(self, inner):
-        self._inner = inner
+    def __init__(self, metrics_client, *, metrics_is_fd: bool, earnings_client=None):
+        self._metrics = metrics_client
+        self._earnings = earnings_client
+        self._metrics_is_fd = metrics_is_fd
         self.skipped: dict[str, str] = {}
+        self.fd_requests: dict[str, int] = {}
 
-    def __getattr__(self, name):
-        attr = getattr(self._inner, name)
-        if name not in self._SOFT or not callable(attr):
-            return attr
+    def _count(self, endpoint: str) -> None:
+        self.fd_requests[endpoint] = self.fd_requests.get(endpoint, 0) + 1
 
-        def soft(*args, **kwargs):
-            try:
-                return attr(*args, **kwargs)
-            except Exception as exc:  # noqa: BLE001 — provider miss for one ticker
-                ticker = str(args[0]) if args else "?"
-                self.skipped.setdefault(ticker, f"{name}: {type(exc).__name__}: {str(exc)[:120]}")
-                return [] if name != "get_earnings" else None
+    def get_financial_metrics(self, ticker, end_date, limit=1, **kwargs):
+        if self._metrics_is_fd:
+            self._count("financial_metrics")
+        try:
+            return self._metrics.get_financial_metrics(ticker, end_date, limit=limit, **kwargs)
+        except Exception as exc:  # noqa: BLE001 — provider miss for one ticker
+            self.skipped.setdefault(str(ticker), f"metrics: {type(exc).__name__}: {str(exc)[:120]}")
+            return []
 
-        return soft
+    def get_earnings(self, ticker):
+        if self._earnings is None:
+            return None
+        self._count("earnings")
+        try:
+            return self._earnings.get_earnings(ticker)
+        except Exception as exc:  # noqa: BLE001
+            self.skipped.setdefault(str(ticker), f"earnings: {type(exc).__name__}: {str(exc)[:120]}")
+            return None
+
+    def __getattr__(self, name):  # anything else (misses, stats, ...) comes from the metrics client
+        return getattr(self._metrics, name)
 
     def __enter__(self):
         return self
 
     def __exit__(self, *exc):
-        close = getattr(self._inner, "close", None)
-        if callable(close):
-            close()
+        for client in (self._metrics, self._earnings):
+            close = getattr(client, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:  # noqa: BLE001
+                    pass
         return False
+
+
+def _screen_clients(body: "ScreeningInput") -> _ScreenData:
+    """yfinance (free) or FD for metrics; FD for earnings only when asked."""
+    from v2.data import CachedFDClient
+
+    fd = CachedFDClient() if (body.data_source == "fd" or body.with_earnings) else None
+    if body.data_source == "yfinance":
+        try:
+            from v2.data.yfinance_client import YFinanceClient
+        except Exception as exc:  # noqa: BLE001 — fall back to FD rather than fail the screen
+            raise RuntimeError(f"yfinance client unavailable ({type(exc).__name__}); choose data_source=fd") from exc
+        return _ScreenData(YFinanceClient(), metrics_is_fd=False, earnings_client=fd if body.with_earnings else None)
+    return _ScreenData(fd, metrics_is_fd=True, earnings_client=fd if body.with_earnings else None)
 
 
 class _Ticking(list):
@@ -318,7 +353,6 @@ class _Ticking(list):
 
 
 def _run_screening(body: ScreeningInput, on_tick=None) -> dict:
-    from v2.data import CachedFDClient
     from v2.screening import FilterConfig, run_screening
 
     tickers, meta = resolve_universe(body.universe, body.tickers, limit=BIG_LIMIT)
@@ -329,10 +363,12 @@ def _run_screening(body: ScreeningInput, on_tick=None) -> dict:
         gross_margin_min=body.gross_margin_min,
         volatility_max=body.volatility_max,
     )
-    with _TolerantFD(CachedFDClient()) as client:
+    with _screen_clients(body) as client:
         result = run_screening(_Ticking(tickers, on_tick) if on_tick else tickers, client, config)
-        skipped = dict(client.skipped)
+        skipped, fd_requests = dict(client.skipped), dict(client.fd_requests)
     return {"kind": "screening", "universe": meta["universe"], "universe_as_of": meta.get("as_of"), "tickers": tickers,
+            "data_source": body.data_source, "with_earnings": body.with_earnings,
+            "fd_requests": fd_requests, "fd_cost_usd": fd_cost(fd_requests),
             "thresholds": config.model_dump(), "skipped": skipped, **result.model_dump()}
 
 

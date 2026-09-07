@@ -123,7 +123,8 @@ def test_committee_on_holdings_labels_actions(client, monkeypatch):
     import v2.broker.alpaca_client as alpaca
 
     monkeypatch.setattr(alpaca, "get_portfolio", lambda: portfolio)
-    res = client.post("/api/lab/committee", json={"source": "holdings", "as_of": "2026-06-30", "personas": ["warren_buffett", "peter_lynch", "phil_fisher"], "max_weight": 0.15})
+    # lean=False: Lynch and Fisher need the news / insider rows to reach their bullish votes
+    res = client.post("/api/lab/committee", json={"source": "holdings", "as_of": "2026-06-30", "personas": ["warren_buffett", "peter_lynch", "phil_fisher"], "max_weight": 0.15, "lean": False})
     assert res.status_code == 200, res.text
     by = {v["ticker"]: v for v in res.json()["verdicts"]}
     assert set(by) == {"QLTY", "DSTR"}  # shorts are skipped
@@ -133,7 +134,7 @@ def test_committee_on_holdings_labels_actions(client, monkeypatch):
     assert by["QLTY"]["action"] == "持有" and "上限" in by["QLTY"]["action_reason"]
     assert by["QLTY"]["price"] == 150.0
 
-    relaxed = client.post("/api/lab/committee", json={"source": "holdings", "as_of": "2026-06-30", "personas": ["warren_buffett", "peter_lynch", "phil_fisher"], "max_weight": 0.5}).json()
+    relaxed = client.post("/api/lab/committee", json={"source": "holdings", "as_of": "2026-06-30", "personas": ["warren_buffett", "peter_lynch", "phil_fisher"], "max_weight": 0.5, "lean": False}).json()
     assert {v["ticker"]: v["action"] for v in relaxed["verdicts"]}["QLTY"] == "增持候选"
 
     monkeypatch.setattr(alpaca, "get_portfolio", lambda: {"account": {}, "positions": []})
@@ -392,11 +393,11 @@ def test_ticking_list_reports_each_index():
 
 
 
-def test_tolerant_fd_skips_uncovered_tickers_instead_of_aborting():
+def test_screen_data_skips_uncovered_tickers_and_counts_fd_requests():
     class Boom(Exception):
         pass
 
-    class Inner:
+    class Metrics:
         misses = 3
 
         def get_financial_metrics(self, ticker, end, limit=1):
@@ -404,17 +405,58 @@ def test_tolerant_fd_skips_uncovered_tickers_instead_of_aborting():
                 raise Boom("Financial Datasets EMPTY_DATA at /financial-metrics/ (HTTP 404)")
             return [{"market_cap": 1.0}]
 
-        def get_earnings(self, ticker):
-            raise Boom("no earnings")
-
         def close(self):
             self.closed = True
 
-    inner = Inner()
-    with workspace._TolerantFD(inner) as fd:
+    class Earnings:
+        def get_earnings(self, ticker):
+            if ticker == "AAPL":
+                raise Boom("no earnings")
+            return {"eps": 1}
+
+    metrics, earnings = Metrics(), Earnings()
+    with workspace._ScreenData(metrics, metrics_is_fd=True, earnings_client=earnings) as fd:
         assert fd.get_financial_metrics("AAPL", "2026-06-30", limit=1) == [{"market_cap": 1.0}]
         assert fd.get_financial_metrics("BRK.B", "2026-06-30", limit=1) == []
-        assert fd.get_earnings("AAPL") is None
-        assert fd.misses == 3  # non-wrapped attributes pass through
+        assert fd.get_earnings("AAPL") is None and fd.get_earnings("MSFT") == {"eps": 1}
+        assert fd.misses == 3  # pass-through
     assert set(fd.skipped) == {"BRK.B", "AAPL"} and "HTTP 404" in fd.skipped["BRK.B"]
-    assert inner.closed
+    assert fd.fd_requests == {"financial_metrics": 2, "earnings": 2}
+    assert metrics.closed
+
+    free = workspace._ScreenData(Metrics(), metrics_is_fd=False)
+    free.get_financial_metrics("AAPL", "2026-06-30")
+    assert free.fd_requests == {} and free.get_earnings("AAPL") is None
+
+
+def test_screen_clients_default_to_free_yfinance_and_bill_only_when_asked(monkeypatch):
+    from app.routers.workspace import ScreeningInput, _screen_clients
+
+    free = _screen_clients(ScreeningInput())
+    assert free._metrics_is_fd is False and free._earnings is None
+    paid = _screen_clients(ScreeningInput(data_source="fd", with_earnings=True))
+    assert paid._metrics_is_fd is True and paid._earnings is not None
+    mixed = _screen_clients(ScreeningInput(data_source="yfinance", with_earnings=True))
+    assert mixed._metrics_is_fd is False and mixed._earnings is not None
+
+
+def test_committee_lean_mode_skips_news_and_insiders_and_reports_cost(client, fake):
+    lean = client.post("/api/lab/committee", json={"tickers": ["QLTY"], "as_of": "2026-06-30", "personas": ["charlie_munger"]}).json()
+    assert lean["lean"] is True
+    assert set(lean["fd_requests"]) == {"financial_metrics", "line_items"} and "news" not in lean["fd_requests"]
+    assert lean["fd_cost_usd"] == pytest.approx(0.16)  # 2 metrics + 2 line items at the default $0.04
+    full = client.post("/api/lab/committee", json={"tickers": ["DSTR"], "as_of": "2026-06-30", "personas": ["charlie_munger"], "lean": False}).json()
+    assert {"news", "insider_trades"} <= set(full["fd_requests"]) and full["fd_cost_usd"] > lean["fd_cost_usd"]
+    assert "company_facts" not in full["fd_requests"]  # market cap comes from the metrics row
+    pricing = client.get("/api/lab/committee/pricing").json()
+    assert pricing["committee_per_ticker"]["lean"] == pytest.approx(0.18) and pricing["committee_per_ticker"]["full"] == pytest.approx(0.26)
+
+
+def test_fd_prices_override(monkeypatch):
+    from app import fd_pricing
+
+    monkeypatch.setenv("FD_PRICES", '{"financial_metrics": 0.02, "bogus": 9}')
+    assert fd_pricing.prices()["financial_metrics"] == 0.02 and "bogus" not in fd_pricing.prices()
+    assert fd_pricing.cost({"financial_metrics": 10, "earnings": 3}) == pytest.approx(0.23)
+    monkeypatch.setenv("FD_PRICES", "not json")
+    assert fd_pricing.prices()["financial_metrics"] == 0.04

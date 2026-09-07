@@ -101,6 +101,14 @@ POST /api/lab/committee/narrate      {run_id, ticker, persona, language} → LLM
 POST /api/lab/committee/backfill     run the forward-return backfill now (scheduler ⑯ does it nightly at 02:30 ET)
 ```
 
+Cost control (financialdatasets.ai bills per request on the credits plan):
+the screener defaults to yfinance for market cap / revenue growth / gross
+margin (free; FD is a switch), earnings enrichment is opt-in (one FD request
+per candidate), the committee's 省流模式 (default on) skips the news and
+insider-trade fetches, market cap is read from the metrics row instead of a
+separate call, and every run reports `fd_requests` and `fd_cost_usd`.
+`GET /api/lab/committee/pricing` exposes the price table used for estimates.
+
 Frontend: `ai-workbench/app/lab.tsx` (the Lab section), `app/lib/api.ts`
 (owner-token fetch helper shared with `page.tsx`).
 
@@ -112,6 +120,7 @@ Frontend: `ai-workbench/app/lab.tsx` (the Lab section), `app/lib/api.ts`
 | `WEB_ARCHIVE_DB` | path to v2's `archive.db` | `<repo>/data/archive.db` |
 | `WEB_PERSONAS_DB` | committee votes + snapshot cache (Lab · 投资人委员会) | `<repo>/data/personas.db` |
 | `WEB_LAB_DB` | persisted run log for every Lab tool | `<repo>/data/lab.db` |
+| `FD_PRICES` | JSON overriding financialdatasets.ai per-request prices used for Lab cost estimates, e.g. `{"financial_metrics":0.02,"line_items":0.04}` | published pay-as-you-go tiers, unknown ones at $0.04 |
 | `WEB_CORS_ORIGINS` | comma-separated allowed origins | `localhost:5173` |
 
 Plus the v2 runtime env (`FINANCIAL_DATASETS_API_KEY`, `DEEPSEEK_API_KEY`,

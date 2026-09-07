@@ -29,14 +29,15 @@ const UNIVERSE_LABEL: Record<string, string> = Object.fromEntries(UNIVERSES.map(
 type ScreenCandidate = { ticker: string; price: number; price_change: number | null; market_cap: number | null; revenue_growth: number | null; gross_margin: number | null; volatility: number | null; high_52w: number | null; return_1w?: number | null; revenue_actual?: number | null; revenue_estimate?: number | null };
 type ScreeningJob = { job_id: string; status: 'running' | 'completed' | 'failed'; done: number; total: number; universe: string; error?: string; result?: ScreeningResult };
 type UniverseInfo = { size: number; as_of: string | null; label: string };
-type ScreeningResult = { kind: 'screening'; lab_run_id?: string; universe: string; universe_as_of?: string | null; skipped?: Record<string, string>; tickers: string[]; thresholds: Record<string, number>; date: string; universe_size: number; candidates: ScreenCandidate[]; fd_calls?: number };
+type Pricing = { prices_usd: Record<string, number>; committee_per_ticker: { full: number; lean: number } };
+type ScreeningResult = { kind: 'screening'; lab_run_id?: string; universe: string; universe_as_of?: string | null; skipped?: Record<string, string>; data_source?: 'yfinance' | 'fd'; with_earnings?: boolean; fd_requests?: Record<string, number>; fd_cost_usd?: number; tickers: string[]; thresholds: Record<string, number>; date: string; universe_size: number; candidates: ScreenCandidate[]; fd_calls?: number };
 
 type CommitteeSource = 'tickers' | 'holdings' | 'watchlist' | 'screening';
 type PersonaMeta = { key: string; name: string; name_zh: string; style: string; period: string; lookback: number; needs: string[] };
 type CommitteePart = { name: string; score: number; max_score: number; details: string };
 type CommitteeSignal = { persona: string; ticker: string; as_of: string; signal: 'bullish' | 'bearish' | 'neutral'; confidence: number; score: number; max_score: number; parts: CommitteePart[]; facts: Record<string, unknown>; margin_of_safety: number | null; reasoning: string; narrative?: string | null; narrative_grounded?: boolean | null; abstained: boolean; data_gaps: string[] };
 type CommitteeVerdict = { ticker: string; stance: 'bullish' | 'bearish' | 'neutral' | 'abstain'; consensus: number; bullish: number; bearish: number; neutral: number; abstained: number; voters: number; agreement: number; avg_confidence: number; rank: number | null; signals: CommitteeSignal[]; position?: { weight: number | null; market_value: number; current_price: number | null; unrealized_pl_pct: number | null }; action?: string; action_reason?: string; price?: number | null };
-type CommitteeResult = { kind: 'committee'; run_id: string; lab_run_id?: string; source: CommitteeSource; as_of: string; personas: string[]; personas_meta: PersonaMeta[]; elapsed_s: number; errors: Record<string, string>; cache_hits: string[]; data_gaps?: { gap: string; tickers: string[] }[]; verdicts: CommitteeVerdict[]; top: { rank: number; ticker: string; stance: string; consensus: number }[]; screening?: { universe_size: number | null; n_candidates: number } };
+type CommitteeResult = { kind: 'committee'; run_id: string; lab_run_id?: string; source: CommitteeSource; as_of: string; personas: string[]; personas_meta: PersonaMeta[]; elapsed_s: number; errors: Record<string, string>; cache_hits: string[]; data_gaps?: { gap: string; tickers: string[] }[]; lean?: boolean; fd_requests?: Record<string, number>; fd_cost_usd?: number; verdicts: CommitteeVerdict[]; top: { rank: number; ticker: string; stance: string; consensus: number }[]; screening?: { universe_size: number | null; n_candidates: number } };
 
 type Trade = { ticker: string; direction: string; entry_date: string; exit_date: string; entry_price: number; exit_price: number; pnl: number; return_pct: number; holding_days: number };
 type BacktestResult = { kind: 'backtest'; lab_run_id?: string; strategy: string; universe: string; tickers: string[]; params: Record<string, number>; trades: Trade[]; metrics: { total_return_pct: number; annualized_return_pct: number; sharpe_ratio: number; max_drawdown_pct: number; win_rate: number; n_trades: number; n_long: number; n_short: number; avg_return_pct: number; avg_holding_days: number } | null; equity_curve: number[] };
@@ -58,6 +59,7 @@ type Handoff = { tickers: string[]; from: string };
 const pct = (v: number | null | undefined, d = 1) => v == null || !Number.isFinite(v) ? '—' : `${v >= 0 ? '+' : ''}${(v * 100).toFixed(d)}%`;
 const pctAbs = (v: number | null | undefined, d = 0) => v == null || !Number.isFinite(v) ? '—' : `${(v * 100).toFixed(d)}%`;
 const num = (v: number | null | undefined, d = 2) => v == null || !Number.isFinite(v) ? '—' : v.toFixed(d);
+const usd = (v: number | null | undefined) => v == null || !Number.isFinite(v) ? '—' : `$${v.toFixed(2)}`;
 const money = (v: number | null | undefined) => v == null || !Number.isFinite(v) ? '—' : Math.abs(v) >= 1e12 ? `$${(v / 1e12).toFixed(2)}T` : Math.abs(v) >= 1e9 ? `$${(v / 1e9).toFixed(1)}B` : Math.abs(v) >= 1e6 ? `$${(v / 1e6).toFixed(0)}M` : `$${v.toFixed(2)}`;
 const when = (iso: string) => { try { return new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(iso)) } catch { return iso.slice(5, 16) } };
 const parseTickers = (text: string) => Array.from(new Set(text.split(/[\s,，;]+/).map(t => t.trim().toUpperCase()).filter(Boolean)));
@@ -162,8 +164,9 @@ function OverviewTool({ selectTool, watchlist, ask }: ToolProps) {
 }
 
 function RunRow({ run, onOpen }: { run: RunSummary; onOpen: () => void }) {
-  const line = run.kind === 'screening' ? `${UNIVERSE_LABEL[String(run.universe)] || run.universe} ${run.universe_size} → ${run.n_candidates} 只`
-    : run.kind === 'committee' ? `${run.n_tickers} 只 · 偏多 ${(run.stances as Record<string, number>)?.bullish ?? 0} 偏空 ${(run.stances as Record<string, number>)?.bearish ?? 0}${(run.top as string[])?.length ? ` · 榜首 ${(run.top as string[])[0]}` : ''}`
+  const costTag = typeof run.fd_cost_usd === 'number' ? ` · FD ${usd(run.fd_cost_usd)}` : '';
+  const line = run.kind === 'screening' ? `${UNIVERSE_LABEL[String(run.universe)] || run.universe} ${run.universe_size} → ${run.n_candidates} 只${costTag}`
+    : run.kind === 'committee' ? `${run.n_tickers} 只 · 偏多 ${(run.stances as Record<string, number>)?.bullish ?? 0} 偏空 ${(run.stances as Record<string, number>)?.bearish ?? 0}${(run.top as string[])?.length ? ` · 榜首 ${(run.top as string[])[0]}` : ''}${costTag}`
     : run.kind === 'backtest' ? `${run.n_trades} 笔 · ${pct(run.total_return_pct as number)} · 夏普 ${num(run.sharpe_ratio as number)}`
     : run.kind === 'event_study' ? `${run.n_events} 个事件 · ${run.n_groups} 组`
     : run.kind === 'backfill' ? `回填 ${run.filled} / ${run.checked}` : '';
@@ -176,11 +179,15 @@ function ScreeningTool({ result, setResult, onHand, watchlist, refreshWatchlist,
   const [universe, setUniverse] = useState<Universe>('tech30'); const [tickers, setTickers] = useState('');
   const [capMin, setCapMin] = useState('10'); const [capMax, setCapMax] = useState('5000'); const [rev, setRev] = useState('5'); const [gm, setGm] = useState('50'); const [vol, setVol] = useState('60');
   const [busy, setBusy] = useState(false); const [error, setError] = useState(''); const [picked, setPicked] = useState<Set<string>>(new Set()); const [job, setJob] = useState<ScreeningJob | null>(null);
+  const [dataSource, setDataSource] = useState<'yfinance' | 'fd'>('yfinance'); const [withEarnings, setWithEarnings] = useState(false);
   const info = useLabData<{ items: Record<string, UniverseInfo> }>('/api/lab/universes');
+  const pricing = useLabData<Pricing>('/api/lab/committee/pricing');
+  const poolSize = universe === 'custom' ? parseTickers(tickers).length : (info.data?.items[universe]?.size ?? 0);
+  const estMetrics = dataSource === 'fd' ? poolSize * (pricing.data?.prices_usd.financial_metrics ?? 0.04) : 0;
   const run = async () => {
     setBusy(true); setError(''); setJob(null);
     try {
-      const body = { universe, tickers: universe === 'custom' ? parseTickers(tickers) : [], market_cap_min: Number(capMin) * 1e9, market_cap_max: Number(capMax) * 1e9, revenue_growth_min: Number(rev) / 100, gross_margin_min: Number(gm) / 100, volatility_max: Number(vol) / 100 };
+      const body = { universe, tickers: universe === 'custom' ? parseTickers(tickers) : [], data_source: dataSource, with_earnings: withEarnings, market_cap_min: Number(capMin) * 1e9, market_cap_max: Number(capMax) * 1e9, revenue_growth_min: Number(rev) / 100, gross_margin_min: Number(gm) / 100, volatility_max: Number(vol) / 100 };
       let r = await apiJson<ScreeningResult | ScreeningJob>('/api/lab/screening', { method: 'POST', body: JSON.stringify(body) });
       while ('job_id' in r) {
         setJob(r);
@@ -196,14 +203,17 @@ function ScreeningTool({ result, setResult, onHand, watchlist, refreshWatchlist,
   return <div className="lab-tool">
     <section className="surface lab-config"><div className="surface-header"><div><h2>筛选条件</h2><span>全部阈值可改，缺数据的股票不通过</span></div></div>
       <UniversePicker universe={universe} setUniverse={setUniverse} tickers={tickers} setTickers={setTickers} info={info.data?.items}/>
+      <Field label="数据源" hint={dataSource === 'yfinance' ? '市值、营收增长、毛利率来自 yfinance，免费；口径：营收增长为最近一季同比，毛利率为 TTM' : `Financial Datasets 按请求计费，约 ${usd(pricing.data?.prices_usd.financial_metrics ?? 0.04)}/只`}><Chips options={[{ id: 'yfinance', label: 'yfinance（免费）' }, { id: 'fd', label: 'Financial Datasets（付费）' }]} value={dataSource} onChange={setDataSource}/></Field>
+      <Field label="候选的华尔街财报预期" hint={`来自 Financial Datasets，每只候选约 ${usd(pricing.data?.prices_usd.earnings ?? 0.01)}`}><Chips options={[{ id: 'no', label: '不取' }, { id: 'yes', label: '取' }]} value={withEarnings ? 'yes' : 'no'} onChange={v => setWithEarnings(v === 'yes')}/></Field>
       <div className="lab-grid2"><Field label="市值下限（十亿美元）"><NumberInput value={capMin} onChange={setCapMin} min={0} step={1}/></Field><Field label="市值上限（十亿美元）"><NumberInput value={capMax} onChange={setCapMax} min={1} step={10}/></Field>
         <Field label="营收增长 ≥（%）"><NumberInput value={rev} onChange={setRev} step={1}/></Field><Field label="毛利率 ≥（%）"><NumberInput value={gm} onChange={setGm} min={0} max={100} step={5}/></Field><Field label="年化波动率 ≤（%）"><NumberInput value={vol} onChange={setVol} min={1} step={5}/></Field></div>
+      <p className="lab-note">预计 Financial Datasets 费用：{estMetrics > 0 ? `≈ ${usd(estMetrics)}（${poolSize} 次指标请求）` : '$0.00'}{withEarnings ? ` + 每只候选 ${usd(pricing.data?.prices_usd.earnings ?? 0.01)}` : ''}。价格来自 /api/lab/committee/pricing，可用 FD_PRICES 环境变量校正。</p>
       <button className="run-button" disabled={busy || (universe === 'custom' && !parseTickers(tickers).length)} onClick={() => void run()}>{busy ? (job ? `筛选中… ${job.done} / ${job.total}` : '筛选中…') : '运行筛选'}</button>
       {job && <div className="lab-progress"><i style={{ width: `${job.total ? Math.round((job.done / job.total) * 100) : 0}%` }}/></div>}
     </section>
     <section className="surface lab-result">
       {error ? <ErrorBox text={error}/> : !result ? <Empty glyph="⌕" title="等待筛选" text="选一个股票池、调好阈值，结果是通过硬规则的候选名单。可以整单送进委员会。"/> : <>
-        <div className="surface-header"><div><h2>{result.candidates.length} / {result.universe_size} 只通过</h2><span>{UNIVERSE_LABEL[result.universe] || result.universe}{result.universe_as_of ? `（成分股 ${result.universe_as_of}）` : ''} · {result.date}{result.skipped && Object.keys(result.skipped).length ? ` · 数据源无覆盖跳过 ${Object.keys(result.skipped).length} 只（${Object.keys(result.skipped).slice(0, 6).join(' ')}${Object.keys(result.skipped).length > 6 ? ' …' : ''}）` : ''} · 市值 ≥ {money(result.thresholds.market_cap_min)} · 营收增长 ≥ {pctAbs(result.thresholds.revenue_growth_min)} · 毛利率 ≥ {pctAbs(result.thresholds.gross_margin_min)} · 波动 ≤ {pctAbs(result.thresholds.volatility_max)}</span></div>
+        <div className="surface-header"><div><h2>{result.candidates.length} / {result.universe_size} 只通过</h2><span>{UNIVERSE_LABEL[result.universe] || result.universe}{result.universe_as_of ? `（成分股 ${result.universe_as_of}）` : ''} · {result.date} · {result.data_source === 'fd' ? 'Financial Datasets' : 'yfinance'} · FD 费用 {usd(result.fd_cost_usd ?? 0)}{result.fd_requests && Object.keys(result.fd_requests).length ? `（${Object.entries(result.fd_requests).map(([k, n]) => `${k} ${n}`).join('，')}）` : ''}{result.skipped && Object.keys(result.skipped).length ? ` · 数据源无覆盖跳过 ${Object.keys(result.skipped).length} 只（${Object.keys(result.skipped).slice(0, 6).join(' ')}${Object.keys(result.skipped).length > 6 ? ' …' : ''}）` : ''} · 市值 ≥ {money(result.thresholds.market_cap_min)} · 营收增长 ≥ {pctAbs(result.thresholds.revenue_growth_min)} · 毛利率 ≥ {pctAbs(result.thresholds.gross_margin_min)} · 波动 ≤ {pctAbs(result.thresholds.volatility_max)}</span></div>
           <div className="lab-actions"><button type="button" disabled={!chosen.length} onClick={() => onHand(chosen, '股票筛选', 'committee')}>送入委员会（{chosen.length}）</button><button type="button" disabled={!chosen.length} onClick={() => onHand(chosen, '股票筛选', 'backtest')}>送入回测</button></div></div>
         {result.candidates.length === 0 ? <p className="lab-note">没有股票通过。放宽阈值，或换一个股票池。</p> : <div className="lab-table-wrap"><table className="lab-table"><thead><tr><th><input type="checkbox" checked={picked.size === result.candidates.length} onChange={e => setPicked(e.target.checked ? new Set(result.candidates.map(c => c.ticker)) : new Set())}/></th><th>股票</th><th>价格</th><th>1 日</th><th>1 周</th><th>市值</th><th>营收增长</th><th>毛利率</th><th>波动率</th><th></th></tr></thead><tbody>
           {result.candidates.map(c => <tr key={c.ticker}><td><input type="checkbox" checked={picked.has(c.ticker)} onChange={() => setPicked(cur => { const next = new Set(cur); if (next.has(c.ticker)) next.delete(c.ticker); else next.add(c.ticker); return next })}/></td><td><strong>{c.ticker}</strong></td><td>${num(c.price)}</td><td className={(c.price_change || 0) >= 0 ? 'positive' : 'negative'}>{pct(c.price_change)}</td><td className={(c.return_1w || 0) >= 0 ? 'positive' : 'negative'}>{pct(c.return_1w)}</td><td>{money(c.market_cap)}</td><td>{pct(c.revenue_growth)}</td><td>{pctAbs(c.gross_margin)}</td><td>{pctAbs(c.volatility)}</td><td><AddToWatchlist ticker={c.ticker} watchlist={watchlist} onAdded={refreshWatchlist}/></td></tr>)}
@@ -226,7 +236,10 @@ const FALLBACK_PERSONAS: PersonaMeta[] = [['warren_buffett','Warren Buffett','�
 
 function CommitteeTool({ result, setResult, handoff, clearHandoff, onHand, watchlist, refreshWatchlist, ask }: ToolProps & { result?: CommitteeResult; setResult: (r?: CommitteeResult) => void; handoff: Handoff | null; clearHandoff: () => void; onHand: (t: string[], from: string, to: LabTool) => void }) {
   const [source, setSource] = useState<CommitteeSource>('holdings'); const [tickers, setTickers] = useState('AAPL, MSFT, NVDA');
-  const [topN, setTopN] = useState('15'); const [maxWeight, setMaxWeight] = useState('15'); const [useCache, setUseCache] = useState(true);
+  const [topN, setTopN] = useState('15'); const [maxWeight, setMaxWeight] = useState('15'); const [useCache, setUseCache] = useState(true); const [lean, setLean] = useState(true);
+  const pricing = useLabData<Pricing>('/api/lab/committee/pricing');
+  const perTicker = lean ? pricing.data?.committee_per_ticker.lean : pricing.data?.committee_per_ticker.full;
+  const knownCount = source === 'tickers' ? parseTickers(tickers).length : source === 'screening' ? Number(topN) || 15 : null;
   const personasData = useLabData<{ items: PersonaMeta[] }>('/api/lab/committee/personas');
   const personas = personasData.data?.items?.length ? personasData.data.items : FALLBACK_PERSONAS;
   const [selected, setSelected] = useState<string[]>(FALLBACK_PERSONAS.map(p => p.key));
@@ -236,7 +249,7 @@ function CommitteeTool({ result, setResult, handoff, clearHandoff, onHand, watch
   const run = async () => {
     setBusy(true); setError('');
     try {
-      const body: Record<string, unknown> = { source, personas: allSelected ? undefined : selected, use_cache: useCache, max_weight: (Number(maxWeight) || 15) / 100, ...(source === 'tickers' ? { tickers: parseTickers(tickers) } : {}), ...(source === 'screening' ? { top_n: Number(topN) || 15 } : {}) };
+      const body: Record<string, unknown> = { source, personas: allSelected ? undefined : selected, use_cache: useCache, lean, max_weight: (Number(maxWeight) || 15) / 100, ...(source === 'tickers' ? { tickers: parseTickers(tickers) } : {}), ...(source === 'screening' ? { top_n: Number(topN) || 15 } : {}) };
       setResult(await apiJson<CommitteeResult>('/api/lab/committee', { method: 'POST', body: JSON.stringify(body) }));
     } catch (e) { setError(errorText(e)) } finally { setBusy(false) }
   };
@@ -251,6 +264,8 @@ function CommitteeTool({ result, setResult, handoff, clearHandoff, onHand, watch
         {source === 'screening' && <Field label="从候选中选出前 N 只"><NumberInput value={topN} onChange={setTopN} min={1} max={60}/></Field>}
         <Field label={`参与投票的投资人（${selected.length}/${personas.length}）`}><div className="persona-chips">{personas.map(p => <button key={p.key} type="button" className={selected.includes(p.key) ? 'active' : ''} title={p.style} onClick={() => setSelected(cur => cur.includes(p.key) ? cur.filter(k => k !== p.key) : [...cur, p.key])}>{p.name_zh || p.name}</button>)}<button type="button" className="lab-link" onClick={() => setSelected(allSelected ? [] : personas.map(p => p.key))}>{allSelected ? '全不选' : '全选'}</button></div></Field>
         <Field label="数据"><Chips options={[{ id: 'cache', label: '复用当日快照' }, { id: 'fresh', label: '重新取数' }]} value={useCache ? 'cache' : 'fresh'} onChange={v => setUseCache(v === 'cache')}/></Field>
+        <Field label="省流模式" hint={lean ? '跳过新闻和内部人交易两路付费请求；只影响几位投资人的情绪小分项' : '取全部数据，每只多两次付费请求'}><Chips options={[{ id: 'lean', label: '开（省流）' }, { id: 'full', label: '关（全量）' }]} value={lean ? 'lean' : 'full'} onChange={v => setLean(v === 'lean')}/></Field>
+        <p className="lab-note">预计 Financial Datasets 费用：每只约 {usd(perTicker)}{knownCount ? `，${knownCount} 只约 ${usd((perTicker ?? 0) * knownCount)}` : ''}；当日已有快照的股票不再计费。</p>
         <button className="run-button" disabled={busy || !selected.length || (source === 'tickers' && !parseTickers(tickers).length)} onClick={() => void run()}>{busy ? '评审中…（首次取数约 5 秒/只）' : '开始评审'}</button>
         {history.data?.items.length ? <div className="lab-history"><span>历史运行</span>{history.data.items.map(h => <button key={h.run_id} type="button" onClick={() => void reopen(h.run_id)} className={result?.run_id === h.run_id ? 'active' : ''}>{when(h.created_at)} · {COMMITTEE_SOURCES.find(s => s.id === h.source)?.label || h.source} · {h.n_tickers} 只</button>)}</div> : null}
       </section>
@@ -278,7 +293,7 @@ function CommitteeView({ result, personas, watchlist, refreshWatchlist, ask, onH
   };
   const bullishTickers = verdicts.filter(v => v.stance === 'bullish').map(v => v.ticker);
   return <>
-    <div className="surface-header"><div><h2>{verdicts.length} 只 · {meta.length} 位投资人</h2><span>{COMMITTEE_SOURCES.find(s => s.id === result.source)?.label || result.source} · as of {result.as_of} · {num(result.elapsed_s, 1)}s{result.cache_hits?.length ? ` · ${result.cache_hits.length} 只命中当日缓存` : ''}{result.screening ? ` · 初筛 ${result.screening.universe_size ?? '?'} → ${result.screening.n_candidates}` : ''}</span></div>
+    <div className="surface-header"><div><h2>{verdicts.length} 只 · {meta.length} 位投资人</h2><span>{COMMITTEE_SOURCES.find(s => s.id === result.source)?.label || result.source} · as of {result.as_of} · {num(result.elapsed_s, 1)}s · FD 费用 {usd(result.fd_cost_usd ?? 0)}{result.lean ? '（省流）' : ''}{result.cache_hits?.length ? ` · ${result.cache_hits.length} 只命中当日缓存` : ''}{result.screening ? ` · 初筛 ${result.screening.universe_size ?? '?'} → ${result.screening.n_candidates}` : ''}</span></div>
       <div className="lab-actions"><button type="button" disabled={!bullishTickers.length} onClick={() => onHand(bullishTickers, '委员会偏多', 'backtest')}>偏多的送入回测（{bullishTickers.length}）</button></div></div>
     {Object.keys(result.errors || {}).length > 0 && <div className="committee-errors">{Object.entries(result.errors).map(([t, e]) => <span key={t}><strong>{t}</strong> {e}</span>)}</div>}
     {result.data_gaps && result.data_gaps.length > 0 && <div className="lab-gaps"><strong>数据缺口</strong>{result.data_gaps.map(g => <div key={g.gap}><span>{g.gap}</span><small>{g.tickers.length} 只：{g.tickers.slice(0, 12).join(' ')}{g.tickers.length > 12 ? ' …' : ''}</small></div>)}<p>缺少所需输入的投资人会弃权而不是打低分；弃权票不参与共识。</p></div>}
