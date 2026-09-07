@@ -286,17 +286,34 @@ def parse_constituents(html: str, header_names: tuple[str, ...]) -> list[str]:
     return _dedupe(best)
 
 
-_DATE_FORMATS = ("%B %d, %Y", "%b %d, %Y", "%Y-%m-%d", "%d %B %Y", "%d %b %Y")
+_DATE_FORMATS = ("%B %d, %Y", "%b %d, %Y", "%Y-%m-%d", "%d %B %Y", "%d %b %Y", "%b. %d, %Y")
+_DATE_IN_TEXT = re.compile(r"(\d{4}-\d{2}-\d{2}|[A-Z][a-z]+\.? \d{1,2}, \d{4}|\d{1,2} [A-Z][a-z]+ \d{4})")
 
 
 def _parse_date(text: str) -> str | None:
-    text = re.sub(r"\[.*?\]", "", text).replace("\u200b", "").strip().rstrip(".")
-    for fmt in _DATE_FORMATS:
-        try:
-            return datetime.strptime(text, fmt).date().isoformat()
-        except ValueError:
-            continue
+    """ISO date from a table cell: tolerates footnotes, sort keys, odd spaces."""
+    text = re.sub(r"\[.*?\]", "", text).replace("\u200b", "").replace("\xa0", " ")
+    text = re.sub(r"\s+", " ", text).strip().rstrip(".")
+    candidates = [text] + _DATE_IN_TEXT.findall(text)
+    for cand in candidates:
+        for fmt in _DATE_FORMATS:
+            try:
+                return datetime.strptime(cand, fmt).date().isoformat()
+            except ValueError:
+                continue
     return None
+
+
+def _changes_tables(html: str) -> list[list[list[str]]]:
+    """Every table whose first rows mention both Added and Removed."""
+    parser = _Tables()
+    parser.feed(html)
+    out = []
+    for rows in parser.tables:
+        head = " ".join(" ".join(r) for r in rows[:3]).lower()
+        if "added" in head and "removed" in head:
+            out.append(rows)
+    return out
 
 
 def _clean_symbol(cell: str) -> str | None:
@@ -315,18 +332,14 @@ def parse_changes(html: str) -> list[dict[str, str | None]]:
     rows (rowspan) shows up here as rows with one cell fewer; those inherit the
     previous date. Either ticker may be empty. Newest first, like the page.
     """
-    parser = _Tables()
-    parser.feed(html)
     best: list[dict[str, str | None]] = []
-    for rows in parser.tables:
-        head = " ".join(" ".join(r) for r in rows[:2]).lower()
-        if "added" not in head or "removed" not in head or "date" not in head:
-            continue
+    for rows in _changes_tables(html):
         out: list[dict[str, str | None]] = []
         last_date: str | None = None
         for row in rows:
             cells = [c.strip() for c in row]
-            if not cells or "added" in " ".join(cells).lower() and "removed" in " ".join(cells).lower():
+            joined = " ".join(cells).lower()
+            if not cells or ("added" in joined and "removed" in joined) or joined.startswith("ticker security"):
                 continue  # header rows
             maybe = _parse_date(cells[0])
             if maybe:
@@ -338,13 +351,23 @@ def parse_changes(html: str) -> list[dict[str, str | None]]:
             if len(body) < 3:
                 continue
             added = _clean_symbol(body[0])
-            removed = _clean_symbol(body[2]) if len(body) >= 3 else None
+            removed = _clean_symbol(body[2])
             if added or removed:
                 out.append({"date": last_date, "added": added, "removed": removed,
                             "added_name": body[1] or None, "removed_name": body[3] if len(body) > 3 and body[3] else None})
         if len(out) > len(best):
             best = out
     return best
+
+
+def describe_changes(html: str, limit: int = 8) -> list[str]:
+    """Raw first rows of every candidate changes table — for ``--dump-changes`` debugging."""
+    lines = []
+    for i, rows in enumerate(_changes_tables(html)):
+        lines.append(f"candidate table {i}: {len(rows)} rows, parsed {len(parse_changes(html)) if i == 0 else '-'}")
+        for r in rows[:limit]:
+            lines.append("   " + " | ".join(r))
+    return lines or ["no table mentions both 'Added' and 'Removed' in its first rows"]
 
 
 def describe_tables(html: str) -> list[str]:
@@ -425,7 +448,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--show", choices=sorted(_BUNDLED), help="print the tickers that will be used for one universe")
     parser.add_argument("--dump", choices=sorted(_BUNDLED), help="print every table header found on the Wikipedia page (parser debugging)")
     parser.add_argument("--show-at", nargs=2, metavar=("UNIVERSE", "DATE"), help="print the constituents on a past date, e.g. --show-at sp500 2024-09-10")
+    parser.add_argument("--dump-changes", action="store_true", help="print the raw first rows of the S&P 500 additions/removals table (parser debugging)")
     args = parser.parse_args(argv)
+    if args.dump_changes:
+        for url in _WIKI["sp500"]:
+            print(f"== {url}")
+            try:
+                for line in describe_changes(_fetch(url, 30.0)):
+                    print("  " + line)
+            except Exception as exc:  # noqa: BLE001
+                print(f"  fetch failed: {type(exc).__name__}: {exc}")
     if args.show_at:
         name, on = args.show_at
         tickers, pit = members_at(name, on)
@@ -448,7 +480,7 @@ def main(argv: list[str] | None = None) -> int:
         tickers, as_of = load_universe(args.show)
         print(f"{args.show} · {len(tickers)} tickers · as of {as_of}")
         print(" ".join(tickers))
-    if not (args.refresh or args.show or args.dump or args.show_at):
+    if not (args.refresh or args.show or args.dump or args.show_at or args.dump_changes):
         print(json.dumps(universe_status(), ensure_ascii=False, indent=1))
     return 0
 

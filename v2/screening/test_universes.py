@@ -32,6 +32,16 @@ def test_parse_changes_handles_rowspan_dates_empty_cells_and_dotted_tickers():
     assert U.parse_constituents(HTML, U._HEADERS) == ["AAPL"]  # the constituent parser still picks the other table
 
 
+def test_parse_changes_tolerates_footnotes_nbsp_and_iso_dates():
+    html = """<table><tr><th>Date</th><th colspan=2>Added</th><th colspan=2>Removed</th><th>Reason</th></tr>
+    <tr><th>Ticker</th><th>Security</th><th>Ticker</th><th>Security</th></tr>
+    <tr><td>September&nbsp;22, 2025<sup>[3]</sup></td><td>APP</td><td>AppLovin</td><td>MKTX</td><td>MarketAxess</td><td>r</td></tr>
+    <tr><td>2025-07-23</td><td>BLK</td><td>BlackRock</td><td>WBA</td><td>Walgreens</td><td>r</td></tr></table>"""
+    rows = U.parse_changes(html)
+    assert [(r["date"], r["added"], r["removed"]) for r in rows] == [("2025-09-22", "APP", "MKTX"), ("2025-07-23", "BLK", "WBA")]
+    assert U.describe_changes(html)[0].startswith("candidate table 0: 4 rows")
+
+
 def test_members_at_rewinds_todays_list_through_the_changes(tmp_path, monkeypatch):
     path = tmp_path / "universes.json"
     monkeypatch.setattr(U, "DATA_PATH", path)
