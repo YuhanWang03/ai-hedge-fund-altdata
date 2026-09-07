@@ -85,7 +85,8 @@ class AggregateResult(BaseModel):
     because 8-K filing_date is closer to the actual announcement.
     """
 
-    source_type: str                          # "8-K", "10-Q", "10-K", "20-F"
+    source_type: str                          # group label (kept for older readers; same as ``group``)
+    group: str = ""                           # "ALL" / "BEAT" / "MISS" / "MEET" / "UNLABELED", or a filing type
     n_events: int                             # total events in this group
     windows: list[WindowStats] = Field(default_factory=list)
 
@@ -101,3 +102,5 @@ class EventStudyResult(BaseModel):
     events: list[EventCAR] = Field(default_factory=list)
     aggregates: list[AggregateResult] = Field(default_factory=list)
     skipped_tickers: list[str] = Field(default_factory=list)
+    dedupe: bool = False                      # one event per (ticker, report_period)?
+    group_by: str = "source"                  # how ``aggregates`` are segmented

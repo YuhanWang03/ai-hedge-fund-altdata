@@ -74,6 +74,8 @@ def compute_car(
     n_bootstrap: int = 10_000,
     rng_seed: int | None = None,
     require_eps_surprise: bool = False,
+    dedupe: bool = True,
+    group_by: str = "surprise",
 ) -> EventStudyResult:
     """Compute CARs for earnings events across multiple tickers.
 
@@ -90,6 +92,11 @@ def compute_car(
         n_bootstrap:          Number of bootstrap resamples for CIs.
         rng_seed:             Seed for bootstrap reproducibility (None = random).
         require_eps_surprise: If True, only include events with BEAT/MISS/MEET label.
+        dedupe:               One event per (ticker, report_period): the same announcement
+                              usually appears as an 8-K and again as the 10-Q/10-K; keep the
+                              earliest filing (8-K preferred) so it is not counted twice.
+        group_by:             "surprise" → groups ALL / BEAT / MISS / MEET (the PEAD question);
+                              "source" → groups by filing type (the original robustness check).
 
     Returns:
         EventStudyResult with per-event CARs, aggregate stats, and skipped tickers.
@@ -111,7 +118,7 @@ def compute_car(
 
     for ticker in tickers:
         events = _compute_ticker_events(
-            ticker, fd_client, spy_closes, earnings_limit=earnings_limit,
+            ticker, fd_client, spy_closes, earnings_limit=earnings_limit, dedupe=dedupe,
         )
         if events:
             all_events.extend(events)
@@ -123,10 +130,11 @@ def compute_car(
         all_events = [e for e in all_events if e.eps_surprise is not None]
 
     # Cross-sectional aggregation: mean CAR, t-test, bootstrap CI, by source_type
-    aggregates = _aggregate(all_events, n_bootstrap, rng_seed)
+    aggregates = _aggregate(all_events, n_bootstrap, rng_seed, group_by=group_by)
 
     return EventStudyResult(
         events=all_events, aggregates=aggregates, skipped_tickers=skipped,
+        dedupe=dedupe, group_by=group_by,
     )
 
 
@@ -140,6 +148,7 @@ def _compute_ticker_events(
     spy_closes: dict[str, float],
     *,
     earnings_limit: int = 12,
+    dedupe: bool = True,
 ) -> list[EventCAR]:
     """Compute CARs for all valid earnings events of a single ticker.
 
@@ -157,6 +166,8 @@ def _compute_ticker_events(
 
     # Step 2: Drop retrospective rows (e.g., Q4 data parsed from a Q1 8-K)
     records = _filter_retrospective(records)
+    if dedupe:
+        records = _dedupe_records(records)
     if not records:
         return []
 
@@ -295,10 +306,37 @@ def _process_event(
 # Cross-sectional aggregation
 # ---------------------------------------------------------------------------
 
+_SOURCE_PRIORITY = {"8-K": 0, "10-Q": 1, "10-K": 2, "20-F": 3}
+
+
+def _dedupe_records(records: list[EarningsRecord]) -> list[EarningsRecord]:
+    """One filing per report period: the earliest, preferring the 8-K announcement.
+
+    The price reaction happens on the announcement day; the 10-Q / 10-K a few
+    days later is the same event and would otherwise be counted twice (and
+    make the by-source groups compare the same announcements with themselves).
+    """
+    best: dict[str, EarningsRecord] = {}
+    for r in records:
+        key = str(r.report_period)[:10]
+        rank = (_SOURCE_PRIORITY.get(r.source_type, 9), str(r.filing_date)[:10])
+        cur = best.get(key)
+        if cur is None or rank < (_SOURCE_PRIORITY.get(cur.source_type, 9), str(cur.filing_date)[:10]):
+            best[key] = r
+    return [best[k] for k in sorted(best, reverse=True)]
+
+
+def _group_key(e: EventCAR, group_by: str) -> str:
+    if group_by == "surprise":
+        return e.eps_surprise or "UNLABELED"
+    return e.source_type
+
+
 def _aggregate(
     events: list[EventCAR],
     n_bootstrap: int,
     rng_seed: int | None,
+    group_by: str = "source",
 ) -> list[AggregateResult]:
     """Aggregate CARs across events, segmented by source_type.
 
@@ -315,16 +353,19 @@ def _aggregate(
     if not events:
         return []
 
-    # Group events by source_type
+    # Group events: by EPS surprise (with an ALL group first) or by filing type
     groups: dict[str, list[EventCAR]] = defaultdict(list)
+    if group_by == "surprise":
+        groups["ALL"] = list(events)
     for e in events:
-        groups[e.source_type].append(e)
+        groups[_group_key(e, group_by)].append(e)
 
     # Map window labels to EventCAR attribute names
     car_attr = {"[0,+1]": "car_0_1", "[0,+5]": "car_0_5", "[0,+20]": "car_0_20"}
     results: list[AggregateResult] = []
 
-    for source_type in sorted(groups):
+    order = {"ALL": 0, "BEAT": 1, "MISS": 2, "MEET": 3, "UNLABELED": 4}
+    for source_type in sorted(groups, key=lambda k: (order.get(k, 9), k)):
         group = groups[source_type]
         windows: list[WindowStats] = []
 
@@ -350,8 +391,10 @@ def _aggregate(
                 ci=ci,
             ))
 
+        if not windows:
+            continue  # fewer than two events in every window: nothing to report
         results.append(AggregateResult(
-            source_type=source_type, n_events=len(group), windows=windows,
+            source_type=source_type, group=source_type, n_events=len(group), windows=windows,
         ))
 
     return results

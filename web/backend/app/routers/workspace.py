@@ -351,6 +351,10 @@ class EventStudyInput(BaseModel):
     earnings_limit: int = Field(default=8, ge=1, le=20)
     n_bootstrap: int = Field(default=2000, ge=100, le=10_000)
     require_eps_surprise: bool = True
+    #: one event per (ticker, report period): the 8-K and the later 10-Q/10-K are the same announcement
+    dedupe: bool = True
+    #: "surprise" → ALL / BEAT / MISS / MEET groups; "source" → by filing type
+    group_by: Literal["surprise", "source"] = "surprise"
 
 
 def _run_event_study(body: EventStudyInput) -> dict:
@@ -365,11 +369,14 @@ def _run_event_study(body: EventStudyInput) -> dict:
             earnings_limit=body.earnings_limit,
             n_bootstrap=body.n_bootstrap,
             require_eps_surprise=body.require_eps_surprise,
+            dedupe=body.dedupe,
+            group_by=body.group_by,
         )
         fd_requests = _fd_bill(data, body.data_source)
         price_failures = dict(data.prices.failed)
     return {"kind": "event_study", "universe": meta["universe"], "tickers": tickers, "data_source": body.data_source,
-            "params": {"earnings_limit": body.earnings_limit, "n_bootstrap": body.n_bootstrap, "require_eps_surprise": body.require_eps_surprise, "data_source": body.data_source},
+            "params": {"earnings_limit": body.earnings_limit, "n_bootstrap": body.n_bootstrap, "require_eps_surprise": body.require_eps_surprise,
+                       "data_source": body.data_source, "dedupe": body.dedupe, "group_by": body.group_by},
             "fd_requests": fd_requests, "fd_cost_usd": fd_cost(fd_requests), "price_failures": price_failures, **result.model_dump()}
 
 

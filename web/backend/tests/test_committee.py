@@ -583,7 +583,8 @@ def test_event_study_takes_prices_from_the_chosen_feed_and_bills_earnings(client
 
     seen = {}
 
-    def fake_compute_car(tickers, data, *, earnings_limit, n_bootstrap, require_eps_surprise):
+    def fake_compute_car(tickers, data, *, earnings_limit, n_bootstrap, require_eps_surprise, dedupe, group_by):
+        seen["mode"] = (dedupe, group_by)
         assert isinstance(data, BacktestData)
         seen["chunk"] = data.prices._chunk
         for t in tickers:
@@ -594,6 +595,7 @@ def test_event_study_takes_prices_from_the_chosen_feed_and_bills_earnings(client
     monkeypatch.setattr(es, "compute_car", fake_compute_car)
     free = client.post("/api/lab/event-study", json={"tickers": ["AAA", "BBB"]}).json()
     assert free["data_source"] == "yfinance" and free["fd_requests"] == {"earnings": 2} and free["fd_cost_usd"] == 0.04 and seen["chunk"] is None
+    assert seen["mode"] == (True, "surprise") and free["params"]["group_by"] == "surprise"
     paid = client.post("/api/lab/event-study", json={"tickers": ["AAA", "BBB"], "data_source": "fd"}).json()
     assert paid["fd_requests"] == {"earnings": 2, "prices": 3} and paid["fd_cost_usd"] == 0.1 and seen["chunk"] == workspace.FD_PRICE_CHUNK_DAYS
     assert client.get("/api/lab/runs?kind=event_study").json()["items"][0]["fd_cost_usd"] == 0.1
