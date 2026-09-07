@@ -94,7 +94,10 @@ optional `near_high_pct` for the 52-week-high variant), `insider`
 purchases), and `committee` (the 13 personas vote at every rebalance date over
 `history_days`; fundamentals as of `filing_lag_days` earlier; `top_n`,
 `min_consensus`, `min_agreement`, `lean`; `notes.periods` on the result lists
-every rebalance date's votes and picks). `data_source` picks where daily
+every rebalance date's votes and picks). Momentum is price-only, so it may
+run over a whole index universe (sp500 / nasdaq100 / dow30, as a job); the
+paid strategies keep the 60-ticker cap. Every result carries `benchmark`
+(SPY buy-and-hold from first entry to last exit) and `excess_return_pct`. `data_source` picks where daily
 prices come from — yfinance is free, FD bills per 90-day chunk — while
 earnings, insider trades and fundamentals are always Financial Datasets;
 `fd_requests` / `fd_cost_usd` on the result say what a run cost, and persona

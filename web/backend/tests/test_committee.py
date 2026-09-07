@@ -340,9 +340,12 @@ def test_index_universes_resolve_only_for_the_screener(client, monkeypatch):
     # contributes multiple share classes, so validate the lower bound rather
     # than pinning a live constituent feed to an exact count.
     assert items["sp500"]["size"] > 450 and items["nasdaq100"]["size"] >= 100 and items["tech30"]["size"] == len(TECH_30)
-    # backtest refuses an index universe cleanly
-    res = client.post("/api/lab/backtest", json={"universe": "sp500"})
+    # paid strategies refuse an index universe cleanly; the free momentum strategy takes the whole index as a job
+    res = client.post("/api/lab/backtest", json={"universe": "sp500", "strategy": "pead"})
     assert res.status_code in (400, 503) and "at most 60" in res.json()["detail"]
+    monkeypatch.setattr(workspace, "_run_backtest", lambda body, on_tick=None: {"kind": "backtest", "strategy": body.strategy, "universe": body.universe, "tickers": [], "trades": [], "metrics": None, "equity_curve": []})
+    job = client.post("/api/lab/backtest", json={"universe": "sp500", "strategy": "momentum"}).json()
+    assert job["kind"] == "backtest_job" and job["total"] > 450
 
 
 def test_large_screening_runs_as_a_polled_job(client, monkeypatch):
@@ -535,6 +538,9 @@ def test_backtest_strategies_and_data_feeds(client, monkeypatch, tmp_path):
     body = res.json()
     assert body["strategy"] == "momentum" and body["data_source"] == "yfinance" and body["fd_cost_usd"] == 0 and body["fd_requests"] == {}
     assert body["metrics"]["n_trades"] >= 5 and body["params"]["lookback_days"] == 252 and body["notes"]["price_failures"] == {}
+    # SPY buy-and-hold over the same span, and the strategy's excess over it
+    assert body["benchmark"]["ticker"] == "SPY" and body["benchmark"]["start"] == body["trades"][0]["entry_date"] and body["benchmark"]["total_return_pct"] > 0
+    assert abs(body["excess_return_pct"] - (body["metrics"]["total_return_pct"] - body["benchmark"]["total_return_pct"])) < 1e-6
     assert client.get("/api/lab/runs?kind=backtest").json()["items"][0]["fd_cost_usd"] == 0
 
     assert client.post("/api/lab/backtest", json={"tickers": ["AAA"], "strategy": "bollinger"}).status_code == 422

@@ -47,7 +47,7 @@ def _summarize(kind: str, result: dict) -> dict:
         m = result.get("metrics") or {}
         summary.update({"strategy": result.get("strategy"), "universe": result.get("universe"), "n_trades": m.get("n_trades", 0),
                         "total_return_pct": m.get("total_return_pct"), "sharpe_ratio": m.get("sharpe_ratio"), "max_drawdown_pct": m.get("max_drawdown_pct"),
-                        "data_source": result.get("data_source"), "fd_cost_usd": result.get("fd_cost_usd")})
+                        "data_source": result.get("data_source"), "fd_cost_usd": result.get("fd_cost_usd"), "excess_return_pct": result.get("excess_return_pct")})
     elif kind == "event_study":
         summary.update({"universe": result.get("universe"), "n_events": len(result.get("events") or []), "n_groups": len(result.get("aggregates") or []),
                         "data_source": result.get("data_source"), "fd_cost_usd": result.get("fd_cost_usd")})
@@ -318,6 +318,37 @@ def _build_strategy(body: BacktestInput, on_tick=None):
                              store=_store(), progress=on_tick)
 
 
+def _backtest_limit(body: BacktestInput) -> int:
+    """Price-only momentum is free, so it may run over a whole index; paid strategies keep the small cap."""
+    return BIG_LIMIT if body.strategy == "momentum" else MAX_TICKERS
+
+
+def _benchmark(data, trades, ticker: str = "SPY") -> dict | None:
+    """Buy-and-hold return of ``ticker`` from the first entry to the last exit, for comparison."""
+    if not trades:
+        return None
+    start = min(t.entry_date for t in trades)
+    end = max(t.exit_date for t in trades)
+    rows = data.get_prices(ticker, start, end) or []
+    closes = []
+    for r in rows:
+        close = r.get("close") if isinstance(r, dict) else getattr(r, "close", None)
+        try:
+            close = float(close)
+        except (TypeError, ValueError):
+            continue
+        if close > 0:
+            closes.append(close)
+    if len(closes) < 2:
+        return None
+    total = closes[-1] / closes[0] - 1
+    days = (datetime.fromisoformat(end) - datetime.fromisoformat(start)).days
+    years = days / 365.25
+    annualized = (1 + total) ** (1 / years) - 1 if years >= 0.1 else None
+    return {"ticker": ticker, "start": start, "end": end, "total_return_pct": round(total, 6),
+            "annualized_return_pct": round(annualized, 6) if annualized is not None else None}
+
+
 def _backtest_total(body: BacktestInput, n_tickers: int) -> int:
     """Progress units: tickers, or tickers × rebalance dates for the committee."""
     if body.strategy != "committee":
@@ -330,17 +361,22 @@ def _backtest_total(body: BacktestInput, n_tickers: int) -> int:
 def _run_backtest(body: BacktestInput, on_tick=None) -> dict:
     from v2.backtesting import BacktestEngine
 
-    tickers, meta = resolve_universe(body.universe, body.tickers)
+    tickers, meta = resolve_universe(body.universe, body.tickers, limit=_backtest_limit(body))
     with _backtest_data(body) as data:
         data.progress = on_tick
         strategy = _build_strategy(body, on_tick)
         result = BacktestEngine(capital=body.capital, per_trade=body.per_trade).run(strategy, tickers, data)
+        benchmark = _benchmark(data, result.trades)
         fd_requests = _fd_bill(data, body.data_source)
         notes = {"price_failures": dict(data.prices.failed), "errors": dict(getattr(strategy, "errors", {}) or {}),
                  "rebalance_dates": list(getattr(strategy, "dates", []) or []), "periods": list(getattr(strategy, "periods", []) or []),
                  "aborted": getattr(strategy, "aborted", None)}
-    return {"kind": "backtest", "strategy": body.strategy, "data_source": body.data_source, "universe": meta["universe"], "tickers": tickers,
-            "params": body.params(), "fd_requests": fd_requests, "fd_cost_usd": fd_cost(fd_requests), "notes": notes, **result.model_dump()}
+    excess = None
+    if benchmark and result.metrics:
+        excess = round(result.metrics.total_return_pct - benchmark["total_return_pct"], 6)
+    return {"kind": "backtest", "strategy": body.strategy, "data_source": body.data_source, "universe": meta["universe"], "universe_as_of": meta.get("as_of"),
+            "tickers": tickers, "params": body.params(), "fd_requests": fd_requests, "fd_cost_usd": fd_cost(fd_requests), "notes": notes,
+            "benchmark": benchmark, "excess_return_pct": excess, **result.model_dump()}
 
 
 class EventStudyInput(BaseModel):
@@ -546,7 +582,7 @@ async def _lab_call(fn, body) -> dict:
 async def run_backtest(body: BacktestInput, background: bool | None = None) -> dict:
     """Quick runs answer inline; the committee strategy (or ?background=true) returns a job to poll."""
     try:
-        tickers, _ = await run_in_threadpool(resolve_universe, body.universe, body.tickers)
+        tickers, _ = await run_in_threadpool(resolve_universe, body.universe, body.tickers, limit=_backtest_limit(body))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     total = _backtest_total(body, len(tickers))
