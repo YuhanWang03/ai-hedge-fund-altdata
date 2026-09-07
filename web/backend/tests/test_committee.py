@@ -1,0 +1,194 @@
+"""Lab · 投资人委员会 endpoint tests. No network, no key, no LLM."""
+
+from __future__ import annotations
+
+from contextlib import contextmanager
+
+import pytest
+from fastapi.testclient import TestClient
+
+from app.main import app
+from app.routers import committee, workspace
+from v2.personas.fixtures import distressed_snapshot, quality_snapshot
+from v2.personas.store import PersonaStore
+
+
+class _FakeClient:
+    """Serves the synthetic snapshots through the persona data protocol."""
+
+    def __init__(self):
+        self.snaps = {s.ticker: s for s in (quality_snapshot(), distressed_snapshot())}
+        self.calls = 0
+
+    def _snap(self, ticker):
+        return self.snaps.get(ticker.upper())
+
+    def get_financial_metrics(self, ticker, end_date, *, period="ttm", limit=10):
+        self.calls += 1
+        s = self._snap(ticker)
+        return [r.to_dict() for r in s.metrics(period, limit)] if s else []
+
+    def search_line_items(self, ticker, line_items, end_date, *, period="ttm", limit=10):
+        self.calls += 1
+        s = self._snap(ticker)
+        return [r.to_dict() for r in s.line_items(period, limit)] if s else []
+
+    def get_market_cap(self, ticker, end_date):
+        self.calls += 1
+        s = self._snap(ticker)
+        return s.market_cap if s else None
+
+    def get_insider_trades(self, ticker, end_date, *, start_date=None, limit=1000):
+        self.calls += 1
+        s = self._snap(ticker)
+        return list(s.insider_trades) if s else []
+
+    def get_company_news(self, ticker, end_date, *, start_date=None, limit=100):
+        self.calls += 1
+        s = self._snap(ticker)
+        return list(s.news) if s else []
+
+    def get_prices(self, ticker, start_date, end_date):
+        self.calls += 1
+        s = self._snap(ticker)
+        return list(s.prices) if s else []
+
+
+@pytest.fixture()
+def fake():
+    return _FakeClient()
+
+
+@pytest.fixture()
+def client(tmp_path, monkeypatch, fake):
+    monkeypatch.setattr(committee, "_STORE", PersonaStore(tmp_path / "personas.db"))
+
+    @contextmanager
+    def _fake_data_client():
+        yield fake
+
+    monkeypatch.setattr(committee, "_data_client", _fake_data_client)
+    workspace._LAB_RUNS.clear()
+    return TestClient(app)
+
+
+def test_committee_on_explicit_tickers_returns_matrix_and_persists(client, fake):
+    body = {"source": "tickers", "tickers": ["qlty", "DSTR", "qlty"], "as_of": "2026-06-30", "personas": ["warren_buffett", "ben_graham", "michael_burry"]}
+    res = client.post("/api/lab/committee", json=body)
+    assert res.status_code == 200, res.text
+    data = res.json()
+    assert data["kind"] == "committee" and data["source"] == "tickers"
+    assert [v["ticker"] for v in data["verdicts"]] == ["QLTY", "DSTR"]
+    assert data["verdicts"][1]["stance"] == "bearish" and data["verdicts"][1]["bearish"] == 3
+    assert [m["key"] for m in data["personas_meta"]] == ["warren_buffett", "ben_graham", "michael_burry"]
+    assert data["personas_meta"][0]["name_zh"] == "沃伦·巴菲特"
+    assert data["top"][0]["ticker"] == "QLTY" and len(data["top"]) == 2
+    assert data["cache_hits"] == [] and data["run_id"]
+    assert "position" not in data["verdicts"][0]
+    first_calls = fake.calls
+    assert first_calls > 0
+
+    # persisted: run log + detail + workspace run summary
+    runs = client.get("/api/lab/committee/runs").json()["items"]
+    assert runs[0]["run_id"] == data["run_id"] and runs[0]["tickers"] == ["QLTY", "DSTR"]
+    detail = client.get(f"/api/lab/committee/runs/{data['run_id']}").json()
+    assert detail["verdicts"][0]["signals"][0]["persona"] == "warren_buffett"
+    lab_runs = client.get("/api/lab/runs").json()["items"]
+    assert lab_runs[0]["kind"] == "committee" and lab_runs[0]["top"][0] == "QLTY"
+    assert client.get("/api/lab/committee/runs/nope").status_code == 404
+
+    # second run the same day hits the snapshot cache: zero data calls
+    again = client.post("/api/lab/committee", json=body).json()
+    assert again["cache_hits"] == ["DSTR", "QLTY"] and fake.calls == first_calls
+    assert again["verdicts"][0]["consensus"] == data["verdicts"][0]["consensus"]
+
+
+def test_committee_defaults_to_all_personas_and_rejects_unknown(client):
+    res = client.post("/api/lab/committee", json={"tickers": ["QLTY"], "as_of": "2026-06-30"})
+    assert res.status_code == 200
+    assert len(res.json()["personas_meta"]) == 13 and len(res.json()["verdicts"][0]["signals"]) == 13
+    bad = client.post("/api/lab/committee", json={"tickers": ["QLTY"], "personas": ["elon"]})
+    assert bad.status_code == 400 and "unknown persona" in bad.json()["detail"]
+    assert client.post("/api/lab/committee", json={"tickers": ["bad ticker!"]}).status_code == 400
+    assert client.post("/api/lab/committee", json={"tickers": []}).status_code == 400
+
+
+def test_committee_on_holdings_labels_actions(client, monkeypatch):
+    portfolio = {
+        "account": {"portfolio_value": 100_000.0},
+        "positions": [
+            {"symbol": "QLTY", "market_value": 20_000.0, "current_price": 150.0, "side": "long", "unrealized_pl_pct": 0.1},
+            {"symbol": "DSTR", "market_value": 5_000.0, "current_price": 40.0, "side": "long", "unrealized_pl_pct": -0.2},
+            {"symbol": "SHRT", "market_value": 1_000.0, "current_price": 1.0, "side": "short"},
+        ],
+    }
+    import v2.broker.alpaca_client as alpaca
+
+    monkeypatch.setattr(alpaca, "get_portfolio", lambda: portfolio)
+    res = client.post("/api/lab/committee", json={"source": "holdings", "as_of": "2026-06-30", "personas": ["warren_buffett", "peter_lynch", "phil_fisher"], "max_weight": 0.15})
+    assert res.status_code == 200, res.text
+    by = {v["ticker"]: v for v in res.json()["verdicts"]}
+    assert set(by) == {"QLTY", "DSTR"}  # shorts are skipped
+    assert by["DSTR"]["action"] == "减持候选" and by["DSTR"]["position"]["weight"] == pytest.approx(0.05)
+    assert by["QLTY"]["position"]["weight"] == pytest.approx(0.20)
+    # QLTY: Lynch + Fisher bullish, Buffett neutral → consensus > .2, agreement 2/3, but weight 20% >= cap 15% → hold
+    assert by["QLTY"]["action"] == "持有" and "上限" in by["QLTY"]["action_reason"]
+    assert by["QLTY"]["price"] == 150.0
+
+    relaxed = client.post("/api/lab/committee", json={"source": "holdings", "as_of": "2026-06-30", "personas": ["warren_buffett", "peter_lynch", "phil_fisher"], "max_weight": 0.5}).json()
+    assert {v["ticker"]: v["action"] for v in relaxed["verdicts"]}["QLTY"] == "增持候选"
+
+    monkeypatch.setattr(alpaca, "get_portfolio", lambda: {"account": {}, "positions": []})
+    assert client.post("/api/lab/committee", json={"source": "holdings"}).status_code == 400
+
+
+def test_committee_on_watchlist_and_screening(client, monkeypatch, tmp_path):
+    from v2.bot import state as bot_state
+
+    monkeypatch.setattr(bot_state, "_DB_PATH", tmp_path / "bot_state.db")
+    assert client.post("/api/lab/committee", json={"source": "watchlist"}).status_code == 400  # empty
+    client.post("/api/watchlist", json={"ticker": "dstr", "note": ""})
+    res = client.post("/api/lab/committee", json={"source": "watchlist", "as_of": "2026-06-30", "personas": ["warren_buffett"]})
+    assert res.status_code == 200 and [v["ticker"] for v in res.json()["verdicts"]] == ["DSTR"]
+
+    monkeypatch.setattr(
+        workspace, "_run_screening",
+        lambda body: {"kind": "screening", "date": "2026-06-30", "universe_size": 30, "candidates": [{"ticker": "QLTY", "price": 150.0, "market_cap": 250e9, "revenue_growth": 0.12, "gross_margin": 0.62}]},
+    )
+    res = client.post("/api/lab/committee", json={"source": "screening", "as_of": "2026-06-30", "personas": ["warren_buffett"], "screening": {"revenue_growth_min": 0.1}})
+    assert res.status_code == 200, res.text
+    data = res.json()
+    assert data["screening"]["n_candidates"] == 1 and data["screening"]["universe_size"] == 30
+    assert [v["ticker"] for v in data["verdicts"]] == ["QLTY"]
+
+
+def test_personas_and_scoreboard_endpoints(client):
+    items = client.get("/api/lab/committee/personas").json()["items"]
+    assert len(items) == 13 and items[0] == {
+        "key": "warren_buffett", "name": "Warren Buffett", "name_zh": "沃伦·巴菲特",
+        "style": "seeks wonderful companies at a fair price", "period": "ttm", "lookback": 10, "needs": [],
+    }
+    assert client.get("/api/lab/committee/scoreboard").json() == {"kind": "scoreboard", "items": []}
+
+
+def test_store_forward_return_backfill(tmp_path):
+    store = PersonaStore(tmp_path / "p.db")
+    payload = {
+        "as_of": "2026-01-15", "personas": ["warren_buffett"], "elapsed_s": 0.1,
+        "verdicts": [{"ticker": "AAA", "price": 100.0, "signals": [
+            {"persona": "warren_buffett", "as_of": "2026-01-15", "signal": "bullish", "confidence": 70, "score": 8, "max_score": 10, "abstained": False, "facts": {}},
+            {"persona": "ben_graham", "as_of": "2026-01-15", "signal": "neutral", "confidence": 0, "score": 0, "max_score": 0, "abstained": True, "facts": {}},
+        ]}],
+    }
+    run_id = store.save_run(payload, source="tickers")
+    assert store.get_run(run_id)["run_id"] == run_id
+    pending = store.signals_awaiting_forward_returns(older_than_days=30)
+    assert [p["persona"] for p in pending] == ["warren_buffett"]  # abstentions never scored
+    store.set_forward_return(pending[0]["id"], column="fwd_1m", value=0.08)
+    assert store.signals_awaiting_forward_returns(older_than_days=30) == []
+    board = store.persona_scoreboard()
+    assert board == [{"persona": "warren_buffett", "n": 1, "hits": 1, "hit_rate": 1.0, "avg_directional_1m": 0.08}]
+    latest = store.latest_signals("AAA")
+    assert {s["persona"] for s in latest} == {"warren_buffett", "ben_graham"}
+    with pytest.raises(ValueError):
+        store.set_forward_return(1, column="drop table", value=0)

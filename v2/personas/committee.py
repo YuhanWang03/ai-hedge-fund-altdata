@@ -86,6 +86,8 @@ class CommitteeResult:
     verdicts: list[TickerVerdict]          # sorted by consensus, best first
     elapsed_s: float = 0.0
     errors: dict[str, str] = field(default_factory=dict)
+    #: the snapshots the verdicts were computed from (not serialized; for caching)
+    snapshots: dict[str, PersonaSnapshot] = field(default_factory=dict, repr=False)
 
     def verdict(self, ticker: str) -> TickerVerdict | None:
         for v in self.verdicts:
@@ -236,4 +238,5 @@ def run_committee(
         verdicts=verdicts,
         elapsed_s=time.time() - started,
         errors=errors,
+        snapshots={t: ready[t] for t in wanted if t in ready},
     )

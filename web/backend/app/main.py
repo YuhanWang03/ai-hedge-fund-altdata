@@ -16,7 +16,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import SETTINGS
-from app.routers import chat, dashboard, health, portfolio, research, workspace
+from app.routers import chat, committee, dashboard, health, portfolio, research, workspace
 
 repo_root = str(SETTINGS.repo_root.resolve())
 if repo_root not in sys.path:
@@ -38,3 +38,4 @@ app.include_router(portfolio.router)
 app.include_router(dashboard.router)
 app.include_router(workspace.router)
 app.include_router(research.router)
+app.include_router(committee.router)

@@ -34,6 +34,13 @@ def _remember_run(kind: str, result: dict) -> None:
         summary.update({"n_events": len(result.get("events") or []), "tickers": result.get("tickers", [])})
     elif kind == "screening":
         summary.update({"n_candidates": len(result.get("candidates") or []), "tickers": result.get("tickers", [])})
+    elif kind == "committee":
+        verdicts = result.get("verdicts") or []
+        summary.update({
+            "run_id": result.get("run_id"), "source": result.get("source"),
+            "n_tickers": len(verdicts), "tickers": [v.get("ticker") for v in verdicts],
+            "top": [t.get("ticker") for t in (result.get("top") or [])[:5]],
+        })
     _LAB_RUNS.insert(0, summary)
     del _LAB_RUNS[50:]
 

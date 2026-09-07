@@ -42,6 +42,7 @@ v2/personas/
 ├── <investor>.py    十三位投资人，各自一个文件，上游的打分函数逐条保留
 ├── registry.py      key → 类，懒加载
 ├── committee.py     run_committee()：并行取快照、逐人打分、按置信度加权投票、排名
+├── store.py         SQLite（data/personas.db）：委员会运行记录、逐人信号（预留 fwd_1m/fwd_3m 前向收益列）、当日快照缓存
 ├── narrate.py       可选 LLM 解读：信号与置信度不可改，数字须可溯源
 ├── fixtures.py      合成快照（quality / distressed / empty），测试与 --demo 用
 └── __main__.py      CLI
@@ -84,10 +85,24 @@ v2/personas/
 位置参数写法，缺的方法（如 `search_line_items`）在设了
 `FINANCIAL_DATASETS_API_KEY` 时由内置 HTTP 客户端补上。
 
+## 实验室接入
+
+`web/backend/app/routers/committee.py` 把这一层挂到工作台的实验室页面（"投资人委员会"工具）：
+
+| 接口 | 作用 |
+|---|---|
+| `POST /api/lab/committee` | 输入来源 `source`：`holdings`（Alpaca 多头持仓，带权重和增持/持有/减持标签）、`watchlist`、`tickers`（≤60 只）、`screening`（先跑股票筛选再评审）。可选 `personas`、`as_of`、`top_n`、`max_weight`。 |
+| `GET /api/lab/committee/runs` · `/runs/{id}` | 落库的运行记录与完整结果 |
+| `GET /api/lab/committee/personas` | 13 位投资人的元数据（前端的多选） |
+| `GET /api/lab/committee/scoreboard` | 回填前向收益后的逐人命中率（目前为空） |
+
+持仓标签是一条透明规则（`_holding_action`）：共识 ≥ +0.2 且一致度 ≥ 50% 为"增持候选"，
+但权重已达 `max_weight` 则"持有"；共识 ≤ −0.2 为"减持候选"；其余"持有"。
+
 ## 未做的事
 
-- 没有 Web 接口和实验室页面的接入，这一层只是引擎。
-- 没有历史回测；LLM 层做回测有前视偏差，确定性打分层可以包成
-  `v2/backtesting.Strategy`，尚未实现。
-- 没有落库；`PersonaSignal.to_dict()` / `CommitteeResult.to_dict()` 已是 JSON，
-  存哪里由调用方决定。
+- 前向收益回填：`store.py` 预留了 `fwd_1m` / `fwd_3m` 列和 `signals_awaiting_forward_returns()`，
+  还没有定时任务去填。填上之后 `/scoreboard` 才有内容。
+- 历史回测：LLM 层做回测有前视偏差；确定性打分层可以包成 `v2/backtesting.Strategy`，尚未实现。
+- 接口是同步的（沿用实验室 240 秒超时）。规则层有缓存时几秒即返；若以后加 LLM 解读，
+  应照 `routers/research.py` 的异步任务模式。

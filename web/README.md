@@ -67,12 +67,29 @@ npm run dev          # → http://127.0.0.1:5173  (proxies /api to :8100)
 Open the page, paste your `WEB_OWNER_TOKEN` into the header box (if auth is on),
 click 保存. Left pane = portfolio; right pane = chat.
 
+## Lab · 投资人委员会
+
+`routers/committee.py` exposes the thirteen rule-based investor personas
+(`v2/personas/`) to the workbench's Lab section:
+
+```
+POST /api/lab/committee            {source: holdings|watchlist|tickers|screening, tickers?, personas?, as_of?, top_n?, max_weight?}
+GET  /api/lab/committee/runs       persisted run log (data/personas.db, override with WEB_PERSONAS_DB)
+GET  /api/lab/committee/runs/{id}  full result of one run
+GET  /api/lab/committee/personas   persona metadata for the picker
+GET  /api/lab/committee/scoreboard per-persona hit rate once forward returns are back-filled
+```
+
+Fundamentals snapshots are cached per (ticker, day), so re-running the same
+day costs no API calls. No LLM is involved in the verdicts.
+
 ## Env
 
 | Var | Meaning | Default |
 |---|---|---|
 | `WEB_OWNER_TOKEN` | required header value in prod; empty = auth off (dev) | *(unset)* |
 | `WEB_ARCHIVE_DB` | path to v2's `archive.db` | `<repo>/data/archive.db` |
+| `WEB_PERSONAS_DB` | committee run log + snapshot cache (Lab · 投资人委员会) | `<repo>/data/personas.db` |
 | `WEB_CORS_ORIGINS` | comma-separated allowed origins | `localhost:5173` |
 
 Plus the v2 runtime env (`FINANCIAL_DATASETS_API_KEY`, `DEEPSEEK_API_KEY`,
