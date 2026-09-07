@@ -335,7 +335,10 @@ def test_index_universes_resolve_only_for_the_screener(client, monkeypatch):
     from v2.screening.universe import TECH_30
 
     items = client.get("/api/lab/universes").json()["items"]
-    assert items["sp500"]["size"] > 450 and items["nasdaq100"]["size"] == 100 and items["tech30"]["size"] == len(TECH_30)
+    # Nasdaq-100 can contain more than 100 listed securities when one company
+    # contributes multiple share classes, so validate the lower bound rather
+    # than pinning a live constituent feed to an exact count.
+    assert items["sp500"]["size"] > 450 and items["nasdaq100"]["size"] >= 100 and items["tech30"]["size"] == len(TECH_30)
     # backtest refuses an index universe cleanly
     res = client.post("/api/lab/backtest", json={"universe": "sp500"})
     assert res.status_code in (400, 503) and "at most 60" in res.json()["detail"]
