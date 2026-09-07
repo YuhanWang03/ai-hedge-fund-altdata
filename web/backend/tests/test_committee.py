@@ -115,9 +115,9 @@ def test_committee_on_holdings_labels_actions(client, monkeypatch):
     portfolio = {
         "account": {"portfolio_value": 100_000.0},
         "positions": [
-            {"symbol": "QLTY", "market_value": 20_000.0, "current_price": 150.0, "side": "long", "unrealized_pl_pct": 0.1},
+            {"symbol": "QLTY", "market_value": 20_000.0, "current_price": 150.0, "side": "PositionSide.LONG", "unrealized_pl_pct": 0.1},
             {"symbol": "DSTR", "market_value": 5_000.0, "current_price": 40.0, "side": "long", "unrealized_pl_pct": -0.2},
-            {"symbol": "SHRT", "market_value": 1_000.0, "current_price": 1.0, "side": "short"},
+            {"symbol": "SHRT", "market_value": 1_000.0, "current_price": 1.0, "side": "PositionSide.SHORT"},
         ],
     }
     import v2.broker.alpaca_client as alpaca

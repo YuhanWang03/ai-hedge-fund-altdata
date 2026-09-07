@@ -41,7 +41,9 @@ def holdings() -> tuple[list[str], dict[str, dict[str, Any]]]:
     positions: dict[str, dict[str, Any]] = {}
     for p in pf.get("positions") or []:
         symbol = str(p.get("symbol") or "").upper()
-        if not symbol or str(p.get("side", "long")).lower() != "long":
+        # alpaca-py hands back an enum; str() of it is "PositionSide.LONG".
+        side = str(p.get("side") or "long").lower().rsplit(".", 1)[-1]
+        if not symbol or side == "short":
             continue
         mv = float(p.get("market_value") or 0.0)
         positions[symbol] = {
