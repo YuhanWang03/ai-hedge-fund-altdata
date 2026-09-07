@@ -362,14 +362,18 @@ class WarrenBuffett(Persona):
         if not shares or shares <= 0:
             return {"intrinsic_value": None, "details": ["Missing or invalid shares outstanding data"]}
 
-        historical = [i.net_income for i in items[:5] if i.net_income]
-        if len(historical) >= 3 and historical[-1] > 0:
-            years = len(historical) - 1
-            growth = (historical[0] / historical[-1]) ** (1 / years) - 1
-            growth = max(-0.05, min(growth, 0.15))
-            conservative_growth = growth * 0.7
+        # Date-based growth (rows may be quarterly TTM, so row count ≠ years); a loss in the
+        # newest period is a decline, not a complex number — clamp it to the floor.
+        newest_income = items[0].net_income
+        if newest_income is not None and float(newest_income) <= 0:
+            conservative_growth = -0.05 * 0.7
         else:
-            conservative_growth = 0.03
+            grown = cls.cagr(items[:5], "net_income", min_years=1.0)
+            if grown is not None:
+                growth = max(-0.05, min(grown[0], 0.15))
+                conservative_growth = growth * 0.7
+            else:
+                conservative_growth = 0.03
 
         stage1_growth = min(conservative_growth, 0.08)
         stage2_growth = min(conservative_growth * 0.5, 0.04)

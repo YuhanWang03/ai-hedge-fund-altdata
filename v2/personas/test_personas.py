@@ -405,6 +405,16 @@ def test_annual_series_is_derived_from_ttm_when_the_provider_has_too_few_years()
     assert derive_annual([]) == [] and derive_annual([Record(ticker="X", revenue=1)]) == []
 
 
+def test_buffett_survives_a_loss_making_latest_period():
+    """INTC / CRWD: a negative newest net income made (new/old) ** (1/years) complex and crashed the vote."""
+    snap = quality_snapshot()
+    for row in snap.line_items_ttm[:2]:
+        row.net_income = -2_000e6
+    sig = get_persona("warren_buffett").analyze(snap)
+    assert not sig.abstained and "TypeError" not in sig.reasoning
+    assert sig.signal in ("bearish", "neutral", "bullish")
+
+
 def test_price_readers_abstain_without_prices():
     snap = quality_snapshot()
     snap.prices = []
