@@ -195,3 +195,4 @@
 .lab-result-clamp>.lab-error{flex:0 0 auto}
 .lab-big .lab-stat strong{white-space:nowrap}
 .lab-result-clamp>.lab-scroll .lab-table-wrap{overflow-x:auto}
+.lab-table tr.picked td{background:#f0f7ff}

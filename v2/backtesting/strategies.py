@@ -414,6 +414,8 @@ class CommitteeStrategy(Strategy):
         self._progress, self._workers = progress, max_workers
         self.dates: list[str] = []
         self.errors: dict[str, str] = {}
+        #: one entry per rebalance date: every ticker's vote and whether it was bought
+        self.periods: list[dict[str, Any]] = []
 
     @property
     def name(self) -> str:
@@ -452,6 +454,14 @@ class CommitteeStrategy(Strategy):
             for t, err in result.errors.items():
                 self.errors[f"{t}@{as_of}"] = err
             picked = [v for v in result.verdicts if v.voters > 0 and v.consensus >= self.min_consensus and v.agreement >= self.min_agreement]
+            chosen = {v.ticker for v in picked[: self.top_n]}
+            self.periods.append({
+                "signal_date": signal_date, "as_of": as_of, "picked": sorted(chosen),
+                "verdicts": [{"ticker": v.ticker, "consensus": round(v.consensus, 3), "agreement": round(v.agreement, 2), "voters": v.voters,
+                              "abstained": v.abstained, "bullish": v.bullish, "bearish": v.bearish, "neutral": v.neutral,
+                              "gaps": len(v.data_gaps), "picked": v.ticker in chosen} for v in result.verdicts],
+                "missing": sorted(set(tickers) - {v.ticker for v in result.verdicts}),
+            })
             entry = (date.fromisoformat(signal_date) + timedelta(days=1)).isoformat()
             for v in picked[: self.top_n]:
                 signals.append(TradeSignal(

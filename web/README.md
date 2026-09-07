@@ -93,7 +93,8 @@ optional `near_high_pct` for the 52-week-high variant), `insider`
 (`min_insiders` distinct buyers inside `window_days` with `min_value_usd` of
 purchases), and `committee` (the 13 personas vote at every rebalance date over
 `history_days`; fundamentals as of `filing_lag_days` earlier; `top_n`,
-`min_consensus`, `min_agreement`, `lean`). `data_source` picks where daily
+`min_consensus`, `min_agreement`, `lean`; `notes.periods` on the result lists
+every rebalance date's votes and picks). `data_source` picks where daily
 prices come from — yfinance is free, FD bills per 90-day chunk — while
 earnings, insider trades and fundamentals are always Financial Datasets;
 `fd_requests` / `fd_cost_usd` on the result say what a run cost, and persona

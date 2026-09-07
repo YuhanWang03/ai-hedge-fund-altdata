@@ -188,7 +188,7 @@ def test_committee_strategy_buys_top_consensus_with_lagged_fundamentals(monkeypa
 
     def fake_run_committee(tickers, client, *, personas=None, as_of=None, snapshots=None, max_workers=4, exclude_needs=(), progress=None):
         calls.append((tuple(tickers), as_of, tuple(sorted(snapshots or {})), tuple(exclude_needs)))
-        verdict = lambda t, c, agree: SimpleNamespace(ticker=t, consensus=c, agreement=agree, bullish=5, bearish=1, neutral=2, abstained=5, voters=8)  # noqa: E731
+        verdict = lambda t, c, agree: SimpleNamespace(ticker=t, consensus=c, agreement=agree, bullish=5, bearish=1, neutral=2, abstained=5, voters=8, data_gaps=[])  # noqa: E731
         verdicts = [verdict("AAA", 0.6, 0.8), verdict("BBB", 0.3, 0.4), verdict("CCC", -0.5, 0.9)]
         snaps = {t: Snap(t) for t in tickers if t not in (snapshots or {})}
         return SimpleNamespace(verdicts=verdicts, snapshots={**(snapshots or {}), **snaps}, errors={"CCC": "boom"})
@@ -223,6 +223,10 @@ def test_committee_strategy_buys_top_consensus_with_lagged_fundamentals(monkeypa
     # paid requests counted only for freshly fetched snapshots (AAA, CCC × 4 dates); cached BBB is free and not re-saved
     assert data.fd_requests == {"financial_metrics": 16, "line_items": 16} and sorted(set(store.saved)) == ["AAA", "CCC"]
     assert any(k.startswith("CCC@") for k in strat.errors)
+    # the per-period log explains every date: who voted, who was picked
+    assert len(strat.periods) == 4 and strat.periods[0]["picked"] == ["AAA"]
+    row = {v["ticker"]: v for v in strat.periods[0]["verdicts"]}
+    assert row["AAA"]["picked"] and not row["BBB"]["picked"] and row["CCC"]["consensus"] == -0.5 and row["AAA"]["voters"] == 8
 
 
 def test_committee_strategy_full_mode_and_missing_client():

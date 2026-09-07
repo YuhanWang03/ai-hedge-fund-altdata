@@ -323,7 +323,7 @@ def _run_backtest(body: BacktestInput, on_tick=None) -> dict:
         if body.data_source == "fd" and data.prices.requests:
             fd_requests["prices"] = fd_requests.get("prices", 0) + data.prices.requests
         notes = {"price_failures": dict(data.prices.failed), "errors": dict(getattr(strategy, "errors", {}) or {}),
-                 "rebalance_dates": list(getattr(strategy, "dates", []) or [])}
+                 "rebalance_dates": list(getattr(strategy, "dates", []) or []), "periods": list(getattr(strategy, "periods", []) or [])}
     return {"kind": "backtest", "strategy": body.strategy, "data_source": body.data_source, "universe": meta["universe"], "tickers": tickers,
             "params": body.params(), "fd_requests": fd_requests, "fd_cost_usd": fd_cost(fd_requests), "notes": notes, **result.model_dump()}
 

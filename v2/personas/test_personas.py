@@ -380,6 +380,30 @@ def test_every_persona_abstains_on_too_short_history(key):
     assert s.abstained and "need 3" in s.reasoning
 
 
+def test_annual_series_is_derived_from_ttm_when_the_provider_has_too_few_years():
+    """FD only carries ~2 fiscal years at historical dates; TTM rows a year apart stand in."""
+    from v2.personas.snapshot import derive_annual
+
+    snap = quality_snapshot()                      # 10 quarterly TTM rows, 10 real annual rows
+    real = snap.metrics("annual")
+    assert real == snap.metrics_annual and not snap.annual_derived
+
+    snap.metrics_annual = snap.metrics_annual[:2]  # what FD returns as of mid-2025
+    snap.line_items_annual = snap.line_items_annual[:2]
+    derived = snap.metrics("annual")
+    assert len(derived) == 3 and all(r.period == "annual" and r.derived_from == "ttm" for r in derived)
+    assert [r.report_period for r in derived] == [snap.metrics_ttm[i].report_period for i in (0, 4, 8)]
+    assert len(snap.line_items("annual")) == 3 and snap.annual_derived
+    for key in PERSONAS:                           # nobody abstains for "need 3" any more
+        sig = get_persona(key).analyze(snap)
+        assert "need 3" not in sig.reasoning, (key, sig.reasoning)
+
+    # the derived series is only used when it is longer than the real one
+    snap.metrics_ttm = snap.metrics_ttm[:5]        # 5 quarters → 2 derived points, no better than 2 real
+    assert snap.metrics("annual") == snap.metrics_annual
+    assert derive_annual([]) == [] and derive_annual([Record(ticker="X", revenue=1)]) == []
+
+
 def test_price_readers_abstain_without_prices():
     snap = quality_snapshot()
     snap.prices = []

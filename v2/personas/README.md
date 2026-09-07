@@ -56,6 +56,7 @@ v2/personas/
   置信度是得分率的确定性函数。上游本身在打分层已经算好了这些数字，判决只是照念。
 - **一次取数，十三人共用。** 上游每个 agent 各取各的，一只股票 40–60 次 API 调用；
   这里 `build_snapshot()` 最多 8 次，只取被选中的投资人真正需要的部分。
+- **年报不足时从 TTM 推导。** Financial Datasets 的年报只覆盖最近两三个财年，历史时点更少；`PersonaSnapshot.metrics("annual")` / `line_items("annual")` 在真实年报少于 3 期时，改用相隔 ≥ 350 天的 TTM 行（财年末的 TTM 就是年报数字）拼成年度序列，只在推导序列更长时启用，行上带 `derived_from="ttm"` 标记，`snap.annual_derived` 可查。
 - **弃权是显式的。** 缺基本面就 `abstained=True`、confidence 0，不再默认 neutral/50，
   投票时不计入。
 - **委员会是算术，不是 LLM。** 上游的 Portfolio Manager 把 13 份意见塞给模型综合；
