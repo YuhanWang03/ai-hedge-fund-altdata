@@ -78,6 +78,8 @@ GET  /api/lab/committee/runs       persisted run log (data/personas.db, override
 GET  /api/lab/committee/runs/{id}  full result of one run
 GET  /api/lab/committee/personas   persona metadata for the picker
 GET  /api/lab/committee/scoreboard per-persona hit rate once forward returns are back-filled
+POST /api/lab/committee/narrate    {run_id, ticker, persona, language} → LLM explanation for one cell, verdict unchanged
+POST /api/lab/committee/backfill   run the forward-return backfill now (scheduler ⑯ does it nightly at 02:30 ET)
 ```
 
 Fundamentals snapshots are cached per (ticker, day), so re-running the same

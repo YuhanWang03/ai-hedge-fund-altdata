@@ -192,3 +192,89 @@ def test_store_forward_return_backfill(tmp_path):
     assert {s["persona"] for s in latest} == {"warren_buffett", "ben_graham"}
     with pytest.raises(ValueError):
         store.set_forward_return(1, column="drop table", value=0)
+
+
+# ------------------------------------------------------------------ narration
+
+def test_narrate_endpoint_adds_grounded_text_without_changing_the_verdict(client, monkeypatch):
+    import json as _json
+
+    from v2.agent.llm import LLMResponse, ScriptedLLM
+
+    run = client.post("/api/lab/committee", json={"tickers": ["QLTY"], "as_of": "2026-06-30", "personas": ["warren_buffett"]}).json()
+    sig = run["verdicts"][0]["signals"][0]
+    roe_line = sig["parts"][0]["details"].split(";")[0]
+    reply = _json.dumps({"signal": sig["signal"], "confidence": sig["confidence"], "reasoning": f"{roe_line}，估值偏贵，先观望。"})
+    monkeypatch.setattr(committee, "_narrate_llm", lambda: ScriptedLLM([LLMResponse(text=reply)]))
+
+    res = client.post("/api/lab/committee/narrate", json={"run_id": run["run_id"], "ticker": "qlty", "persona": "warren_buffett"})
+    assert res.status_code == 200, res.text
+    data = res.json()
+    assert data["narrative"].startswith(roe_line) and data["narrative_grounded"] is True
+    assert data["signal"] == sig["signal"] and data["confidence"] == sig["confidence"]
+    # persisted into the stored run
+    stored = client.get(f"/api/lab/committee/runs/{run['run_id']}").json()
+    assert stored["verdicts"][0]["signals"][0]["narrative"] == data["narrative"]
+
+    # a reply that flips the signal is discarded → 503 with the reason
+    flipped = _json.dumps({"signal": "bearish" if sig["signal"] != "bearish" else "bullish", "confidence": sig["confidence"], "reasoning": "nope"})
+    monkeypatch.setattr(committee, "_narrate_llm", lambda: ScriptedLLM([LLMResponse(text=flipped)]))
+    res = client.post("/api/lab/committee/narrate", json={"run_id": run["run_id"], "ticker": "QLTY", "persona": "warren_buffett"})
+    assert res.status_code == 503 and "rule-based reasoning stands" in res.json()["detail"]
+
+    assert client.post("/api/lab/committee/narrate", json={"run_id": "nope", "ticker": "QLTY", "persona": "warren_buffett"}).status_code == 404
+    assert client.post("/api/lab/committee/narrate", json={"run_id": run["run_id"], "ticker": "QLTY", "persona": "ben_graham"}).status_code == 404
+
+
+# ------------------------------------------------------------------- backfill
+
+class _Prices:
+    """Deterministic price path: 100 on day 0, +0.1 per calendar day."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def get_prices(self, ticker, start, end):
+        from datetime import date, timedelta
+
+        self.calls += 1
+        d0, d1 = date.fromisoformat(start), date.fromisoformat(end)
+        base = date(2026, 1, 1)
+        return [{"time": (d0 + timedelta(days=i)).isoformat(), "close": 100 + 0.1 * ((d0 + timedelta(days=i)) - base).days} for i in range((d1 - d0).days + 1) if (d0 + timedelta(days=i)).weekday() < 5]
+
+
+def test_forward_backfill_fills_due_horizons_and_scores_personas(tmp_path):
+    from datetime import date
+
+    from v2.personas.forward import backfill_forward_returns
+
+    store = PersonaStore(tmp_path / "p.db")
+    payload = {"as_of": "2026-01-15", "personas": ["a", "b"], "verdicts": [{"ticker": "AAA", "signals": [
+        {"persona": "a", "as_of": "2026-01-15", "signal": "bullish", "confidence": 70, "score": 8, "max_score": 10, "abstained": False, "facts": {}},
+        {"persona": "b", "as_of": "2026-01-15", "signal": "bearish", "confidence": 60, "score": 2, "max_score": 10, "abstained": False, "facts": {}},
+    ]}]}
+    store.save_run(payload, source="tickers")
+    prices = _Prices()
+
+    # 45 days later: 1m due, 3m not yet
+    report = backfill_forward_returns(store, prices, today=date(2026, 3, 1))
+    assert report.filled == 2 and report.by_column == {"fwd_1m": 2} and prices.calls == 1
+    board = {row["persona"]: row for row in store.persona_scoreboard()}
+    assert board["a"]["hits"] == 1 and board["b"]["hits"] == 0  # price rose: bull right, bear wrong
+    assert board["a"]["avg_directional_1m"] == pytest.approx(0.0296, abs=0.002)
+
+    # idempotent: nothing left for 1m, 3m fills once due
+    again = backfill_forward_returns(store, prices, today=date(2026, 3, 1))
+    assert again.filled == 0
+    later = backfill_forward_returns(store, prices, today=date(2026, 6, 1))
+    assert later.by_column == {"fwd_3m": 2}
+    assert store.signals_awaiting_forward_returns(older_than_days=91, column="fwd_3m") == []
+
+
+def test_backfill_endpoint_reports_and_returns_scoreboard(client, monkeypatch):
+    from v2.personas import forward as forward_mod
+
+    monkeypatch.setattr(forward_mod, "_default_price_source", lambda: _Prices())
+    res = client.post("/api/lab/committee/backfill", json={"columns": ["fwd_1m"]})
+    assert res.status_code == 200, res.text
+    assert res.json()["kind"] == "backfill" and res.json()["checked"] == 0 and res.json()["scoreboard"] == []

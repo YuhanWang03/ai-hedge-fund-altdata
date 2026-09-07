@@ -23,6 +23,7 @@
 | 时间 · 频率 | ID | 名称 | 功能 | Family · 推送 |
 |---|---|---|---|---|
 | **02:00 UTC** · daily | ⑥ | Archive Cleanup | 清理 > 90 天 archive 记录 | 维护 · 🔇 无推送 |
+| **02:30 ET** · daily | ⑯ | Persona Forward Backfill | 用真实 1 月 / 3 月收益回填投资人委员会的历史投票，供命中率榜使用 | 维护 · 🔇 无推送 |
 | **08:00 ET** · mon-fri | ⑦ | Earnings Reminders | watchlist + 持仓 D-3/D-1/D-0 财报提醒 | Earnings · ✅ |
 | **08:30 ET** · mon-fri | ⑬ | ARK Alerts | ARK 4 funds 显著调仓告警（新建仓/清仓/±20%）| ARK · ✅ pre-market |
 | **09:00 ET** · mon-fri | ⑮ | Macro Release Scanner | CPI/PCE/NFP/GDP/PPI/FOMC release 解读（σ ladder）| Macro · ✅ 命中日 |

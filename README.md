@@ -25,6 +25,7 @@ Only 6 jobs push on a schedule — the highest-value, time-sensitive signals:
 | Time · Frequency | ID | Name | Function |
 |---|---|---|---|
 | **02:00 ET** · daily | ⑥ | Archive Cleanup | Purge expired archive rows (infra · 🔇 no push) |
+| **02:30 ET** · daily | ⑯ | Persona Forward Backfill | Score past 投资人委员会 votes against realised 1m / 3m returns (infra · 🔇 no push) |
 | **08:00 ET** · mon-fri | ⑦ | Earnings Reminders | watchlist + holdings D-3 / D-1 / D-0 alerts |
 | **16:45 ET** · mon-fri | 📋 | P2 Digest | Roll the day's P2 items into one card |
 | **17:35 ET** · mon-fri | ② | Anomaly Monitor | Anomaly detect + Tavily multi-source attribution |

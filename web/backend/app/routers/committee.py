@@ -25,6 +25,8 @@ from pydantic import BaseModel, Field
 from app.auth import require_owner
 from app.routers import workspace
 from v2.personas.committee import CommitteeResult, TickerVerdict, run_committee
+from v2.personas.forward import backfill_forward_returns
+from v2.personas.models import PersonaSignal
 from v2.personas.data import adapt_client
 from v2.personas.registry import PERSONAS, get_persona
 from v2.personas.store import DEFAULT_PATH, PersonaStore
@@ -191,6 +193,13 @@ def _run(body: CommitteeInput) -> dict[str, Any]:
     payload["personas_meta"] = _persona_meta(keys)
     payload["cache_hits"] = sorted(cached)
     for v_dict, v in zip(payload["verdicts"], result.verdicts):
+        snap = result.snapshots.get(v.ticker)
+        if snap is not None and snap.prices:
+            last = snap.prices[-1]
+            try:
+                v_dict["price"] = float(last.close) if last.close is not None else None
+            except (TypeError, ValueError):
+                v_dict["price"] = None
         pos = positions.get(v.ticker)
         if pos:
             label, why = _holding_action(v, pos.get("weight"), body.max_weight)
@@ -236,3 +245,81 @@ async def run_detail(run_id: str) -> dict:
 async def scoreboard() -> dict:
     """Per-persona hit rate once forward returns have been back-filled."""
     return {"kind": "scoreboard", "items": _store().persona_scoreboard()}
+
+
+# ------------------------------------------------------------------- narration
+
+class NarrateInput(BaseModel):
+    run_id: str
+    ticker: str
+    persona: str
+    language: Literal["zh", "en"] = "zh"
+
+
+def _narrate_llm() -> Any:
+    """Seam for tests; production uses the agent loop's configured provider."""
+    from v2.agent.llm import build_llm
+
+    return build_llm()
+
+
+def _narrate(body: NarrateInput) -> dict[str, Any]:
+    from v2.personas.narrate import narrate
+
+    store = _store()
+    payload = store.get_run(body.run_id)
+    if payload is None:
+        raise LookupError("committee run not found")
+    ticker = body.ticker.upper()
+    found = None
+    for v in payload.get("verdicts") or []:
+        if v.get("ticker") == ticker:
+            for sig in v.get("signals") or []:
+                if sig.get("persona") == body.persona:
+                    found = sig
+    if found is None:
+        raise LookupError("signal not found in this run")
+    signal = PersonaSignal.from_dict(found)
+    if signal.abstained:
+        raise ValueError("this persona abstained; nothing to narrate")
+    # A fresh request means a fresh narration: forget any stored text so a
+    # discarded reply surfaces as an error instead of echoing the old one.
+    signal.narrative = None
+    signal.narrative_grounded = None
+    narrate(signal, llm=_narrate_llm(), language=body.language)
+    if not signal.narrative:
+        raise RuntimeError("the model returned nothing usable; the rule-based reasoning stands")
+    store.update_signal_narrative(body.run_id, ticker, body.persona, signal.narrative, signal.narrative_grounded)
+    return {
+        "kind": "narrative", "run_id": body.run_id, "ticker": ticker, "persona": body.persona,
+        "signal": signal.signal, "confidence": signal.confidence,
+        "narrative": signal.narrative, "narrative_grounded": signal.narrative_grounded,
+    }
+
+
+@router.post("/narrate")
+async def narrate_signal(body: NarrateInput) -> dict:
+    """LLM explanation for one cell of a stored run. Never changes the verdict."""
+    try:
+        return await workspace._lab_call(_narrate, body)
+    except HTTPException as exc:
+        if isinstance(exc.__cause__, LookupError):
+            raise HTTPException(status_code=404, detail=str(exc.__cause__)) from exc
+        raise
+
+
+# -------------------------------------------------------------------- backfill
+
+class BackfillInput(BaseModel):
+    columns: list[Literal["fwd_1m", "fwd_3m"]] = Field(default_factory=lambda: ["fwd_1m", "fwd_3m"])
+
+
+def _backfill(body: BackfillInput) -> dict[str, Any]:
+    report = backfill_forward_returns(_store(), columns=tuple(body.columns))
+    return {"kind": "backfill", **report.to_dict(), "scoreboard": _store().persona_scoreboard()}
+
+
+@router.post("/backfill")
+async def backfill(body: BackfillInput | None = None) -> dict:
+    """Run the forward-return backfill now (the scheduler also does this nightly)."""
+    return await workspace._lab_call(_backfill, body or BackfillInput())

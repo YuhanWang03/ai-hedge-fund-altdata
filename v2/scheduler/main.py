@@ -25,6 +25,7 @@ from v2.scheduler.jobs import (
     earnings_reminders_job,
     earnings_summaries_job,
     p2_digest_job,
+    persona_forward_backfill_job,
     portfolio_risk_job,
 )
 
@@ -107,6 +108,18 @@ def build_scheduler() -> BlockingScheduler:
         CronTrigger(hour=2, minute=0, timezone=_TZ),
         id="archive_cleanup",
         name="⑥ Archive Cleanup",
+        misfire_grace_time=3600,
+        coalesce=True,
+    )
+
+    # ⑯ Persona forward-return backfill — 02:30 ET daily, infra, no push.
+    # Scores past 投资人委员会 votes against realised 1m / 3m returns so the
+    # Lab scoreboard has look-ahead-free hit rates. No-op until votes exist.
+    scheduler.add_job(
+        persona_forward_backfill_job,
+        CronTrigger(hour=2, minute=30, timezone=_TZ),
+        id="persona_forward_backfill",
+        name="⑯ Persona Forward Backfill",
         misfire_grace_time=3600,
         coalesce=True,
     )

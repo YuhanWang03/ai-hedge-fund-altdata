@@ -99,10 +99,18 @@ v2/personas/
 持仓标签是一条透明规则（`_holding_action`）：共识 ≥ +0.2 且一致度 ≥ 50% 为"增持候选"，
 但权重已达 `max_weight` 则"持有"；共识 ≤ −0.2 为"减持候选"；其余"持有"。
 
+## 前向收益与解读
+
+- `forward.py`：`backfill_forward_returns()` 给已过 30 / 91 天的投票回填 `fwd_1m` / `fwd_3m`，
+  只用投票日之后的价格，没有前视。调度器每天 02:30 ET 跑一次（⑯，不推送），
+  也可 `python -m v2.personas.forward --scoreboard` 或 `POST /api/lab/committee/backfill` 手动触发。
+  `GET /api/lab/committee/scoreboard` 返回逐人命中率。
+- `POST /api/lab/committee/narrate`：对某次运行里某一格调用 `narrate()`，写回该运行的结果。
+  页面上是详情卡里的「LLM 解读」按钮；改了信号或置信度的回复会被丢弃并报错，
+  数字溯源结果显示为 ✓ / ⚠。
+
 ## 未做的事
 
-- 前向收益回填：`store.py` 预留了 `fwd_1m` / `fwd_3m` 列和 `signals_awaiting_forward_returns()`，
-  还没有定时任务去填。填上之后 `/scoreboard` 才有内容。
 - 历史回测：LLM 层做回测有前视偏差；确定性打分层可以包成 `v2/backtesting.Strategy`，尚未实现。
-- 接口是同步的（沿用实验室 240 秒超时）。规则层有缓存时几秒即返；若以后加 LLM 解读，
-  应照 `routers/research.py` 的异步任务模式。
+- 接口是同步的（沿用实验室 240 秒超时）。规则层有缓存时几秒即返；解读一次一格，
+  也在超时内。批量解读应照 `routers/research.py` 的异步任务模式。

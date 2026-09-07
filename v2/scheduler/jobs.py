@@ -247,3 +247,22 @@ def archive_cleanup_job() -> None:
     finally:
         conn.close()
     logger.info("archive_cleanup: deleted %d expired rows", deleted)
+
+
+def persona_forward_backfill_job() -> None:
+    """Daily back-fill of forward returns for stored persona votes (infra, no push).
+
+    Lab · 投资人委员会 records every persona's vote with its date; once 30 / 91
+    calendar days have passed this fills ``fwd_1m`` / ``fwd_3m`` from actual
+    prices so the per-persona hit rate is computed without look-ahead.
+    Idempotent — only NULL cells are touched. Skips when no votes exist yet.
+    """
+    db = _PROJECT_ROOT / "data" / "personas.db"
+    if not db.exists():
+        logger.info("persona_forward_backfill: no personas.db yet, skipping")
+        return
+    from v2.personas.forward import backfill_forward_returns
+    from v2.personas.store import PersonaStore
+
+    report = backfill_forward_returns(PersonaStore(db))
+    logger.info("persona_forward_backfill: %s", report.to_dict())

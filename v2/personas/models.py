@@ -169,6 +169,22 @@ class PersonaSignal:
     def direction(self) -> int:
         return {"bullish": 1, "bearish": -1}.get(self.signal, 0)
 
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "PersonaSignal":
+        parts = [
+            SubScore(name=p["name"], score=float(p["score"]), max_score=float(p["max_score"]), details=p.get("details", ""), data=dict(p.get("data") or {}))
+            for p in data.get("parts") or []
+        ]
+        return cls(
+            persona=data["persona"], ticker=data["ticker"], as_of=data.get("as_of", ""),
+            signal=data.get("signal", "neutral"), confidence=int(data.get("confidence", 0)),
+            score=float(data.get("score", 0.0)), max_score=float(data.get("max_score", 0.0)),
+            parts=parts, facts=dict(data.get("facts") or {}), margin_of_safety=data.get("margin_of_safety"),
+            reasoning=data.get("reasoning", ""), narrative=data.get("narrative"),
+            narrative_grounded=data.get("narrative_grounded"), abstained=bool(data.get("abstained", False)),
+            data_gaps=list(data.get("data_gaps") or []), snapshot_hash=data.get("snapshot_hash", ""),
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "persona": self.persona,

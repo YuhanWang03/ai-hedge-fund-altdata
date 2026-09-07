@@ -18,7 +18,7 @@ import json
 import sqlite3
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -148,6 +148,26 @@ class PersonaStore:
             for r in rows
         ]
 
+    def update_signal_narrative(self, run_id: str, ticker: str, persona: str, narrative: str, grounded: bool | None) -> bool:
+        """Write an LLM narrative into a stored run's result JSON. Returns False if not found."""
+        with self._conn() as conn:
+            row = conn.execute("SELECT result_json FROM committee_runs WHERE id = ?", (run_id,)).fetchone()
+            if not row:
+                return False
+            payload = json.loads(row["result_json"])
+            hit = False
+            for v in payload.get("verdicts") or []:
+                if v.get("ticker") != ticker:
+                    continue
+                for sig in v.get("signals") or []:
+                    if sig.get("persona") == persona:
+                        sig["narrative"] = narrative
+                        sig["narrative_grounded"] = grounded
+                        hit = True
+            if hit:
+                conn.execute("UPDATE committee_runs SET result_json = ? WHERE id = ?", (json.dumps(payload, ensure_ascii=False, default=str), run_id))
+            return hit
+
     # -- signals ------------------------------------------------------------------
 
     def latest_signals(self, ticker: str, limit: int = 13) -> list[dict[str, Any]]:
@@ -162,11 +182,12 @@ class PersonaStore:
             ).fetchall()
         return [dict(r) for r in rows]
 
-    def signals_awaiting_forward_returns(self, *, older_than_days: int, column: str = "fwd_1m") -> list[dict[str, Any]]:
+    def signals_awaiting_forward_returns(self, *, older_than_days: int, column: str = "fwd_1m", today: date | None = None) -> list[dict[str, Any]]:
         """Signals old enough to be scored, whose ``column`` is still NULL."""
         if column not in ("fwd_1m", "fwd_3m"):
             raise ValueError("column must be fwd_1m or fwd_3m")
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=older_than_days)).date().isoformat()
+        base = today or datetime.now(timezone.utc).date()
+        cutoff = (base - timedelta(days=older_than_days)).isoformat()
         with self._conn() as conn:
             rows = conn.execute(
                 f"SELECT id, ticker, as_of, persona, signal, price_at FROM persona_signals WHERE {column} IS NULL AND abstained = 0 AND as_of <= ? ORDER BY as_of",
