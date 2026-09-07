@@ -24,6 +24,7 @@ trading day's close.
 from __future__ import annotations
 
 import logging
+import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -92,14 +93,15 @@ class PriceCache:
 
     def _fetch(self, ticker: str, start: date, end: date) -> list[Any]:
         if self._chunk is None:
-            self.requests += 1
-            return list(self._source.get_prices(ticker, start.isoformat(), end.isoformat()) or [])
+            rows = list(self._source.get_prices(ticker, start.isoformat(), end.isoformat()) or [])
+            self.requests += 1  # counted after the call: a rejected request is not billed
+            return rows
         out: list[Any] = []
         cursor = start
         while cursor <= end:
             stop = min(cursor + timedelta(days=self._chunk - 1), end)
-            self.requests += 1
             out.extend(self._source.get_prices(ticker, cursor.isoformat(), stop.isoformat()) or [])
+            self.requests += 1
             cursor = stop + timedelta(days=1)
         return out
 
@@ -416,6 +418,8 @@ class CommitteeStrategy(Strategy):
         self.errors: dict[str, str] = {}
         #: one entry per rebalance date: every ticker's vote and whether it was bought
         self.periods: list[dict[str, Any]] = []
+        #: set when a rebalance date's fetches failed wholesale and the run stopped early
+        self.aborted: dict[str, Any] | None = None
 
     @property
     def name(self) -> str:
@@ -459,9 +463,16 @@ class CommitteeStrategy(Strategy):
                 "signal_date": signal_date, "as_of": as_of, "picked": sorted(chosen),
                 "verdicts": [{"ticker": v.ticker, "consensus": round(v.consensus, 3), "agreement": round(v.agreement, 2), "voters": v.voters,
                               "abstained": v.abstained, "bullish": v.bullish, "bearish": v.bearish, "neutral": v.neutral,
-                              "gaps": len(v.data_gaps), "picked": v.ticker in chosen} for v in result.verdicts],
+                              "gaps": len(v.data_gaps), "reasons": abstain_reasons(v), "picked": v.ticker in chosen} for v in result.verdicts],
                 "missing": sorted(set(tickers) - {v.ticker for v in result.verdicts}),
             })
+            failed = [v for v in result.verdicts if core_gaps(v.data_gaps)] + [t for t in tickers if t not in result.snapshots]
+            if len(tickers) >= 2 and len(failed) > len(tickers) / 2:
+                sample = next((g for v in result.verdicts for g in v.data_gaps if core_gaps([g])), None) or next(iter(result.errors.values()), "")
+                self.aborted = {"signal_date": signal_date, "as_of": as_of, "failed": len(failed), "of": len(tickers),
+                                "reason": (sample or "provider requests failed")[:200], "remaining_dates": dates[dates.index(signal_date) + 1:]}
+                logger.warning("committee backtest stopped at %s: %d/%d tickers without core data (%s)", signal_date, len(failed), len(tickers), sample)
+                break
             entry = (date.fromisoformat(signal_date) + timedelta(days=1)).isoformat()
             for v in picked[: self.top_n]:
                 signals.append(TradeSignal(
@@ -473,6 +484,28 @@ class CommitteeStrategy(Strategy):
             if self._progress:
                 self._progress(done)
         return signals
+
+
+def core_gaps(gaps: Iterable[str]) -> list[str]:
+    """Gap messages about fundamentals (a snapshot without them is a failed fetch)."""
+    return [g for g in gaps if g.startswith(("metrics_", "line_items_"))]
+
+
+def abstain_reasons(verdict: Any, limit: int = 2) -> list[str]:
+    """The most common abstention notes across the personas, short enough for a table cell."""
+    counts: dict[str, int] = {}
+    for sig in getattr(verdict, "signals", []) or []:
+        if not getattr(sig, "abstained", False):
+            continue
+        note = str(getattr(sig, "reasoning", "") or "")
+        note = note[len("abstain · "):] if note.startswith("abstain · ") else note
+        note = note.replace("missing inputs: ", "")
+        # keep the provider's error but not the whole URL/traceback
+        note = re.sub(r"\s+", " ", note)[:120]
+        if note:
+            counts[note] = counts.get(note, 0) + 1
+    ranked = sorted(counts.items(), key=lambda kv: -kv[1])[:limit]
+    return [f"{n} × {c}" if c > 1 else n for n, c in ranked]
 
 
 def _as_data(data: Any) -> BacktestData:

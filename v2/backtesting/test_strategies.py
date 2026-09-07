@@ -73,7 +73,7 @@ def test_price_cache_fetches_once_and_serves_slices_and_chunks():
             raise RuntimeError("404 EMPTY_DATA")
 
     dead = PriceCache(Boom(), today=TODAY)
-    assert dead.get_prices("ZZZ", start.isoformat(), TODAY.isoformat()) == [] and "ZZZ" in dead.failed
+    assert dead.get_prices("ZZZ", start.isoformat(), TODAY.isoformat()) == [] and "ZZZ" in dead.failed and dead.requests == 0
 
 
 # --------------------------------------------------------------------- momentum
@@ -188,7 +188,7 @@ def test_committee_strategy_buys_top_consensus_with_lagged_fundamentals(monkeypa
 
     def fake_run_committee(tickers, client, *, personas=None, as_of=None, snapshots=None, max_workers=4, exclude_needs=(), progress=None):
         calls.append((tuple(tickers), as_of, tuple(sorted(snapshots or {})), tuple(exclude_needs)))
-        verdict = lambda t, c, agree: SimpleNamespace(ticker=t, consensus=c, agreement=agree, bullish=5, bearish=1, neutral=2, abstained=5, voters=8, data_gaps=[])  # noqa: E731
+        verdict = lambda t, c, agree: SimpleNamespace(ticker=t, consensus=c, agreement=agree, bullish=5, bearish=1, neutral=2, abstained=5, voters=8, data_gaps=[], signals=[])  # noqa: E731
         verdicts = [verdict("AAA", 0.6, 0.8), verdict("BBB", 0.3, 0.4), verdict("CCC", -0.5, 0.9)]
         snaps = {t: Snap(t) for t in tickers if t not in (snapshots or {})}
         return SimpleNamespace(verdicts=verdicts, snapshots={**(snapshots or {}), **snaps}, errors={"CCC": "boom"})
@@ -227,6 +227,33 @@ def test_committee_strategy_buys_top_consensus_with_lagged_fundamentals(monkeypa
     assert len(strat.periods) == 4 and strat.periods[0]["picked"] == ["AAA"]
     row = {v["ticker"]: v for v in strat.periods[0]["verdicts"]}
     assert row["AAA"]["picked"] and not row["BBB"]["picked"] and row["CCC"]["consensus"] == -0.5 and row["AAA"]["voters"] == 8
+
+
+def test_committee_strategy_stops_when_a_date_fails_wholesale(monkeypatch):
+    """Credits ran out mid-run once: every later date failed and was still paid for in time. Now it stops."""
+    from types import SimpleNamespace
+
+    seen = []
+
+    def fake_run_committee(tickers, client, *, personas=None, as_of=None, snapshots=None, max_workers=4, exclude_needs=(), progress=None):
+        seen.append(as_of)
+        broken = len(seen) >= 2  # first date fine, second date the provider rejects everything
+        gaps = ["metrics_ttm: RuntimeError: HTTP 402 for /financial-metrics/: payment required", "line_items_ttm: RuntimeError: HTTP 402"] if broken else []
+        sig = SimpleNamespace(abstained=broken, reasoning="abstain · missing inputs: ttm metrics (metrics_ttm: RuntimeError: HTTP 402 for /financial-metrics/: payment required)")
+        mk = lambda t: SimpleNamespace(ticker=t, consensus=0.0 if broken else 0.5, agreement=0.0 if broken else 0.8, bullish=0 if broken else 6, bearish=0, neutral=0 if broken else 2,  # noqa: E731
+                                       abstained=13 if broken else 5, voters=0 if broken else 8, data_gaps=gaps, signals=[sig, sig])
+        snaps = {t: SimpleNamespace(ticker=t, requests={} if broken else {"financial_metrics": 2}, gaps=gaps) for t in tickers}
+        return SimpleNamespace(verdicts=[mk(t) for t in tickers], snapshots=snaps, errors={})
+
+    import v2.personas.committee as committee_mod
+    monkeypatch.setattr(committee_mod, "run_committee", fake_run_committee)
+    strat = CommitteeStrategy(holding_days=63, history_days=365, top_n=2)
+    signals = strat.generate_signals(["AAA", "BBB", "CCC"], _data({}, fd=object()))
+    assert len(strat.dates) == 4 and len(seen) == 2                      # stopped after the failing date
+    assert strat.aborted and strat.aborted["failed"] == 3 and "HTTP 402" in strat.aborted["reason"] and len(strat.aborted["remaining_dates"]) == 2
+    assert len(signals) == 2 and len(strat.periods) == 2                  # the good date's picks are kept
+    assert strat.periods[1]["verdicts"][0]["reasons"] == ["ttm metrics (metrics_ttm: RuntimeError: HTTP 402 for /financial-metrics/: payment required) × 2"]
+    assert strat.periods[0]["verdicts"][0]["reasons"] == []
 
 
 def test_committee_strategy_full_mode_and_missing_client():

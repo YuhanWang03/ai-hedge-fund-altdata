@@ -194,9 +194,10 @@ def build_snapshot(
         endpoint = {"metrics_ttm": "financial_metrics", "metrics_annual": "financial_metrics", "line_items_ttm": "line_items",
                     "line_items_annual": "line_items", "market_cap": "company_facts", "insider_trades": "insider_trades",
                     "news": "news", "prices": "prices"}[label]
-        snap.requests[endpoint] = snap.requests.get(endpoint, 0) + 1
         try:
-            return fn(*args, **kwargs)
+            out = fn(*args, **kwargs)
+            snap.requests[endpoint] = snap.requests.get(endpoint, 0) + 1  # only successful (billed) calls count
+            return out
         except NotImplementedError as exc:
             snap.gaps.append(f"{label}: {exc}")
         except Exception as exc:  # noqa: BLE001 — degrade, never crash the run

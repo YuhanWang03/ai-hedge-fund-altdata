@@ -150,6 +150,7 @@ def test_build_snapshot_records_gaps_instead_of_raising():
             return []
 
     snap = build_snapshot("X", "2026-06-30", Broken())
+    assert "financial_metrics" not in snap.requests and snap.requests["line_items"] == 2  # rejected requests are not billed, so not counted
     assert any(g.startswith("metrics_ttm: RuntimeError") for g in snap.gaps)
     assert any(g.startswith("fundamentals:") for g in snap.gaps)
     assert not snap.has_fundamentals

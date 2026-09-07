@@ -196,3 +196,4 @@
 .lab-big .lab-stat strong{white-space:nowrap}
 .lab-result-clamp>.lab-scroll .lab-table-wrap{overflow-x:auto}
 .lab-table tr.picked td{background:#f0f7ff}
+.lab-table td.lab-reasons{max-width:360px;white-space:normal;text-align:left;color:#7d899b;font-size:11px;line-height:1.4}
