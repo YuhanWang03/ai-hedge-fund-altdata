@@ -183,7 +183,7 @@ function ScreeningTool({ result, setResult, onHand, watchlist, refreshWatchlist,
   const info = useLabData<{ items: Record<string, UniverseInfo> }>('/api/lab/universes');
   const pricing = useLabData<Pricing>('/api/lab/committee/pricing');
   const poolSize = universe === 'custom' ? parseTickers(tickers).length : (info.data?.items[universe]?.size ?? 0);
-  const estMetrics = dataSource === 'fd' ? poolSize * (pricing.data?.prices_usd.financial_metrics ?? 0.04) : 0;
+  const estMetrics = dataSource === 'fd' ? poolSize * (pricing.data?.prices_usd.financial_metrics ?? 0.02) : 0;
   const run = async () => {
     setBusy(true); setError(''); setJob(null);
     try {
@@ -203,11 +203,11 @@ function ScreeningTool({ result, setResult, onHand, watchlist, refreshWatchlist,
   return <div className="lab-tool">
     <section className="surface lab-config"><div className="surface-header"><div><h2>筛选条件</h2><span>全部阈值可改，缺数据的股票不通过</span></div></div>
       <UniversePicker universe={universe} setUniverse={setUniverse} tickers={tickers} setTickers={setTickers} info={info.data?.items}/>
-      <Field label="数据源" hint={dataSource === 'yfinance' ? '市值、营收增长、毛利率来自 yfinance，免费；口径：营收增长为最近一季同比，毛利率为 TTM' : `Financial Datasets 按请求计费，约 ${usd(pricing.data?.prices_usd.financial_metrics ?? 0.04)}/只`}><Chips options={[{ id: 'yfinance', label: 'yfinance（免费）' }, { id: 'fd', label: 'Financial Datasets（付费）' }]} value={dataSource} onChange={setDataSource}/></Field>
-      <Field label="候选的华尔街财报预期" hint={`来自 Financial Datasets，每只候选约 ${usd(pricing.data?.prices_usd.earnings ?? 0.01)}`}><Chips options={[{ id: 'no', label: '不取' }, { id: 'yes', label: '取' }]} value={withEarnings ? 'yes' : 'no'} onChange={v => setWithEarnings(v === 'yes')}/></Field>
+      <Field label="数据源" hint={dataSource === 'yfinance' ? '市值、营收增长、毛利率来自 yfinance，免费；口径：营收增长为最近一季同比，毛利率为 TTM' : `Financial Datasets 按请求计费，约 ${usd(pricing.data?.prices_usd.financial_metrics ?? 0.02)}/只`}><Chips options={[{ id: 'yfinance', label: 'yfinance（免费）' }, { id: 'fd', label: 'Financial Datasets（付费）' }]} value={dataSource} onChange={setDataSource}/></Field>
+      <Field label="候选的华尔街财报预期" hint={`来自 Financial Datasets，每只候选约 ${usd(pricing.data?.prices_usd.earnings ?? 0.02)}`}><Chips options={[{ id: 'no', label: '不取' }, { id: 'yes', label: '取' }]} value={withEarnings ? 'yes' : 'no'} onChange={v => setWithEarnings(v === 'yes')}/></Field>
       <div className="lab-grid2"><Field label="市值下限（十亿美元）"><NumberInput value={capMin} onChange={setCapMin} min={0} step={1}/></Field><Field label="市值上限（十亿美元）"><NumberInput value={capMax} onChange={setCapMax} min={1} step={10}/></Field>
         <Field label="营收增长 ≥（%）"><NumberInput value={rev} onChange={setRev} step={1}/></Field><Field label="毛利率 ≥（%）"><NumberInput value={gm} onChange={setGm} min={0} max={100} step={5}/></Field><Field label="年化波动率 ≤（%）"><NumberInput value={vol} onChange={setVol} min={1} step={5}/></Field></div>
-      <p className="lab-note">预计 Financial Datasets 费用：{estMetrics > 0 ? `≈ ${usd(estMetrics)}（${poolSize} 次指标请求）` : '$0.00'}{withEarnings ? ` + 每只候选 ${usd(pricing.data?.prices_usd.earnings ?? 0.01)}` : ''}。价格来自 /api/lab/committee/pricing，可用 FD_PRICES 环境变量校正。</p>
+      <p className="lab-note">预计 Financial Datasets 费用：{estMetrics > 0 ? `≈ ${usd(estMetrics)}（${poolSize} 次指标请求）` : '$0.00'}{withEarnings ? ` + 每只候选 ${usd(pricing.data?.prices_usd.earnings ?? 0.02)}` : ''}。价格来自 /api/lab/committee/pricing，可用 FD_PRICES 环境变量校正。</p>
       <button className="run-button" disabled={busy || (universe === 'custom' && !parseTickers(tickers).length)} onClick={() => void run()}>{busy ? (job ? `筛选中… ${job.done} / ${job.total}` : '筛选中…') : '运行筛选'}</button>
       {job && <div className="lab-progress"><i style={{ width: `${job.total ? Math.round((job.done / job.total) * 100) : 0}%` }}/></div>}
     </section>

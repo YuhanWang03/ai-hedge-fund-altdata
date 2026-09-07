@@ -444,12 +444,12 @@ def test_committee_lean_mode_skips_news_and_insiders_and_reports_cost(client, fa
     lean = client.post("/api/lab/committee", json={"tickers": ["QLTY"], "as_of": "2026-06-30", "personas": ["charlie_munger"]}).json()
     assert lean["lean"] is True
     assert set(lean["fd_requests"]) == {"financial_metrics", "line_items"} and "news" not in lean["fd_requests"]
-    assert lean["fd_cost_usd"] == pytest.approx(0.16)  # 2 metrics + 2 line items at the default $0.04
+    assert lean["fd_cost_usd"] == pytest.approx(0.08)  # 2 metrics + 2 line items at $0.02
     full = client.post("/api/lab/committee", json={"tickers": ["DSTR"], "as_of": "2026-06-30", "personas": ["charlie_munger"], "lean": False}).json()
     assert {"news", "insider_trades"} <= set(full["fd_requests"]) and full["fd_cost_usd"] > lean["fd_cost_usd"]
     assert "company_facts" not in full["fd_requests"]  # market cap comes from the metrics row
     pricing = client.get("/api/lab/committee/pricing").json()
-    assert pricing["committee_per_ticker"]["lean"] == pytest.approx(0.18) and pricing["committee_per_ticker"]["full"] == pytest.approx(0.26)
+    assert pricing["committee_per_ticker"]["lean"] == pytest.approx(0.10) and pricing["committee_per_ticker"]["full"] == pytest.approx(0.14)
 
 
 def test_fd_prices_override(monkeypatch):
@@ -457,6 +457,6 @@ def test_fd_prices_override(monkeypatch):
 
     monkeypatch.setenv("FD_PRICES", '{"financial_metrics": 0.02, "bogus": 9}')
     assert fd_pricing.prices()["financial_metrics"] == 0.02 and "bogus" not in fd_pricing.prices()
-    assert fd_pricing.cost({"financial_metrics": 10, "earnings": 3}) == pytest.approx(0.23)
+    assert fd_pricing.cost({"financial_metrics": 10, "earnings": 3}) == pytest.approx(0.26)
     monkeypatch.setenv("FD_PRICES", "not json")
-    assert fd_pricing.prices()["financial_metrics"] == 0.04
+    assert fd_pricing.prices()["financial_metrics"] == 0.02

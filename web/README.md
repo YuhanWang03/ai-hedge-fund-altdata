@@ -120,7 +120,7 @@ Frontend: `ai-workbench/app/lab.tsx` (the Lab section), `app/lib/api.ts`
 | `WEB_ARCHIVE_DB` | path to v2's `archive.db` | `<repo>/data/archive.db` |
 | `WEB_PERSONAS_DB` | committee votes + snapshot cache (Lab · 投资人委员会) | `<repo>/data/personas.db` |
 | `WEB_LAB_DB` | persisted run log for every Lab tool | `<repo>/data/lab.db` |
-| `FD_PRICES` | JSON overriding financialdatasets.ai per-request prices used for Lab cost estimates, e.g. `{"financial_metrics":0.02,"line_items":0.04}` | published pay-as-you-go tiers, unknown ones at $0.04 |
+| `FD_PRICES` | JSON overriding financialdatasets.ai per-request prices used for Lab cost estimates, e.g. `{"news":0.04}` | $0.02 per request for every stock endpoint (account Billing page, 2026-09) |
 | `WEB_CORS_ORIGINS` | comma-separated allowed origins | `localhost:5173` |
 
 Plus the v2 runtime env (`FINANCIAL_DATASETS_API_KEY`, `DEEPSEEK_API_KEY`,
