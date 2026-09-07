@@ -104,6 +104,7 @@ One-shot redeploy of backend + workbench (+ scheduler when its code changed):
 ```bash
 cd /root/hedge-fund && bash web/deploy/redeploy.sh            # fast-forwards to origin/main
 cd /root/hedge-fund && bash web/deploy/redeploy.sh origin/<branch>
+cd /root/hedge-fund && bash web/deploy/redeploy.sh --frontend --scheduler   # force rebuild / restart
 ```
 
 Then open the site, Lab → 投资人委员会. Smoke-test from the shell:
