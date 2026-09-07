@@ -119,7 +119,7 @@ export function LabPage({ tool, selectTool, ask }: { tool: LabTool; selectTool: 
     scoreboard: ['观察记分板', '委员会每一票在 1 个月 / 3 个月后对不对：无前视的逐人命中率。'],
     runs: ['运行记录', '所有工具的历史运行，点开可原样重看。'],
   };
-  return <div className={`page lab-page${tool === 'screening' ? ' lab-page-fill' : ''}`}>
+  return <div className={`page lab-page lab-big${tool === 'screening' ? ' lab-page-fill' : ''}`}>
     <div className="page-heading"><div><h1>{heading[tool][0]}</h1><p>{heading[tool][1]}</p></div><span className="lab-tag">ISOLATED LAB</span></div>
     {tool === 'overview' && <OverviewTool {...common}/>}
     {tool === 'screening' && <ScreeningTool {...common} result={results.screening as ScreeningResult | undefined} setResult={r => setResult('screening', r)} onHand={hand}/>}
@@ -225,7 +225,7 @@ function ScreeningTool({ result, setResult, onHand, watchlist, refreshWatchlist,
     } catch (e) { setError(errorText(e)) } finally { setBusy(false); setJob(null) }
   };
   const chosen = result ? result.candidates.filter(c => picked.has(c.ticker)).map(c => c.ticker) : [];
-  return <div className="lab-tool lab-tool-fill lab-big">
+  return <div className="lab-tool lab-tool-fill">
     <section className="surface lab-config lab-config-fill"><div className="surface-header"><div><h2>筛选条件</h2><span>全部阈值可改，缺数据的股票不通过</span></div></div>
       <div className="lab-config-body lab-scroll">
       <UniversePicker universe={universe} setUniverse={setUniverse} tickers={tickers} setTickers={setTickers} info={info.data?.items}/>

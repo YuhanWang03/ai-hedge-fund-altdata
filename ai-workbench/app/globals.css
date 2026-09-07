@@ -130,3 +130,65 @@
 .lab-result-clamp>.lab-empty{flex:1;min-height:0}
 .lab-big .lab-result-clamp>.surface-header{flex-wrap:wrap}
 .lab-big .lab-result-clamp>.surface-header>div{flex:1 1 220px;min-width:0}
+
+/* Lab-wide type scale (the .lab-big scope now sits on the whole Lab page). */
+.lab-big .page-heading h1{font-size:22px}
+.lab-big .page-heading p{font-size:13px}
+.lab-big .lab-tag,.lab-big .universe-source{font-size:11px}
+.lab-big .surface-header button,.lab-big .text-action{padding:7px 12px;font-size:12px}
+.lab-big .surface-header>strong{font-size:16px}
+.lab-big .explain-button{padding:10px 14px;font-size:13px}
+.lab-big .persona-chips button{padding:7px 12px;font-size:12px}
+.lab-big .lab-tag-ok{font-size:11px}
+.lab-big .lab-link{font-size:12px}
+.lab-big .lab-pipeline button{padding:16px 18px;gap:6px}
+.lab-big .lab-pipeline strong{font-size:15px}
+.lab-big .lab-pipeline em{font-size:24px}
+.lab-big .lab-pipeline span{font-size:12px}
+.lab-big .lab-stat{padding:12px 14px}
+.lab-big .lab-stat span{font-size:11px}
+.lab-big .lab-stat strong{font-size:18px}
+.lab-big .lab-subhead{padding:12px 0 6px;font-size:13px}
+.lab-big .lab-handoff{padding:11px 14px;font-size:13px}
+.lab-big .lab-handoff button:not(.lab-link){padding:8px 12px;font-size:12px}
+.lab-big .lab-history{padding:12px 16px 0;gap:4px}
+.lab-big .lab-history>span{font-size:12px}
+.lab-big .lab-history button{padding:8px 11px;font-size:12px}
+.lab-big .lab-runs{padding:6px 16px 10px}
+.lab-big .lab-run{grid-template-columns:110px minmax(0,1fr) auto;padding:11px 2px;font-size:12px}
+.lab-big .lab-run em{padding:4px 9px}
+.lab-big .lab-engines{padding:8px 16px}
+.lab-big .lab-engines button{padding:11px 2px;font-size:12px}
+.lab-big .lab-engines strong{font-size:13px}
+.lab-big .lab-verdict{padding:12px 14px;font-size:12px}
+.lab-big .lab-verdict strong{font-size:15px}
+.lab-big .lab-verdict small{font-size:11px}
+.lab-big .lab-verdicts{grid-template-columns:repeat(auto-fill,minmax(230px,1fr))}
+.lab-big .lab-thresholds{margin:14px 16px 0}
+.lab-big .lab-thresholds>div{padding:9px 12px;font-size:12px}
+.lab-big .lab-thresholds .lab-subhead{padding:10px 12px 6px}
+.lab-big .lab-gaps{padding:11px 16px;font-size:12px}
+.lab-big .lab-equity{height:150px;padding:8px 16px 0}
+.lab-big .guardrail{padding:13px 16px;font-size:12px}
+.lab-big .lab-result pre{font-size:12px}
+.lab-big .lab-result summary{padding:11px 16px;font-size:12px}
+.lab-big .lab-result.error-result{font-size:13px}
+.lab-big .committee-errors{padding:11px 16px;font-size:12px}
+.lab-big .committee-matrix-wrap{padding:0 16px 8px}
+.lab-big .committee-matrix{font-size:12px}
+.lab-big .committee-matrix th{padding:9px 10px}
+.lab-big .committee-matrix td{padding:4px 5px}
+.lab-big .committee-matrix .sig{min-width:60px;padding:6px 9px;font-size:13px}
+.lab-big .committee-foot th,.lab-big .committee-foot td{font-size:12px}
+.lab-big .committee-foot td strong{font-size:13px}
+.lab-big .committee-detail{padding:14px 16px}
+.lab-big .committee-detail-head{font-size:13px}
+.lab-big .committee-detail-head strong{font-size:15px}
+.lab-big .committee-part-head{font-size:12px}
+.lab-big .committee-parts p{font-size:11px;line-height:1.6}
+.lab-big .committee-narrative{padding:11px 14px;font-size:13px}
+.lab-big .committee-narrative em{font-size:11px}
+.lab-big .committee-gaps{font-size:11px}
+.lab-big .lab-ask{padding:10px 16px}
+@media(max-width:760px){.lab-big .lab-run{grid-template-columns:90px minmax(0,1fr) auto}}
+.lab-big .lab-tag{white-space:nowrap}
