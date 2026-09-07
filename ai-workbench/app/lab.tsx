@@ -353,11 +353,12 @@ function EquityLine({ values }: { values: number[] }) {
 }
 
 type StrategyId = 'pead' | 'momentum' | 'insider' | 'committee';
-const STRATEGIES: { id: StrategyId; label: string; short: string; holding: number; hint: string; empty: string }[] = [
-  { id: 'pead', label: 'PEAD 财报后漂移', short: 'PEAD', holding: 5, hint: '财报 EPS 超预期做多、不及预期做空，财报日后入场持有 N 日。财报历史来自 Financial Datasets，每只 1 次请求。', empty: '在选定股票池的历史财报事件上按 PEAD 规则入场、持有 N 日出场，得到逐笔交易与净值曲线。' },
-  { id: 'momentum', label: '价格动量', short: '动量', holding: 21, hint: '12-1 动量：按「跳过最近 M 日后的 N 日涨幅」排名，每期买入前 K 只、持有一期。只用价格，yfinance 下免费。可选只买接近 52 周新高的股票。', empty: '每个换仓日按过去一年的涨幅排名，买入最强的几只，持有一期后换仓。' },
-  { id: 'insider', label: '内部人集中买入', short: '内部人', holding: 63, hint: '窗口期内有多位不同内部人（高管、董事）净买入且合计金额达标，即在最后一笔申报日次日买入。内部人交易来自 Financial Datasets，每只 1 次请求。', empty: '找出历史上多位内部人在短窗口内集中买入的时点，买入并持有一段时间。' },
-  { id: 'committee', label: '投资人委员会', short: '委员会', holding: 63, hint: '每个换仓日让 13 位模拟投资人按当时可得的财务数据打分，买入共识最强的前 K 只。每只股票每个时点约 4 次付费请求（省流模式），快照会缓存，重跑同一时点不再计费。', empty: '在历史上每个季度让投资人委员会投票，买入共识最强的几只，看这套打分规则过去是否赚钱。' },
+type DataTier = 'free' | 'paid';
+const STRATEGIES: { id: StrategyId; tier: DataTier; label: string; short: string; holding: number; hint: string; empty: string }[] = [
+  { id: 'pead', tier: 'paid', label: 'PEAD 财报后漂移', short: 'PEAD', holding: 5, hint: '财报 EPS 超预期做多、不及预期做空，财报日后入场持有 N 日。财报历史来自 Financial Datasets，每只 1 次请求。', empty: '在选定股票池的历史财报事件上按 PEAD 规则入场、持有 N 日出场，得到逐笔交易与净值曲线。' },
+  { id: 'momentum', tier: 'free', label: '价格动量', short: '动量', holding: 21, hint: '12-1 动量：按「跳过最近 M 日后的 N 日涨幅」排名，每期买入前 K 只、持有一期。只用价格，yfinance 下免费。可选只买接近 52 周新高的股票。', empty: '每个换仓日按过去一年的涨幅排名，买入最强的几只，持有一期后换仓。' },
+  { id: 'insider', tier: 'paid', label: '内部人集中买入', short: '内部人', holding: 63, hint: '窗口期内有多位不同内部人（高管、董事）净买入且合计金额达标，即在最后一笔申报日次日买入。内部人交易来自 Financial Datasets，每只 1 次请求。', empty: '找出历史上多位内部人在短窗口内集中买入的时点，买入并持有一段时间。' },
+  { id: 'committee', tier: 'paid', label: '投资人委员会', short: '委员会', holding: 63, hint: '每个换仓日让 13 位模拟投资人按当时可得的财务数据打分，买入共识最强的前 K 只。每只股票每个时点约 4 次付费请求（省流模式），快照会缓存，重跑同一时点不再计费。', empty: '在历史上每个季度让投资人委员会投票，买入共识最强的几只，看这套打分规则过去是否赚钱。' },
 ];
 const STRATEGY_LABEL: Record<string, string> = Object.fromEntries(STRATEGIES.map(s => [s.id, s.label]));
 
@@ -372,8 +373,8 @@ function signalText(strategy: string, meta?: Record<string, unknown>): string {
 
 function BacktestTool({ result, setResult, handoff, clearHandoff, ask }: ToolProps & { result?: BacktestResult; setResult: (r?: BacktestResult) => void; handoff: Handoff | null; clearHandoff: () => void }) {
   const [universe, setUniverse] = useState<Universe>('custom'); const [tickers, setTickers] = useState('AAPL, MSFT, NVDA');
-  const [strategy, setStrategyRaw] = useState<StrategyId>('pead'); const [dataSource, setDataSource] = useState<'yfinance' | 'fd'>('yfinance');
-  const [holding, setHolding] = useState('5'); const [earnings, setEarnings] = useState('8'); const [capital, setCapital] = useState('100000'); const [perTrade, setPerTrade] = useState('10000');
+  const [tier, setTierRaw] = useState<DataTier>('free'); const [strategy, setStrategyRaw] = useState<StrategyId>('momentum'); const [dataSource, setDataSource] = useState<'yfinance' | 'fd'>('yfinance');
+  const [holding, setHolding] = useState('21'); const [earnings, setEarnings] = useState('8'); const [capital, setCapital] = useState('100000'); const [perTrade, setPerTrade] = useState('10000');
   const [history, setHistory] = useState('730'); const [topN, setTopN] = useState('5'); const [lookback, setLookback] = useState('252'); const [skip, setSkip] = useState('21'); const [nearHigh, setNearHigh] = useState('');
   const [window, setWindowDays] = useState('30'); const [minInsiders, setMinInsiders] = useState('2'); const [minValue, setMinValue] = useState('100000');
   const [minConsensus, setMinConsensus] = useState('0.2'); const [minAgreement, setMinAgreement] = useState('0.5'); const [lean, setLean] = useState(true); const [lag, setLag] = useState('45');
@@ -382,6 +383,8 @@ function BacktestTool({ result, setResult, handoff, clearHandoff, ask }: ToolPro
   const pricing = useLabData<Pricing>('/api/lab/committee/pricing');
   const meta = STRATEGIES.find(s => s.id === strategy)!;
   const setStrategy = (id: StrategyId) => { setStrategyRaw(id); setHolding(String(STRATEGIES.find(s => s.id === id)!.holding)); };
+  const setTier = (t: DataTier) => { setTierRaw(t); setStrategy(STRATEGIES.find(s => s.tier === t)!.id); if (t === 'free') setDataSource('yfinance'); };
+  const tierStrategies = STRATEGIES.filter(s => s.tier === tier);
   const price = (k: string) => pricing.data?.prices_usd[k] ?? 0.02;
   const poolSize = universe === 'custom' ? parseTickers(tickers).length : (info.data?.items[universe]?.size ?? 0);
   const step = Math.max(1, Math.round(Number(holding) * 365 / 252));
@@ -429,10 +432,11 @@ function BacktestTool({ result, setResult, handoff, clearHandoff, ask }: ToolPro
   return <>
     {handoff && <HandoffBanner handoff={handoff} onUse={() => { setUniverse('custom'); setTickers(handoff.tickers.join(', ')); clearHandoff() }} onClear={clearHandoff}/>}
     <div className="lab-tool">
-      <section className="surface lab-config"><div className="surface-header"><div><h2>回测参数</h2><span>四个策略共用一个引擎：策略只产生信号，引擎负责成交、持有与统计</span></div></div>
-        <Field label="策略" hint={meta.hint}><Chips options={STRATEGIES.map(s => ({ id: s.id, label: s.label }))} value={strategy} onChange={setStrategy}/></Field>
+      <section className="surface lab-config"><div className="surface-header"><div><h2>回测参数</h2><span>先选免费还是付费数据，再选该档位下的策略；四个策略共用一个引擎</span></div></div>
+        <Field label="数据" hint={tier === 'free' ? '只用 yfinance 的日线价格，不产生任何费用；可用的策略是纯价格策略。' : '财报、内部人交易和财务数据来自 Financial Datasets，按请求计费（每次约 $0.02）；下方会给出费用预估。'}><Chips options={[{ id: 'free', label: '免费（yfinance）' }, { id: 'paid', label: '付费（Financial Datasets）' }]} value={tier} onChange={setTier}/></Field>
+        <Field label="策略" hint={meta.hint}><Chips options={tierStrategies.map(s => ({ id: s.id, label: s.label }))} value={strategy} onChange={setStrategy}/></Field>
         <UniversePicker universe={universe} setUniverse={setUniverse} tickers={tickers} setTickers={setTickers} exclude={INDEX_UNIVERSES}/>
-        <Field label="价格数据源" hint={dataSource === 'yfinance' ? '日线价格来自 yfinance，免费；财报、内部人交易和财务数据始终来自 Financial Datasets。' : `日线价格也从 Financial Datasets 取，每只每 90 天一段、每段 ${usd(price('prices'))}；只在需要与线上口径完全一致时用。`}><Chips options={[{ id: 'yfinance', label: 'yfinance（免费）' }, { id: 'fd', label: 'Financial Datasets（付费）' }]} value={dataSource} onChange={setDataSource}/></Field>
+        {tier === 'paid' && <Field label="价格来源" hint={dataSource === 'yfinance' ? '日线价格仍用 yfinance，免费；只有事件和财务数据付费。' : `日线价格也从 Financial Datasets 取，每只每 90 天一段、每段 ${usd(price('prices'))}；只在需要与线上口径完全一致时用。`}><Chips options={[{ id: 'yfinance', label: 'yfinance（免费）' }, { id: 'fd', label: 'Financial Datasets（付费）' }]} value={dataSource} onChange={setDataSource}/></Field>}
         <div className="lab-grid2">
           <Field label="持有交易日" hint={strategy === 'momentum' || strategy === 'committee' ? '也是换仓周期' : undefined}><NumberInput value={holding} onChange={setHolding} min={1} max={252}/></Field>
           {strategy === 'pead' ? <Field label="每只回看财报数" hint="每份财报是一个入场事件"><NumberInput value={earnings} onChange={setEarnings} min={1} max={20}/></Field>
@@ -443,7 +447,8 @@ function BacktestTool({ result, setResult, handoff, clearHandoff, ask }: ToolPro
           <Field label="初始资金（$）"><NumberInput value={capital} onChange={setCapital} min={1000} step={10000}/></Field><Field label="单笔资金（$）"><NumberInput value={perTrade} onChange={setPerTrade} min={100} step={1000}/></Field>
         </div>
         {strategy === 'committee' && <Field label="省流模式" hint={lean ? '跳过新闻和内部人交易两路请求；只影响几位投资人的情绪小分项' : '取全部数据，每个时点每只约 6 次请求'}><Chips options={[{ id: 'on', label: '开（省流）' }, { id: 'off', label: '关（全量）' }]} value={lean ? 'on' : 'off'} onChange={v => setLean(v === 'on')}/></Field>}
-        <p className="lab-note">预计 Financial Datasets 费用：{estimate ? `≈ ${usd(estimate.total)}${estimate.note ? `（${estimate.note}${estimate.prices ? ` + 价格 ${usd(estimate.prices)}` : ''}）` : ''}` : '$0.00'}{strategy === 'committee' ? '。已缓存的时点不重复计费；委员会回测在后台运行，可以看进度。' : strategy === 'pead' && dataSource === 'fd' ? '，另加每笔交易 1 次价格请求。' : '。'}</p>
+        {tier === 'paid' && <p className="lab-note">预计 Financial Datasets 费用：{estimate ? `≈ ${usd(estimate.total)}${estimate.note ? `（${estimate.note}${estimate.prices ? ` + 价格 ${usd(estimate.prices)}` : ''}）` : ''}` : '$0.00'}{strategy === 'committee' ? '。已缓存的时点不重复计费；委员会回测在后台运行，可以看进度。' : strategy === 'pead' && dataSource === 'fd' ? '，另加每笔交易 1 次价格请求。' : '。'}</p>}
+        {tier === 'free' && <p className="lab-note">免费档不调用 Financial Datasets，费用 $0.00。</p>}
         <button className="run-button" disabled={busy || (universe === 'custom' && !parseTickers(tickers).length)} onClick={() => void run()}>{busy ? (job ? `回测中… ${job.done} / ${job.total}` : '回测中…') : '运行回测'}</button>
         {job && <div className="lab-progress"><i style={{ width: `${job.total ? Math.round((job.done / job.total) * 100) : 0}%` }}/></div>}
       </section>
