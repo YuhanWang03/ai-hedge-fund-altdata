@@ -11,7 +11,7 @@ type LabTool = 'overview' | 'committee' | 'backtest' | 'event-study' | 'screenin
 type CommitteeSource = 'tickers' | 'holdings' | 'watchlist' | 'screening';
 type PersonaMeta = { key: string; name: string; name_zh: string; style: string; period: string; lookback: number; needs: string[] };
 type CommitteePart = { name: string; score: number; max_score: number; details: string };
-type CommitteeSignal = { persona: string; ticker: string; as_of: string; signal: 'bullish' | 'bearish' | 'neutral'; confidence: number; score: number; max_score: number; ratio: number; parts: CommitteePart[]; facts: Record<string, unknown>; margin_of_safety: number | null; reasoning: string; narrative?: string | null; abstained: boolean; data_gaps: string[] };
+type CommitteeSignal = { persona: string; ticker: string; as_of: string; signal: 'bullish' | 'bearish' | 'neutral'; confidence: number; score: number; max_score: number; ratio: number; parts: CommitteePart[]; facts: Record<string, unknown>; margin_of_safety: number | null; reasoning: string; narrative?: string | null; narrative_grounded?: boolean | null; abstained: boolean; data_gaps: string[] };
 type CommitteeVerdict = { ticker: string; as_of: string; stance: 'bullish' | 'bearish' | 'neutral' | 'abstain'; consensus: number; net_votes: number; bullish: number; bearish: number; neutral: number; abstained: number; voters: number; agreement: number; avg_confidence: number; rank: number | null; data_gaps: string[]; signals: CommitteeSignal[]; position?: { weight: number | null; market_value: number; current_price: number | null; unrealized_pl_pct: number | null }; action?: string; action_reason?: string; price?: number | null };
 type CommitteeResult = { kind: 'committee'; run_id: string; source: CommitteeSource; as_of: string; personas: string[]; personas_meta: PersonaMeta[]; elapsed_s: number; errors: Record<string, string>; cache_hits: string[]; verdicts: CommitteeVerdict[]; top: { rank: number; ticker: string; stance: string; consensus: number; bullish: number; bearish: number; neutral: number; agreement: number }[]; screening?: { universe_size: number | null; n_candidates: number; date: string | null }; error?: string };
 type ChatMessage = { id: number; role: 'user' | 'assistant'; text: string; image?: string; meta?: string };
@@ -623,8 +623,20 @@ function CommitteePanel({ ask, run, busy }: { ask: (prompt: string, context: str
   </section><section className="surface result-preview"><div className="result-placeholder"><span>⚖</span><h2>等待评审</h2><p>结果是一张矩阵：行是投资人，列是股票，格子里是多空与置信度。点任意格子看依据。</p></div><div className="guardrail"><strong>无 LLM 判决</strong><span>信号与置信度全部由规则算出，可复现；LLM 只在你点「解读」时写文字。</span></div></section></div>;
 }
 
+type NarrativeState = { text: string; grounded: boolean | null } | { error: string } | 'loading';
 function CommitteeResultView({ result }: { result: CommitteeResult }) {
   const [picked, setPicked] = useState<{ ticker: string; persona: string } | null>(null);
+  const [narratives, setNarratives] = useState<Record<string, NarrativeState>>({});
+  const narrate = async (ticker: string, persona: string) => {
+    const key = `${persona}|${ticker}`;
+    setNarratives(current => ({ ...current, [key]: 'loading' }));
+    try {
+      const data = await apiJson<{ narrative: string; narrative_grounded: boolean | null }>('/api/lab/committee/narrate', { method: 'POST', body: JSON.stringify({ run_id: result.run_id, ticker, persona, language: 'zh' }) });
+      setNarratives(current => ({ ...current, [key]: { text: data.narrative, grounded: data.narrative_grounded } }));
+    } catch (error) {
+      setNarratives(current => ({ ...current, [key]: { error: error instanceof Error ? error.message : 'unknown' } }));
+    }
+  };
   if (result.error) return <section className="surface lab-result error-result"><strong>请求失败</strong><span>{String(result.error)}</span></section>;
   const verdicts = result.verdicts || [];
   const personas = result.personas_meta?.length ? result.personas_meta : (result.personas || []).map(key => ({ key, name: key, name_zh: key, style: '', period: '', lookback: 0, needs: [] as string[] }));
@@ -648,7 +660,8 @@ function CommitteeResultView({ result }: { result: CommitteeResult }) {
     </tbody></table></div>
     {pickedSignal && pickedVerdict && <div className="committee-detail"><div className="committee-detail-head"><strong>{personas.find(p => p.key === pickedSignal.persona)?.name_zh || pickedSignal.persona} · {pickedVerdict.ticker}</strong><em className={`sig-text-${pickedSignal.abstained ? 'abstain' : pickedSignal.signal}`}>{SIGNAL_LABEL[pickedSignal.abstained ? 'abstain' : pickedSignal.signal]} {pickedSignal.abstained ? '' : `${pickedSignal.confidence}%`}</em><span>得分 {pickedSignal.score.toFixed(2)} / {pickedSignal.max_score}{pickedSignal.margin_of_safety != null ? ` · 安全边际 ${pct(pickedSignal.margin_of_safety)}` : ''}</span></div>
       {pickedSignal.parts.length > 0 && <div className="committee-parts">{pickedSignal.parts.map(part => <div key={part.name}><div className="committee-part-head"><span>{part.name.replaceAll('_', ' ')}</span><strong>{part.score.toFixed(part.score % 1 ? 2 : 0)} / {part.max_score}</strong></div><div className="risk-track"><i style={{ width: `${part.max_score > 0 ? Math.max(0, Math.min(100, (part.score / part.max_score) * 100)) : 0}%` }}/></div><p>{part.details || '—'}</p></div>)}</div>}
-      {pickedSignal.narrative && <p className="committee-narrative">{pickedSignal.narrative}</p>}
+      {(() => { const key = `${pickedSignal.persona}|${pickedVerdict.ticker}`; const state = narratives[key]; const stored = pickedSignal.narrative ? { text: pickedSignal.narrative, grounded: pickedSignal.narrative_grounded ?? null } : null; const shown = state && state !== 'loading' && 'text' in state ? state : stored;
+        return <div className="committee-narrate">{shown ? <p className="committee-narrative">{shown.text}<em className={shown.grounded === false ? 'ungrounded' : ''}>{shown.grounded === false ? '⚠ 有数字无法溯源' : shown.grounded ? '✓ 数字已溯源' : ''}</em></p> : null}{state && state !== 'loading' && 'error' in state ? <small className="committee-gaps">解读失败：{state.error}</small> : null}{result.run_id ? <button type="button" className="text-action" disabled={state === 'loading'} onClick={() => void narrate(pickedVerdict.ticker, pickedSignal.persona)}>{state === 'loading' ? '解读中…' : shown ? '重新解读' : 'LLM 解读'}</button> : null}</div> })()}
       {pickedSignal.data_gaps.length > 0 && <small className="committee-gaps">数据缺口：{pickedSignal.data_gaps.join('；')}</small>}
     </div>}
     <details><summary>查看原始结果</summary><pre>{JSON.stringify(result, null, 2)}</pre></details>
