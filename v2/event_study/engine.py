@@ -58,7 +58,7 @@ _ESTIMATION_END = -11              # end of estimation window (10-day buffer avo
 _MIN_ESTIMATION_DAYS = 200         # skip events without enough pre-event price history
 _MAX_EVENT_WINDOW = 20             # widest post-event window (day 0 through day +20)
 _RETROSPECTIVE_CUTOFF_DAYS = 45    # max days between filing_date and report_period
-_CAR_WINDOWS = [(0, 1), (0, 5), (0, 20)]  # the three event windows we compute CARs for
+_CAR_WINDOWS = [(0, 1), (0, 5), (0, 20), (2, 20)]  # reaction windows plus the post-announcement drift window [+2,+20]
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +96,8 @@ def compute_car(
                               usually appears as an 8-K and again as the 10-Q/10-K; keep the
                               earliest filing (8-K preferred) so it is not counted twice.
         group_by:             "surprise" → groups ALL / BEAT / MISS / MEET (the PEAD question);
+                              "reaction" → ALL plus terciles of the two-day announcement reaction
+                              (REACT_UP / MID / DOWN), read together with the [+2,+20] window;
                               "source" → groups by filing type (the original robustness check).
 
     Returns:
@@ -299,6 +301,7 @@ def _process_event(
         car_0_1=cars["car_0_1"],
         car_0_5=cars["car_0_5"],
         car_0_20=cars["car_0_20"],
+        car_2_20=cars["car_2_20"],
     )
 
 
@@ -332,6 +335,22 @@ def _group_key(e: EventCAR, group_by: str) -> str:
     return e.source_type
 
 
+def _reaction_groups(events: list[EventCAR]) -> dict[str, list[EventCAR]]:
+    """Terciles of the two-day announcement reaction (CAR [0,+1]).
+
+    The EPS label is a noisy proxy for the surprise; the price reaction on the
+    announcement itself is the market's own verdict. Whether the top and bottom
+    terciles keep drifting over [+2,+20] is the earnings-announcement-return
+    version of the PEAD test.
+    """
+    scored = sorted((e for e in events if e.car_0_1 is not None), key=lambda e: e.car_0_1)
+    n = len(scored)
+    if n < 3:
+        return {}
+    cut = n // 3
+    return {"REACT_DOWN": scored[:cut], "REACT_MID": scored[cut:n - cut], "REACT_UP": scored[n - cut:]}
+
+
 def _aggregate(
     events: list[EventCAR],
     n_bootstrap: int,
@@ -355,16 +374,19 @@ def _aggregate(
 
     # Group events: by EPS surprise (with an ALL group first) or by filing type
     groups: dict[str, list[EventCAR]] = defaultdict(list)
-    if group_by == "surprise":
+    if group_by in ("surprise", "reaction"):
         groups["ALL"] = list(events)
-    for e in events:
-        groups[_group_key(e, group_by)].append(e)
+    if group_by == "reaction":
+        groups.update(_reaction_groups(events))
+    else:
+        for e in events:
+            groups[_group_key(e, group_by)].append(e)
 
     # Map window labels to EventCAR attribute names
-    car_attr = {"[0,+1]": "car_0_1", "[0,+5]": "car_0_5", "[0,+20]": "car_0_20"}
+    car_attr = {"[0,+1]": "car_0_1", "[0,+5]": "car_0_5", "[0,+20]": "car_0_20", "[+2,+20]": "car_2_20"}
     results: list[AggregateResult] = []
 
-    order = {"ALL": 0, "BEAT": 1, "MISS": 2, "MEET": 3, "UNLABELED": 4}
+    order = {"ALL": 0, "BEAT": 1, "MISS": 2, "MEET": 3, "UNLABELED": 4, "REACT_UP": 1, "REACT_MID": 2, "REACT_DOWN": 3}
     for source_type in sorted(groups, key=lambda k: (order.get(k, 9), k)):
         group = groups[source_type]
         windows: list[WindowStats] = []

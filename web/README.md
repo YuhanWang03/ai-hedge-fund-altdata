@@ -115,7 +115,7 @@ POST /api/lab/screening              {universe, tickers?, data_source: yfinance|
 GET  /api/lab/screening/criteria     the 22 rule fields (label, unit, source) + the default rule set
 POST /api/lab/backtest               {universe, tickers?, strategy: pead|momentum|insider|committee, data_source: yfinance|fd, holding_days, capital, per_trade, …}
 GET  /api/lab/backtest/jobs/{id}     poll a background backtest (the committee strategy always runs as one)
-POST /api/lab/event-study            {universe, tickers?, data_source: yfinance|fd, earnings_limit, n_bootstrap, require_eps_surprise, dedupe, group_by: surprise|source}
+POST /api/lab/event-study            {universe, tickers?, data_source: yfinance|fd, earnings_limit, n_bootstrap, require_eps_surprise, dedupe, group_by: surprise|reaction|source}
 GET  /api/lab/signals                production anomaly thresholds, read-only
 GET  /api/lab/runs[?kind=&limit=]    persisted run log for every tool (+ per-kind counts)
 GET  /api/lab/runs/{id}              params + full result of one run

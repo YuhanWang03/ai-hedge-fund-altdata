@@ -150,6 +150,24 @@ class TestDedupeAndGrouping:
         by_source = _aggregate(events, 200, 42, group_by="source")
         assert [g.group for g in by_source] == ["8-K"] and by_source[0].source_type == "8-K"
 
+    def test_aggregate_by_reaction_splits_terciles_of_the_two_day_car(self):
+        from v2.event_study.engine import _aggregate, _reaction_groups
+
+        def ev(i, react):
+            return EventCAR(ticker="T", event_date=f"2025-01-{10 + i:02d}", source_type="8-K", report_period="2024-12-31", eps_surprise=None,
+                            market_model=MarketModelFit(alpha=0.0, beta=1.0, r_squared=0.5, n_obs=240), daily_ar=[0.0] * 21,
+                            car_0_1=react, car_0_5=react, car_0_20=react * 1.5, car_2_20=react * 0.5)
+
+        events = [ev(i, r) for i, r in enumerate([-0.10, -0.08, -0.06, -0.01, 0.0, 0.01, 0.05, 0.07, 0.09])]
+        terciles = _reaction_groups(events)
+        assert [len(terciles[k]) for k in ("REACT_DOWN", "REACT_MID", "REACT_UP")] == [3, 3, 3]
+        assert all(e.car_0_1 <= -0.06 for e in terciles["REACT_DOWN"]) and all(e.car_0_1 >= 0.05 for e in terciles["REACT_UP"])
+        groups = _aggregate(events, 200, 42, group_by="reaction")
+        assert [g.group for g in groups] == ["ALL", "REACT_UP", "REACT_MID", "REACT_DOWN"]
+        drift = {w.window: w.mean_car for w in groups[1].windows}
+        assert "[+2,+20]" in drift and drift["[+2,+20]"] > 0 > {w.window: w.mean_car for w in groups[3].windows}["[+2,+20]"]
+        assert _reaction_groups(events[:2]) == {}  # too few to cut into thirds
+
 
 # ---------------------------------------------------------------------------
 # Unit tests — plot (smoke test, no visual assertion)

@@ -353,8 +353,8 @@ class EventStudyInput(BaseModel):
     require_eps_surprise: bool = True
     #: one event per (ticker, report period): the 8-K and the later 10-Q/10-K are the same announcement
     dedupe: bool = True
-    #: "surprise" → ALL / BEAT / MISS / MEET groups; "source" → by filing type
-    group_by: Literal["surprise", "source"] = "surprise"
+    #: "surprise" → ALL / BEAT / MISS / MEET; "reaction" → terciles of the 2-day reaction; "source" → by filing type
+    group_by: Literal["surprise", "reaction", "source"] = "surprise"
 
 
 def _run_event_study(body: EventStudyInput) -> dict:

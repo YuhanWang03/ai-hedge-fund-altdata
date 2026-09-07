@@ -46,6 +46,7 @@ class EventCAR(BaseModel):
     car_0_1: float | None = None              # cumulative AR over [0, +1] (2 days)
     car_0_5: float | None = None              # cumulative AR over [0, +5] (6 days)
     car_0_20: float | None = None             # cumulative AR over [0, +20] (21 days)
+    car_2_20: float | None = None             # post-announcement drift: [+2, +20], excludes the reaction days
 
 
 class BootstrapCI(BaseModel):
