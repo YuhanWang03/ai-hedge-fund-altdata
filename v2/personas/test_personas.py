@@ -543,3 +543,23 @@ def test_consistency_and_trend_loops_read_newest_first_order():
     munger_shrink = get_persona("charlie_munger").analyze(shrink).parts[0].details
     assert "Gross margins consistently improving" in munger_grow, munger_grow
     assert "consistently improving" not in munger_shrink, munger_shrink
+
+
+def test_wikipedia_constituents_parser_is_nesting_safe_and_picks_the_best_table():
+    import runpy
+
+    ns = runpy.run_path("v2/screening/universes.py", run_name="not_main")  # avoid importing the production-only screener package
+    html = """
+    <table><tr><th>Year</th><th>Return</th></tr><tr><td>2024</td><td>+25%</td></tr></table>
+    <table class="wikitable"><caption>Constituents</caption>
+    <tr><th>Company<span>sort</span></th><th>Ticker</th><th>GICS Sector</th></tr>
+    <tr><td>Adobe<table><tr><td>inner</td></tr></table></td><td><a href="x">ADBE</a></td><td>IT</td></tr>
+    <tr><td>Alphabet</td><td>GOOGL</td><td>Comm</td></tr>
+    <tr><td>Berkshire</td><td>BRK.B</td><td>Fin</td></tr>
+    <tr><td>Bad</td><td>not a ticker</td><td>x</td></tr>
+    </table>
+    <table><tr><th>Symbol</th></tr><tr><td>ONLY</td></tr></table>"""
+    assert ns["parse_constituents"](html, ("ticker", "symbol")) == ["ADBE", "GOOGL", "BRK.B"]
+    assert len(ns["describe_tables"](html)) == 4
+    sp500, as_of = ns["load_universe"]("sp500")
+    assert len(sp500) > 450 and len(set(sp500)) == len(sp500) and as_of

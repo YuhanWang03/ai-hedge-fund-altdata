@@ -136,71 +136,97 @@ def universe_status() -> dict[str, dict[str, object]]:
 
 # ----------------------------------------------------------------- refresh from Wikipedia
 
-class _ConstituentsTable(HTMLParser):
-    """Pull the symbol column out of the first table whose header names it."""
+class _Tables(HTMLParser):
+    """Collect every table on the page as rows of cell text (nesting-safe)."""
 
-    def __init__(self, header_names: tuple[str, ...]) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        self.header_names = header_names
-        self.rows: list[list[str]] = []
-        self._in_table = 0
+        self.tables: list[list[list[str]]] = []
+        self._stack: list[list[list[str]]] = []
+        self._saved: list[tuple[list[str] | None, list[str] | None]] = []  # outer row/cell while inside a nested table
         self._row: list[str] | None = None
         self._cell: list[str] | None = None
-        self.done = False
 
     def handle_starttag(self, tag, attrs):
-        if self.done:
-            return
         if tag == "table":
-            self._in_table += 1
-        elif tag == "tr" and self._in_table:
+            self._stack.append([])
+            self._saved.append((self._row, self._cell))
+            self._row, self._cell = None, None
+        elif tag == "tr" and self._stack:
             self._row = []
         elif tag in ("td", "th") and self._row is not None:
             self._cell = []
+        elif tag == "br" and self._cell is not None:
+            self._cell.append(" ")
 
     def handle_endtag(self, tag):
-        if self.done:
-            return
         if tag in ("td", "th") and self._cell is not None and self._row is not None:
             self._row.append(re.sub(r"\s+", " ", "".join(self._cell)).strip())
             self._cell = None
-        elif tag == "tr" and self._row is not None:
+        elif tag == "tr" and self._row is not None and self._stack:
             if self._row:
-                self.rows.append(self._row)
+                self._stack[-1].append(self._row)
             self._row = None
-        elif tag == "table" and self._in_table:
-            self._in_table -= 1
-            if self.rows and any(h.lower() in self.header_names for h in self.rows[0]):
-                self.done = True
-            elif not self.done:
-                self.rows = []
+        elif tag == "table" and self._stack:
+            self.tables.append(self._stack.pop())
+            self._row, self._cell = self._saved.pop() if self._saved else (None, None)
 
     def handle_data(self, data):
         if self._cell is not None:
             self._cell.append(data)
 
-    def symbols(self) -> list[str]:
-        if not self.rows:
-            return []
-        header = [h.lower() for h in self.rows[0]]
-        col = next((i for i, h in enumerate(header) if h in self.header_names), None)
+
+_TICKER_RE = re.compile(r"[A-Z][A-Z0-9.\-]{0,7}")
+
+
+def _symbols_from_table(rows: list[list[str]], header_names: tuple[str, ...]) -> list[str]:
+    for h, header in enumerate(rows[:3]):  # header may follow a caption row
+        cols = [c.strip().lower() for c in header]
+        col = next((i for i, c in enumerate(cols) if c in header_names), None)
         if col is None:
-            return []
+            continue
         out = []
-        for row in self.rows[1:]:
-            if len(row) > col and re.fullmatch(r"[A-Z][A-Z0-9.\-]{0,7}", row[col].replace(" ", "").strip()):
-                out.append(row[col].strip())
+        for row in rows[h + 1:]:
+            if len(row) > col:
+                cell = row[col].replace(" ", "").strip()
+                if _TICKER_RE.fullmatch(cell):
+                    out.append(cell)
         return out
+    return []
 
 
 def parse_constituents(html: str, header_names: tuple[str, ...]) -> list[str]:
-    parser = _ConstituentsTable(header_names)
+    """Symbols from whichever table has a matching header and the most valid tickers."""
+    parser = _Tables()
     parser.feed(html)
-    return _dedupe(parser.symbols())
+    best: list[str] = []
+    for rows in parser.tables:
+        found = _symbols_from_table(rows, header_names)
+        if len(found) > len(best):
+            best = found
+    return _dedupe(best)
 
 
-def refresh_from_wikipedia(names: list[str] | None = None, *, path: Path = DATA_PATH, timeout: float = 30.0) -> dict[str, int]:
-    """Fetch current constituents and write ``data/universes.json``. Returns sizes."""
+def describe_tables(html: str) -> list[str]:
+    """One line per table: row count and header cells — for ``--dump`` debugging."""
+    parser = _Tables()
+    parser.feed(html)
+    return [f"table {i}: {len(rows)} rows · header {rows[0][:8] if rows else []}" for i, rows in enumerate(parser.tables)]
+
+
+def _fetch(url: str, timeout: float) -> str:
+    request = urllib.request.Request(url, headers={"User-Agent": "ai-hedge-fund-altdata/2026 (+https://github.com/YuhanWang03/ai-hedge-fund-altdata)"})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return response.read().decode("utf-8", "replace")
+
+
+def refresh_from_wikipedia(names: list[str] | None = None, *, path: Path = DATA_PATH, timeout: float = 30.0) -> dict[str, object]:
+    """Fetch current constituents and write ``data/universes.json``.
+
+    Each index is independent: a page whose layout defeats the parser is
+    reported under ``errors`` and its previous entry (or the bundled list)
+    stays in force; the others are still written.
+    """
     names = names or list(_WIKI)
     data: dict[str, dict[str, object]] = {}
     if path.exists():
@@ -209,20 +235,24 @@ def refresh_from_wikipedia(names: list[str] | None = None, *, path: Path = DATA_
         except ValueError:
             data = {}
     sizes: dict[str, int] = {}
+    errors: dict[str, str] = {}
+    minimum = {"sp500": 480, "nasdaq100": 90, "dow30": 28}
     for name in names:
         url, headers = _WIKI[name]
-        request = urllib.request.Request(url, headers={"User-Agent": "ai-hedge-fund-altdata/2026 (+https://github.com/YuhanWang03/ai-hedge-fund-altdata)"})
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            html = response.read().decode("utf-8", "replace")
-        tickers = parse_constituents(html, headers)
-        expected = {"sp500": 480, "nasdaq100": 90, "dow30": 28}[name]
-        if len(tickers) < expected:
-            raise RuntimeError(f"{name}: parsed only {len(tickers)} symbols (expected ≥ {expected}); page layout may have changed")
+        try:
+            tickers = parse_constituents(_fetch(url, timeout), headers)
+            if len(tickers) < minimum[name]:
+                raise RuntimeError(f"parsed only {len(tickers)} symbols (expected ≥ {minimum[name]}); run --dump {name} to see the tables")
+        except Exception as exc:  # noqa: BLE001 — one bad page must not block the rest
+            errors[name] = f"{type(exc).__name__}: {exc}"
+            logger.warning("universe refresh %s failed: %s", name, exc)
+            continue
         data[name] = {"tickers": tickers, "as_of": date.today().isoformat(), "source": url}
         sizes[name] = len(tickers)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
-    return sizes
+    if sizes:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    return {"written": str(path) if sizes else None, "sizes": sizes, "errors": errors}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -231,15 +261,21 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m v2.screening.universes")
     parser.add_argument("--refresh", action="store_true", help="fetch current constituents from Wikipedia into data/universes.json")
     parser.add_argument("--show", choices=sorted(_BUNDLED), help="print the tickers that will be used for one universe")
+    parser.add_argument("--dump", choices=sorted(_BUNDLED), help="print every table header found on the Wikipedia page (parser debugging)")
     args = parser.parse_args(argv)
+    if args.dump:
+        for line in describe_tables(_fetch(_WIKI[args.dump][0], 30.0)):
+            print(line)
     if args.refresh:
-        sizes = refresh_from_wikipedia()
-        print(json.dumps({"written": str(DATA_PATH), "sizes": sizes}, indent=1))
+        report = refresh_from_wikipedia()
+        print(json.dumps(report, ensure_ascii=False, indent=1))
+        if report["errors"]:
+            return 1
     if args.show:
         tickers, as_of = load_universe(args.show)
         print(f"{args.show} · {len(tickers)} tickers · as of {as_of}")
         print(" ".join(tickers))
-    if not args.refresh and not args.show:
+    if not (args.refresh or args.show or args.dump):
         print(json.dumps(universe_status(), ensure_ascii=False, indent=1))
     return 0
 
