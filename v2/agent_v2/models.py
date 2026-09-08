@@ -1,0 +1,272 @@
+"""Stable data contracts shared by Agent V2 components and channel adapters."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any
+
+
+class RouteKind(str, Enum):
+    GENERAL_KNOWLEDGE = "general_knowledge"
+    FAST_LOOKUP = "fast_lookup"
+    RESEARCH = "research"
+    LAB = "lab"
+    COMMAND = "command"
+    ASYNC = "async"
+
+
+class RunStatus(str, Enum):
+    RECEIVED = "received"
+    ROUTED = "routed"
+    PLANNED = "planned"
+    WAITING_CONFIRMATION = "waiting_confirmation"
+    QUEUED = "queued"
+    EXECUTING = "executing"
+    SYNTHESIZING = "synthesizing"
+    VERIFYING = "verifying"
+    COMPLETED = "completed"
+    PARTIAL = "partial"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class ResultStatus(str, Enum):
+    COMPLETED = "completed"
+    PARTIAL_DATA = "partial_data"
+    PARTIAL_ERROR = "partial_error"
+    FAILED = "failed"
+    CACHED = "cached"
+    SKIPPED = "skipped"
+
+
+class AnswerMode(str, Enum):
+    TOOL_GROUNDED = "tool_grounded"
+    RESEARCH_GROUNDED = "research_grounded"
+    WEB_GROUNDED = "web_grounded"
+    GENERAL_KNOWLEDGE = "general_knowledge"
+    MIXED = "mixed"
+    INSUFFICIENT_EVIDENCE = "insufficient_evidence"
+
+
+class BudgetClass(str, Enum):
+    DIRECT = "direct"
+    FOCUSED = "focused"
+    STANDARD = "standard"
+    COMPARISON = "comparison"
+    PORTFOLIO = "portfolio"
+    LAB = "lab"
+    DEEP = "deep"
+
+
+@dataclass(frozen=True)
+class NormalizedRequest:
+    original_text: str
+    text: str
+    session_id: str = ""
+    entities: tuple[str, ...] = ()
+    forced_agent: bool = False
+    allow_web: bool = False
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class SessionResolution:
+    text: str
+    rewritten: bool = False
+    antecedent: str = ""
+    note: str = ""
+
+
+@dataclass(frozen=True)
+class RouteDecision:
+    kind: RouteKind
+    packs: tuple[str, ...]
+    reason: str
+    asynchronous: bool = False
+
+
+@dataclass(frozen=True)
+class PlanTask:
+    id: str
+    capability: str
+    arguments: dict[str, Any] = field(default_factory=dict)
+    depends_on: tuple[str, ...] = ()
+    required: bool = True
+    purpose: str = ""
+
+
+@dataclass(frozen=True)
+class ExecutionPlan:
+    objective: str
+    route: RouteKind
+    tasks: tuple[PlanTask, ...] = ()
+    budget: BudgetClass = BudgetClass.DIRECT
+    answer_mode: AnswerMode = AnswerMode.TOOL_GROUNDED
+    requires_confirmation: bool = False
+    web_fallback_allowed: bool = False
+    assumptions: tuple[str, ...] = ()
+    stop_conditions: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class EvidenceItem:
+    id: str
+    entity: str
+    claim: str
+    metric: str = ""
+    value: Any = None
+    unit: str = ""
+    period: str = ""
+    as_of: str = ""
+    source_id: str = ""
+    source_title: str = ""
+    source_url: str = ""
+    confidence: float | None = None
+    producer_run_id: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "entity": self.entity,
+            "claim": self.claim,
+            "metric": self.metric,
+            "value": self.value,
+            "unit": self.unit,
+            "period": self.period,
+            "as_of": self.as_of,
+            "source_id": self.source_id,
+            "source_title": self.source_title,
+            "source_url": self.source_url,
+            "confidence": self.confidence,
+            "producer_run_id": self.producer_run_id,
+            "metadata": dict(self.metadata),
+        }
+
+
+@dataclass
+class ToolEnvelope:
+    capability: str
+    status: ResultStatus
+    subject: str = ""
+    as_of: str = ""
+    summary: str = ""
+    metrics: dict[str, Any] = field(default_factory=dict)
+    findings: list[dict[str, Any]] = field(default_factory=list)
+    evidence: list[EvidenceItem] = field(default_factory=list)
+    limitations: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    run_id: str = ""
+    cache_hit: bool = False
+    elapsed_ms: int = 0
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def ok(self) -> bool:
+        return self.status in {
+            ResultStatus.COMPLETED,
+            ResultStatus.CACHED,
+            ResultStatus.PARTIAL_DATA,
+        }
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "capability": self.capability,
+            "status": self.status.value,
+            "subject": self.subject,
+            "as_of": self.as_of,
+            "summary": self.summary,
+            "metrics": dict(self.metrics),
+            "findings": list(self.findings),
+            "evidence": [item.to_dict() for item in self.evidence],
+            "limitations": list(self.limitations),
+            "errors": list(self.errors),
+            "run_id": self.run_id,
+            "cache_hit": self.cache_hit,
+            "elapsed_ms": self.elapsed_ms,
+            "metadata": dict(self.metadata),
+        }
+
+
+@dataclass(frozen=True)
+class ProgressEvent:
+    run_id: str
+    status: RunStatus
+    message: str
+    task_id: str = ""
+    capability: str = ""
+
+
+@dataclass(frozen=True)
+class VerificationReport:
+    ok: bool = True
+    unknown_citations: tuple[str, ...] = ()
+    ungrounded_numbers: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
+
+
+@dataclass
+class AgentResult:
+    run_id: str
+    request: NormalizedRequest
+    route: RouteDecision
+    plan: ExecutionPlan
+    status: RunStatus
+    answer: str
+    answer_mode: AnswerMode
+    results: list[ToolEnvelope] = field(default_factory=list)
+    evidence: list[EvidenceItem] = field(default_factory=list)
+    verification: VerificationReport = field(default_factory=VerificationReport)
+    elapsed_ms: int = 0
+    error: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "request": {
+                "original_text": self.request.original_text,
+                "text": self.request.text,
+                "session_id": self.request.session_id,
+                "entities": list(self.request.entities),
+            },
+            "route": {
+                "kind": self.route.kind.value,
+                "packs": list(self.route.packs),
+                "reason": self.route.reason,
+                "asynchronous": self.route.asynchronous,
+            },
+            "plan": {
+                "objective": self.plan.objective,
+                "route": self.plan.route.value,
+                "budget": self.plan.budget.value,
+                "answer_mode": self.plan.answer_mode.value,
+                "requires_confirmation": self.plan.requires_confirmation,
+                "web_fallback_allowed": self.plan.web_fallback_allowed,
+                "assumptions": list(self.plan.assumptions),
+                "tasks": [
+                    {
+                        "id": task.id,
+                        "capability": task.capability,
+                        "arguments": dict(task.arguments),
+                        "depends_on": list(task.depends_on),
+                        "required": task.required,
+                        "purpose": task.purpose,
+                    }
+                    for task in self.plan.tasks
+                ],
+            },
+            "status": self.status.value,
+            "answer": self.answer,
+            "answer_mode": self.answer_mode.value,
+            "results": [result.to_dict() for result in self.results],
+            "evidence": [item.to_dict() for item in self.evidence],
+            "verification": {
+                "ok": self.verification.ok,
+                "unknown_citations": list(self.verification.unknown_citations),
+                "ungrounded_numbers": list(self.verification.ungrounded_numbers),
+                "warnings": list(self.verification.warnings),
+            },
+            "elapsed_ms": self.elapsed_ms,
+            "error": self.error,
+        }

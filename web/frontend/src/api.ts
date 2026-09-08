@@ -1,4 +1,6 @@
 import type {
+  AgentV2Job,
+  AgentV2Resp,
   ChatResp,
   FlowStatusResp,
   HistoryResp,
@@ -68,4 +70,19 @@ export function postChat(text: string): Promise<ChatResp> {
     method: "POST",
     body: JSON.stringify({ text }),
   });
+}
+
+export function postAgentV2(
+  text: string,
+  sessionId: string,
+  allowWeb: boolean,
+): Promise<AgentV2Resp | AgentV2Job> {
+  return req<AgentV2Resp | AgentV2Job>("/api/agent-v2/ask", {
+    method: "POST",
+    body: JSON.stringify({ text, session_id: sessionId, allow_web: allowWeb }),
+  });
+}
+
+export function getAgentV2Job(jobId: string, signal?: AbortSignal): Promise<AgentV2Job> {
+  return req<AgentV2Job>(`/api/agent-v2/jobs/${encodeURIComponent(jobId)}`, { signal });
 }

@@ -92,6 +92,7 @@ def build_application() -> Application:
     # below excludes commands — without this line Telegram swallows it and the
     # hatch is unreachable in production. It is the same handler either way.
     app.add_handler(CommandHandler("ask", commands.cmd_nl))
+    app.add_handler(CommandHandler("ask_v2", commands.cmd_agent_v2))
     app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, commands.cmd_nl)
     )

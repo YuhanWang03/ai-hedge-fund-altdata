@@ -26,3 +26,63 @@ export async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
   }
   return response.json() as Promise<T>;
 }
+
+export type AgentV2Evidence = {
+  id: string;
+  entity: string;
+  claim: string;
+  metric?: string;
+  value?: unknown;
+  unit?: string;
+  period?: string;
+  as_of: string;
+  source_id: string;
+  source_title: string;
+  source_url: string;
+  confidence: number | null;
+};
+
+export type AgentV2Response = {
+  run_id: string;
+  status: string;
+  answer: string;
+  answer_mode: string;
+  route: { kind: string; packs: string[]; reason: string; asynchronous: boolean };
+  plan: {
+    objective: string;
+    tasks: { id: string; capability: string; purpose: string }[];
+    assumptions: string[];
+  };
+  evidence: AgentV2Evidence[];
+  verification: {
+    ok: boolean;
+    warnings: string[];
+    unknown_citations: string[];
+    ungrounded_numbers: string[];
+  };
+  elapsed_ms: number;
+  error: string;
+  interface: 'web';
+  policy: { web_requested: boolean; web_enabled: boolean; web_allowed: boolean };
+};
+
+export type AgentV2Job = {
+  job_id: string;
+  status: 'running' | 'completed' | 'failed';
+  agent_status: string;
+  progress: string;
+  error?: string;
+  result?: AgentV2Response;
+};
+
+export function askAgentV2(text: string, sessionId: string, allowWeb: boolean, signal?: AbortSignal) {
+  return apiJson<AgentV2Response | AgentV2Job>('/api/agent-v2/ask', {
+    method: 'POST',
+    body: JSON.stringify({ text, session_id: sessionId, allow_web: allowWeb }),
+    signal,
+  });
+}
+
+export function getAgentV2Job(jobId: string, signal?: AbortSignal) {
+  return apiJson<AgentV2Job>(`/api/agent-v2/jobs/${encodeURIComponent(jobId)}`, { signal });
+}

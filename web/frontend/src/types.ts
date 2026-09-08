@@ -44,6 +44,59 @@ export interface ChatResp {
   extra_html?: string[];
 }
 
+export interface AgentV2Evidence {
+  id: string;
+  entity: string;
+  claim: string;
+  source_id: string;
+  source_title: string;
+  source_url: string;
+  as_of: string;
+  confidence: number | null;
+}
+
+export interface AgentV2Resp {
+  run_id: string;
+  status: string;
+  answer: string;
+  answer_mode: string;
+  route: {
+    kind: string;
+    packs: string[];
+    reason: string;
+    asynchronous: boolean;
+  };
+  plan: {
+    objective: string;
+    tasks: { id: string; capability: string; purpose: string }[];
+    assumptions: string[];
+  };
+  evidence: AgentV2Evidence[];
+  verification: {
+    ok: boolean;
+    warnings: string[];
+    unknown_citations: string[];
+    ungrounded_numbers: string[];
+  };
+  elapsed_ms: number;
+  error: string;
+  interface: "web";
+  policy: {
+    web_requested: boolean;
+    web_enabled: boolean;
+    web_allowed: boolean;
+  };
+}
+
+export interface AgentV2Job {
+  job_id: string;
+  status: "running" | "completed" | "failed";
+  agent_status: string;
+  progress: string;
+  error?: string;
+  result?: AgentV2Resp;
+}
+
 export interface RiskResp {
   portfolio_value: number;
   cash: number;

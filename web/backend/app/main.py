@@ -16,11 +16,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import SETTINGS
-from app.routers import chat, committee, dashboard, health, portfolio, research, workspace
-
 repo_root = str(SETTINGS.repo_root.resolve())
 if repo_root not in sys.path:
     sys.path.insert(0, repo_root)
+
+from app.routers import agent_v2, chat, committee, dashboard, health, portfolio, research, workspace  # noqa: E402
 
 app = FastAPI(title="AI Hedge Fund · Web", version="0.1.0")
 
@@ -33,6 +33,7 @@ app.add_middleware(
 )
 
 app.include_router(health.router)
+app.include_router(agent_v2.router)
 app.include_router(chat.router)
 app.include_router(portfolio.router)
 app.include_router(dashboard.router)

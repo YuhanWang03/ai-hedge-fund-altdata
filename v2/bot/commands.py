@@ -106,6 +106,8 @@ _HELP_TEXT = (
     "<b>自然语言（Stage 3 即将上线）</b>\n"
     "  直接发问，bot 会自动路由到对应工具\n"
     "  例：「NVDA 为什么涨」「找一下 AMD 的产业链」\n"
+    "  /ask_v2 问题      — 显式使用新 Agent V2\n"
+    "  /ask_v2 --web 问题 — 允许网页证据兜底（服务端也须启用）\n"
     "\n"
     "<i>本 bot 受单用户授权——只响应所有者的消息。</i>"
 )
@@ -641,6 +643,27 @@ async def cmd_insiders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 # ---------------------------------------------------------------------------
 # Stage 3 — NL → Intent classifier and router
 # ---------------------------------------------------------------------------
+
+
+@authorized_only
+async def cmd_agent_v2(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Explicit opt-in to Agent V2; ``--web`` is a second network consent."""
+
+    args = list(context.args or [])
+    allow_web = any(value.lower() == "--web" for value in args)
+    text = " ".join(
+        value for value in args if value.lower() != "--web"
+    ).strip()
+    if not text:
+        await update.message.reply_html(
+            "用法：<code>/ask_v2 [--web] 问题</code>\n"
+            "例：<code>/ask_v2 比较 NVDA 和 AMD 的风险</code>"
+        )
+        return
+
+    from v2.bot.agent_v2_bridge import handle_agent_v2
+
+    await handle_agent_v2(update, context, text, allow_web=allow_web)
 
 
 _INTENT_DISPLAY = {
