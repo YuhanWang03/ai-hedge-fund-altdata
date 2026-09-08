@@ -126,7 +126,7 @@ def test_research_adapter_preserves_engine_evidence():
     assert result.evidence[0].id == "ev-1"
     assert result.evidence[0].source_url == "https://example.test"
     metrics_evidence = next(item for item in result.evidence if item.metadata.get("citation_kind") == "metrics")
-    assert metrics_evidence.id.startswith("research-metrics-")
+    assert metrics_evidence.id.startswith("evidence-research-metrics-")
     assert metrics_evidence.metadata["metrics"]["scores"]["valuation"] == 60
 
 
@@ -281,14 +281,14 @@ def test_llm_synthesizer_normalizes_valid_result_paths_to_evidence_ids():
     )
     evidence = [
         EvidenceItem(
-            "research-metrics-1",
+            "evidence-research-metrics-1",
             "NVDA",
             "NVDA fundamental score is 96/100.",
             producer_run_id="research-1",
             metadata={"citation_kind": "metrics"},
         ),
         EvidenceItem(
-            "research-limitations-1",
+            "evidence-research-limitations-1",
             "NVDA",
             "NVDA expectations data is incomplete.",
             producer_run_id="research-1",
@@ -297,8 +297,8 @@ def test_llm_synthesizer_normalizes_valid_result_paths_to_evidence_ids():
     ]
     answer = synthesizer.synthesize(request, plan, [result], evidence)
     assert "[results." not in answer
-    assert "[research-metrics-1]" in answer
-    assert "[research-limitations-1]" in answer
+    assert "[evidence-research-metrics-1]" in answer
+    assert "[evidence-research-limitations-1]" in answer
 
 
 def test_llm_synthesizer_keeps_invalid_result_paths_for_verifier_to_reject():
@@ -314,7 +314,7 @@ def test_llm_synthesizer_keeps_invalid_result_paths_for_verifier_to_reject():
     )
     evidence = [
         EvidenceItem(
-            "research-metrics-1",
+            "evidence-research-metrics-1",
             "NVDA",
             "NVDA fundamental score is 96/100.",
             producer_run_id="research-1",

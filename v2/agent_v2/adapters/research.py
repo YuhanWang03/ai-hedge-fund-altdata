@@ -128,7 +128,7 @@ def _derived_evidence(result: dict[str, Any], limitations: list[str]) -> list[Ev
         digest = hashlib.sha1(f"{ticker}|{run_id}|metrics|{encoded}".encode("utf-8")).hexdigest()[:16]
         items.append(
             EvidenceItem(
-                id=f"research-metrics-{digest}",
+                id=f"evidence-research-metrics-{digest}",
                 entity=ticker,
                 claim=f"{ticker} Research Engine 派生评分与风险指标：{encoded}",
                 as_of=generated_at,
@@ -143,7 +143,7 @@ def _derived_evidence(result: dict[str, Any], limitations: list[str]) -> list[Ev
         digest = hashlib.sha1(f"{ticker}|{run_id}|limitations|{encoded}".encode("utf-8")).hexdigest()[:16]
         items.append(
             EvidenceItem(
-                id=f"research-limitations-{digest}",
+                id=f"evidence-research-limitations-{digest}",
                 entity=ticker,
                 claim=f"{ticker} Research Engine 已知数据限制：{'；'.join(limitations)}",
                 as_of=generated_at,
