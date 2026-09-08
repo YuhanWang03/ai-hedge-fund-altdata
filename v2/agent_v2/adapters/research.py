@@ -111,8 +111,56 @@ def _limitations(result: dict[str, Any]) -> list[str]:
     return list(dict.fromkeys(str(value) for value in limitations if value))[:12]
 
 
+def _derived_evidence(result: dict[str, Any], limitations: list[str]) -> list[EvidenceItem]:
+    """Make engine-derived metrics and limitations citeable like source evidence."""
+
+    ticker = str(result.get("ticker") or "")
+    run_id = str(result.get("run_id") or "")
+    generated_at = str(result.get("generated_at") or "")
+    metrics = {
+        "scores": result.get("scores") or {},
+        "risk_level": result.get("risk_level"),
+        "confidence": result.get("research_confidence") or {},
+    }
+    items: list[EvidenceItem] = []
+    if any(value for value in metrics.values()):
+        encoded = json.dumps(metrics, ensure_ascii=False, sort_keys=True, default=str)
+        digest = hashlib.sha1(f"{ticker}|{run_id}|metrics|{encoded}".encode("utf-8")).hexdigest()[:16]
+        items.append(
+            EvidenceItem(
+                id=f"research-metrics-{digest}",
+                entity=ticker,
+                claim=f"{ticker} Research Engine 派生评分与风险指标：{encoded}",
+                as_of=generated_at,
+                source_id="research_engine",
+                source_title="Research Engine derived metrics",
+                producer_run_id=run_id,
+                metadata={"citation_kind": "metrics", "metrics": metrics, "verified": True},
+            )
+        )
+    if limitations:
+        encoded = json.dumps(limitations, ensure_ascii=False, default=str)
+        digest = hashlib.sha1(f"{ticker}|{run_id}|limitations|{encoded}".encode("utf-8")).hexdigest()[:16]
+        items.append(
+            EvidenceItem(
+                id=f"research-limitations-{digest}",
+                entity=ticker,
+                claim=f"{ticker} Research Engine 已知数据限制：{'；'.join(limitations)}",
+                as_of=generated_at,
+                source_id="research_engine",
+                source_title="Research Engine data limitations",
+                producer_run_id=run_id,
+                metadata={"citation_kind": "limitations", "limitations": limitations, "verified": True},
+            )
+        )
+    return items
+
+
 def _envelope(result: dict[str, Any], capability: str) -> ToolEnvelope:
     findings = list(result.get("research_findings") or [])[:12]
+    limitations = _limitations(result)
+    derived = _derived_evidence(result, limitations)
+    source_evidence = _evidence(result)
     return ToolEnvelope(
         capability=capability,
         status=_status(str(result.get("status") or ""), bool(result.get("from_cache"))),
@@ -121,8 +169,8 @@ def _envelope(result: dict[str, Any], capability: str) -> ToolEnvelope:
         summary=str(result.get("core_thesis") or result.get("investment_thesis") or ""),
         metrics={"scores": result.get("scores", {}), "risk_level": result.get("risk_level"), "confidence": result.get("research_confidence", {})},
         findings=findings,
-        evidence=_evidence(result),
-        limitations=_limitations(result),
+        evidence=[*source_evidence[: 40 - len(derived)], *derived],
+        limitations=limitations,
         run_id=str(result.get("run_id") or ""),
         cache_hit=bool(result.get("from_cache")),
         metadata={"requested_modules": result.get("requested_modules", []), "module_status": result.get("module_status", {})},

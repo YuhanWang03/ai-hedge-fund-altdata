@@ -125,6 +125,9 @@ def test_research_adapter_preserves_engine_evidence():
     assert result.ok
     assert result.evidence[0].id == "ev-1"
     assert result.evidence[0].source_url == "https://example.test"
+    metrics_evidence = next(item for item in result.evidence if item.metadata.get("citation_kind") == "metrics")
+    assert metrics_evidence.id.startswith("research-metrics-")
+    assert metrics_evidence.metadata["metrics"]["scores"]["valuation"] == 60
 
 
 def test_research_adapter_disambiguates_conflicting_ids_from_cached_results():
@@ -253,6 +256,76 @@ def test_llm_synthesizer_requires_evidence_ids_in_its_prompt_contract():
     evidence = [EvidenceItem("E1", "NVDA", "支持结论")]
     answer = synthesizer.synthesize(request, plan, [], evidence)
     assert answer.endswith("[E1]")
+
+
+def test_llm_synthesizer_normalizes_valid_result_paths_to_evidence_ids():
+    llm = ScriptedLLM(
+        [
+            LLMResponse(
+                text=(
+                    "基本面评分为 96/100。[results.metrics.scores.fundamental] "
+                    "预期数据不足。[results.limitations]"
+                )
+            )
+        ]
+    )
+    synthesizer = LLMEvidenceSynthesizer(llm)
+    request = normalize_request("分析 NVDA")
+    plan = ExecutionPlan("分析 NVDA", RouteKind.RESEARCH)
+    result = ToolEnvelope(
+        "research.stock",
+        ResultStatus.COMPLETED,
+        metrics={"scores": {"fundamental": 96}},
+        limitations=["expectations: PARTIAL_DATA"],
+        run_id="research-1",
+    )
+    evidence = [
+        EvidenceItem(
+            "research-metrics-1",
+            "NVDA",
+            "NVDA fundamental score is 96/100.",
+            producer_run_id="research-1",
+            metadata={"citation_kind": "metrics"},
+        ),
+        EvidenceItem(
+            "research-limitations-1",
+            "NVDA",
+            "NVDA expectations data is incomplete.",
+            producer_run_id="research-1",
+            metadata={"citation_kind": "limitations"},
+        ),
+    ]
+    answer = synthesizer.synthesize(request, plan, [result], evidence)
+    assert "[results." not in answer
+    assert "[research-metrics-1]" in answer
+    assert "[research-limitations-1]" in answer
+
+
+def test_llm_synthesizer_keeps_invalid_result_paths_for_verifier_to_reject():
+    llm = ScriptedLLM([LLMResponse(text="虚构评分为 96。[results.metrics.scores.invented]")])
+    synthesizer = LLMEvidenceSynthesizer(llm)
+    request = normalize_request("分析 NVDA")
+    plan = ExecutionPlan("分析 NVDA", RouteKind.RESEARCH)
+    result = ToolEnvelope(
+        "research.stock",
+        ResultStatus.COMPLETED,
+        metrics={"scores": {"fundamental": 96}},
+        run_id="research-1",
+    )
+    evidence = [
+        EvidenceItem(
+            "research-metrics-1",
+            "NVDA",
+            "NVDA fundamental score is 96/100.",
+            producer_run_id="research-1",
+            metadata={"citation_kind": "metrics"},
+        )
+    ]
+    answer = synthesizer.synthesize(request, plan, [result], evidence)
+    assert "[results.metrics.scores.invented]" in answer
+    report = verify_answer(answer, evidence, answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result])
+    assert not report.ok
+    assert "results.metrics.scores.invented" in report.unknown_citations
 
 
 def test_verifier_rejects_an_invented_number_even_with_a_valid_citation():

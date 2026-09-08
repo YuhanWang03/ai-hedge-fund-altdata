@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import replace
 from typing import Any
 
@@ -12,6 +13,7 @@ from v2.agent_v2.catalog import CapabilityCatalog
 from v2.agent_v2.models import (
     AnswerMode,
     BudgetClass,
+    EvidenceItem,
     ExecutionPlan,
     NormalizedRequest,
     PlanTask,
@@ -21,6 +23,8 @@ from v2.agent_v2.models import (
 )
 from v2.agent_v2.planning import RulePlanner
 from v2.agent_v2.synthesis import EvidenceSummarySynthesizer
+
+_RESULT_CITATION = re.compile(r"\[results\.(metrics|limitations)([^\]]*)\]")
 
 
 def _strip_fence(text: str) -> str:
@@ -174,6 +178,8 @@ class LLMEvidenceSynthesizer:
         else:
             system = """你是证据约束的投研回答器。先给结论，再给依据和限制。
 只能陈述输入证据支持的外部事实。每项关键事实后必须写对应的 [evidence_id]。
+方括号内只能原样使用 evidence 数组中真实存在的 id；严禁把 results.*、字段路径、source_id 或占位符当作引用。
+results 中的评分或限制如需引用，使用 evidence 中 citation_kind 为 metrics 或 limitations 的对应条目。
 推断必须标成“推断”；数据缺失必须明确说明。不得把一个主体的数据归给另一个主体。
 不要把历史回测写成未来收益保证。不要输出未在证据中出现的数字。"""
             payload = self._payload(request.text, plan, results, evidence)
@@ -188,7 +194,7 @@ class LLMEvidenceSynthesizer:
             answer = presentation.strip_deliberation(response.text)
             if not answer:
                 raise ValueError("synthesizer returned an empty answer")
-            return answer
+            return _normalize_result_citations(answer, results, evidence)
         except (LLMError, ValueError, TypeError) as exc:
             return self.fallback.synthesize(request, plan, results, evidence)
 
@@ -268,3 +274,40 @@ class LLMEvidenceSynthesizer:
             }
             encoded = json.dumps(data, ensure_ascii=False, default=str)
         return encoded
+
+
+def _normalize_result_citations(
+    answer: str,
+    results: list[ToolEnvelope],
+    evidence: list[EvidenceItem],
+) -> str:
+    """Resolve valid result-field references to their citeable derived evidence."""
+
+    def replace_result_path(match: re.Match[str]) -> str:
+        kind = match.group(1)
+        suffix = match.group(2).replace("\\_", "_")
+        candidates: list[EvidenceItem] = []
+        for item in evidence:
+            if item.metadata.get("citation_kind") != kind:
+                continue
+            matching_results = [result for result in results if not item.producer_run_id or result.run_id == item.producer_run_id]
+            if kind == "metrics" and not any(_has_metric_path(result.metrics, suffix) for result in matching_results):
+                continue
+            if kind == "limitations" and (suffix or not any(result.limitations for result in matching_results)):
+                continue
+            candidates.append(item)
+        return f"[{candidates[0].id}]" if len(candidates) == 1 else match.group(0)
+
+    return _RESULT_CITATION.sub(replace_result_path, answer)
+
+
+def _has_metric_path(metrics: dict[str, Any], suffix: str) -> bool:
+    value: Any = metrics
+    path = suffix.removeprefix(".")
+    if not path:
+        return bool(metrics)
+    for key in path.split("."):
+        if not isinstance(value, dict) or key not in value:
+            return False
+        value = value[key]
+    return value is not None
