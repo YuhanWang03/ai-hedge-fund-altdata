@@ -127,6 +127,61 @@ def test_research_adapter_preserves_engine_evidence():
     assert result.evidence[0].source_url == "https://example.test"
 
 
+def test_research_adapter_disambiguates_conflicting_ids_from_cached_results():
+    class CachedEngine:
+        def run(self, ticker, modules=None):
+            return {
+                "ticker": ticker,
+                "run_id": "cached-research",
+                "status": "COMPLETED",
+                "generated_at": "2026-09-08T00:00:00Z",
+                "core_thesis": "Cached thesis",
+                "research_findings": [],
+                "evidence_index": [
+                    {"id": "legacy-id", "ticker": ticker, "module": "sec", "claim": "First filing excerpt.", "source_ids": ["sec_filings"]},
+                    {"id": "legacy-id", "ticker": ticker, "module": "sec", "claim": "Second filing excerpt.", "source_ids": ["sec_filings"]},
+                ],
+                "sources": [{"id": "sec_filings", "title": "SEC filing", "url": "https://example.test/filing"}],
+                "production_diagnostics": {"modules": {}},
+            }
+
+    catalog = default_catalog()
+    registry = CapabilityRegistry(catalog)
+    register_research_capabilities(registry, engine_factory=CachedEngine)
+    plan = ExecutionPlan("research", RouteKind.RESEARCH, (PlanTask("one", "research.stock", {"ticker": "NVDA"}),), BudgetClass.STANDARD)
+    results, ledger = ExecutionEngine(registry).run(plan, _context())
+    assert results[0].ok
+    assert len(ledger.items()) == 2
+    assert len(ledger.ids()) == 2
+    repaired = next(item for item in ledger.items() if item.id != "legacy-id")
+    assert repaired.metadata["original_evidence_id"] == "legacy-id"
+    assert repaired.metadata["collision_disambiguated"] is True
+
+
+def test_evidence_conflict_is_not_reported_as_a_valid_plan_or_verification():
+    catalog = default_catalog()
+    registry = CapabilityRegistry(catalog)
+
+    def conflicting_research(args, context):
+        return ToolEnvelope(
+            "research.stock",
+            ResultStatus.COMPLETED,
+            subject=args["ticker"],
+            evidence=[
+                EvidenceItem("same-id", args["ticker"], "First claim"),
+                EvidenceItem("same-id", args["ticker"], "Second claim"),
+            ],
+        )
+
+    registry.register("research.stock", conflicting_research)
+    result = AgentV2(catalog=catalog, registry=registry).run("分析 NVDA")
+    assert result.status == RunStatus.FAILED
+    assert "证据标识" in result.answer
+    assert "conflicting evidence id" in result.error
+    assert not result.verification.ok
+    assert result.verification.warnings == ("证据完整性检查失败",)
+
+
 def test_web_facade_returns_transport_neutral_dict():
     payload = WebFacade(AgentV2()).handle(WebRequest("什么是市盈率？", session_id="web-1"))
     assert payload["request"]["session_id"] == "web-1"

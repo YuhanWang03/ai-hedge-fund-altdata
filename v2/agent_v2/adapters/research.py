@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from typing import Any, Callable
 
 from v2.agent_v2.execution import CapabilityRegistry, ExecutionContext
@@ -53,28 +56,49 @@ def _evidence(result: dict[str, Any]) -> list[EvidenceItem]:
     run_id = str(result.get("run_id") or "")
     sources = {str(row.get("id")): row for row in result.get("sources", [])}
     items: list[EvidenceItem] = []
+    used: dict[str, EvidenceItem] = {}
     for row in result.get("evidence_index", [])[:40]:
         source_ids = [str(value) for value in row.get("source_ids", []) if value]
         source = next((sources[value] for value in source_ids if value in sources), {})
         metrics = row.get("metrics") or {}
         metric = next(iter(metrics), "")
-        items.append(
-            EvidenceItem(
-                id=str(row.get("id") or f"{run_id}-evidence-{len(items) + 1}"),
-                entity=str(row.get("ticker") or ticker),
-                claim=str(row.get("claim") or ""),
-                metric=metric,
-                value=metrics.get(metric) if metric else None,
-                period=str(row.get("data_period") or ""),
-                as_of=str(row.get("published_at") or row.get("fetched_at") or result.get("generated_at") or ""),
-                source_id=source_ids[0] if source_ids else "",
-                source_title=str(source.get("title") or ""),
-                source_url=str(source.get("url") or ""),
-                confidence=None,
-                producer_run_id=run_id,
-                metadata={"module": row.get("module"), "verified": bool(row.get("verified")), "metrics": metrics},
-            )
+        item = EvidenceItem(
+            id=str(row.get("id") or f"{run_id}-evidence-{len(items) + 1}"),
+            entity=str(row.get("ticker") or ticker),
+            claim=str(row.get("claim") or ""),
+            metric=metric,
+            value=metrics.get(metric) if metric else None,
+            period=str(row.get("data_period") or ""),
+            as_of=str(row.get("published_at") or row.get("fetched_at") or result.get("generated_at") or ""),
+            source_id=source_ids[0] if source_ids else "",
+            source_title=str(source.get("title") or ""),
+            source_url=str(source.get("url") or ""),
+            confidence=None,
+            producer_run_id=run_id,
+            metadata={"module": row.get("module"), "verified": bool(row.get("verified")), "metrics": metrics},
         )
+        current = used.get(item.id)
+        if current == item:
+            continue
+        if current is not None:
+            original_id = item.id
+            digest = hashlib.sha1(json.dumps(row, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:8]
+            candidate_id = f"{original_id}-{digest}"
+            item = replace(
+                item,
+                id=candidate_id,
+                metadata={**item.metadata, "original_evidence_id": original_id, "collision_disambiguated": True},
+            )
+            if used.get(candidate_id) == item:
+                continue
+            sequence = 2
+            while candidate_id in used:
+                candidate_id = f"{original_id}-{digest}-{sequence}"
+                sequence += 1
+            if candidate_id != item.id:
+                item = replace(item, id=candidate_id)
+        used[item.id] = item
+        items.append(item)
     return items
 
 

@@ -127,7 +127,10 @@ def _make_finding(ticker: str, module_name: str, module: dict, category: str, ti
         confidence = min(confidence, .30)
         if importance in {"HIGH", "CRITICAL"}:
             importance = "MEDIUM"
-    evidence_id = f"evidence-{_id(ticker, module_name, category, title, sources)}"
+    # The title alone is not unique: one filing can contain several guidance
+    # excerpts with the same type/status.  The claim is part of the evidence
+    # identity so distinct excerpts can never alias to one ledger entry.
+    evidence_id = f"evidence-{_id(ticker, module_name, category, title, claim, sources)}"
     finding_id = f"finding-{_id(ticker, module_name, category, title, claim)}"
     finding = ResearchFinding(finding_id, ticker, module_name, category, title, claim, direction, importance,
                               round(confidence, 3), [evidence_id], sources, metrics or {}, _now())

@@ -341,7 +341,7 @@ export default function Home() {
             route: response.route.kind,
             answerMode: response.answer_mode,
             elapsedMs: response.elapsed_ms,
-            verified: response.verification.ok,
+            verified: response.status !== 'failed' && response.verification.ok,
             capabilities: response.plan.tasks.map(task => task.capability),
             webRequested: response.policy.web_requested,
             webEnabled: response.policy.web_enabled,

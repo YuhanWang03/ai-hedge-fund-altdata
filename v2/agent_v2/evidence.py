@@ -7,6 +7,10 @@ from collections import defaultdict
 from v2.agent_v2.models import EvidenceItem, ToolEnvelope
 
 
+class EvidenceConflictError(ValueError):
+    """One evidence identifier was reused for different evidence content."""
+
+
 class EvidenceLedger:
     def __init__(self) -> None:
         self._items: dict[str, EvidenceItem] = {}
@@ -16,7 +20,7 @@ class EvidenceLedger:
             raise ValueError("evidence id is required")
         current = self._items.get(item.id)
         if current is not None and current != item:
-            raise ValueError(f"conflicting evidence id: {item.id}")
+            raise EvidenceConflictError(f"conflicting evidence id: {item.id}")
         self._items[item.id] = item
 
     def extend(self, items: list[EvidenceItem]) -> None:

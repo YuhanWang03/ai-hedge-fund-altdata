@@ -7,7 +7,8 @@ import uuid
 from dataclasses import dataclass, replace
 
 from v2.agent_v2.catalog import CapabilityCatalog, default_catalog
-from v2.agent_v2.execution import CapabilityRegistry, ExecutionContext, ExecutionEngine
+from v2.agent_v2.evidence import EvidenceConflictError
+from v2.agent_v2.execution import CapabilityRegistry, ExecutionContext, ExecutionEngine, PlanValidationError
 from v2.agent_v2.models import (
     AgentResult,
     AnswerMode,
@@ -17,6 +18,7 @@ from v2.agent_v2.models import (
     RouteDecision,
     RouteKind,
     RunStatus,
+    VerificationReport,
 )
 from v2.agent_v2.planning import RulePlanner
 from v2.agent_v2.ports import PlannerPort, ProgressSink, SessionPort, SynthesizerPort
@@ -124,16 +126,26 @@ class AgentV2:
         try:
             results, ledger = self.executor.run(plan, context)
         except Exception as exc:
+            if isinstance(exc, EvidenceConflictError):
+                answer = "研究结果包含冲突的证据标识，任务已安全停止。"
+                warning = "证据完整性检查失败"
+            elif isinstance(exc, PlanValidationError):
+                answer = "执行计划无效，任务没有完成。"
+                warning = "执行计划校验失败"
+            else:
+                answer = "工具执行发生未预期错误，任务没有完成。"
+                warning = "工具执行失败"
             return self._result(
                 run_id,
                 request,
                 decision,
                 plan,
                 RunStatus.FAILED,
-                "执行计划无效，任务没有完成。",
+                answer,
                 AnswerMode.INSUFFICIENT_EVIDENCE,
                 started,
                 error=f"{type(exc).__name__}: {exc}",
+                verification=VerificationReport(ok=False, warnings=(warning,)),
             )
 
         plan, results = self._web_fallback(request, decision, plan, results, ledger, context)
@@ -216,8 +228,6 @@ class AgentV2:
         verification=None,
         error: str = "",
     ) -> AgentResult:
-        from v2.agent_v2.models import VerificationReport
-
         result = AgentResult(
             run_id=run_id,
             request=request,

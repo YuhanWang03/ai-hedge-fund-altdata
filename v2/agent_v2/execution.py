@@ -32,6 +32,10 @@ _TASK_LIMITS = {
 }
 
 
+class PlanValidationError(ValueError):
+    """The planned task graph cannot be executed safely."""
+
+
 @dataclass(frozen=True)
 class ExecutionContext:
     run_id: str
@@ -114,13 +118,13 @@ class ExecutionEngine:
         context: ExecutionContext,
     ) -> tuple[list[ToolEnvelope], EvidenceLedger]:
         if len(plan.tasks) > _TASK_LIMITS[plan.budget]:
-            raise ValueError(f"plan has {len(plan.tasks)} tasks; {plan.budget.value} budget allows " f"{_TASK_LIMITS[plan.budget]}")
+            raise PlanValidationError(f"plan has {len(plan.tasks)} tasks; {plan.budget.value} budget allows " f"{_TASK_LIMITS[plan.budget]}")
         ids = [task.id for task in plan.tasks]
         if len(ids) != len(set(ids)):
-            raise ValueError("plan task ids must be unique")
+            raise PlanValidationError("plan task ids must be unique")
         known = set(ids)
         if any(set(task.depends_on) - known for task in plan.tasks):
-            raise ValueError("plan contains an unknown dependency")
+            raise PlanValidationError("plan contains an unknown dependency")
 
         pending = {task.id: task for task in plan.tasks}
         completed: dict[str, ToolEnvelope] = {}
@@ -130,7 +134,7 @@ class ExecutionEngine:
         while pending:
             ready = [task for task in pending.values() if all(dependency in completed for dependency in task.depends_on)]
             if not ready:
-                raise ValueError("plan dependency cycle detected")
+                raise PlanValidationError("plan dependency cycle detected")
 
             runnable: list[PlanTask] = []
             for task in ready:

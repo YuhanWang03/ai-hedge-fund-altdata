@@ -69,6 +69,20 @@ def test_peer_relevance_guidance_and_missing_expectations():
     assert rows[1]["guidance_type"] == "MANAGEMENT_COMMENTARY"
 
 
+def test_distinct_guidance_claims_receive_distinct_evidence_ids():
+    modules, company = modules_for("NVDA")
+    modules["sec"]["details"]["guidance"] = [
+        {"guidance_type": "MANAGEMENT_COMMENTARY", "status": "UNCHANGED", "evidence_text": "First filing excerpt."},
+        {"guidance_type": "MANAGEMENT_COMMENTARY", "status": "UNCHANGED", "evidence_text": "Second filing excerpt."},
+    ]
+    result = build_intelligence("NVDA", modules, company)
+    guidance = [row for row in result["research_findings"] if row["module"] == "sec" and row["category"] == "guidance"]
+    evidence_ids = [row["evidence_ids"][0] for row in guidance]
+    assert len(guidance) == 2
+    assert len(set(evidence_ids)) == 2
+    assert set(evidence_ids) <= {row["id"] for row in result["evidence_index"]}
+
+
 def test_low_completeness_conflicts_and_traceability():
     modules, company = modules_for("TSLA")
     modules["fundamental"]["completeness"] = .15
