@@ -225,7 +225,7 @@ def _move_envelope(ticker: str, context: ExecutionContext, anomaly, *, now: date
         # Attribution currently returns a shared source set, not a reason-to-source
         # mapping. Only expose a direct URL when the relationship is unambiguous.
         source = source_rows[0] if len(source_rows) == 1 else {}
-        item = _item(role, ticker, as_of, claim, context, confidence=confidence_value.get(level, 0.3), source_url=str(source.get("url") or ""), metadata={"claim_role": "confirmed_driver" if confirmed else "candidate_driver", "causal_confidence": level, "note": reason.note, "supporting_sources": source_rows})
+        item = _item(role, ticker, as_of, claim, context, confidence=confidence_value.get(level, 0.3), source_url=str(source.get("url") or ""), metadata={"claim_role": "confirmed_driver" if confirmed else "candidate_driver", "causal_confidence": level, "driver_text": reason.text, "note": reason.note, "supporting_sources": source_rows})
         evidence.append(item)
         findings.append({"claim": reason.text, "causal_confidence": level, "confirmed": confirmed, "evidence_ids": [item.id]})
 

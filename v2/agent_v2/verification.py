@@ -14,6 +14,7 @@ _HEDGED_CAUSE = re.compile(r"可能|或许|候选|低置信|中置信|尚未确�
 _INTRADAY_MARKER = re.compile(r"盘中|截至查询时|截至.{0,30}(?:ET|美东)")
 _FINAL_VOLUME_CONCLUSION = re.compile(r"缩量|放量|量能不足|成交量.{0,12}(?:未|没有).{0,6}(?:放大|跟上)|持续性存疑")
 _INTRADAY_CAUTION = re.compile(r"不能|无法|不应|不得|尚不能|待收盘|未收盘|尚未定型|不宜")
+_REJECTED_CANDIDATE_NOTE = re.compile(r"无直接证据|未提及|关联弱|不匹配|Tier 3|长期预测", re.I)
 
 
 def verify_answer(
@@ -139,6 +140,13 @@ def _citation_integrity_warnings(answer: str, evidence: list[EvidenceItem], resu
         }
         if len(cited_candidates) > 1:
             warnings.append("未确认直接驱动时展示了过多弱候选线索")
+        rejected_candidates = [
+            known[citation]
+            for citation in cited_candidates
+            if float(known[citation].confidence or 0) < 0.5 or _REJECTED_CANDIDATE_NOTE.search(str(known[citation].metadata.get("note") or ""))
+        ]
+        if rejected_candidates:
+            warnings.append("展示了缺乏直接支持的过弱异动线索")
         if re.search(r"0\s*个.{0,12}(?:驱动|催化|原因)", answer):
             warnings.append("将内部归因计数直接暴露给用户")
     return list(dict.fromkeys(warnings))

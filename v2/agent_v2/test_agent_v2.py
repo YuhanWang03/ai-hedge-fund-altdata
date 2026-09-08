@@ -173,7 +173,9 @@ def test_market_move_adapter_splits_facts_and_causal_confidence():
     assert result.metrics["confirmed_driver_count"] == 1
     assert result.findings[0]["confirmed"] is True
     assert result.findings[1]["confirmed"] is False
-    assert next(item for item in result.evidence if item.metadata.get("claim_role") == "candidate_driver").confidence == 0.3
+    candidate_evidence = next(item for item in result.evidence if item.metadata.get("claim_role") == "candidate_driver")
+    assert candidate_evidence.confidence == 0.3
+    assert candidate_evidence.metadata["driver_text"] == "期权市场波动"
     assert next(item for item in result.evidence if item.metadata.get("claim_role") == "attribution_assessment")
     assert result.metrics["is_intraday"] is True
     assert "盘中累计成交量" in next(item.claim for item in result.evidence if item.metadata.get("evidence_scope") == "volume")
@@ -587,6 +589,14 @@ def test_verifier_limits_weak_candidates_when_no_direct_driver_is_confirmed():
     report = verify_answer("可能与线索一相关。[C1] 也可能与线索二相关。[C2]", evidence, answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result])
     assert not report.ok
     assert any("过多弱候选" in warning for warning in report.warnings)
+
+
+def test_verifier_hides_a_single_candidate_that_lacks_direct_support():
+    evidence = [EvidenceItem("C1", "AMD", "Candidate one.", confidence=0.3, metadata={"claim_role": "candidate_driver", "note": "无直接证据"})]
+    result = ToolEnvelope("market.explain_move", ResultStatus.COMPLETED, subject="AMD", metrics={"confirmed_driver_count": 0}, evidence=evidence)
+    report = verify_answer("可能与该线索相关。[C1]", evidence, answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result])
+    assert not report.ok
+    assert any("过弱异动线索" in warning for warning in report.warnings)
 
 
 def test_verifier_does_not_treat_digits_in_opaque_ids_as_observations():

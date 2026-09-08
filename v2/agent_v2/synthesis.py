@@ -22,6 +22,20 @@ def _scoped(evidence: list[EvidenceItem], scope: str) -> list[EvidenceItem]:
     return [item for item in evidence if item.metadata.get("evidence_scope") == scope]
 
 
+def _driver_text(item: EvidenceItem) -> str:
+    text = str(item.metadata.get("driver_text") or "").strip()
+    if text:
+        return text.rstrip("。")
+    text = item.claim.split("：", 1)[-1].split("；校验备注", 1)[0]
+    return text.rstrip("。")
+
+
+def _displayable_candidate(item: EvidenceItem) -> bool:
+    note = str(item.metadata.get("note") or "")
+    rejected = ("无直接证据", "未提及", "关联弱", "不匹配", "Tier 3", "长期预测")
+    return float(item.confidence or 0) >= 0.5 and not any(marker in note for marker in rejected)
+
+
 def synthesize_market_answer(results: list[ToolEnvelope], evidence: list[EvidenceItem]) -> str | None:
     """Return a compact, deterministic answer for evidence-sensitive market queries."""
 
@@ -89,13 +103,16 @@ def synthesize_market_answer(results: list[ToolEnvelope], evidence: list[Evidenc
     confirmed = _scoped(evidence, "driver")
     candidates = _scoped(evidence, "candidate")
     if confirmed:
-        reason_text = "；".join(f"{item.claim.rstrip('。')}{_cite(item)}" for item in confirmed[:2])
+        reason_text = "；".join(f"{_driver_text(item)}{_cite(item)}" for item in confirmed[:2])
         second = f"目前能直接支持的高置信度驱动是：{reason_text}。"
     else:
         second = f"但“为什么{direction}”目前还不能下定论：暂未找到可核实的同日催化剂，具体触发原因尚未确认{_cite(assessment)}。"
-    if candidates:
-        candidate = max(candidates, key=lambda item: float(item.confidence or 0))
-        second += f"目前最相关的中低置信度线索仅作排查方向：{candidate.claim.rstrip('。')}{_cite(candidate)}。"
+    displayable = [item for item in candidates if _displayable_candidate(item)]
+    if displayable:
+        candidate = max(displayable, key=lambda item: float(item.confidence or 0))
+        note = str(candidate.metadata.get("note") or "").strip().rstrip("。")
+        note_text = f"；但{note}" if note else ""
+        second += f"目前最相关的一条候选线索是“{_driver_text(candidate)}”{note_text}，因此它仍只能作为排查方向{_cite(candidate)}。"
     if market.metrics.get("is_intraday"):
         third = f"从盘面看，股价明显跑赢行业基准{_cite(benchmarks[0] if benchmarks else None)}。但当前成交量仍是盘中累计值{_cite(volume)}，不能用它推断放量、缩量或上涨持续性；应待收盘后再判断量能，并等待公司公告或可核验的同日新闻确认催化剂。"
     else:
