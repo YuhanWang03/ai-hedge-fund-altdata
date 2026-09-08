@@ -46,12 +46,32 @@ class PersonaSnapshot:
     # -- accessors the personas use --------------------------------------------
 
     def metrics(self, period: str = "ttm", limit: int | None = None) -> list[Record]:
-        rows = self.metrics_annual if period == "annual" else self.metrics_ttm
+        rows = self._annual(self.metrics_annual, self.metrics_ttm) if period == "annual" else self.metrics_ttm
         return rows[:limit] if limit else list(rows)
 
     def line_items(self, period: str = "ttm", limit: int | None = None) -> list[Record]:
-        rows = self.line_items_annual if period == "annual" else self.line_items_ttm
+        rows = self._annual(self.line_items_annual, self.line_items_ttm) if period == "annual" else self.line_items_ttm
         return rows[:limit] if limit else list(rows)
+
+    @staticmethod
+    def _annual(annual: list[Record], ttm: list[Record]) -> list[Record]:
+        """Real annual rows, or a series derived from TTM rows when too few exist.
+
+        The provider's annual statements only go back a couple of fiscal years
+        (two at most historical dates), below the personas' three-period
+        minimum. A trailing-twelve-month row is a full-year figure, so TTM rows
+        spaced a year apart form an equivalent annual series; it is used only
+        when it is longer than what the provider gave.
+        """
+        if len(annual) >= MIN_ANNUAL_PERIODS:
+            return annual
+        derived = derive_annual(ttm)
+        return derived if len(derived) > len(annual) else annual
+
+    @property
+    def annual_derived(self) -> bool:
+        """True when at least one annual series the personas read is TTM-derived."""
+        return any(r.derived_from == "ttm" for r in self.metrics("annual") + self.line_items("annual"))
 
     @property
     def has_fundamentals(self) -> bool:
@@ -104,6 +124,36 @@ class PersonaSnapshot:
         )
 
 
+#: the personas' ``min_periods``; below this the annual series is derived from TTM rows
+MIN_ANNUAL_PERIODS = 3
+#: two TTM rows at least this far apart are treated as consecutive fiscal years
+ANNUAL_GAP_DAYS = 350
+
+
+def derive_annual(ttm_rows: list[Record], *, gap_days: int = ANNUAL_GAP_DAYS) -> list[Record]:
+    """Pick TTM rows (newest first) whose report periods are ≥ ``gap_days`` apart.
+
+    Each picked row is copied with ``period="annual"`` and ``derived_from="ttm"``
+    so a reader can tell it from a provider annual row. Rows without a parseable
+    ``report_period`` are skipped.
+    """
+    dated: list[tuple[date, Record]] = []
+    for r in ttm_rows:
+        raw = r.report_period or r.period_end or r.date
+        try:
+            dated.append((date.fromisoformat(str(raw)[:10]), r))
+        except (TypeError, ValueError):
+            continue
+    dated.sort(key=lambda x: x[0], reverse=True)
+    out: list[Record] = []
+    last: date | None = None
+    for d, r in dated:
+        if last is None or (last - d).days >= gap_days:
+            out.append(Record(r.to_dict(), period="annual", derived_from="ttm"))
+            last = d
+    return out
+
+
 def _as_of(value: str | date | None) -> str:
     if value is None:
         return date.today().isoformat()
@@ -124,7 +174,7 @@ def build_snapshot(
     client: PersonaDataClient | Any | None = None,
     *,
     need: Iterable[str] = OPTIONAL_NEEDS,
-    limit: int = 10,
+    limit: int = 12,
     lookback_days: int = 365,
     line_items: Iterable[str] = ALL_LINE_ITEMS,
 ) -> PersonaSnapshot:
@@ -144,9 +194,10 @@ def build_snapshot(
         endpoint = {"metrics_ttm": "financial_metrics", "metrics_annual": "financial_metrics", "line_items_ttm": "line_items",
                     "line_items_annual": "line_items", "market_cap": "company_facts", "insider_trades": "insider_trades",
                     "news": "news", "prices": "prices"}[label]
-        snap.requests[endpoint] = snap.requests.get(endpoint, 0) + 1
         try:
-            return fn(*args, **kwargs)
+            out = fn(*args, **kwargs)
+            snap.requests[endpoint] = snap.requests.get(endpoint, 0) + 1  # only successful (billed) calls count
+            return out
         except NotImplementedError as exc:
             snap.gaps.append(f"{label}: {exc}")
         except Exception as exc:  # noqa: BLE001 — degrade, never crash the run

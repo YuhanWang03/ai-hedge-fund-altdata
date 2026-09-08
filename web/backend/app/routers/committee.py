@@ -243,7 +243,7 @@ async def scoreboard() -> dict:
         meta = names.get(row["persona"], {})
         row["name_zh"] = meta.get("name_zh", row["persona"])
         row["name"] = meta.get("name", row["persona"])
-    return {"kind": "scoreboard", "items": items, "counts": store.signal_counts()}
+    return {"kind": "scoreboard", "items": items, "counts": store.signal_counts(), "baseline": store.scoreboard_baseline()}
 
 
 # ------------------------------------------------------------------- narration

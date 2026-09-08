@@ -7,7 +7,7 @@ import os
 import pytest
 
 from v2.backtesting.models import TradeSignal
-from v2.backtesting.engine import BacktestEngine
+from v2.backtesting.engine import BacktestEngine, yearly_breakdown
 from v2.backtesting.strategy import PEADStrategy
 from v2.data.models import EarningsData, EarningsRecord, Price
 
@@ -230,6 +230,51 @@ class TestBacktestEngine:
 # ---------------------------------------------------------------------------
 # Unit tests — Metrics
 # ---------------------------------------------------------------------------
+
+class TestCostsAndPeriods:
+    def test_round_trip_cost_is_charged_per_side(self):
+        prices = _make_prices(100.0, 20, daily_change=0.01)
+        fd = MockFDClient(prices=prices)
+        signal = TradeSignal(ticker="TEST", direction="long", entry_date=prices[0].time[:10], holding_days=5)
+        free = BacktestEngine(capital=50_000, per_trade=10_000).run_signals([signal], fd).trades[0]
+        paid = BacktestEngine(capital=50_000, per_trade=10_000, cost_bps=10).run_signals([signal], fd).trades[0]
+        assert abs((free.return_pct - paid.return_pct) - 0.002) < 1e-9      # 10 bp × 2 sides
+        assert abs((free.pnl - paid.pnl) - 20.0) < 1e-6                     # on $10k deployed
+
+    def test_sharpe_uses_one_observation_per_rebalance_period(self):
+        """Ten trades opened the same day are one bet, not ten independent samples."""
+        prices = _make_prices(100.0, 60, daily_change=0.01)
+        fd = MockFDClient(prices=prices)
+        d0, d1 = prices[0].time[:10], prices[25].time[:10]
+        same_day = [TradeSignal(ticker="TEST", direction="long", entry_date=d0, holding_days=5) for _ in range(10)]
+        two_periods = same_day + [TradeSignal(ticker="TEST", direction="long", entry_date=d1, holding_days=5) for _ in range(10)]
+        res = BacktestEngine(capital=200_000, per_trade=10_000).run_signals(two_periods, fd)
+        m = res.metrics
+        assert m.n_trades == 20 and m.n_periods == 2
+        assert len(res.equity_curve) == 3                                    # capital, after period 1, after period 2
+        # identical returns within a period: per-period std is tiny, per-trade std is zero → both finite, reported separately
+        assert m.sharpe_trade_level == 0.0 or m.sharpe_trade_level != m.sharpe_ratio
+        single = BacktestEngine(capital=200_000, per_trade=10_000).run_signals(same_day, fd).metrics
+        assert single.n_periods == 1 and single.sharpe_ratio == 0.0         # one period → no dispersion to annualise
+
+    def test_yearly_breakdown_groups_by_entry_year_on_additive_equity(self):
+        from v2.backtesting.models import Trade
+
+        def trade(entry, exit_, pnl, ret):
+            return Trade(ticker="T", direction="long", entry_date=entry, exit_date=exit_, entry_price=100, exit_price=100 * (1 + ret),
+                         shares=100, pnl=pnl, return_pct=ret, holding_days=21)
+
+        trades = [trade("2024-03-01", "2024-04-01", 1_000, 0.10), trade("2024-03-01", "2024-04-01", -500, -0.05),
+                  trade("2024-12-10", "2025-01-12", 2_000, 0.20),           # entered in 2024, exits in 2025 → counts for 2024
+                  trade("2025-02-01", "2025-03-05", -1_000, -0.10)]
+        rows = yearly_breakdown(trades, capital=100_000)
+        assert [r["year"] for r in rows] == ["2024", "2025"]
+        y24, y25 = rows
+        assert y24["periods"] == 2 and y24["trades"] == 3 and y24["pnl"] == 2_500 and y24["start_equity"] == 100_000
+        assert abs(y24["return_pct"] - 0.025) < 1e-9 and y24["start"] == "2024-03-01" and y24["end"] == "2025-01-12"
+        assert y25["start_equity"] == 102_500 and abs(y25["return_pct"] - (-1_000 / 102_500)) < 1e-6 and y25["win_rate"] == 0.0
+        assert yearly_breakdown([], capital=1) == []
+
 
 class TestMetrics:
     def test_win_rate(self):

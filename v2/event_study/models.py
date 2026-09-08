@@ -46,6 +46,7 @@ class EventCAR(BaseModel):
     car_0_1: float | None = None              # cumulative AR over [0, +1] (2 days)
     car_0_5: float | None = None              # cumulative AR over [0, +5] (6 days)
     car_0_20: float | None = None             # cumulative AR over [0, +20] (21 days)
+    car_2_20: float | None = None             # post-announcement drift: [+2, +20], excludes the reaction days
 
 
 class BootstrapCI(BaseModel):
@@ -85,7 +86,8 @@ class AggregateResult(BaseModel):
     because 8-K filing_date is closer to the actual announcement.
     """
 
-    source_type: str                          # "8-K", "10-Q", "10-K", "20-F"
+    source_type: str                          # group label (kept for older readers; same as ``group``)
+    group: str = ""                           # "ALL" / "BEAT" / "MISS" / "MEET" / "UNLABELED", or a filing type
     n_events: int                             # total events in this group
     windows: list[WindowStats] = Field(default_factory=list)
 
@@ -101,3 +103,5 @@ class EventStudyResult(BaseModel):
     events: list[EventCAR] = Field(default_factory=list)
     aggregates: list[AggregateResult] = Field(default_factory=list)
     skipped_tickers: list[str] = Field(default_factory=list)
+    dedupe: bool = False                      # one event per (ticker, report_period)?
+    group_by: str = "source"                  # how ``aggregates`` are segmented

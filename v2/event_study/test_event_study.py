@@ -122,6 +122,53 @@ class TestRetrospectiveFilter:
         assert result[0].report_period == "2026-03-31"
 
 
+class TestDedupeAndGrouping:
+    def test_one_event_per_report_period_prefers_the_8k(self):
+        from v2.data.models import EarningsRecord
+        from v2.event_study.engine import _dedupe_records
+
+        rec = lambda src, filed, period="2026-06-30": EarningsRecord(ticker="X", report_period=period, source_type=src, filing_date=filed)  # noqa: E731
+        kept = _dedupe_records([rec("10-Q", "2026-08-01"), rec("8-K", "2026-07-30"), rec("10-K", "2026-08-05", "2026-03-31"), rec("8-K", "2026-04-28", "2026-03-31")])
+        assert [(r.report_period, r.source_type, r.filing_date) for r in kept] == [("2026-06-30", "8-K", "2026-07-30"), ("2026-03-31", "8-K", "2026-04-28")]
+        # without an 8-K the earliest filing wins
+        only = _dedupe_records([rec("10-K", "2026-08-05"), rec("10-Q", "2026-08-01")])
+        assert len(only) == 1 and only[0].source_type == "10-Q"
+
+    def test_aggregate_by_surprise_puts_all_first_then_beat_and_miss(self):
+        from v2.event_study.engine import _aggregate
+
+        def ev(i, surprise):
+            return EventCAR(ticker="T", event_date=f"2025-01-{10 + i:02d}", source_type="8-K", report_period="2024-12-31", eps_surprise=surprise,
+                            market_model=MarketModelFit(alpha=0.0, beta=1.0, r_squared=0.5, n_obs=240), daily_ar=[0.0] * 21,
+                            car_0_1=0.02 if surprise == "BEAT" else -0.02, car_0_5=0.03 if surprise == "BEAT" else -0.03, car_0_20=0.04 if surprise == "BEAT" else -0.04)
+
+        events = [ev(i, "BEAT") for i in range(4)] + [ev(i + 4, "MISS") for i in range(3)] + [ev(8, None)]
+        groups = _aggregate(events, 200, 42, group_by="surprise")
+        assert [g.group for g in groups] == ["ALL", "BEAT", "MISS"]  # a single unlabeled event is too small for stats
+        assert groups[0].n_events == 8 and groups[1].n_events == 4 and groups[2].n_events == 3
+        assert groups[1].windows[0].mean_car > 0 > groups[2].windows[0].mean_car
+        by_source = _aggregate(events, 200, 42, group_by="source")
+        assert [g.group for g in by_source] == ["8-K"] and by_source[0].source_type == "8-K"
+
+    def test_aggregate_by_reaction_splits_terciles_of_the_two_day_car(self):
+        from v2.event_study.engine import _aggregate, _reaction_groups
+
+        def ev(i, react):
+            return EventCAR(ticker="T", event_date=f"2025-01-{10 + i:02d}", source_type="8-K", report_period="2024-12-31", eps_surprise=None,
+                            market_model=MarketModelFit(alpha=0.0, beta=1.0, r_squared=0.5, n_obs=240), daily_ar=[0.0] * 21,
+                            car_0_1=react, car_0_5=react, car_0_20=react * 1.5, car_2_20=react * 0.5)
+
+        events = [ev(i, r) for i, r in enumerate([-0.10, -0.08, -0.06, -0.01, 0.0, 0.01, 0.05, 0.07, 0.09])]
+        terciles = _reaction_groups(events)
+        assert [len(terciles[k]) for k in ("REACT_DOWN", "REACT_MID", "REACT_UP")] == [3, 3, 3]
+        assert all(e.car_0_1 <= -0.06 for e in terciles["REACT_DOWN"]) and all(e.car_0_1 >= 0.05 for e in terciles["REACT_UP"])
+        groups = _aggregate(events, 200, 42, group_by="reaction")
+        assert [g.group for g in groups] == ["ALL", "REACT_UP", "REACT_MID", "REACT_DOWN"]
+        drift = {w.window: w.mean_car for w in groups[1].windows}
+        assert "[+2,+20]" in drift and drift["[+2,+20]"] > 0 > {w.window: w.mean_car for w in groups[3].windows}["[+2,+20]"]
+        assert _reaction_groups(events[:2]) == {}  # too few to cut into thirds
+
+
 # ---------------------------------------------------------------------------
 # Unit tests — plot (smoke test, no visual assertion)
 # ---------------------------------------------------------------------------

@@ -56,6 +56,7 @@ v2/personas/
   置信度是得分率的确定性函数。上游本身在打分层已经算好了这些数字，判决只是照念。
 - **一次取数，十三人共用。** 上游每个 agent 各取各的，一只股票 40–60 次 API 调用；
   这里 `build_snapshot()` 最多 8 次，只取被选中的投资人真正需要的部分。
+- **年报不足时从 TTM 推导。** Financial Datasets 的年报只覆盖最近两三个财年，历史时点更少；`PersonaSnapshot.metrics("annual")` / `line_items("annual")` 在真实年报少于 3 期时，改用相隔 ≥ 350 天的 TTM 行（财年末的 TTM 就是年报数字）拼成年度序列，只在推导序列更长时启用，行上带 `derived_from="ttm"` 标记，`snap.annual_derived` 可查。
 - **弃权是显式的。** 缺基本面就 `abstained=True`、confidence 0，不再默认 neutral/50，
   投票时不计入。
 - **委员会是算术，不是 LLM。** 上游的 Portfolio Manager 把 13 份意见塞给模型综合；
@@ -112,6 +113,6 @@ v2/personas/
 
 ## 未做的事
 
-- 历史回测：LLM 层做回测有前视偏差；确定性打分层可以包成 `v2/backtesting.Strategy`，尚未实现。
+- 历史回测：已实现为 `v2/backtesting/strategies.py` 的 `CommitteeStrategy`（实验室「策略回测」→「投资人委员会」）：每个换仓日用信号日前 `filing_lag_days` 天的财务数据打分，买入共识最强的前 N 只；LLM 解读层不参与回测。
 - 接口是同步的（沿用实验室 240 秒超时）。规则层有缓存时几秒即返；解读一次一格，
   也在超时内。批量解读应照 `routers/research.py` 的异步任务模式。

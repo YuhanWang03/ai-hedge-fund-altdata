@@ -86,6 +86,54 @@ as a background job — `POST /api/lab/screening` returns `{job_id, done, total}
 and `GET /api/lab/screening/jobs/{id}` is polled — because nginx cuts requests
 at 90 s. `GET /api/lab/universes` lists sizes and snapshot dates.
 
+Backtest strategies (all in `v2/backtesting/strategies.py`, one engine):
+`pead` (EPS beat/miss after the filing, `earnings_limit`), `momentum` (12-1
+momentum ranked every `holding_days`, `lookback_days`, `skip_days`, `top_n`,
+optional `near_high_pct` for the 52-week-high variant), `insider`
+(`min_insiders` distinct buyers inside `window_days` with `min_value_usd` of
+purchases), and `committee` (the 13 personas vote at every rebalance date over
+`history_days`; fundamentals as of `filing_lag_days` earlier; `top_n`,
+`min_consensus`, `min_agreement`, `lean`; `notes.periods` on the result lists
+every rebalance date's votes and picks). Momentum is price-only, so it may
+run over a whole index universe (sp500 / nasdaq100 / dow30, as a job); the
+paid strategies keep the 60-ticker cap. Every result carries `benchmark`
+(SPY buy-and-hold from first entry to last exit) and `excess_return_pct`.
+Metrics are portfolio-level: `sharpe_ratio` and `max_drawdown_pct` use one
+observation per rebalance period (trades sharing an entry date), with the
+old per-trade figure kept as `sharpe_trade_level`; `cost_bps` (default 10,
+one-way) is charged on both sides of every trade. `yearly` breaks the run
+into calendar years (trades grouped by entry year): periods, trades, P&L,
+return on the equity at the start of the year, SPY over the same span and
+the excess — the quick way to see whether the alpha is spread out or comes
+from one year. `deployment` reports capital utilisation — the engine sizes
+every position at `per_trade` and never checks capital, so 5 × $10k on $100k
+leaves half idle (diluted returns) and 30 × $10k is 3× leverage — and
+restates return, annualized return, drawdown and excess on the peak deployed
+amount (`on_deployed`; the yearly rows carry `return_on_deployed_pct` too).
+
+`POST /api/lab/backtest/sweep` runs a momentum parameter grid as one job:
+prices are loaded once (every ticker, plus SPY) and each combination of
+`top_ns` × `holding_days_list` × `near_high_pcts` (defaults 10/20/30 ×
+21/42/63 × none/10 %) is backtested against the in-memory cache with the
+same universe (point-in-time when history is stored) and costs, each fully
+invested (`per_trade = capital / top_n`) so the variants are comparable.
+The result (`kind: "sweep"`) lists one row per combination — total and
+annualized return, per-period Sharpe, max drawdown, win rate, SPY and
+excess — and the UI sorts it by Sharpe / return / excess / drawdown. Picking
+the best cell is in-sample selection; a smooth neighbourhood matters more.
+
+**Point-in-time constituents.** `python -m v2.screening.universes --refresh`
+also stores the S&P 500 page's additions/removals table; `members_at(name,
+date)` rewinds today's list through it, and the momentum backtest on an
+index pool ranks only that date's members (loading prices for former members
+too, reporting those without data). Without the table the run is flagged as
+survivorship-biased in the UI. `--show-at sp500 2024-09-10` prints a past list. `data_source` picks where daily
+prices come from — yfinance is free, FD bills per 90-day chunk — while
+earnings, insider trades and fundamentals are always Financial Datasets;
+`fd_requests` / `fd_cost_usd` on the result say what a run cost, and persona
+snapshots for historical dates are cached in `data/personas.db` so a re-run
+of the same dates is free.
+
 Screening rules are individually optional: the UI ticks any subset of the
 criteria (market cap, price, growth, margins, ROE/ROIC, leverage, valuation
 multiples, FCF yield, payout, volatility, 1w/1m/3m returns, distance from the
@@ -98,15 +146,20 @@ fields (e.g. ROIC, payout) may be empty for part of the universe.
 ```
 POST /api/lab/screening              {universe, tickers?, data_source: yfinance|fd, with_earnings?, rules: [{field, op: gte|lte, value}]}
 GET  /api/lab/screening/criteria     the 22 rule fields (label, unit, source) + the default rule set
-POST /api/lab/backtest               {universe, tickers?, strategy: "pead", holding_days, earnings_limit, capital, per_trade}
-POST /api/lab/event-study            {universe, tickers?, earnings_limit, n_bootstrap, require_eps_surprise}
+POST /api/lab/backtest               {universe, tickers?, strategy: pead|momentum|insider|committee, data_source: yfinance|fd, holding_days, capital, per_trade, …}
+POST /api/lab/backtest/sweep         momentum grid on one price load: {universe, tickers?, history_days, capital, top_ns, holding_days_list, near_high_pcts, cost_bps, …} → job
+GET  /api/lab/backtest/jobs/{id}     poll a background backtest or sweep (the committee strategy always runs as one)
+POST /api/lab/event-study            {universe, tickers?, data_source: yfinance|fd, earnings_limit, n_bootstrap, require_eps_surprise, dedupe, group_by: surprise|reaction|source}
 GET  /api/lab/signals                production anomaly thresholds, read-only
 GET  /api/lab/runs[?kind=&limit=]    persisted run log for every tool (+ per-kind counts)
-GET  /api/lab/runs/{id}              params + full result of one run
+GET  /api/lab/runs/{id}              params + full result of one run (the UI refills the tool's form from params)
+DELETE /api/lab/runs/{id}            drop one run; POST /api/lab/runs/cleanup {older_than_days: 30} drops everything older
 
 POST /api/lab/committee              {source: holdings|watchlist|tickers|screening, tickers?, personas?, as_of?, top_n?, max_weight?}
 GET  /api/lab/committee/runs, /runs/{id}, /personas
-GET  /api/lab/committee/scoreboard   per-persona hit rate + vote counts (due / scored per horizon)
+GET  /api/lab/committee/scoreboard   per-persona hit rates for 1 m and 3 m, 95 % Wilson interval, each persona's chance baseline
+                                     (share_bullish × P(up) + share_bearish × P(down)) and the edge over it; `baseline` = how the scored
+                                     tickers themselves moved (one observation per ticker·date); counts due / scored per horizon
 POST /api/lab/committee/narrate      {run_id, ticker, persona, language} → LLM explanation for one cell, verdict unchanged
 POST /api/lab/committee/backfill     run the forward-return backfill now (scheduler ⑯ does it nightly at 02:30 ET)
 ```

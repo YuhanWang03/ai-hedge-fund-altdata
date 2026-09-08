@@ -42,14 +42,17 @@ class PerformanceMetrics(BaseModel):
 
     total_return_pct: float
     annualized_return_pct: float
-    sharpe_ratio: float
-    max_drawdown_pct: float
+    sharpe_ratio: float               # annualised, from per-period portfolio returns
+    max_drawdown_pct: float           # on the per-period equity curve
     win_rate: float                   # fraction of trades with positive return
     n_trades: int
     n_long: int
     n_short: int
     avg_return_pct: float
     avg_holding_days: float
+    n_periods: int = 0                # rebalance periods (distinct entry dates) behind sharpe_ratio
+    sharpe_trade_level: float = 0.0   # the old per-trade Sharpe, overstated when trades overlap
+    cost_bps: float = 0.0             # one-way cost charged per side
 
 
 class BacktestResult(BaseModel):

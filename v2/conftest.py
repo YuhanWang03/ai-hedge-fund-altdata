@@ -13,6 +13,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from v2.testing_stubs import install_data_stubs  # noqa: E402
+
+install_data_stubs()  # no-op on the VPS, where the real v2/data package exists
+
 try:
     import edgar  # noqa: F401
 except ImportError:

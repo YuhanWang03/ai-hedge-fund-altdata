@@ -150,6 +150,7 @@ def test_build_snapshot_records_gaps_instead_of_raising():
             return []
 
     snap = build_snapshot("X", "2026-06-30", Broken())
+    assert "financial_metrics" not in snap.requests and snap.requests["line_items"] == 2  # rejected requests are not billed, so not counted
     assert any(g.startswith("metrics_ttm: RuntimeError") for g in snap.gaps)
     assert any(g.startswith("fundamentals:") for g in snap.gaps)
     assert not snap.has_fundamentals
@@ -378,6 +379,40 @@ def test_every_persona_abstains_on_too_short_history(key):
     snap.line_items_annual = snap.line_items_annual[:1]
     s = get_persona(key).analyze(snap)
     assert s.abstained and "need 3" in s.reasoning
+
+
+def test_annual_series_is_derived_from_ttm_when_the_provider_has_too_few_years():
+    """FD only carries ~2 fiscal years at historical dates; TTM rows a year apart stand in."""
+    from v2.personas.snapshot import derive_annual
+
+    snap = quality_snapshot()                      # 10 quarterly TTM rows, 10 real annual rows
+    real = snap.metrics("annual")
+    assert real == snap.metrics_annual and not snap.annual_derived
+
+    snap.metrics_annual = snap.metrics_annual[:2]  # what FD returns as of mid-2025
+    snap.line_items_annual = snap.line_items_annual[:2]
+    derived = snap.metrics("annual")
+    assert len(derived) == 3 and all(r.period == "annual" and r.derived_from == "ttm" for r in derived)
+    assert [r.report_period for r in derived] == [snap.metrics_ttm[i].report_period for i in (0, 4, 8)]
+    assert len(snap.line_items("annual")) == 3 and snap.annual_derived
+    for key in PERSONAS:                           # nobody abstains for "need 3" any more
+        sig = get_persona(key).analyze(snap)
+        assert "need 3" not in sig.reasoning, (key, sig.reasoning)
+
+    # the derived series is only used when it is longer than the real one
+    snap.metrics_ttm = snap.metrics_ttm[:5]        # 5 quarters → 2 derived points, no better than 2 real
+    assert snap.metrics("annual") == snap.metrics_annual
+    assert derive_annual([]) == [] and derive_annual([Record(ticker="X", revenue=1)]) == []
+
+
+def test_buffett_survives_a_loss_making_latest_period():
+    """INTC / CRWD: a negative newest net income made (new/old) ** (1/years) complex and crashed the vote."""
+    snap = quality_snapshot()
+    for row in snap.line_items_ttm[:2]:
+        row.net_income = -2_000e6
+    sig = get_persona("warren_buffett").analyze(snap)
+    assert not sig.abstained and "TypeError" not in sig.reasoning
+    assert sig.signal in ("bearish", "neutral", "bullish")
 
 
 def test_price_readers_abstain_without_prices():
