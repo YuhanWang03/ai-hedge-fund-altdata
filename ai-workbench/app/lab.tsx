@@ -348,6 +348,7 @@ function CommitteeTool({ result, setResult, handoff, clearHandoff, onHand, watch
   const reopen = async (runId: string) => { setBusy(true); setError(''); try { setResult(await apiJson<CommitteeResult>(`/api/lab/committee/runs/${encodeURIComponent(runId)}`)) } catch (e) { setError(errorText(e)) } finally { setBusy(false) } };
   return <>
     {handoff && <HandoffBanner handoff={handoff} onUse={() => { setSource('tickers'); setTickers(handoff.tickers.join(', ')); clearHandoff() }} onClear={clearHandoff}/>}
+    <div className="lab-notice lab-notice-neutral"><strong>打分有效，但依据比设计的浅，评价还要等</strong><span>委员会不是回测：它对当前数据实时评审，每一票对不对由「观察记分板」在 1 个月 / 3 个月后用真实收益判定，这个流程本身没有前视。两条局限要记住：一是 Financial Datasets 的财务报表只有 2–3 个财年，巴菲特、芒格、林奇这类看 10 年的投资人，其增长和一致性指标实际是用 TTM 推算的年度序列打的分，只能看到约 3 年，不是清单要求的 10 年；二是记分板需要时间积累，一位投资人至少要 20 票、经过 1 个月才有可解读的命中率，现在还在积累期，榜上的差异暂时是噪声。</span></div>
     <div className="lab-tool">
       <section className="surface lab-config"><div className="surface-header"><div><h2>评审设置</h2><span>每位投资人一份确定性打分清单 · 按置信度加权投票</span></div></div>
         <Field label="输入来源" hint={COMMITTEE_SOURCES.find(s => s.id === source)?.hint}><Chips options={COMMITTEE_SOURCES} value={source} onChange={setSource}/></Field>
@@ -614,6 +615,7 @@ function EventStudyTool({ result, setResult, handoff, clearHandoff, ask, restore
   const run = async () => { setBusy(true); setError(''); try { setResult(await apiJson<EventStudyResult>('/api/lab/event-study', { method: 'POST', body: JSON.stringify({ universe, tickers: universe === 'custom' ? parseTickers(tickers) : [], data_source: dataSource, earnings_limit: Number(earnings), n_bootstrap: Number(boot), require_eps_surprise: surprise, dedupe, group_by: groupBy }) })) } catch (e) { setError(errorText(e)) } finally { setBusy(false) } };
   return <>
     {handoff && <HandoffBanner handoff={handoff} onUse={() => { setUniverse('custom'); setTickers(handoff.tickers.join(', ')); clearHandoff() }} onClear={clearHandoff}/>}
+    <div className="lab-notice"><strong>数据不足，结果不理想</strong><span>三轮实验都没有发现财报后的漂移：标普 500 大盘股、从中筛出的 20 只最小市值股票、以及按公告日反应分组，[+2, +20] 窗口的累计异常收益都不显著。限制是硬的：Financial Datasets 只有约 5 个季度的财报历史，每只股票最多 5 个事件，20 只股票凑不出 100 个事件，而标普 500 成分股的财报又是市场上被消化得最快的。想要有机会看到漂移，需要 10 年以上的财报日期与 EPS 意外历史，并把股票池扩到中小市值。在此之前，这一页只适合检验事件研究的流程，不适合据以决策。</span></div>
     <div className="lab-tool lab-tool-fill">
       <section className="surface lab-config lab-config-fill"><div className="surface-header"><div><h2>事件研究参数</h2><span>事件 = 财报公布；基准 = 市场模型（SPY）</span></div></div>
         <div className="lab-config-body lab-scroll">
