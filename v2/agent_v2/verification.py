@@ -130,4 +130,15 @@ def _citation_integrity_warnings(answer: str, evidence: list[EvidenceItem], resu
                 warnings.append("未收盘成交量被用于判定放量、缩量或持续性")
         elif market_answer and grounding.check(plain, "").total:
             warnings.append("行情事实缺少邻近引用")
+    move_result = next((result for result in results if result.capability == "market.explain_move"), None)
+    if move_result is not None and int(move_result.metrics.get("confirmed_driver_count") or 0) == 0:
+        cited_candidates = {
+            citation
+            for citation in _CITATION.findall(answer)
+            if citation in known and known[citation].metadata.get("claim_role") == "candidate_driver"
+        }
+        if len(cited_candidates) > 1:
+            warnings.append("未确认直接驱动时展示了过多弱候选线索")
+        if re.search(r"0\s*个.{0,12}(?:驱动|催化|原因)", answer):
+            warnings.append("将内部归因计数直接暴露给用户")
     return list(dict.fromkeys(warnings))

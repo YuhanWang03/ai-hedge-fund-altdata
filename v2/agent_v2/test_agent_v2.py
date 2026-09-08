@@ -578,6 +578,17 @@ def test_verifier_rejects_final_volume_conclusion_from_intraday_evidence():
     assert any("未收盘成交量" in warning for warning in report.warnings)
 
 
+def test_verifier_limits_weak_candidates_when_no_direct_driver_is_confirmed():
+    evidence = [
+        EvidenceItem("C1", "AMD", "Candidate one.", metadata={"claim_role": "candidate_driver"}),
+        EvidenceItem("C2", "AMD", "Candidate two.", metadata={"claim_role": "candidate_driver"}),
+    ]
+    result = ToolEnvelope("market.explain_move", ResultStatus.COMPLETED, subject="AMD", metrics={"confirmed_driver_count": 0}, evidence=evidence)
+    report = verify_answer("可能与线索一相关。[C1] 也可能与线索二相关。[C2]", evidence, answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result])
+    assert not report.ok
+    assert any("过多弱候选" in warning for warning in report.warnings)
+
+
 def test_verifier_does_not_treat_digits_in_opaque_ids_as_observations():
     evidence = [EvidenceItem("evidence-999999", "NVDA", "Insiders were net sellers.")]
     result = ToolEnvelope(
