@@ -29,9 +29,22 @@ _DETAILED_ANSWER = re.compile(r"详细|完整|全面|深度|报告|逐项|表格
 _MOVE_ANSWER = re.compile(r"(?:为什么|原因|何故).{0,12}(?:涨|跌|异动|波动)|(?:涨|跌|异动|波动).{0,12}(?:为什么|原因|怎么回事|怎么了|何故)|(?:最近|今天|今日).{0,8}(?:怎么回事|怎么了)", re.I)
 _PERFORMANCE_ANSWER = re.compile(
     r"(?:最近|近期|今天|今日|本周|这周|本月|这个月|近\s*\d+\s*(?:天|日|周|月)).{0,12}(?:股价|价格|走势|表现|涨|跌|涨跌|回报|收益率)"
-    r"|(?:股价|价格).{0,8}(?:走势|表现|涨跌|回报|收益率)|(?:走势|涨跌|跑赢|跑输)",
+    r"|(?:股价|价格).{0,8}(?:走势|表现|涨跌|回报|收益率)|(?:走势|涨跌|跑赢|跑输)|(?:股票|股价|价格)?表现(?:如何|怎么样|怎样|好吗|好不好)",
     re.I,
 )
+
+
+def _response_intent(query: str, plan: ExecutionPlan) -> str:
+    capabilities = {task.capability for task in plan.tasks}
+    if "market.explain_move" in capabilities:
+        return "move_explanation"
+    if "market.performance" in capabilities:
+        return "recent_performance"
+    if _MOVE_ANSWER.search(query):
+        return "move_explanation"
+    if _PERFORMANCE_ANSWER.search(query):
+        return "recent_performance"
+    return "stock_research"
 
 
 def _strip_fence(text: str) -> str:
@@ -200,8 +213,8 @@ results 中的评分或限制如需引用，使用 evidence 中 citation_kind �
             system += """
 
 再严格遵循 response_intent：
-- recent_performance：先回答最新交易日、近 5 日和近 1 月的价格回报，再说明相对行业或大盘基准的强弱及成交量；不得用营收、毛利率或估值代替价格表现。数据不足时明确缺少哪个时间窗口。
-- move_explanation：第一句回答是否上涨/下跌、日期、幅度和成交量。把已确认行情事实、高置信度直接驱动、普通候选解释分开。只有 metadata.claim_role=confirmed_driver 的证据才能写成已确认原因；candidate_driver 必须写成“可能相关”并说明中/低置信度。如果 confirmed_driver_count 为 0，必须明确说“具体触发原因尚未确认”，不能把历史涨幅、机构持仓或时间不匹配的新闻写成当日直接原因。必须给出行业基准对比；若工具没有基准则说明缺失。
+- recent_performance：先回答最新交易日、近 5 日和近 1 月的价格回报，再说明相对行业或大盘基准的强弱及成交量；不得用营收、毛利率或估值代替价格表现。若 metrics.is_intraday=true，必须写“截至查询时”或“盘中”，不能写“收盘”；当前累计成交量只能与完整日均量做进度参考，不得据此判断放量、缩量或上涨持续性。数据不足时明确缺少哪个时间窗口。
+- move_explanation：第一句回答是否上涨/下跌、日期、幅度和成交量。把已确认行情事实、高置信度直接驱动、普通候选解释分开。只有 metadata.claim_role=confirmed_driver 的证据才能写成已确认原因；candidate_driver 必须写成“可能相关”并说明中/低置信度。如果 confirmed_driver_count 为 0，用自然语言说“暂未找到可核实的同日催化剂，具体触发原因尚未确认”，不要输出“0 个驱动”之类的系统字段。不能把历史涨幅、机构持仓或时间不匹配的新闻写成当日直接原因。没有直接驱动时最多展示 1 条最相关的候选线索，过于间接的线索可直接省略。必须给出行业基准对比；若工具没有基准则说明缺失。若 metrics.is_intraday=true，必须标明盘中口径，且不得用当前累计成交量推断放量/缩量或持续性。
 - stock_research：围绕公司的核心投资矛盾组织答案，不逐项报分。ROIC、ROE、利润率等异常高于 100% 的比率必须提示其依赖数据与计算口径，不能当作无条件质量结论。
 
 每个引用只支持它紧邻的那句话。不要用一条聚合引用同时支撑价格、成交量、新闻和期权等不同事实。"""
@@ -234,7 +247,7 @@ results 中的评分或限制如需引用，使用 evidence 中 citation_kind �
             "query": query[:2000],
             "objective": plan.objective[:2000],
             "response_style": "detailed" if _DETAILED_ANSWER.search(query) else "brief",
-            "response_intent": "move_explanation" if _MOVE_ANSWER.search(query) else "recent_performance" if _PERFORMANCE_ANSWER.search(query) else "stock_research",
+            "response_intent": _response_intent(query, plan),
             "assumptions": list(plan.assumptions),
             "results": [
                 {

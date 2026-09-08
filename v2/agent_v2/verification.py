@@ -11,6 +11,9 @@ _CITATION = re.compile(r"\[([A-Za-z0-9_.:-]+)\]")
 _SENTENCE = re.compile(r"[^。！？!?\n]+(?:[。！？!?]+|$)(?:\s*\[[A-Za-z0-9_.:-]+\])*")
 _DIRECT_CAUSE = re.compile(r"主要原因|直接原因|直接驱动|由.{0,20}推动|因为|催化剂是|归因于")
 _HEDGED_CAUSE = re.compile(r"可能|或许|候选|低置信|中置信|尚未确认|无法确认|不能确认")
+_INTRADAY_MARKER = re.compile(r"盘中|截至查询时|截至.{0,30}(?:ET|美东)")
+_FINAL_VOLUME_CONCLUSION = re.compile(r"缩量|放量|量能不足|成交量.{0,12}(?:未|没有).{0,6}(?:放大|跟上)|持续性存疑")
+_INTRADAY_CAUTION = re.compile(r"不能|无法|不应|不得|尚不能|待收盘|未收盘|尚未定型|不宜")
 
 
 def verify_answer(
@@ -119,6 +122,12 @@ def _citation_integrity_warnings(answer: str, evidence: list[EvidenceItem], resu
                 weak = [item for item in cited_items if item.metadata.get("claim_role") == "candidate_driver"]
                 if weak:
                     warnings.append("候选归因被表述为已确认原因：" + ", ".join(item.id for item in weak[:2]))
+            intraday_price = any(item.metadata.get("evidence_scope") == "price" and item.metadata.get("is_intraday") for item in cited_items)
+            if intraday_price and not _INTRADAY_MARKER.search(plain):
+                warnings.append("盘中价格被表述为完整收盘口径")
+            intraday_volume = any(item.metadata.get("evidence_scope") == "volume" and item.metadata.get("is_intraday") for item in cited_items)
+            if intraday_volume and _FINAL_VOLUME_CONCLUSION.search(plain) and not _INTRADAY_CAUTION.search(plain):
+                warnings.append("未收盘成交量被用于判定放量、缩量或持续性")
         elif market_answer and grounding.check(plain, "").total:
             warnings.append("行情事实缺少邻近引用")
     return list(dict.fromkeys(warnings))

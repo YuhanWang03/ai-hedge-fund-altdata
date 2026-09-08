@@ -4,11 +4,45 @@ from __future__ import annotations
 
 import hashlib
 import math
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 from v2.agent_v2.execution import CapabilityRegistry, ExecutionContext
 from v2.agent_v2.models import EvidenceItem, ResultStatus, ToolEnvelope
+
+_ET = ZoneInfo("America/New_York")
+_REGULAR_OPEN = time(9, 30)
+_REGULAR_CLOSE = time(16, 0)
+
+
+def _now_et() -> datetime:
+    return datetime.now(_ET)
+
+
+def _as_et(now: datetime | None = None) -> datetime:
+    current = now or _now_et()
+    return current.replace(tzinfo=_ET) if current.tzinfo is None else current.astimezone(_ET)
+
+
+def _observation_state(as_of: str, now: datetime | None = None) -> dict[str, Any]:
+    current = _as_et(now)
+    try:
+        observation_date = date.fromisoformat(as_of[:10])
+    except ValueError:
+        observation_date = None
+    intraday = bool(
+        observation_date == current.date()
+        and current.weekday() < 5
+        and _REGULAR_OPEN <= current.time().replace(tzinfo=None) < _REGULAR_CLOSE
+    )
+    return {
+        "market_session": "REGULAR" if intraday else "CLOSED",
+        "is_intraday": intraday,
+        "volume_is_final": not intraday,
+        "observed_at": current.isoformat(timespec="minutes"),
+        "observed_at_label": current.strftime("%Y-%m-%d %H:%M ET"),
+    }
 
 
 def _default_price_source():
@@ -74,7 +108,7 @@ def _item(
         value=value,
         as_of=as_of,
         source_id="market_data" if kind not in {"driver", "candidate"} else "move_attribution",
-        source_title="Daily OHLCV market data" if kind not in {"driver", "candidate"} else "Move attribution evidence",
+        source_title="Daily/intraday OHLCV market data" if kind not in {"driver", "candidate"} else "Move attribution evidence",
         source_url=source_url,
         confidence=confidence,
         producer_run_id=context.run_id,
@@ -82,8 +116,9 @@ def _item(
     )
 
 
-def _performance_envelope(ticker: str, context: ExecutionContext, price_source) -> ToolEnvelope:
-    today = date.today()
+def _performance_envelope(ticker: str, context: ExecutionContext, price_source, *, now: datetime | None = None) -> ToolEnvelope:
+    current = _as_et(now)
+    today = current.date()
     start = today - timedelta(days=430)
     prices = price_source.get_prices(ticker, start.isoformat(), today.isoformat()) or []
     if len(prices) < 2:
@@ -91,6 +126,8 @@ def _performance_envelope(ticker: str, context: ExecutionContext, price_source) 
 
     latest, previous = prices[-1], prices[-2]
     as_of = str(latest.time)[:10]
+    observation = _observation_state(as_of, current)
+    observation_metadata = {key: value for key, value in observation.items() if key != "observed_at_label"}
     close = float(latest.close)
     day_return = close / float(previous.close) - 1 if float(previous.close) > 0 else None
     windows = {"1d": day_return, "5d": _return(prices, 5), "1m": _return(prices, 21), "3m": _return(prices, 63), "1y": _return(prices, 252)}
@@ -101,17 +138,24 @@ def _performance_envelope(ticker: str, context: ExecutionContext, price_source) 
     volatility_21d = (sum((value - sum(recent_returns) / len(recent_returns)) ** 2 for value in recent_returns) / max(1, len(recent_returns) - 1)) ** 0.5 * (252**0.5) if len(recent_returns) > 1 else None
 
     evidence: list[EvidenceItem] = []
-    price_claim = f"{ticker} 截至 {as_of} 收盘价为 {close:.2f} 美元，单日涨跌幅为 {day_return:+.2%}。" if day_return is not None else f"{ticker} 截至 {as_of} 收盘价为 {close:.2f} 美元。"
-    evidence.append(_item("price", ticker, as_of, price_claim, context, metric="close", value=close, metadata={"day_return": day_return}))
+    if observation["is_intraday"]:
+        price_claim = f"{ticker} 截至 {observation['observed_at_label']} 的盘中价格为 {close:.2f} 美元，相对前一交易日收盘价 {day_return:+.2%}。"
+    else:
+        price_claim = f"{ticker} 截至 {as_of} 收盘价为 {close:.2f} 美元，单日涨跌幅为 {day_return:+.2%}。" if day_return is not None else f"{ticker} 截至 {as_of} 收盘价为 {close:.2f} 美元。"
+    evidence.append(_item("price", ticker, as_of, price_claim, context, metric="close", value=close, metadata={"day_return": day_return, **observation_metadata}))
     available_windows = {key: value for key, value in windows.items() if value is not None}
-    window_claim = f"{ticker} 区间回报：" + "，".join(f"{key} {value:+.2%}" for key, value in available_windows.items()) + "。"
-    evidence.append(_item("returns", ticker, as_of, window_claim, context, metadata={"returns": available_windows}))
+    window_prefix = f"{ticker} 截至查询时的区间回报（含当前盘中价格）：" if observation["is_intraday"] else f"{ticker} 区间回报："
+    window_claim = window_prefix + "，".join(f"{key} {value:+.2%}" for key, value in available_windows.items()) + "。"
+    evidence.append(_item("returns", ticker, as_of, window_claim, context, metadata={"returns": available_windows, **observation_metadata}))
     if avg_volume_30d is not None and volume_ratio is not None:
-        volume_claim = f"{ticker} {as_of} 成交量为 {int(latest.volume)} 股，30 日平均成交量为 {avg_volume_30d:.0f} 股，量比为 {volume_ratio:.2f} 倍。"
-        evidence.append(_item("volume", ticker, as_of, volume_claim, context, metric="volume_ratio", value=volume_ratio, metadata={"volume": int(latest.volume), "average_volume_30d": avg_volume_30d}))
+        if observation["is_intraday"]:
+            volume_claim = f"{ticker} 截至 {observation['observed_at_label']} 的盘中累计成交量为 {int(latest.volume)} 股，相当于 30 日完整交易日平均成交量 {avg_volume_30d:.0f} 股的 {volume_ratio:.2f} 倍；当日未收盘，不能据此判定是否放量或缩量。"
+        else:
+            volume_claim = f"{ticker} {as_of} 成交量为 {int(latest.volume)} 股，30 日平均成交量为 {avg_volume_30d:.0f} 股，量比为 {volume_ratio:.2f} 倍。"
+        evidence.append(_item("volume", ticker, as_of, volume_claim, context, metric="volume_ratio", value=volume_ratio, metadata={"volume": int(latest.volume), "average_volume_30d": avg_volume_30d, **observation_metadata}))
     if volatility_21d is not None:
-        volatility_claim = f"{ticker} 近 21 个交易日的实现波动率折算年化后为 {volatility_21d:.2%}。"
-        evidence.append(_item("volatility", ticker, as_of, volatility_claim, context, metric="annualized_volatility_21d", value=volatility_21d))
+        volatility_claim = f"{ticker} 基于截至查询时价格估算的近 21 个交易日年化实现波动率为 {volatility_21d:.2%}。" if observation["is_intraday"] else f"{ticker} 近 21 个交易日的实现波动率折算年化后为 {volatility_21d:.2%}。"
+        evidence.append(_item("volatility", ticker, as_of, volatility_claim, context, metric="annualized_volatility_21d", value=volatility_21d, metadata=observation_metadata))
 
     from v2.universe import BENCHMARK_ETF, sector_etf_for
 
@@ -126,8 +170,9 @@ def _performance_envelope(ticker: str, context: ExecutionContext, price_source) 
             limitations.append(f"{benchmark} benchmark history unavailable")
             continue
         relative[benchmark] = {key: windows[key] - value for key, value in comparable.items()}
-        claim = f"同期基准 {benchmark} 回报：" + "，".join(f"{key} {value:+.2%}（{ticker} 相对 {windows[key] - value:+.2%}）" for key, value in comparable.items()) + "。"
-        evidence.append(_item("benchmark", ticker, as_of, claim, context, metadata={"benchmark": benchmark, "benchmark_returns": comparable, "relative_returns": relative[benchmark]}))
+        claim_prefix = f"截至同一查询时点的盘中基准 {benchmark} 回报：" if observation["is_intraday"] else f"同期基准 {benchmark} 回报："
+        claim = claim_prefix + "，".join(f"{key} {value:+.2%}（{ticker} 相对 {windows[key] - value:+.2%}）" for key, value in comparable.items()) + "。"
+        evidence.append(_item("benchmark", ticker, as_of, claim, context, metadata={"benchmark": benchmark, "benchmark_returns": comparable, "relative_returns": relative[benchmark], **observation_metadata}))
 
     metrics = {
         "close": close,
@@ -138,24 +183,32 @@ def _performance_envelope(ticker: str, context: ExecutionContext, price_source) 
         "annualized_volatility_21d": volatility_21d,
         "sector_benchmark": sector_etf,
         "relative_returns": relative,
+        **observation_metadata,
     }
     summary = price_claim + " " + window_claim
     status = ResultStatus.COMPLETED if "1m" in available_windows and relative else ResultStatus.PARTIAL_DATA
     return ToolEnvelope("market.performance", status, subject=ticker, as_of=as_of, summary=summary, metrics=metrics, evidence=evidence, limitations=limitations)
 
 
-def _move_envelope(ticker: str, context: ExecutionContext, anomaly) -> ToolEnvelope:
+def _move_envelope(ticker: str, context: ExecutionContext, anomaly, *, now: datetime | None = None) -> ToolEnvelope:
     if anomaly is None:
         return ToolEnvelope("market.explain_move", ResultStatus.FAILED, subject=ticker, errors=["no recent move data"])
     as_of = str(anomaly.date)[:10]
+    observation = _observation_state(as_of, now)
+    observation_metadata = {key: value for key, value in observation.items() if key != "observed_at_label"}
     evidence: list[EvidenceItem] = []
-    price_claim = f"{ticker} 在 {as_of} 收于 {float(anomaly.price):.2f} 美元，较前一交易日 {float(anomaly.price_change_pct):+.2%}。"
-    evidence.append(_item("price", ticker, as_of, price_claim, context, metric="price_change_pct", value=float(anomaly.price_change_pct), metadata={"close": float(anomaly.price)}))
-    volume_claim = f"{ticker} 当日成交量为 {int(anomaly.volume_today)} 股，30 日均量为 {float(anomaly.volume_avg_30d):.0f} 股，量比 {float(anomaly.volume_ratio):.2f} 倍。"
-    evidence.append(_item("volume", ticker, as_of, volume_claim, context, metric="volume_ratio", value=float(anomaly.volume_ratio)))
+    if observation["is_intraday"]:
+        price_claim = f"{ticker} 截至 {observation['observed_at_label']} 盘中报 {float(anomaly.price):.2f} 美元，相对前一交易日收盘价 {float(anomaly.price_change_pct):+.2%}。"
+        volume_claim = f"{ticker} 截至查询时的盘中累计成交量为 {int(anomaly.volume_today)} 股，相当于 30 日完整交易日均量 {float(anomaly.volume_avg_30d):.0f} 股的 {float(anomaly.volume_ratio):.2f} 倍；盘中成交量尚未定型，不能据此判定是否放量或缩量。"
+    else:
+        price_claim = f"{ticker} 在 {as_of} 收于 {float(anomaly.price):.2f} 美元，较前一交易日 {float(anomaly.price_change_pct):+.2%}。"
+        volume_claim = f"{ticker} 当日成交量为 {int(anomaly.volume_today)} 股，30 日均量为 {float(anomaly.volume_avg_30d):.0f} 股，量比 {float(anomaly.volume_ratio):.2f} 倍。"
+    evidence.append(_item("price", ticker, as_of, price_claim, context, metric="price_change_pct", value=float(anomaly.price_change_pct), metadata={"close": float(anomaly.price), **observation_metadata}))
+    evidence.append(_item("volume", ticker, as_of, volume_claim, context, metric="volume_ratio", value=float(anomaly.volume_ratio), metadata=observation_metadata))
     if anomaly.sector_etf and anomaly.sector_return_1d is not None:
-        benchmark_claim = f"同期行业基准 {anomaly.sector_etf} 单日回报为 {float(anomaly.sector_return_1d):+.2%}，{ticker} 相对回报为 {float(anomaly.relative_1d_pp or 0):+.2%}。"
-        evidence.append(_item("benchmark", ticker, as_of, benchmark_claim, context, metadata={"benchmark": anomaly.sector_etf, "contrarian": bool(anomaly.contrarian)}))
+        benchmark_prefix = "截至同一查询时点的盘中" if observation["is_intraday"] else "同期"
+        benchmark_claim = f"{benchmark_prefix}行业基准 {anomaly.sector_etf} 单日回报为 {float(anomaly.sector_return_1d):+.2%}，{ticker} 相对回报为 {float(anomaly.relative_1d_pp or 0):+.2%}。"
+        evidence.append(_item("benchmark", ticker, as_of, benchmark_claim, context, metadata={"benchmark": anomaly.sector_etf, "contrarian": bool(anomaly.contrarian), **observation_metadata}))
 
     findings: list[dict[str, Any]] = []
     source_rows = [source.model_dump() if hasattr(source, "model_dump") else dict(source) for source in anomaly.sources]
@@ -190,6 +243,7 @@ def _move_envelope(ticker: str, context: ExecutionContext, anomaly) -> ToolEnvel
         "relative_1d": anomaly.relative_1d_pp,
         "confirmed_driver_count": high_confidence,
         "candidate_driver_count": len(anomaly.reasons) - high_confidence,
+        **observation_metadata,
     }
     assessment_claim = (
         f"{ticker} 异动归因中有 {high_confidence} 个高置信度直接驱动，"
@@ -231,14 +285,15 @@ def register_market_capabilities(
     *,
     price_source_factory: Callable[[], Any] = _default_price_source,
     move_provider: Callable[[str], Any] = _default_move_provider,
+    now_factory: Callable[[], datetime] = _now_et,
 ) -> None:
     def performance(arguments: dict[str, Any], context: ExecutionContext) -> ToolEnvelope:
         ticker = str(arguments.get("ticker") or "").upper()
-        return _performance_envelope(ticker, context, price_source_factory())
+        return _performance_envelope(ticker, context, price_source_factory(), now=now_factory())
 
     def explain(arguments: dict[str, Any], context: ExecutionContext) -> ToolEnvelope:
         ticker = str(arguments.get("ticker") or "").upper()
-        return _move_envelope(ticker, context, move_provider(ticker))
+        return _move_envelope(ticker, context, move_provider(ticker), now=now_factory())
 
     registry.register("market.performance", performance)
     registry.register("market.explain_move", explain)

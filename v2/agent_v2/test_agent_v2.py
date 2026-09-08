@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from v2.agent.llm import LLMResponse, ScriptedLLM
 from v2.agent_v2.adapters.lab import register_lab_capabilities
-from v2.agent_v2.adapters.market import register_market_capabilities
+from v2.agent_v2.adapters.market import _observation_state, register_market_capabilities
 from v2.agent_v2.adapters.research import register_research_capabilities
 from v2.agent_v2.adapters.tavily_web import TavilyWebSearchPort
 from v2.agent_v2.adapters.web import register_web_capability
@@ -60,6 +61,20 @@ def test_recent_stock_performance_uses_market_data_instead_of_fundamentals():
     assert plan.tasks[0].arguments == {"ticker": "AMD"}
 
 
+@pytest.mark.parametrize("query", ["AMD表现如何？", "AMD股票表现怎么样？"])
+def test_bare_stock_performance_defaults_to_recent_market_data(query):
+    request = normalize_request(query)
+    plan = RulePlanner().plan(request, route(request))
+    assert plan.tasks[0].capability == "market.performance"
+
+
+@pytest.mark.parametrize("query", ["AMD经营表现如何？", "AMD基本面表现如何？", "AMD最近财报表现如何？", "AMD技术面表现如何？"])
+def test_non_price_performance_language_stays_with_research(query):
+    request = normalize_request(query)
+    plan = RulePlanner().plan(request, route(request))
+    assert plan.tasks[0].capability == "research.stock"
+
+
 def test_recent_earnings_quality_is_not_misrouted_as_price_performance():
     request = normalize_request("AMD最近的收益质量如何？")
     plan = RulePlanner().plan(request, route(request))
@@ -73,6 +88,15 @@ def test_move_explanation_cannot_be_overridden_by_the_llm_planner():
     plan = StructuredLLMPlanner(llm, catalog).plan(request, route(request))
     assert plan.tasks[0].capability == "market.explain_move"
     assert not llm.calls
+
+
+def test_market_observation_becomes_final_at_the_regular_close():
+    before_close = _observation_state("2026-09-08", datetime(2026, 9, 8, 15, 59, tzinfo=ZoneInfo("America/New_York")))
+    after_close = _observation_state("2026-09-08", datetime(2026, 9, 8, 16, 0, tzinfo=ZoneInfo("America/New_York")))
+    assert before_close["is_intraday"] is True
+    assert before_close["volume_is_final"] is False
+    assert after_close["is_intraday"] is False
+    assert after_close["volume_is_final"] is True
 
 
 def test_catalog_exposes_only_requested_packs():
@@ -102,16 +126,20 @@ def test_market_performance_adapter_returns_window_and_benchmark_evidence():
 
     catalog = default_catalog()
     registry = CapabilityRegistry(catalog)
-    register_market_capabilities(registry, price_source_factory=Prices, move_provider=lambda ticker: None)
+    now = datetime(2026, 8, 4, 13, 0, tzinfo=ZoneInfo("America/New_York"))
+    register_market_capabilities(registry, price_source_factory=Prices, move_provider=lambda ticker: None, now_factory=lambda: now)
     result = registry.execute(PlanTask("performance", "market.performance", {"ticker": "AMD"}), _context())
     assert result.ok
     assert result.metrics["returns"]["5d"] is not None
     assert result.metrics["relative_returns"]["SMH"]["5d"] is not None
+    assert result.metrics["is_intraday"] is True
     assert {item.metadata["evidence_scope"] for item in result.evidence} >= {"price", "returns", "volume", "volatility", "benchmark"}
     answer = synthesize_market_answer([result], result.evidence)
     assert answer is not None
     assert "近 5 日回报" in answer
     assert "相对 SMH" in answer
+    assert "盘中价格" in answer
+    assert "不能据此判定是否放量或缩量" in answer
     assert verify_answer(answer, result.evidence, answer_mode=AnswerMode.TOOL_GROUNDED, results=[result]).ok
 
 
@@ -137,7 +165,8 @@ def test_market_move_adapter_splits_facts_and_causal_confidence():
     )
     catalog = default_catalog()
     registry = CapabilityRegistry(catalog)
-    register_market_capabilities(registry, price_source_factory=lambda: None, move_provider=lambda ticker: anomaly)
+    now = datetime(2026, 9, 8, 13, 0, tzinfo=ZoneInfo("America/New_York"))
+    register_market_capabilities(registry, price_source_factory=lambda: None, move_provider=lambda ticker: anomaly, now_factory=lambda: now)
     result = registry.execute(PlanTask("move", "market.explain_move", {"ticker": "AMD"}), _context())
     scopes = [item.metadata["evidence_scope"] for item in result.evidence]
     assert scopes[:3] == ["price", "volume", "benchmark"]
@@ -146,6 +175,8 @@ def test_market_move_adapter_splits_facts_and_causal_confidence():
     assert result.findings[1]["confirmed"] is False
     assert next(item for item in result.evidence if item.metadata.get("claim_role") == "candidate_driver").confidence == 0.3
     assert next(item for item in result.evidence if item.metadata.get("claim_role") == "attribution_assessment")
+    assert result.metrics["is_intraday"] is True
+    assert "盘中累计成交量" in next(item.claim for item in result.evidence if item.metadata.get("evidence_scope") == "volume")
     answer = synthesize_market_answer([result], result.evidence)
     assert answer is not None
     assert verify_answer(answer, result.evidence, answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result]).ok
@@ -537,6 +568,14 @@ def test_verifier_rejects_candidate_driver_written_as_confirmed_cause():
     )
     assert not report.ok
     assert any("候选归因" in warning for warning in report.warnings)
+
+
+def test_verifier_rejects_final_volume_conclusion_from_intraday_evidence():
+    evidence = [EvidenceItem("V1", "AMD", "Intraday cumulative volume.", metadata={"evidence_scope": "volume", "is_intraday": True})]
+    result = ToolEnvelope("market.performance", ResultStatus.COMPLETED, subject="AMD", metrics={"is_intraday": True}, evidence=evidence)
+    report = verify_answer("AMD属于缩量上涨。[V1]", evidence, answer_mode=AnswerMode.TOOL_GROUNDED, results=[result])
+    assert not report.ok
+    assert any("未收盘成交量" in warning for warning in report.warnings)
 
 
 def test_verifier_does_not_treat_digits_in_opaque_ids_as_observations():
