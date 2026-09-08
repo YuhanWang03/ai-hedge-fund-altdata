@@ -117,10 +117,21 @@ def _derived_evidence(result: dict[str, Any], limitations: list[str]) -> list[Ev
     ticker = str(result.get("ticker") or "")
     run_id = str(result.get("run_id") or "")
     generated_at = str(result.get("generated_at") or "")
+    diagnostics = result.get("production_diagnostics", {}).get("modules", {}) or {}
+    module_diagnostics = {
+        str(name): {
+            "status": row.get("status"),
+            "completeness": row.get("completeness"),
+            "missing_fields": list(row.get("missing_fields") or [])[:8],
+        }
+        for name, row in diagnostics.items()
+        if isinstance(row, dict)
+    }
     metrics = {
         "scores": result.get("scores") or {},
         "risk_level": result.get("risk_level"),
         "confidence": result.get("research_confidence") or {},
+        "module_diagnostics": module_diagnostics,
     }
     items: list[EvidenceItem] = []
     if any(value for value in metrics.values()):
@@ -140,17 +151,22 @@ def _derived_evidence(result: dict[str, Any], limitations: list[str]) -> list[Ev
         )
     if limitations:
         encoded = json.dumps(limitations, ensure_ascii=False, default=str)
+        completeness_notes = [
+            f"{name} 数据完整度 {float(row['completeness']):.1%}"
+            for name, row in module_diagnostics.items()
+            if isinstance(row.get("completeness"), (int, float))
+        ]
         digest = hashlib.sha1(f"{ticker}|{run_id}|limitations|{encoded}".encode("utf-8")).hexdigest()[:16]
         items.append(
             EvidenceItem(
                 id=f"evidence-research-limitations-{digest}",
                 entity=ticker,
-                claim=f"{ticker} Research Engine 已知数据限制：{'；'.join(limitations)}",
+                claim=f"{ticker} Research Engine 已知数据限制：{'；'.join(limitations)}" + (f"；模块诊断：{'；'.join(completeness_notes)}" if completeness_notes else ""),
                 as_of=generated_at,
                 source_id="research_engine",
                 source_title="Research Engine data limitations",
                 producer_run_id=run_id,
-                metadata={"citation_kind": "limitations", "limitations": limitations, "verified": True},
+                metadata={"citation_kind": "limitations", "limitations": limitations, "module_diagnostics": module_diagnostics, "verified": True},
             )
         )
     return items

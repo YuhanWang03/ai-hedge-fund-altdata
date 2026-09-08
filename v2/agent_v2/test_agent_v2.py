@@ -234,7 +234,8 @@ def test_research_adapter_preserves_engine_evidence():
                 "research_findings": [{"claim": "Revenue grew", "evidence_ids": ["ev-1"]}],
                 "evidence_index": [{"id": "ev-1", "ticker": ticker, "module": "fundamental", "claim": "Revenue grew", "metrics": {"revenue_growth": 0.1}, "source_ids": ["fd_metrics"], "verified": True}],
                 "sources": [{"id": "fd_metrics", "title": "Metrics", "url": "https://example.test", "published_at": "2026-09-01"}],
-                "production_diagnostics": {"modules": {}},
+                "confidence_limitations": ["expectations missing forward estimates"],
+                "production_diagnostics": {"modules": {"expectations": {"status": "PARTIAL", "completeness": 0.25, "missing_fields": ["forward_eps"]}}},
             }
 
     catalog = default_catalog()
@@ -247,6 +248,9 @@ def test_research_adapter_preserves_engine_evidence():
     metrics_evidence = next(item for item in result.evidence if item.metadata.get("citation_kind") == "metrics")
     assert metrics_evidence.id.startswith("evidence-research-metrics-")
     assert metrics_evidence.metadata["metrics"]["scores"]["valuation"] == 60
+    limitation_evidence = next(item for item in result.evidence if item.metadata.get("citation_kind") == "limitations")
+    assert "expectations 数据完整度 25.0%" in limitation_evidence.claim
+    assert limitation_evidence.metadata["module_diagnostics"]["expectations"]["completeness"] == 0.25
 
 
 def test_research_adapter_disambiguates_conflicting_ids_from_cached_results():
