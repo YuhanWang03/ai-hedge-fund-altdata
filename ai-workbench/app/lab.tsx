@@ -3,7 +3,7 @@
 /* 实验室 — 一条主线：筛选 → 委员会 → 回测 → 观察 → 批准（加入 Watchlist）。
    每个工具左侧是真实可调的参数，右侧是该工具自己的结果；所有运行落库，可在「运行记录」里重开。 */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, apiJson } from './lib/api';
 
 // ----------------------------------------------------------------------------- types
@@ -61,8 +61,11 @@ type EventCAR = { ticker: string; event_date: string; source_type: string; eps_s
 type EventStudyResult = { kind: 'event_study'; lab_run_id?: string; universe: string; tickers: string[]; data_source?: string; fd_requests?: Record<string, number>; fd_cost_usd?: number; price_failures?: Record<string, string>; params: Record<string, unknown>; events: EventCAR[]; aggregates: { source_type: string; group?: string; n_events: number; windows: WindowStats[] }[]; skipped_tickers: string[]; dedupe?: boolean; group_by?: string };
 const GROUP_LABEL: Record<string, string> = { ALL: '全部事件', BEAT: '超预期（BEAT）', MISS: '不及预期（MISS）', MEET: '符合预期（MEET）', UNLABELED: '无 EPS 标注', REACT_UP: '公告日反应最强的 1/3', REACT_MID: '公告日反应中间 1/3', REACT_DOWN: '公告日反应最弱的 1/3' };
 
-type ScoreboardRow = { persona: string; name_zh?: string; n: number; hits: number; hit_rate: number | null; avg_directional_1m: number | null };
-type Scoreboard = { items: ScoreboardRow[]; counts: { runs: number; tickers: number; votes: number; scored_1m: number; scored_3m: number; due_1m: number; due_3m: number } };
+type ScoreboardRow = { persona: string; name_zh?: string; n: number; hits: number; hit_rate: number | null; avg_directional_1m: number | null; ci_low?: number | null; ci_high?: number | null; baseline_1m?: number | null; edge_1m?: number | null; n_3m?: number; hits_3m?: number; hit_rate_3m?: number | null; avg_directional_3m?: number | null; baseline_3m?: number | null; edge_3m?: number | null; neutral?: number; abstained?: number; votes?: number };
+type ScoreBaseline = { n_1m: number; up_rate_1m: number | null; avg_return_1m: number | null; n_3m: number; up_rate_3m: number | null; avg_return_3m: number | null };
+type Scoreboard = { items: ScoreboardRow[]; counts: { runs: number; tickers: number; votes: number; scored_1m: number; scored_3m: number; due_1m: number; due_3m: number }; baseline?: ScoreBaseline };
+/** Parameters of a stored run, handed back to a tool so its form matches the result it shows. */
+type Restore = { params: Record<string, unknown>; nonce: number };
 type RunSummary = { id: string; kind: string; ran_at: string; tickers?: string[]; [key: string]: unknown };
 type WatchlistItem = { ticker: string; added_at: string; note: string };
 
@@ -111,6 +114,12 @@ async function pollJob<T>(first: T | LabJob<T>, path: string, onJob: (j: LabJob<
   }
   return r as T;
 }
+/** Apply a stored run's parameters to a tool's form once per reopen; `ready` defers until lookups the mapping needs have loaded. */
+function useRestore(restore: Restore | undefined, apply: (p: Record<string, unknown>) => void, ready = true) {
+  const done = useRef(0);
+  useEffect(() => { if (restore && ready && done.current !== restore.nonce) { done.current = restore.nonce; apply(restore.params) } }, [restore, ready, apply]);
+}
+const str = (v: unknown, fallback: string) => v == null ? fallback : String(v);
 function Field({ label, children, hint, block }: { label: string; children: React.ReactNode; hint?: string; block?: boolean }) { const inner = <><span>{label}</span>{children}{hint ? <small>{hint}</small> : null}</>; return block ? <div className="lab-field">{inner}</div> : <label className="lab-field">{inner}</label> }
 function NumberInput({ value, onChange, min, max, step }: { value: string; onChange: (v: string) => void; min?: number; max?: number; step?: number }) { return <input type="number" value={value} min={min} max={max} step={step} onChange={e => onChange(e.target.value)}/> }
 function Chips<T extends string>({ options, value, onChange }: { options: { id: T; label: string }[]; value: T; onChange: (v: T) => void }) { return <div className="lab-chips">{options.map(o => <button key={o.id} type="button" className={o.id === value ? 'active' : ''} onClick={() => onChange(o.id)}>{o.label}</button>)}</div> }
@@ -135,6 +144,7 @@ type ToolProps = { ask: Ask; selectTool: (t: LabTool) => void; watchlist: Set<st
 
 export function LabPage({ tool, selectTool, ask }: { tool: LabTool; selectTool: (t: LabTool) => void; ask: Ask; askNow?: Ask }) {
   const [results, setResults] = useState<Partial<Record<string, ToolResult>>>({});
+  const [restores, setRestores] = useState<Partial<Record<string, Restore>>>({});
   const [handoff, setHandoff] = useState<Handoff | null>(null);
   const wl = useLabData<{ items: WatchlistItem[] }>('/api/watchlist');
   const watchlist = useMemo(() => new Set((wl.data?.items || []).map(i => i.ticker)), [wl.data]);
@@ -153,12 +163,12 @@ export function LabPage({ tool, selectTool, ask }: { tool: LabTool; selectTool: 
   return <div className={`page lab-page lab-big${tool === 'screening' || tool === 'backtest' || tool === 'event-study' ? ' lab-page-fill' : ''}`}>
     <div className="page-heading"><div><h1>{heading[tool][0]}</h1><p>{heading[tool][1]}</p></div><span className="lab-tag">ISOLATED LAB</span></div>
     {tool === 'overview' && <OverviewTool {...common}/>}
-    {tool === 'screening' && <ScreeningTool {...common} result={results.screening as ScreeningResult | undefined} setResult={r => setResult('screening', r)} onHand={hand}/>}
-    {tool === 'committee' && <CommitteeTool {...common} result={results.committee as CommitteeResult | undefined} setResult={r => setResult('committee', r)} handoff={handoff} clearHandoff={() => setHandoff(null)} onHand={hand}/>}
-    {tool === 'backtest' && <BacktestTool {...common} result={results.backtest as BacktestPanelResult | undefined} setResult={r => setResult('backtest', r)} handoff={handoff} clearHandoff={() => setHandoff(null)}/>}
-    {tool === 'event-study' && <EventStudyTool {...common} result={results.event_study as EventStudyResult | undefined} setResult={r => setResult('event_study', r)} handoff={handoff} clearHandoff={() => setHandoff(null)}/>}
+    {tool === 'screening' && <ScreeningTool {...common} result={results.screening as ScreeningResult | undefined} setResult={r => setResult('screening', r)} onHand={hand} restore={restores.screening}/>}
+    {tool === 'committee' && <CommitteeTool {...common} result={results.committee as CommitteeResult | undefined} setResult={r => setResult('committee', r)} handoff={handoff} clearHandoff={() => setHandoff(null)} onHand={hand} restore={restores.committee}/>}
+    {tool === 'backtest' && <BacktestTool {...common} result={results.backtest as BacktestPanelResult | undefined} setResult={r => setResult('backtest', r)} handoff={handoff} clearHandoff={() => setHandoff(null)} restore={restores.backtest}/>}
+    {tool === 'event-study' && <EventStudyTool {...common} result={results.event_study as EventStudyResult | undefined} setResult={r => setResult('event_study', r)} handoff={handoff} clearHandoff={() => setHandoff(null)} restore={restores.event_study}/>}
     {tool === 'scoreboard' && <ScoreboardTool {...common}/>}
-    {tool === 'runs' && <RunsTool {...common} onOpen={(kind, result) => { setResult(kind === 'event_study' ? 'event_study' : kind, result as ToolResult); selectTool(kind === 'event_study' ? 'event-study' : kind as LabTool) }}/>}
+    {tool === 'runs' && <RunsTool {...common} onOpen={(kind, result, params) => { setResult(kind, result as ToolResult); setRestores(current => ({ ...current, [kind]: { params, nonce: Date.now() } })); selectTool(kind === 'event_study' ? 'event-study' : kind as LabTool) }}/>}
   </div>;
 }
 
@@ -197,16 +207,21 @@ function OverviewTool({ selectTool, watchlist, ask }: ToolProps) {
   </>;
 }
 
-function RunRow({ run, onOpen }: { run: RunSummary; onOpen: () => void }) {
+function RunRow({ run, onOpen, onDelete }: { run: RunSummary; onOpen?: () => void; onDelete?: () => void }) {
   const costTag = typeof run.fd_cost_usd === 'number' ? ` · FD ${usd(run.fd_cost_usd)}` : '';
-  const line = run.kind === 'screening' ? `${UNIVERSE_LABEL[String(run.universe)] || run.universe} ${run.universe_size} → ${run.n_candidates} 只${costTag}`
-    : run.kind === 'committee' ? `${run.n_tickers} 只 · 偏多 ${(run.stances as Record<string, number>)?.bullish ?? 0} 偏空 ${(run.stances as Record<string, number>)?.bearish ?? 0}${(run.top as string[])?.length ? ` · 榜首 ${(run.top as string[])[0]}` : ''}${costTag}`
-    : run.kind === 'backtest' && run.sweep ? `参数扫描 ${run.n_combos} 组 · 最佳夏普 ${num(run.sharpe_ratio as number)}${run.best ? `（每期 ${(run.best as SweepRow).top_n} 只 · 持有 ${(run.best as SweepRow).holding_days} 日）` : ''}`
-    : run.kind === 'backtest' ? `${run.n_trades} 笔 · ${pct(run.total_return_pct as number)} · 夏普 ${num(run.sharpe_ratio as number)}`
-    : run.kind === 'event_study' ? `${run.n_events} 个事件 · ${run.n_groups} 组`
+  const pool = UNIVERSE_LABEL[String(run.universe)] || String(run.universe || '');
+  const line = run.kind === 'screening' ? `${pool} ${run.universe_size} → ${run.n_candidates} 只${costTag}`
+    : run.kind === 'committee' ? `${SOURCE_LABEL[String(run.source)] || run.source || ''} · ${run.n_tickers} 只 · 偏多 ${(run.stances as Record<string, number>)?.bullish ?? 0} 偏空 ${(run.stances as Record<string, number>)?.bearish ?? 0}${(run.top as string[])?.length ? ` · 榜首 ${(run.top as string[])[0]}` : ''}${costTag}`
+    : run.kind === 'backtest' && run.sweep ? `动量参数扫描 · ${pool} · ${run.n_combos} 组 · 最佳夏普 ${num(run.sharpe_ratio as number)}${run.best ? `（每期 ${(run.best as SweepRow).top_n} 只 · 持有 ${(run.best as SweepRow).holding_days} 日）` : ''}`
+    : run.kind === 'backtest' ? `${STRATEGY_LABEL[String(run.strategy)] || run.strategy} · ${pool} · ${run.n_trades} 笔 · ${pct(run.total_return_pct as number)} · 夏普 ${num(run.sharpe_ratio as number)}${typeof run.excess_return_pct === 'number' ? ` · 超额 ${pct(run.excess_return_pct)}` : ''}${costTag}`
+    : run.kind === 'event_study' ? `${pool} · ${run.n_events} 个事件 · ${run.n_groups} 组${costTag}`
     : run.kind === 'backfill' ? `回填 ${run.filled} / ${run.checked}` : '';
-  return <button type="button" className="lab-run" onClick={onOpen}><em className={`kind-${run.kind}`}>{KIND_LABEL[run.kind] || run.kind}</em><span>{line}</span><time>{when(run.ran_at)}</time></button>;
+  return <div className={`lab-run ${onOpen ? '' : 'static'}`} role={onOpen ? 'button' : undefined} tabIndex={onOpen ? 0 : undefined} onClick={onOpen} onKeyDown={e => { if (onOpen && (e.key === 'Enter' || e.key === ' ')) onOpen() }}>
+    <em className={`kind-${run.kind}`}>{KIND_LABEL[run.kind] || run.kind}</em><span>{line}</span>
+    <span className="lab-run-end"><time>{when(run.ran_at)}</time>{onDelete && <button type="button" className="lab-run-del" title="删除这条记录" onClick={e => { e.stopPropagation(); onDelete() }}>×</button>}</span>
+  </div>;
 }
+const SOURCE_LABEL: Record<string, string> = { tickers: '指定股票', holdings: '当前持仓', watchlist: 'Watchlist', screening: '筛选结果' };
 
 // ------------------------------------------------------------------------- screening
 
@@ -228,7 +243,7 @@ const toBackend = (field: string, unit: string, raw: string) => { const n = Numb
 const fmtCell = (unit: string, field: string, v: unknown) => typeof v !== 'number' ? '—' : unit === 'pct' ? pct(v) : unit === 'usd' ? (field === 'market_cap' ? money(v) : `$${num(v)}`) : num(v);
 
 
-function ScreeningTool({ result, setResult, onHand, watchlist, refreshWatchlist, ask }: ToolProps & { result?: ScreeningResult; setResult: (r?: ScreeningResult) => void; onHand: (t: string[], from: string, to: LabTool) => void }) {
+function ScreeningTool({ result, setResult, onHand, watchlist, refreshWatchlist, ask, restore }: ToolProps & { result?: ScreeningResult; setResult: (r?: ScreeningResult) => void; onHand: (t: string[], from: string, to: LabTool) => void; restore?: Restore }) {
   const [universe, setUniverse] = useState<Universe>('tech30'); const [tickers, setTickers] = useState('');
   const criteria = useLabData<CriteriaResp>('/api/lab/screening/criteria');
   const [enabled, setEnabled] = useState<Set<string>>(new Set(DEFAULT_ENABLED));
@@ -239,6 +254,19 @@ function ScreeningTool({ result, setResult, onHand, watchlist, refreshWatchlist,
   const [dataSource, setDataSource] = useState<'yfinance' | 'fd'>('yfinance'); const [withEarnings, setWithEarnings] = useState(false);
   const info = useLabData<{ items: Record<string, UniverseInfo> }>('/api/lab/universes');
   const pricing = useLabData<Pricing>('/api/lab/committee/pricing');
+  const catalog = criteria.data?.items;
+  useRestore(restore, useCallback((p: Record<string, unknown>) => {
+    if (typeof p.universe === 'string') setUniverse(p.universe as Universe);
+    if (Array.isArray(p.tickers)) setTickers((p.tickers as string[]).join(', '));
+    if (p.data_source === 'fd' || p.data_source === 'yfinance') setDataSource(p.data_source);
+    setWithEarnings(!!p.with_earnings);
+    const rules = p.rules as ScreenRule[] | null | undefined;
+    if (rules && catalog) {
+      setEnabled(new Set(rules.map(r => r.field)));
+      setOps(current => ({ ...current, ...Object.fromEntries(rules.map(r => [r.field, r.op])) }));
+      setValues(current => ({ ...current, ...Object.fromEntries(rules.map(r => { const unit = catalog[r.field]?.unit || 'x'; return [r.field, String(unit === 'pct' ? Math.round(r.value * 1000) / 10 : unit === 'usd' && r.field === 'market_cap' ? r.value / 1e9 : r.value)] })) }));
+    }
+  }, [catalog]), !!catalog);
   const poolSize = universe === 'custom' ? parseTickers(tickers).length : (info.data?.items[universe]?.size ?? 0);
   const estMetrics = dataSource === 'fd' ? poolSize * (pricing.data?.prices_usd.financial_metrics ?? 0.02) : 0;
   const run = async () => {
@@ -289,7 +317,7 @@ const COMMITTEE_SOURCES: { id: CommitteeSource; label: string; hint: string }[] 
 ];
 const FALLBACK_PERSONAS: PersonaMeta[] = [['warren_buffett','Warren Buffett','沃伦·巴菲特'],['charlie_munger','Charlie Munger','查理·芒格'],['ben_graham','Ben Graham','本杰明·格雷厄姆'],['peter_lynch','Peter Lynch','彼得·林奇'],['phil_fisher','Phil Fisher','菲利普·费雪'],['bill_ackman','Bill Ackman','比尔·阿克曼'],['cathie_wood','Cathie Wood','凯茜·伍德'],['michael_burry','Michael Burry','迈克尔·伯里'],['mohnish_pabrai','Mohnish Pabrai','莫尼什·帕伯莱'],['stanley_druckenmiller','Stanley Druckenmiller','斯坦利·德鲁肯米勒'],['aswath_damodaran','Aswath Damodaran','阿斯瓦斯·达摩达兰'],['nassim_taleb','Nassim Taleb','纳西姆·塔勒布'],['rakesh_jhunjhunwala','Rakesh Jhunjhunwala','拉克什·金君瓦拉']].map(([key, name, name_zh]) => ({ key, name, name_zh, style: '', period: '', lookback: 0, needs: [] }));
 
-function CommitteeTool({ result, setResult, handoff, clearHandoff, onHand, watchlist, refreshWatchlist, ask }: ToolProps & { result?: CommitteeResult; setResult: (r?: CommitteeResult) => void; handoff: Handoff | null; clearHandoff: () => void; onHand: (t: string[], from: string, to: LabTool) => void }) {
+function CommitteeTool({ result, setResult, handoff, clearHandoff, onHand, watchlist, refreshWatchlist, ask, restore }: ToolProps & { result?: CommitteeResult; setResult: (r?: CommitteeResult) => void; handoff: Handoff | null; clearHandoff: () => void; onHand: (t: string[], from: string, to: LabTool) => void; restore?: Restore }) {
   const [source, setSource] = useState<CommitteeSource>('holdings'); const [tickers, setTickers] = useState('AAPL, MSFT, NVDA');
   const [topN, setTopN] = useState('15'); const [maxWeight, setMaxWeight] = useState('15'); const [useCache, setUseCache] = useState(true); const [lean, setLean] = useState(true);
   const pricing = useLabData<Pricing>('/api/lab/committee/pricing');
@@ -298,6 +326,15 @@ function CommitteeTool({ result, setResult, handoff, clearHandoff, onHand, watch
   const personasData = useLabData<{ items: PersonaMeta[] }>('/api/lab/committee/personas');
   const personas = personasData.data?.items?.length ? personasData.data.items : FALLBACK_PERSONAS;
   const [selected, setSelected] = useState<string[]>(FALLBACK_PERSONAS.map(p => p.key));
+  useRestore(restore, useCallback((p: Record<string, unknown>) => {
+    if (typeof p.source === 'string') setSource(p.source as CommitteeSource);
+    if (Array.isArray(p.tickers) && (p.tickers as string[]).length) setTickers((p.tickers as string[]).join(', '));
+    setSelected(Array.isArray(p.personas) && (p.personas as string[]).length ? p.personas as string[] : personas.map(m => m.key));
+    if (typeof p.use_cache === 'boolean') setUseCache(p.use_cache);
+    if (typeof p.lean === 'boolean') setLean(p.lean);
+    if (typeof p.max_weight === 'number') setMaxWeight(String(Math.round(p.max_weight * 100)));
+    if (p.top_n != null) setTopN(String(p.top_n));
+  }, [personas]));
   const [busy, setBusy] = useState(false); const [error, setError] = useState('');
   const history = useLabData<{ items: { run_id: string; created_at: string; source: string; n_tickers: number; tickers: string[] }[] }>('/api/lab/committee/runs?limit=10', [result?.run_id]);
   const allSelected = selected.length === personas.length;
@@ -419,7 +456,7 @@ function SweepView({ result, ask }: { result: SweepResult; ask: Ask }) {
 }
 const SWEEP_SORT_LABEL: Record<SweepSort, string> = { sharpe_ratio: '夏普', total_return_pct: '总收益', excess_return_pct: '超额', max_drawdown_pct: '回撤（小→大）' };
 
-function BacktestTool({ result: panel, setResult, handoff, clearHandoff, ask }: ToolProps & { result?: BacktestPanelResult; setResult: (r?: BacktestPanelResult) => void; handoff: Handoff | null; clearHandoff: () => void }) {
+function BacktestTool({ result: panel, setResult, handoff, clearHandoff, ask, restore }: ToolProps & { result?: BacktestPanelResult; setResult: (r?: BacktestPanelResult) => void; handoff: Handoff | null; clearHandoff: () => void; restore?: Restore }) {
   const result = panel?.kind === 'backtest' ? panel : undefined; const sweep = panel?.kind === 'sweep' ? panel : undefined;
   const [universe, setUniverse] = useState<Universe>('custom'); const [tickers, setTickers] = useState('AAPL, MSFT, NVDA');
   const [tier, setTierRaw] = useState<DataTier>('free'); const [strategy, setStrategyRaw] = useState<StrategyId>('momentum'); const [dataSource, setDataSource] = useState<'yfinance' | 'fd'>('yfinance');
@@ -433,6 +470,20 @@ function BacktestTool({ result: panel, setResult, handoff, clearHandoff, ask }: 
   const meta = STRATEGIES.find(s => s.id === strategy)!;
   const setStrategy = (id: StrategyId) => { setStrategyRaw(id); setHolding(String(STRATEGIES.find(s => s.id === id)!.holding)); if (id !== 'momentum' && INDEX_UNIVERSES.includes(universe)) setUniverse('custom'); };
   const setTier = (t: DataTier) => { setTierRaw(t); setStrategy(STRATEGIES.find(s => s.tier === t)!.id); if (t === 'free') setDataSource('yfinance'); };
+  useRestore(restore, useCallback((p: Record<string, unknown>) => {
+    // a stored backtest (has `strategy`) or a stored sweep (has `top_ns`); both share the universe / pricing / momentum fields
+    const id = (typeof p.strategy === 'string' ? p.strategy : 'momentum') as StrategyId;
+    const meta = STRATEGIES.find(s => s.id === id) || STRATEGIES[0];
+    setTierRaw(meta.tier); setStrategyRaw(meta.id);
+    if (typeof p.universe === 'string') setUniverse(p.universe as Universe);
+    if (Array.isArray(p.tickers) && (p.tickers as string[]).length) setTickers((p.tickers as string[]).join(', '));
+    if (p.data_source === 'fd' || p.data_source === 'yfinance') setDataSource(p.data_source);
+    setHolding(str(p.holding_days, String(meta.holding))); setCapital(str(p.capital, '100000')); setPerTrade(str(p.per_trade, '10000')); setCostBps(str(p.cost_bps, '10'));
+    setEarnings(str(p.earnings_limit, '8')); setHistory(str(p.history_days, '730')); setTopN(str(p.top_n, '5')); setLookback(str(p.lookback_days, '252')); setSkip(str(p.skip_days, '21'));
+    setNearHigh(typeof p.near_high_pct === 'number' ? String(Math.round(p.near_high_pct * 100)) : '');
+    setWindowDays(str(p.window_days, '30')); setMinInsiders(str(p.min_insiders, '2')); setMinValue(str(p.min_value_usd, '100000'));
+    setMinConsensus(str(p.min_consensus, '0.2')); setMinAgreement(str(p.min_agreement, '0.5')); if (typeof p.lean === 'boolean') setLean(p.lean); setLag(str(p.filing_lag_days, '45'));
+  }, []));
   const tierStrategies = STRATEGIES.filter(s => s.tier === tier);
   const price = (k: string) => pricing.data?.prices_usd[k] ?? 0.02;
   const poolSize = universe === 'custom' ? parseTickers(tickers).length : (info.data?.items[universe]?.size ?? 0);
@@ -541,10 +592,19 @@ function BacktestTool({ result: panel, setResult, handoff, clearHandoff, ask }: 
 
 // ----------------------------------------------------------------------- event study
 
-function EventStudyTool({ result, setResult, handoff, clearHandoff, ask }: ToolProps & { result?: EventStudyResult; setResult: (r?: EventStudyResult) => void; handoff: Handoff | null; clearHandoff: () => void }) {
+function EventStudyTool({ result, setResult, handoff, clearHandoff, ask, restore }: ToolProps & { result?: EventStudyResult; setResult: (r?: EventStudyResult) => void; handoff: Handoff | null; clearHandoff: () => void; restore?: Restore }) {
   const [universe, setUniverse] = useState<Universe>('custom'); const [tickers, setTickers] = useState('AAPL, MSFT, NVDA');
   const [earnings, setEarnings] = useState('8'); const [boot, setBoot] = useState('2000'); const [surprise, setSurprise] = useState(true); const [dataSource, setDataSource] = useState<'yfinance' | 'fd'>('yfinance'); const [dedupe, setDedupe] = useState(true); const [groupBy, setGroupBy] = useState<'surprise' | 'reaction' | 'source'>('surprise');
   const [busy, setBusy] = useState(false); const [error, setError] = useState('');
+  useRestore(restore, useCallback((p: Record<string, unknown>) => {
+    if (typeof p.universe === 'string') setUniverse(p.universe as Universe);
+    if (Array.isArray(p.tickers) && (p.tickers as string[]).length) setTickers((p.tickers as string[]).join(', '));
+    if (p.data_source === 'fd' || p.data_source === 'yfinance') setDataSource(p.data_source);
+    setEarnings(str(p.earnings_limit, '8')); setBoot(str(p.n_bootstrap, '2000'));
+    if (typeof p.require_eps_surprise === 'boolean') setSurprise(p.require_eps_surprise);
+    if (typeof p.dedupe === 'boolean') setDedupe(p.dedupe);
+    if (p.group_by === 'surprise' || p.group_by === 'reaction' || p.group_by === 'source') setGroupBy(p.group_by);
+  }, []));
   const info = useLabData<{ items: Record<string, UniverseInfo> }>('/api/lab/universes');
   const pricing = useLabData<Pricing>('/api/lab/committee/pricing');
   const price = (k: string) => pricing.data?.prices_usd[k] ?? 0.02;
@@ -586,12 +646,18 @@ function EventStudyTool({ result, setResult, handoff, clearHandoff, ask }: ToolP
 
 // ------------------------------------------------------------------------ scoreboard
 
+type ScoreSort = 'n' | 'edge_1m' | 'edge_3m';
+const SCORE_SORT_LABEL: Record<ScoreSort, string> = { n: '票数', edge_1m: '1 月超出基准', edge_3m: '3 月超出基准' };
+const WEAK_N = 20;
 function ScoreboardTool({ ask }: ToolProps) {
   const board = useLabData<Scoreboard>('/api/lab/committee/scoreboard');
   const thresholds = useLabData<{ monitoring: Record<string, number>; intraday: Record<string, number> }>('/api/lab/signals');
   const [busy, setBusy] = useState(false); const [report, setReport] = useState<{ checked: number; filled: number; skipped_no_price: number; errors: Record<string, string> } | null>(null); const [error, setError] = useState('');
+  const [sort, setSort] = useState<ScoreSort>('n');
   const backfill = async () => { setBusy(true); setError(''); try { setReport(await apiJson('/api/lab/committee/backfill', { method: 'POST', body: JSON.stringify({}) })); board.reload() } catch (e) { setError(errorText(e)) } finally { setBusy(false) } };
-  const c = board.data?.counts;
+  const c = board.data?.counts; const b = board.data?.baseline;
+  const rows = [...(board.data?.items || [])].sort((x, y) => sort === 'n' ? y.n - x.n || (y.hit_rate ?? 0) - (x.hit_rate ?? 0) : ((y[sort] ?? -9) - (x[sort] ?? -9)));
+  const strong = rows.filter(r => r.n >= WEAK_N);
   return <div className="lab-tool">
     <section className="surface lab-config"><div className="surface-header"><div><h2>观察进度</h2><span>投票时只有当天数据，收益是之后才发生的</span></div></div>
       {c ? <div className="lab-stats one"><Stat label="委员会运行" value={String(c.runs)}/><Stat label="覆盖股票" value={String(c.tickers)}/><Stat label="有效票" value={String(c.votes)}/><Stat label="已评 1 月 / 待评" value={`${c.scored_1m} / ${c.due_1m}`}/><Stat label="已评 3 月 / 待评" value={`${c.scored_3m} / ${c.due_3m}`}/></div> : board.error ? <ErrorBox text={board.error}/> : null}
@@ -599,13 +665,21 @@ function ScoreboardTool({ ask }: ToolProps) {
       <p className="lab-note">调度器每天 02:30 ET 自动回填一次；这里只是手动触发同一段代码。</p>
       {report && <p className="lab-note">本次检查 {report.checked}，回填 {report.filled}，缺价格 {report.skipped_no_price}{Object.keys(report.errors).length ? `，错误 ${Object.keys(report.errors).length}` : ''}。</p>}
       {error && <ErrorBox text={error}/>}
+      {b && (b.n_1m > 0 || b.n_3m > 0) && <div className="lab-thresholds"><div className="lab-subhead">基准：被评分的股票自己走了多少</div>
+        <div><span>1 个月上涨比例（= 永远看多的命中率）</span><strong>{pctAbs(b.up_rate_1m)}（{b.n_1m} 个股票·日）</strong></div>
+        <div><span>1 个月平均收益</span><strong>{pct(b.avg_return_1m, 2)}</strong></div>
+        <div><span>3 个月上涨比例</span><strong>{pctAbs(b.up_rate_3m)}（{b.n_3m} 个）</strong></div>
+        <div><span>3 个月平均收益</span><strong>{pct(b.avg_return_3m, 2)}</strong></div>
+        <div><span>永远看空的命中率</span><strong>{b.up_rate_1m == null ? '—' : pctAbs(1 - b.up_rate_1m)}</strong></div></div>}
+      <p className="lab-note">每位投资人的「基准」= 按他自己看多 / 看空的比例，在同一批股票上随机投票能拿到的命中率；「超出」= 命中率 − 基准。只有超出为正、且票数够多（≥ {WEAK_N}）的行才说明点什么。</p>
       {thresholds.data && <div className="lab-thresholds"><div className="lab-subhead">生产监控阈值（只读）</div>{Object.entries({ ...thresholds.data.intraday, volume_spike_threshold: thresholds.data.monitoring.volume_spike_threshold, insider_buy_min_value: thresholds.data.monitoring.insider_buy_min_value }).map(([k, v]) => <div key={k}><span>{k.replaceAll('_', ' ')}</span><strong>{typeof v === 'number' && v < 1 ? pctAbs(v, 1) : typeof v === 'number' && v >= 10000 ? money(v) : String(v)}</strong></div>)}</div>}
     </section>
     <section className="surface lab-result">
       {!board.data ? null : board.data.items.length === 0 ? <Empty glyph="◎" title="还没有可评分的票" text={c && c.votes ? `已有 ${c.votes} 票在观察中，最早的一批在投票 30 天后进入评分。` : '先在「投资人委员会」跑几次评审，票会在 30 天和 91 天后被真实收益评分。'}/> : <>
-        <div className="surface-header"><div><h2>逐人命中率（1 个月）</h2><span>命中 = 看多且上涨，或看空且下跌；中性票不计</span></div></div>
-        <div className="lab-table-wrap"><table className="lab-table"><thead><tr><th>投资人</th><th>票数</th><th>命中</th><th>命中率</th><th>方向平均收益</th></tr></thead><tbody>{board.data.items.map(r => <tr key={r.persona}><td><strong>{r.name_zh || r.persona}</strong></td><td>{r.n}</td><td>{r.hits}</td><td>{pctAbs(r.hit_rate)}</td><td className={(r.avg_directional_1m || 0) >= 0 ? 'positive' : 'negative'}>{pct(r.avg_directional_1m, 2)}</td></tr>)}</tbody></table></div>
-        <div className="lab-foot"><button type="button" className="explain-button" onClick={() => ask(`投资人命中率榜：${board.data!.items.map(r => `${r.name_zh || r.persona} ${pctAbs(r.hit_rate)}（${r.n} 票）`).join('，')}。样本量这么小时，该怎么解读这些差异？`, '实验室 · 观察记分板')}>问 AI 怎么解读</button></div>
+        <div className="surface-header"><div><h2>逐人命中率</h2><span>命中 = 看多且上涨，或看空且下跌；中性和弃权不计。票数少于 {WEAK_N} 的行灰显，区间是 1 月命中率的 95% Wilson 区间</span></div><div className="lab-chips">{(Object.keys(SCORE_SORT_LABEL) as ScoreSort[]).map(k => <button key={k} type="button" className={k === sort ? 'active' : ''} onClick={() => setSort(k)}>按{SCORE_SORT_LABEL[k]}</button>)}</div></div>
+        <div className="lab-table-wrap"><table className="lab-table"><thead><tr><th>投资人</th><th>票（1 月）</th><th>命中率</th><th>95% 区间</th><th>基准</th><th>超出</th><th>方向收益</th><th>票（3 月）</th><th>命中率 3 月</th><th>超出 3 月</th><th>方向收益 3 月</th><th>中性 / 弃权</th></tr></thead><tbody>{rows.map(r => <tr key={r.persona} className={r.n < WEAK_N ? 'weak' : ''}><td><strong>{r.name_zh || r.persona}</strong></td><td>{r.n}</td><td>{pctAbs(r.hit_rate)}</td><td>{r.ci_low == null ? '—' : `${pctAbs(r.ci_low)} – ${pctAbs(r.ci_high)}`}</td><td>{pctAbs(r.baseline_1m)}</td><td className={(r.edge_1m ?? 0) >= 0 ? 'positive' : 'negative'}><strong>{r.edge_1m == null ? '—' : `${r.edge_1m >= 0 ? '+' : ''}${(r.edge_1m * 100).toFixed(0)} 点`}</strong></td><td className={(r.avg_directional_1m || 0) >= 0 ? 'positive' : 'negative'}>{pct(r.avg_directional_1m, 2)}</td><td>{r.n_3m ?? 0}</td><td>{pctAbs(r.hit_rate_3m)}</td><td className={(r.edge_3m ?? 0) >= 0 ? 'positive' : 'negative'}>{r.edge_3m == null ? '—' : `${r.edge_3m >= 0 ? '+' : ''}${(r.edge_3m * 100).toFixed(0)} 点`}</td><td className={(r.avg_directional_3m || 0) >= 0 ? 'positive' : 'negative'}>{pct(r.avg_directional_3m, 2)}</td><td>{r.neutral ?? 0} / {r.abstained ?? 0}</td></tr>)}</tbody></table></div>
+        <p className="lab-note">{strong.length ? `${strong.length} 位投资人票数达到 ${WEAK_N}，其中 ${strong.filter(r => (r.edge_1m ?? 0) > 0).length} 位 1 月命中率高于自己的基准。` : `还没有投资人的票数达到 ${WEAK_N}，目前的差异主要是噪声。`}</p>
+        <div className="lab-foot"><button type="button" className="explain-button" onClick={() => ask(`投资人 1 个月命中率榜（基准 = 同批股票上涨比例 ${pctAbs(b?.up_rate_1m)}）：${rows.map(r => `${r.name_zh || r.persona} ${pctAbs(r.hit_rate)}，基准 ${pctAbs(r.baseline_1m)}，超出 ${r.edge_1m == null ? '—' : (r.edge_1m * 100).toFixed(0) + ' 点'}（${r.n} 票，95% 区间 ${pctAbs(r.ci_low)}–${pctAbs(r.ci_high)}）`).join('；')}。哪些差异是真实的，哪些只是样本量小？`, '实验室 · 观察记分板')}>问 AI 怎么解读</button></div>
       </>}
     </section>
   </div>;
@@ -613,15 +687,24 @@ function ScoreboardTool({ ask }: ToolProps) {
 
 // ------------------------------------------------------------------------------ runs
 
-function RunsTool({ onOpen }: ToolProps & { onOpen: (kind: string, result: unknown) => void }) {
+function RunsTool({ onOpen }: ToolProps & { onOpen: (kind: string, result: unknown, params: Record<string, unknown>) => void }) {
   const [kind, setKind] = useState<string>('all');
   const runs = useLabData<{ items: RunSummary[]; counts: Record<string, number> }>(`/api/lab/runs?limit=100${kind === 'all' ? '' : `&kind=${kind}`}`, [kind]);
-  const [error, setError] = useState('');
-  const open = async (run: RunSummary) => { setError(''); try { const row = await apiJson<{ kind: string; result: unknown }>(`/api/lab/runs/${encodeURIComponent(run.id)}`); onOpen(row.kind, row.result) } catch (e) { setError(errorText(e)) } };
+  const [error, setError] = useState(''); const [notice, setNotice] = useState(''); const [busy, setBusy] = useState(false);
+  const open = async (run: RunSummary) => { setError(''); try { const row = await apiJson<{ kind: string; params: Record<string, unknown>; result: unknown }>(`/api/lab/runs/${encodeURIComponent(run.id)}`); onOpen(row.kind, row.result, row.params || {}) } catch (e) { setError(errorText(e)) } };
+  const remove = async (run: RunSummary) => {
+    if (!globalThis.confirm(`删除这条${KIND_LABEL[run.kind] || run.kind}记录？结果会一并删除，不可恢复。`)) return;
+    setError(''); try { await apiJson(`/api/lab/runs/${encodeURIComponent(run.id)}`, { method: 'DELETE' }); runs.reload() } catch (e) { setError(errorText(e)) }
+  };
+  const cleanup = async () => {
+    if (!globalThis.confirm('删除 30 天前的全部运行记录？不可恢复。')) return;
+    setBusy(true); setError(''); setNotice('');
+    try { const r = await apiJson<{ deleted: number }>('/api/lab/runs/cleanup', { method: 'POST', body: JSON.stringify({ older_than_days: 30 }) }); setNotice(`已删除 ${r.deleted} 条 30 天前的记录。`); runs.reload() } catch (e) { setError(errorText(e)) } finally { setBusy(false) }
+  };
   const kinds = ['all', ...Object.keys(runs.data?.counts || {})];
   return <section className="surface">
-    <div className="surface-header"><div><h2>运行记录</h2><span>后端重启不丢；点一条在对应工具里原样重开</span></div><div className="lab-chips">{kinds.map(k => <button key={k} type="button" className={k === kind ? 'active' : ''} onClick={() => setKind(k)}>{k === 'all' ? `全部 ${Object.values(runs.data?.counts || {}).reduce((a, b) => a + b, 0)}` : `${KIND_LABEL[k] || k} ${runs.data?.counts[k] ?? ''}`}</button>)}</div></div>
-    {error && <ErrorBox text={error}/>}{runs.error && <ErrorBox text={runs.error}/>}
-    {!runs.data?.items.length ? <Empty glyph="◷" title="还没有运行记录" text="每个工具跑完都会记在这里。"/> : <div className="lab-runs">{runs.data.items.map(r => r.kind === 'backfill' ? <div key={r.id} className="lab-run static"><em className="kind-backfill">收益回填</em><span>回填 {String(r.filled)} / {String(r.checked)}</span><time>{when(r.ran_at)}</time></div> : <RunRow key={r.id} run={r} onOpen={() => void open(r)}/>)}</div>}
+    <div className="surface-header"><div><h2>运行记录</h2><span>后端重启不丢；点一条在对应工具里原样重开，参数也一起回填</span></div><div className="lab-chips">{kinds.map(k => <button key={k} type="button" className={k === kind ? 'active' : ''} onClick={() => setKind(k)}>{k === 'all' ? `全部 ${Object.values(runs.data?.counts || {}).reduce((a, b) => a + b, 0)}` : `${KIND_LABEL[k] || k} ${runs.data?.counts[k] ?? ''}`}</button>)}<button type="button" className="lab-chip-danger" disabled={busy} onClick={() => void cleanup()}>{busy ? '清理中…' : '清理 30 天前的记录'}</button></div></div>
+    {error && <ErrorBox text={error}/>}{runs.error && <ErrorBox text={runs.error}/>}{notice && <p className="lab-note">{notice}</p>}
+    {!runs.data?.items.length ? <Empty glyph="◷" title="还没有运行记录" text="每个工具跑完都会记在这里。"/> : <div className="lab-runs">{runs.data.items.map(r => <RunRow key={r.id} run={r} onOpen={r.kind === 'backfill' ? undefined : () => void open(r)} onDelete={() => void remove(r)}/>)}</div>}
   </section>;
 }

@@ -169,7 +169,7 @@ def test_personas_and_scoreboard_endpoints(client):
         "style": "seeks wonderful companies at a fair price", "period": "ttm", "lookback": 10, "needs": [],
     }
     board = client.get("/api/lab/committee/scoreboard").json()
-    assert board["kind"] == "scoreboard" and board["items"] == []
+    assert board["kind"] == "scoreboard" and board["items"] == [] and board["baseline"]["n_1m"] == 0 and board["baseline"]["up_rate_1m"] is None
     assert board["counts"] == {"runs": 0, "tickers": 0, "votes": 0, "scored_1m": 0, "scored_3m": 0, "due_1m": 0, "due_3m": 0}
     client.post("/api/lab/committee", json={"tickers": ["QLTY"], "as_of": "2026-06-30", "personas": ["warren_buffett", "ben_graham"]})
     counts = client.get("/api/lab/committee/scoreboard").json()["counts"]
@@ -192,7 +192,14 @@ def test_store_forward_return_backfill(tmp_path):
     store.set_forward_return(pending[0]["id"], column="fwd_1m", value=0.08)
     assert store.signals_awaiting_forward_returns(older_than_days=30) == []
     board = store.persona_scoreboard()
-    assert board == [{"persona": "warren_buffett", "n": 1, "hits": 1, "hit_rate": 1.0, "avg_directional_1m": 0.08}]
+    assert len(board) == 1 and board[0]["persona"] == "warren_buffett"
+    row = board[0]
+    assert row["n"] == 1 and row["hits"] == 1 and row["hit_rate"] == 1.0 and row["avg_directional_1m"] == 0.08
+    assert row["n_3m"] == 0 and row["hit_rate_3m"] is None and row["neutral"] == 0 and row["abstained"] == 0 and row["votes"] == 1
+    assert 0.2 < row["ci_low"] < 0.3 and row["ci_high"] == 1.0            # Wilson on 1 / 1: wide
+    assert row["baseline_1m"] == 1.0 and row["edge_1m"] == 0.0            # the one ticker rose: always-bullish would also have hit
+    base = store.scoreboard_baseline()
+    assert base["n_1m"] == 1 and base["up_rate_1m"] == 1.0 and base["avg_return_1m"] == 0.08 and base["n_3m"] == 0
     latest = store.latest_signals("AAA")
     assert {s["persona"] for s in latest} == {"warren_buffett", "ben_graham"}
     with pytest.raises(ValueError):
@@ -274,6 +281,11 @@ def test_forward_backfill_fills_due_horizons_and_scores_personas(tmp_path):
     later = backfill_forward_returns(store, prices, today=date(2026, 6, 1))
     assert later.by_column == {"fwd_3m": 2}
     assert store.signals_awaiting_forward_returns(older_than_days=91, column="fwd_3m") == []
+    board = {row["persona"]: row for row in store.persona_scoreboard()}
+    assert board["a"]["n_3m"] == 1 and board["a"]["hit_rate_3m"] == 1.0 and board["b"]["hit_rate_3m"] == 0.0
+    # one (ticker, as_of) rose → baseline P(up) = 1; the bull's mix baseline is 1, the bear's is 0
+    assert board["a"]["baseline_1m"] == 1.0 and board["b"]["baseline_1m"] == 0.0 and board["b"]["edge_1m"] == 0.0
+    assert store.scoreboard_baseline()["n_3m"] == 1
 
 
 def test_backfill_endpoint_reports_and_returns_scoreboard(client, monkeypatch):
@@ -287,6 +299,24 @@ def test_backfill_endpoint_reports_and_returns_scoreboard(client, monkeypatch):
 
 
 # ------------------------------------------------------------------- lab store
+
+def test_lab_runs_can_be_deleted_singly_and_by_age(client, monkeypatch, tmp_path):
+    from app.lab_store import LabRunStore
+
+    store = LabRunStore(tmp_path / "lab.db")
+    monkeypatch.setattr(workspace, "_LAB_STORE", store)
+    a = store.save("backtest", params={"x": 1}, summary={"tickers": ["AAA"]}, result={"kind": "backtest"})
+    b = store.save("screening", params={}, summary={"tickers": []}, result={"kind": "screening"})
+    # age one row artificially
+    with store._conn() as conn:
+        conn.execute("UPDATE lab_runs SET created_at = '2020-01-01T00:00:00' WHERE id = ?", (b,))
+    assert client.get("/api/lab/runs").json()["counts"] == {"backtest": 1, "screening": 1}
+    res = client.post("/api/lab/runs/cleanup", json={"older_than_days": 30}).json()
+    assert res["deleted"] == 1 and res["counts"] == {"backtest": 1}
+    assert client.delete(f"/api/lab/runs/{a}").json()["counts"] == {}
+    assert client.delete(f"/api/lab/runs/{a}").status_code == 404
+    assert client.get(f"/api/lab/runs/{a}").status_code == 404
+
 
 def test_lab_runs_persist_across_kinds_and_reopen(client, monkeypatch):
     monkeypatch.setattr(workspace, "_run_screening", lambda body: {"kind": "screening", "universe": body.universe, "tickers": ["QLTY"], "universe_size": 1, "candidates": [{"ticker": "QLTY"}]})

@@ -156,7 +156,7 @@
 .lab-big .lab-history button{padding:8px 11px;font-size:12px}
 .lab-big .lab-runs{padding:6px 16px 10px}
 .lab-big .lab-run{grid-template-columns:110px minmax(0,1fr) auto;padding:11px 2px;font-size:12px}
-.lab-big .lab-run em{padding:4px 9px}
+.lab-big .lab-run em{padding:4px 9px}.lab-run{cursor:pointer}.lab-run.static{cursor:default}.lab-run-end{display:flex;align-items:center;gap:8px;justify-content:flex-end;color:#9aa5b4}.lab-run-end time{color:inherit}.lab-run-del{border:0;background:transparent;color:#b3bcc8;font-size:14px;line-height:1;padding:2px 6px;cursor:pointer;border-radius:6px}.lab-run-del:hover{color:#ac293d;background:#fde9ec}.lab-chip-danger{border:1px solid #f0c9cf;border-radius:12px;padding:5px 9px;background:#fff;color:#ac293d;font-size:9px}.lab-chip-danger:disabled{opacity:.5}.lab-big .lab-chip-danger{font-size:12px;padding:7px 12px}
 .lab-big .lab-engines{padding:8px 16px}
 .lab-big .lab-engines button{padding:11px 2px;font-size:12px}
 .lab-big .lab-engines strong{font-size:13px}

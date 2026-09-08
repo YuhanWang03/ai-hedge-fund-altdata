@@ -936,3 +936,22 @@ async def lab_run_detail(run_id: str) -> dict:
     if row is None:
         raise HTTPException(status_code=404, detail="lab run not found")
     return row
+
+
+@router.delete("/lab/runs/{run_id}")
+async def lab_run_delete(run_id: str) -> dict:
+    if not _lab_store().delete(run_id):
+        raise HTTPException(status_code=404, detail="lab run not found")
+    return {"deleted": run_id, "counts": _lab_store().counts()}
+
+
+class CleanupInput(BaseModel):
+    older_than_days: int = Field(default=30, ge=1, le=3650)
+
+
+@router.post("/lab/runs/cleanup")
+async def lab_runs_cleanup(body: CleanupInput | None = None) -> dict:
+    """Drop every run older than ``older_than_days`` — results carry full trade lists, so the log grows fast."""
+    days = (body or CleanupInput()).older_than_days
+    deleted = _lab_store().delete_older_than(days)
+    return {"deleted": deleted, "older_than_days": days, "counts": _lab_store().counts()}

@@ -12,7 +12,7 @@ import os
 import sqlite3
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -82,6 +82,16 @@ class LabRunStore:
     def latest(self, kind: str) -> dict[str, Any] | None:
         rows = self.list(limit=1, kind=kind)
         return rows[0] if rows else None
+
+    def delete(self, run_id: str) -> bool:
+        with self._conn() as conn:
+            return conn.execute("DELETE FROM lab_runs WHERE id = ?", (run_id,)).rowcount > 0
+
+    def delete_older_than(self, days: int) -> int:
+        """Drop runs created more than ``days`` ago (their full results included); returns how many."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="microseconds")
+        with self._conn() as conn:
+            return conn.execute("DELETE FROM lab_runs WHERE created_at < ?", (cutoff,)).rowcount
 
     def counts(self) -> dict[str, int]:
         with self._conn() as conn:

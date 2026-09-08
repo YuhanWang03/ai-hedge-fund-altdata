@@ -152,11 +152,14 @@ GET  /api/lab/backtest/jobs/{id}     poll a background backtest or sweep (the co
 POST /api/lab/event-study            {universe, tickers?, data_source: yfinance|fd, earnings_limit, n_bootstrap, require_eps_surprise, dedupe, group_by: surprise|reaction|source}
 GET  /api/lab/signals                production anomaly thresholds, read-only
 GET  /api/lab/runs[?kind=&limit=]    persisted run log for every tool (+ per-kind counts)
-GET  /api/lab/runs/{id}              params + full result of one run
+GET  /api/lab/runs/{id}              params + full result of one run (the UI refills the tool's form from params)
+DELETE /api/lab/runs/{id}            drop one run; POST /api/lab/runs/cleanup {older_than_days: 30} drops everything older
 
 POST /api/lab/committee              {source: holdings|watchlist|tickers|screening, tickers?, personas?, as_of?, top_n?, max_weight?}
 GET  /api/lab/committee/runs, /runs/{id}, /personas
-GET  /api/lab/committee/scoreboard   per-persona hit rate + vote counts (due / scored per horizon)
+GET  /api/lab/committee/scoreboard   per-persona hit rates for 1 m and 3 m, 95 % Wilson interval, each persona's chance baseline
+                                     (share_bullish × P(up) + share_bearish × P(down)) and the edge over it; `baseline` = how the scored
+                                     tickers themselves moved (one observation per ticker·date); counts due / scored per horizon
 POST /api/lab/committee/narrate      {run_id, ticker, persona, language} → LLM explanation for one cell, verdict unchanged
 POST /api/lab/committee/backfill     run the forward-return backfill now (scheduler ⑯ does it nightly at 02:30 ET)
 ```
