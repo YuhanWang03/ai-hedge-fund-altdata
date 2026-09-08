@@ -157,7 +157,7 @@ class AgentV2:
         if not plan.tasks and decision.kind != RouteKind.GENERAL_KNOWLEDGE:
             answer_mode = AnswerMode.INSUFFICIENT_EVIDENCE
         self._emit(on_progress, run_id, RunStatus.VERIFYING, "verifying citations")
-        verification = verify_answer(answer, evidence, answer_mode=answer_mode)
+        verification = verify_answer(answer, evidence, answer_mode=answer_mode, results=results)
         failures = [result for result in results if not result.ok]
         knowledge_unavailable = not results and decision.kind == RouteKind.GENERAL_KNOWLEDGE and not bool(getattr(self.synthesizer, "supports_general_knowledge", False))
         if failures or not verification.ok or knowledge_unavailable or (not results and decision.kind != RouteKind.GENERAL_KNOWLEDGE):

@@ -615,6 +615,13 @@ def test_grounding_accepts_a_unit_conversion():
     assert grounding.check("COO 卖出 919 万", "卖出 41,000 股（$9.19M）").ok
 
 
+def test_grounding_accepts_raw_scale_and_percentage_conversions():
+    """Structured tool values may be raw while the answer uses display units."""
+    assert grounding.check("内部人净卖出 -3.49 亿美元", "net transaction value -349,029,376").ok
+    assert grounding.check("数据完整性 85.7%", "completeness 0.857").ok
+    assert not grounding.check("内部人净卖出 -4.49 亿美元", "net transaction value -349,029,376").ok
+
+
 def test_grounding_exempts_identifiers():
     """8-K Item 5.02 names a section — demanding it trace to data is incoherent."""
     report = grounding.check("披露了 Item 5.02 与 Item 1.01", "无关观测")

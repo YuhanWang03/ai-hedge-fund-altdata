@@ -67,6 +67,23 @@ NON_QUANTITY = re.compile(
 #: 「52 周高点」「200 日均线」「过去 30 天」.
 WINDOW_UNIT = re.compile(r"^\s*(?:个)?\s*(?:周|日|天|月|年|季|季度|小时)")
 
+# A displayed figure can be a faithful scale conversion of a raw observation:
+# 349,029,376 -> 3.49 亿, or 0.857 -> 85.7%.  Keep the unit next to the
+# answer figure in the check so these conversions remain mechanical rather
+# than becoming a general tolerance relaxation.
+_SCALE_UNIT = re.compile(r"^\s*(万|亿|[KMBT])(?![A-Za-z])", re.IGNORECASE)
+_SCALE_FACTORS = {"万": 1e4, "亿": 1e8, "K": 1e3, "M": 1e6, "B": 1e9, "T": 1e12}
+
+
+def _scaled_candidates(value: float, suffix: str) -> tuple[float, ...]:
+    candidates = [value]
+    scale = _SCALE_UNIT.match(suffix)
+    if scale:
+        candidates.append(value * _SCALE_FACTORS[scale.group(1).upper()])
+    if re.match(r"^\s*%", suffix):
+        candidates.append(value / 100)
+    return tuple(candidates)
+
 
 def mask_non_quantities(text: str) -> str:
     return NON_QUANTITY.sub(lambda m: " " * len(m.group(0)), text or "")
@@ -257,6 +274,7 @@ def check(
 
         report.total += 1
         target = abs(as_float)
+        candidates = _scaled_candidates(target, masked[end:])
 
         # 1. Written the same way the card wrote it.
         variants = {token, token.rstrip("0").rstrip("."), f"{as_float:g}"}
@@ -270,7 +288,7 @@ def check(
             report.traced.append(raw)
             continue
         # 3. The card's value, rounded (15,851.57 -> 15,852).
-        if any(abs(target - v) <= max(rounding_tolerance * v, 0.005) for v in values):
+        if any(abs(candidate - v) <= max(rounding_tolerance * v, 0.005) for candidate in candidates for v in values):
             report.grounded += 1
             report.traced.append(raw)
             continue

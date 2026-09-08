@@ -266,6 +266,43 @@ def test_verifier_rejects_an_invented_number_even_with_a_valid_citation():
     assert "20" in report.ungrounded_numbers
 
 
+def test_verifier_grounds_result_metrics_and_scaled_evidence_values():
+    evidence = [EvidenceItem("evidence-999999", "NVDA", "Insider net transaction value was -349029376.")]
+    result = ToolEnvelope(
+        "research.stock",
+        ResultStatus.COMPLETED,
+        metrics={"score": 87, "max_score": 100, "completeness": 0.857},
+        findings=[{"claim": "Insiders were net sellers", "evidence_ids": ["evidence-999999"]}],
+        evidence=evidence,
+    )
+    report = verify_answer(
+        "综合评分 87/100，数据完整性 85.7%，内部人净卖出约 -3.49 亿美元。[evidence-999999]",
+        evidence,
+        answer_mode=AnswerMode.RESEARCH_GROUNDED,
+        results=[result],
+    )
+    assert report.ok
+    assert not report.ungrounded_numbers
+
+
+def test_verifier_does_not_treat_digits_in_opaque_ids_as_observations():
+    evidence = [EvidenceItem("evidence-999999", "NVDA", "Insiders were net sellers.")]
+    result = ToolEnvelope(
+        "research.stock",
+        ResultStatus.COMPLETED,
+        findings=[{"claim": "Insiders were net sellers", "evidence_ids": ["evidence-999999"]}],
+        evidence=evidence,
+    )
+    report = verify_answer(
+        "NVDA 的指标值是 999999。[evidence-999999]",
+        evidence,
+        answer_mode=AnswerMode.RESEARCH_GROUNDED,
+        results=[result],
+    )
+    assert not report.ok
+    assert "999999" in report.ungrounded_numbers
+
+
 def test_web_and_lab_ports_can_be_injected_without_core_dependencies():
     class Search:
         def search(self, query, **kwargs):
