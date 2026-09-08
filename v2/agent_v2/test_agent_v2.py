@@ -61,7 +61,7 @@ def test_recent_stock_performance_uses_market_data_instead_of_fundamentals():
     assert plan.tasks[0].arguments == {"ticker": "AMD"}
 
 
-@pytest.mark.parametrize("query", ["AMD表现如何？", "AMD股票表现怎么样？"])
+@pytest.mark.parametrize("query", ["AMD表现如何？", "AMD股票表现怎么样？", "AMD今天成交量是不是低？", "AMD是不是放量上涨？", "AMD最近波动率多高？"])
 def test_bare_stock_performance_defaults_to_recent_market_data(query):
     request = normalize_request(query)
     plan = RulePlanner().plan(request, route(request))
