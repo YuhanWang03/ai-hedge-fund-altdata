@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
@@ -256,6 +257,21 @@ def test_llm_synthesizer_requires_evidence_ids_in_its_prompt_contract():
     evidence = [EvidenceItem("E1", "NVDA", "支持结论")]
     answer = synthesizer.synthesize(request, plan, [], evidence)
     assert answer.endswith("[E1]")
+    system = llm.calls[0][0]["content"]
+    payload = json.loads(llm.calls[0][1]["content"])
+    assert "3—5 个短段落" in system
+    assert payload["response_style"] == "brief"
+
+
+def test_llm_synthesizer_only_requests_detailed_style_when_user_asks_for_it():
+    llm = ScriptedLLM([LLMResponse(text="详细结论。[E1]")])
+    synthesizer = LLMEvidenceSynthesizer(llm)
+    request = normalize_request("给我一份 NVDA 的完整详细报告")
+    plan = ExecutionPlan("详细分析 NVDA", RouteKind.RESEARCH)
+    evidence = [EvidenceItem("E1", "NVDA", "支持结论")]
+    synthesizer.synthesize(request, plan, [], evidence)
+    payload = json.loads(llm.calls[0][1]["content"])
+    assert payload["response_style"] == "detailed"
 
 
 def test_llm_synthesizer_normalizes_valid_result_paths_to_evidence_ids():

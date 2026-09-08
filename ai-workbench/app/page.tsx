@@ -2,7 +2,7 @@
 
 /* eslint-disable @next/next/no-assign-module-variable, @typescript-eslint/no-unused-vars */
 
-import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { FormEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Image from 'next/image';
 import { apiJson, askAgentV2, authHeaders, getAgentV2Job, type AgentV2Evidence, type AgentV2Job, type AgentV2Response } from './lib/api';
 import { LabPage, labMenu, type LabTool } from './lab';
@@ -102,6 +102,76 @@ function agentSessionId() { const key = 'workbench:agent-v2-session'; const stor
 function waitWithSignal(ms: number, signal: AbortSignal) { return new Promise<void>((resolve, reject) => { const timer = window.setTimeout(resolve, ms); signal.addEventListener('abort', () => { window.clearTimeout(timer); reject(new DOMException('Request cancelled', 'AbortError')) }, { once: true }) }) }
 async function waitForAgentJob(initial: AgentV2Job, signal: AbortSignal, onProgress: (job: AgentV2Job) => void): Promise<AgentV2Response> { let job = initial; const deadline = Date.now() + 15 * 60_000; while (Date.now() < deadline) { if (job.status === 'completed' && job.result) return job.result; if (job.status === 'failed') throw new Error(job.error || 'Agent V2 后台任务失败'); onProgress(job); await waitWithSignal(1000, signal); job = await getAgentV2Job(job.job_id, signal) } throw new Error('Agent V2 后台任务超过 15 分钟仍未完成') }
 function uniqueEvidence(items: AgentV2Evidence[]) { const seen = new Set<string>(); return items.filter(item => { const key = item.id || `${item.source_url}:${item.claim}`; if (seen.has(key)) return false; seen.add(key); return true }) }
+
+function AgentAnswer({ text, evidence = [], messageId }: { text: string; evidence?: AgentV2Evidence[]; messageId: number }) {
+  const evidenceById = new Map(evidence.map((item, index) => [item.id, { item, number: index + 1 }]));
+  const detailsId = `agent-evidence-${messageId}`;
+  const revealEvidence = (number: number) => {
+    const details = document.getElementById(detailsId) as HTMLDetailsElement | null;
+    if (details) details.open = true;
+    window.requestAnimationFrame(() => document.getElementById(`${detailsId}-${number}`)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' }));
+  };
+  const inline = (value: string, keyPrefix: string): ReactNode[] => {
+    const normalized = value.replace(/\\([*_])/g, '$1');
+    const tokens = normalized.split(/(\*\*[^*]+\*\*|`[^`\n]+`|\[[A-Za-z0-9_.:-]+\])/g).filter(Boolean);
+    return tokens.map((token, index) => {
+      const key = `${keyPrefix}-${index}`;
+      if (token.startsWith('**') && token.endsWith('**')) return <strong key={key}>{inline(token.slice(2, -2), `${key}-strong`)}</strong>;
+      if (token.startsWith('`') && token.endsWith('`')) return <code key={key}>{token.slice(1, -1)}</code>;
+      const citation = token.match(/^\[([A-Za-z0-9_.:-]+)\]$/)?.[1];
+      const linked = citation ? evidenceById.get(citation) : undefined;
+      if (linked) return <button key={key} type="button" className="evidence-ref" title={linked.item.claim} aria-label={`查看证据 ${linked.number}`} onClick={() => revealEvidence(linked.number)}>[{linked.number}]</button>;
+      return token;
+    });
+  };
+  const lines = text.replace(/\r\n/g, '\n').trim().split('\n');
+  const blocks: ReactNode[] = [];
+  const isRule = (line: string) => /^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/.test(line);
+  const isList = (line: string) => /^\s*(?:[-*+] |\d+\. )/.test(line);
+  const isHeading = (line: string) => /^\s*#{1,6}\s+/.test(line);
+  const isTable = (line: string) => /^\s*\|.*\|\s*$/.test(line);
+  for (let index = 0; index < lines.length;) {
+    const line = lines[index];
+    if (!line.trim()) { index += 1; continue }
+    if (isRule(line)) { blocks.push(<hr key={`rule-${index}`}/>); index += 1; continue }
+    const heading = line.match(/^\s*(#{1,6})\s+(.+?)\s*#*\s*$/);
+    if (heading) {
+      const content = inline(heading[2], `heading-${index}`);
+      blocks.push(heading[1].length <= 2 ? <h3 key={`heading-${index}`}>{content}</h3> : <h4 key={`heading-${index}`}>{content}</h4>);
+      index += 1;
+      continue;
+    }
+    if (isTable(line) && index + 1 < lines.length && /^\s*\|[\s:|-]+\|\s*$/.test(lines[index + 1])) {
+      const rows: string[][] = [];
+      while (index < lines.length && isTable(lines[index])) {
+        if (!/^\s*\|[\s:|-]+\|\s*$/.test(lines[index])) rows.push(lines[index].trim().slice(1, -1).split('|').map(cell => cell.trim()));
+        index += 1;
+      }
+      const [header, ...body] = rows;
+      blocks.push(<div className="answer-table-wrap" key={`table-${index}`}><table><thead><tr>{header.map((cell, cellIndex) => <th key={cellIndex}>{inline(cell, `th-${index}-${cellIndex}`)}</th>)}</tr></thead><tbody>{body.map((row, rowIndex) => <tr key={rowIndex}>{row.map((cell, cellIndex) => <td key={cellIndex}>{inline(cell, `td-${index}-${rowIndex}-${cellIndex}`)}</td>)}</tr>)}</tbody></table></div>);
+      continue;
+    }
+    if (isList(line)) {
+      const ordered = /^\s*\d+\. /.test(line);
+      const items: string[] = [];
+      while (index < lines.length && isList(lines[index]) && /^\s*\d+\. /.test(lines[index]) === ordered) {
+        items.push(lines[index].replace(/^\s*(?:[-*+] |\d+\. )/, ''));
+        index += 1;
+      }
+      const children = items.map((item, itemIndex) => <li key={itemIndex}>{inline(item, `li-${index}-${itemIndex}`)}</li>);
+      blocks.push(ordered ? <ol key={`list-${index}`}>{children}</ol> : <ul key={`list-${index}`}>{children}</ul>);
+      continue;
+    }
+    const paragraph: string[] = [];
+    while (index < lines.length && lines[index].trim() && !isRule(lines[index]) && !isHeading(lines[index]) && !isList(lines[index]) && !isTable(lines[index])) {
+      paragraph.push(lines[index].trim());
+      index += 1;
+    }
+    if (paragraph.length) blocks.push(<p key={`paragraph-${index}`}>{inline(paragraph.join(' '), `paragraph-${index}`)}</p>);
+    else index += 1;
+  }
+  return <div className="message-markdown">{blocks}</div>;
+}
 
 function MiniEquityChart({ values }: { values: number[] }) {
   const source = values.length > 1 ? values : [97420, 98620, 98210, 99100, 100348];
@@ -419,10 +489,10 @@ export default function Home() {
           {messages.map(message => <div key={message.id} className={`message ${message.role}`}>
             {message.role === 'user' && message.mode && <div className="message-mode">{message.mode === 'agent_v2' ? 'Agent V2' : '经典'}</div>}
             {message.agent && <div className="agent-badges"><span>{message.agent.status}</span><span>{message.agent.route}</span><span>{message.agent.answerMode}</span><span className={message.agent.verified ? 'verified' : 'warning'}>{message.agent.verified ? '证据校验通过' : '证据校验有警告'}</span>{message.agent.webAllowed && <span className="web">Web 已授权</span>}{message.agent.webRequested && !message.agent.webEnabled && <span className="warning">服务端未启用 Web</span>}<span>{(message.agent.elapsedMs / 1000).toFixed(1)}s</span></div>}
-            <div className="message-body">{message.text}</div>
+            <div className="message-body">{message.role === 'assistant' ? <AgentAnswer text={message.text} evidence={message.evidence} messageId={message.id}/> : message.text}</div>
             {message.image && <Image src={message.image} width={900} height={600} unoptimized alt="AI 查询生成的分析图表"/>}
             {message.agent && message.agent.capabilities.length > 0 && <details className="agent-detail"><summary>执行工具（{message.agent.capabilities.length}）</summary><div className="capability-list">{message.agent.capabilities.map((capability, index) => <code key={`${capability}-${index}`}>{capability}</code>)}</div></details>}
-            {message.evidence && message.evidence.length > 0 && <details className="agent-detail"><summary>证据（{message.evidence.length}）</summary><ol className="evidence-list">{message.evidence.map(item => <li key={item.id}><div><code>{item.id}</code>{item.entity && <strong>{item.entity}</strong>}</div><p>{item.claim}</p>{item.source_url ? <a href={item.source_url} target="_blank" rel="noreferrer">{item.source_title || item.source_id || '查看来源'}{item.as_of ? ` · ${item.as_of.slice(0, 10)}` : ''}</a> : <small>{item.source_title || item.source_id || '内部计算结果'}{item.as_of ? ` · ${item.as_of.slice(0, 10)}` : ''}</small>}</li>)}</ol></details>}
+            {message.evidence && message.evidence.length > 0 && <details id={`agent-evidence-${message.id}`} className="agent-detail"><summary>证据（{message.evidence.length}）</summary><ol className="evidence-list">{message.evidence.map((item, index) => <li id={`agent-evidence-${message.id}-${index + 1}`} key={item.id}><div><code>{item.id}</code>{item.entity && <strong>{item.entity}</strong>}</div><p>{item.claim}</p>{item.source_url ? <a href={item.source_url} target="_blank" rel="noreferrer">{item.source_title || item.source_id || '查看来源'}{item.as_of ? ` · ${item.as_of.slice(0, 10)}` : ''}</a> : <small>{item.source_title || item.source_id || '内部计算结果'}{item.as_of ? ` · ${item.as_of.slice(0, 10)}` : ''}</small>}</li>)}</ol></details>}
             {message.agent && message.agent.warnings.length > 0 && <details className="agent-detail warning-detail"><summary>校验警告（{message.agent.warnings.length}）</summary><ul>{message.agent.warnings.map((warning, index) => <li key={`${warning}-${index}`}>{warning}</li>)}</ul></details>}
             {message.meta && <div className="message-meta">{message.meta}</div>}
           </div>)}

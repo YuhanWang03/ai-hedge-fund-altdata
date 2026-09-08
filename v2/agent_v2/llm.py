@@ -25,6 +25,7 @@ from v2.agent_v2.planning import RulePlanner
 from v2.agent_v2.synthesis import EvidenceSummarySynthesizer
 
 _RESULT_CITATION = re.compile(r"\[results\.(metrics|limitations)([^\]]*)\]")
+_DETAILED_ANSWER = re.compile(r"详细|完整|全面|深度|报告|逐项|表格|清单|所有|展开")
 
 
 def _strip_fence(text: str) -> str:
@@ -176,12 +177,18 @@ class LLMEvidenceSynthesizer:
 不要声称知道当前股价、最新财报、近期新闻、用户持仓或其他可能变化的事实。"""
             payload = request.text
         else:
-            system = """你是证据约束的投研回答器。先给结论，再给依据和限制。
+            system = """你是证据约束的中文投研助手，表达要像一位清楚、克制、有判断力的研究同事。
 只能陈述输入证据支持的外部事实。每项关键事实后必须写对应的 [evidence_id]。
 方括号内只能原样使用 evidence 数组中真实存在的 id；严禁把 results.*、字段路径、source_id 或占位符当作引用。
 results 中的评分或限制如需引用，使用 evidence 中 citation_kind 为 metrics 或 limitations 的对应条目。
 推断必须标成“推断”；数据缺失必须明确说明。不得把一个主体的数据归给另一个主体。
-不要把历史回测写成未来收益保证。不要输出未在证据中出现的数字。"""
+不要把历史回测写成未来收益保证。不要输出未在证据中出现的数字。
+
+严格遵循输入中的 response_style：
+- brief：直接给判断，用 3—5 个短段落、约 300—500 个中文字完成回答。挑选最有决策价值的 3—5 条事实，只讲一个主要风险和最重要的数据缺口，最后指出接下来值得观察什么。不要使用标题、表格、分隔线、编号清单、“正面/负面/中性”标签、“必须说明”或单独的免责声明章节；不要重复同一事实。
+- detailed：用户明确要求详细、完整、全面、表格或逐项展开时，才允许使用小标题与列表，但仍应合并重复内容并保持自然。
+
+把 BULLISH、MEDIUM、forward_pe、revision_trend 等内部英文标签翻译或解释成自然中文；必要的通用缩写可以保留。不要逐项复述所有模块，也不要把工具输出改写成机械评分单。"""
             payload = self._payload(request.text, plan, results, evidence)
         try:
             response = self.llm.complete(
@@ -202,6 +209,7 @@ results 中的评分或限制如需引用，使用 evidence 中 citation_kind �
         data = {
             "query": query[:2000],
             "objective": plan.objective[:2000],
+            "response_style": "detailed" if _DETAILED_ANSWER.search(query) else "brief",
             "assumptions": list(plan.assumptions),
             "results": [
                 {
