@@ -22,7 +22,7 @@ from v2.agent_v2.models import (
     ToolEnvelope,
 )
 from v2.agent_v2.planning import RulePlanner
-from v2.agent_v2.synthesis import EvidenceSummarySynthesizer
+from v2.agent_v2.synthesis import EvidenceSummarySynthesizer, synthesize_market_answer
 
 _RESULT_CITATION = re.compile(r"\[results\.(metrics|limitations)([^\]]*)\]")
 _DETAILED_ANSWER = re.compile(r"详细|完整|全面|深度|报告|逐项|表格|清单|所有|展开")
@@ -217,7 +217,15 @@ results 中的评分或限制如需引用，使用 evidence 中 citation_kind �
             answer = presentation.strip_deliberation(response.text)
             if not answer:
                 raise ValueError("synthesizer returned an empty answer")
-            return _normalize_result_citations(answer, results, evidence)
+            answer = _normalize_result_citations(answer, results, evidence)
+            market_fallback = synthesize_market_answer(results, evidence)
+            if market_fallback is not None:
+                from v2.agent_v2.verification import verify_answer
+
+                report = verify_answer(answer, evidence, answer_mode=plan.answer_mode, results=results)
+                if not report.ok:
+                    return market_fallback
+            return answer
         except (LLMError, ValueError, TypeError) as exc:
             return self.fallback.synthesize(request, plan, results, evidence)
 

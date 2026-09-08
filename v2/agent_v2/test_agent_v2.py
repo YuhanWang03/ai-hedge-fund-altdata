@@ -38,6 +38,7 @@ from v2.agent_v2.orchestrator import AgentV2, AgentV2Config
 from v2.agent_v2.planning import RulePlanner
 from v2.agent_v2.routing import normalize_request, route
 from v2.agent_v2.session import ShortTermSession
+from v2.agent_v2.synthesis import synthesize_market_answer
 from v2.agent_v2.verification import verify_answer
 
 
@@ -106,7 +107,12 @@ def test_market_performance_adapter_returns_window_and_benchmark_evidence():
     assert result.ok
     assert result.metrics["returns"]["5d"] is not None
     assert result.metrics["relative_returns"]["SMH"]["5d"] is not None
-    assert {item.metadata["evidence_scope"] for item in result.evidence} >= {"price", "returns", "volume", "benchmark"}
+    assert {item.metadata["evidence_scope"] for item in result.evidence} >= {"price", "returns", "volume", "volatility", "benchmark"}
+    answer = synthesize_market_answer([result], result.evidence)
+    assert answer is not None
+    assert "近 5 日回报" in answer
+    assert "相对 SMH" in answer
+    assert verify_answer(answer, result.evidence, answer_mode=AnswerMode.TOOL_GROUNDED, results=[result]).ok
 
 
 def test_market_move_adapter_splits_facts_and_causal_confidence():
@@ -139,6 +145,42 @@ def test_market_move_adapter_splits_facts_and_causal_confidence():
     assert result.findings[0]["confirmed"] is True
     assert result.findings[1]["confirmed"] is False
     assert next(item for item in result.evidence if item.metadata.get("claim_role") == "candidate_driver").confidence == 0.3
+    assert next(item for item in result.evidence if item.metadata.get("claim_role") == "attribution_assessment")
+    answer = synthesize_market_answer([result], result.evidence)
+    assert answer is not None
+    assert verify_answer(answer, result.evidence, answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result]).ok
+
+
+def test_market_synthesis_falls_back_when_llm_uses_an_unsupported_market_number():
+    result = ToolEnvelope(
+        "market.performance",
+        ResultStatus.COMPLETED,
+        subject="AMD",
+        as_of="2026-09-08",
+        metrics={
+            "close": 100.0,
+            "returns": {"1d": 0.02, "5d": 0.03, "1m": 0.04},
+            "volume": 1_000_000,
+            "volume_ratio": 0.8,
+            "annualized_volatility_21d": 0.5,
+            "relative_returns": {},
+        },
+        evidence=[
+            EvidenceItem("P", "AMD", "AMD close 100.00 and daily return +2.00%.", metadata={"evidence_scope": "price"}),
+            EvidenceItem("R", "AMD", "Returns: 1d +2.00%, 5d +3.00%, 1m +4.00%.", metadata={"evidence_scope": "returns"}),
+            EvidenceItem("V", "AMD", "Volume 1000000 and volume ratio 0.80.", metadata={"evidence_scope": "volume"}),
+            EvidenceItem("VOL", "AMD", "21-day annualized volatility 50.00%.", metadata={"evidence_scope": "volatility"}),
+        ],
+    )
+    llm = ScriptedLLM([LLMResponse(text="AMD 波动率为 99%。[V]")])
+    answer = LLMEvidenceSynthesizer(llm).synthesize(
+        normalize_request("AMD最近表现如何？"),
+        ExecutionPlan("AMD最近表现如何？", RouteKind.FAST_LOOKUP, answer_mode=AnswerMode.TOOL_GROUNDED),
+        [result],
+        result.evidence,
+    )
+    assert "99%" not in answer
+    assert "近 5 日回报" in answer
 
 
 def test_executor_collects_structured_evidence():

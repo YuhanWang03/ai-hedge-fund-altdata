@@ -109,6 +109,9 @@ def _performance_envelope(ticker: str, context: ExecutionContext, price_source) 
     if avg_volume_30d is not None and volume_ratio is not None:
         volume_claim = f"{ticker} {as_of} 成交量为 {int(latest.volume)} 股，30 日平均成交量为 {avg_volume_30d:.0f} 股，量比为 {volume_ratio:.2f} 倍。"
         evidence.append(_item("volume", ticker, as_of, volume_claim, context, metric="volume_ratio", value=volume_ratio, metadata={"volume": int(latest.volume), "average_volume_30d": avg_volume_30d}))
+    if volatility_21d is not None:
+        volatility_claim = f"{ticker} 近 21 个交易日的实现波动率折算年化后为 {volatility_21d:.2%}。"
+        evidence.append(_item("volatility", ticker, as_of, volatility_claim, context, metric="annualized_volatility_21d", value=volatility_21d))
 
     from v2.universe import BENCHMARK_ETF, sector_etf_for
 
@@ -188,6 +191,27 @@ def _move_envelope(ticker: str, context: ExecutionContext, anomaly) -> ToolEnvel
         "confirmed_driver_count": high_confidence,
         "candidate_driver_count": len(anomaly.reasons) - high_confidence,
     }
+    assessment_claim = (
+        f"{ticker} 异动归因中有 {high_confidence} 个高置信度直接驱动，"
+        f"{len(anomaly.reasons) - high_confidence} 个候选解释。"
+    )
+    if high_confidence == 0:
+        assessment_claim += " 现有证据不足以确认具体触发原因。"
+    evidence.append(
+        _item(
+            "attribution",
+            ticker,
+            as_of,
+            assessment_claim,
+            context,
+            metric="confirmed_driver_count",
+            value=high_confidence,
+            metadata={
+                "claim_role": "attribution_assessment",
+                "candidate_driver_count": len(anomaly.reasons) - high_confidence,
+            },
+        )
+    )
     return ToolEnvelope(
         "market.explain_move",
         ResultStatus.COMPLETED if evidence else ResultStatus.PARTIAL_DATA,
