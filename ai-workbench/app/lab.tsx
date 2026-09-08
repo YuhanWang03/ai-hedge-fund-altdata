@@ -482,6 +482,7 @@ function BacktestTool({ result: panel, setResult, handoff, clearHandoff, ask }: 
   const dep = result?.deployment || null; const offFull = !!dep && Math.abs(dep.utilization - 1) >= 0.01;
   return <>
     {handoff && <HandoffBanner handoff={handoff} onUse={() => { setUniverse('custom'); setTickers(handoff.tickers.join(', ')); clearHandoff() }} onClear={clearHandoff}/>}
+    <div className="lab-notice"><strong>数据不足，结果不理想</strong><span>四个策略都在现有数据上验证过：财报事件在标普 500 里没有可用的漂移；等权动量在标普 500 里 10 年跑不赢 SPY（18 组参数全部落后，52 周新高过滤是负贡献）；委员会和内部人策略受财务与交易历史深度限制，样本太小。根本原因是数据：yfinance 只有价格，退市和被收购的前成分股取不到（10 年回测 695 只里缺 101 只）；Financial Datasets 的财报只有约 5 个季度、财务报表只有 2–3 个财年，做不了更长的事件研究和基本面回测。想要有参考价值的结果，需要接入更多数据：含退市股票的无幸存者偏差价格库（如 Sharadar、Norgate、CRSP、Polygon），10 年以上的时点化财务与财报历史，以及更完整的内部人交易记录。在此之前，这一页的数字只适合检验流程，不适合据以决策。</span></div>
     <div className="lab-tool lab-tool-fill">
       <section className="surface lab-config lab-config-fill"><div className="surface-header"><div><h2>回测参数</h2><span>先选免费还是付费数据，再选该档位下的策略；四个策略共用一个引擎</span></div></div>
         <div className="lab-config-body lab-scroll">
