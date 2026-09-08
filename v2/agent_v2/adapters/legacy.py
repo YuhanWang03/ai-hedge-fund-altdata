@@ -56,7 +56,6 @@ def register_legacy_capabilities(registry: CapabilityRegistry) -> None:
     call("v2.bot.responders.pnl_period", "account.performance", lambda fn, args: fn({"period": args.get("period", "day")}), lambda args: "portfolio")
     call("v2.bot.responders.risk_view", "account.risk", lambda fn, args: fn({}), lambda args: "portfolio")
     call("v2.bot.responders.earnings_calendar", "account.earnings_schedule", lambda fn, args: fn({"days_horizon": args.get("days", 14)}), lambda args: "portfolio")
-    call("v2.bot.responders.explain_move", "market.explain_move", lambda fn, args: fn(args["ticker"]), lambda args: str(args.get("ticker", "")))
     call("v2.bot.responders.institutional_quick", "institutional.manager_portfolio", lambda fn, args: fn(args["manager"]), lambda args: str(args.get("manager", "")))
     call("v2.bot.responders.etf_view", "etf.ark_activity", lambda fn, args: fn(args["symbol"]), lambda args: str(args.get("symbol", "")))
     call("v2.bot.responders.release_check", "macro.release", lambda fn, args: fn({"release_type": args["release_type"]}), lambda args: str(args.get("release_type", "")))

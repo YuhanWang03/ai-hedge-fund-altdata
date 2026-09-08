@@ -7,6 +7,7 @@ from dataclasses import replace
 from v2.agent_v2.adapters import (
     register_lab_capabilities,
     register_legacy_capabilities,
+    register_market_capabilities,
     register_research_capabilities,
     register_web_capability,
     TavilyWebSearchPort,
@@ -29,6 +30,7 @@ def build_live_registry(
     registry = CapabilityRegistry(catalog or default_catalog())
     register_research_capabilities(registry)
     register_legacy_capabilities(registry)
+    register_market_capabilities(registry)
     if lab is not None:
         register_lab_capabilities(registry, lab)
     if web_search is not None:

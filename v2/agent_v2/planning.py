@@ -14,6 +14,13 @@ from v2.agent_v2.models import (
     RouteKind,
 )
 
+_MOVE_EXPLANATION = re.compile(r"(?:为什么|原因|何故).{0,12}(?:涨|跌|异动|波动)|(?:涨|跌|异动|波动).{0,12}(?:为什么|原因|怎么回事|怎么了|何故)|(?:最近|今天|今日).{0,8}(?:怎么回事|怎么了)", re.I)
+_RECENT_PERFORMANCE = re.compile(
+    r"(?:最近|近期|今天|今日|本周|这周|本月|这个月|近\s*\d+\s*(?:天|日|周|月)).{0,12}(?:股价|价格|走势|表现|涨|跌|涨跌|回报|收益率)"
+    r"|(?:股价|价格).{0,8}(?:走势|表现|涨跌|回报|收益率)|(?:走势|涨跌|跑赢|跑输)",
+    re.I,
+)
+
 
 def _focus(text: str) -> str:
     checks = (
@@ -74,6 +81,26 @@ class RulePlanner:
                 assumptions=("Missing experiment parameters must be disclosed before execution.",),
             )
 
+        if len(entities) == 1 and _MOVE_EXPLANATION.search(text):
+            return ExecutionPlan(
+                objective=text,
+                route=route.kind,
+                tasks=(PlanTask("market-move", "market.explain_move", {"ticker": entities[0]}, purpose="separate confirmed market facts from candidate move drivers"),),
+                answer_mode=AnswerMode.RESEARCH_GROUNDED,
+                budget=BudgetClass.FOCUSED,
+                web_fallback_allowed=request.allow_web,
+                stop_conditions=("price move and benchmark acquired", "causal evidence exhausted"),
+            )
+        if len(entities) == 1 and _RECENT_PERFORMANCE.search(text):
+            return ExecutionPlan(
+                objective=text,
+                route=route.kind,
+                tasks=(PlanTask("market-performance", "market.performance", {"ticker": entities[0]}, purpose="measure recent returns, volume and benchmark-relative performance"),),
+                answer_mode=AnswerMode.TOOL_GROUNDED,
+                budget=BudgetClass.FOCUSED,
+                stop_conditions=("recent price and benchmark windows acquired",),
+            )
+
         tasks: list[PlanTask] = []
         budget = BudgetClass.DIRECT
         if route.kind == RouteKind.RESEARCH:
@@ -107,7 +134,9 @@ class RulePlanner:
         # state that the request needs clarification instead of guessing.
         if re.search(r"持仓|仓位", text):
             tasks.append(PlanTask("lookup-1", "account.portfolio"))
-        elif re.search(r"盈亏|赚|亏|收益", text):
+        elif re.search(r"盈亏|赚|亏|收益", text) and (
+            not entities or re.search(r"我的|持仓|组合|账户", text)
+        ):
             period = "month" if "月" in text else "week" if "周" in text else "day"
             tasks.append(PlanTask("lookup-1", "account.performance", {"period": period}))
         elif re.search(r"组合风险|集中度|行业暴露", text):

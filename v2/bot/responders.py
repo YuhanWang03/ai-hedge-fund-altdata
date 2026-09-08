@@ -28,6 +28,7 @@ from v2.institutional.summarizer import interpret_changes
 from v2.lateral import LATERAL_FILTERS, run_lateral_expansion
 from v2.memory import AnomalyMemory
 from v2.monitoring import attribute
+from v2.monitoring.relative import compute_relative
 from v2.monitoring.models import Anomaly, MonitorConfig
 from v2.reporting import (
     format_alert_list,
@@ -52,6 +53,7 @@ from v2.screening import (
 )
 from v2.screening.delta_fetcher import fetch_news_headlines
 from v2.screening.screener import enrich_with_earnings
+from v2.universe import sector_etf_for
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +111,9 @@ def _build_query_anomaly(ticker: str, fd: CachedFDClient) -> Anomaly | None:
     latest = prices[-1]
     prev = prices[-2]
     avg30 = float(vols[-31:-1].mean()) if len(vols) >= 31 else float(vols[-len(vols) // 2:].mean())
+    sector_etf = sector_etf_for(ticker)
+    sector_prices = price_source.get_prices(sector_etf, start, today.isoformat())
+    relative = compute_relative(prices, sector_prices)
 
     return Anomaly(
         ticker=ticker,
@@ -122,6 +127,10 @@ def _build_query_anomaly(ticker: str, fd: CachedFDClient) -> Anomaly | None:
         low_52w=float(closes[-252:].min()) if len(closes) >= 252 else float(closes.min()),
         flags=[],  # user query — no detector fired
         recent_prices=[float(p.close) for p in prices[-7:]],
+        sector_etf=sector_etf,
+        sector_return_1d=relative["sector_return_1d"],
+        relative_1d_pp=relative["relative_1d_pp"],
+        contrarian=bool(relative["contrarian"]),
     )
 
 

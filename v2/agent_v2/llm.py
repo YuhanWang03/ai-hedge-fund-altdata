@@ -26,6 +26,12 @@ from v2.agent_v2.synthesis import EvidenceSummarySynthesizer
 
 _RESULT_CITATION = re.compile(r"\[results\.(metrics|limitations)([^\]]*)\]")
 _DETAILED_ANSWER = re.compile(r"详细|完整|全面|深度|报告|逐项|表格|清单|所有|展开")
+_MOVE_ANSWER = re.compile(r"(?:为什么|原因|何故).{0,12}(?:涨|跌|异动|波动)|(?:涨|跌|异动|波动).{0,12}(?:为什么|原因|怎么回事|怎么了|何故)|(?:最近|今天|今日).{0,8}(?:怎么回事|怎么了)", re.I)
+_PERFORMANCE_ANSWER = re.compile(
+    r"(?:最近|近期|今天|今日|本周|这周|本月|这个月|近\s*\d+\s*(?:天|日|周|月)).{0,12}(?:股价|价格|走势|表现|涨|跌|涨跌|回报|收益率)"
+    r"|(?:股价|价格).{0,8}(?:走势|表现|涨跌|回报|收益率)|(?:走势|涨跌|跑赢|跑输)",
+    re.I,
+)
 
 
 def _strip_fence(text: str) -> str:
@@ -69,6 +75,8 @@ class StructuredLLMPlanner:
 
     def plan(self, request: NormalizedRequest, route: RouteDecision) -> ExecutionPlan:
         deterministic = self.fallback.plan(request, route)
+        if deterministic.tasks and deterministic.tasks[0].capability in {"market.performance", "market.explain_move"}:
+            return deterministic
         if route.kind not in {RouteKind.RESEARCH, RouteKind.LAB, RouteKind.ASYNC}:
             return deterministic
         allowed = self.catalog.specs(route.packs)
@@ -189,6 +197,14 @@ results 中的评分或限制如需引用，使用 evidence 中 citation_kind �
 - detailed：用户明确要求详细、完整、全面、表格或逐项展开时，才允许使用小标题与列表，但仍应合并重复内容并保持自然。
 
 把 BULLISH、MEDIUM、forward_pe、revision_trend 等内部英文标签翻译或解释成自然中文；必要的通用缩写可以保留。不要逐项复述所有模块，也不要把工具输出改写成机械评分单。"""
+            system += """
+
+再严格遵循 response_intent：
+- recent_performance：先回答最新交易日、近 5 日和近 1 月的价格回报，再说明相对行业或大盘基准的强弱及成交量；不得用营收、毛利率或估值代替价格表现。数据不足时明确缺少哪个时间窗口。
+- move_explanation：第一句回答是否上涨/下跌、日期、幅度和成交量。把已确认行情事实、高置信度直接驱动、普通候选解释分开。只有 metadata.claim_role=confirmed_driver 的证据才能写成已确认原因；candidate_driver 必须写成“可能相关”并说明中/低置信度。如果 confirmed_driver_count 为 0，必须明确说“具体触发原因尚未确认”，不能把历史涨幅、机构持仓或时间不匹配的新闻写成当日直接原因。必须给出行业基准对比；若工具没有基准则说明缺失。
+- stock_research：围绕公司的核心投资矛盾组织答案，不逐项报分。ROIC、ROE、利润率等异常高于 100% 的比率必须提示其依赖数据与计算口径，不能当作无条件质量结论。
+
+每个引用只支持它紧邻的那句话。不要用一条聚合引用同时支撑价格、成交量、新闻和期权等不同事实。"""
             payload = self._payload(request.text, plan, results, evidence)
         try:
             response = self.llm.complete(
@@ -210,6 +226,7 @@ results 中的评分或限制如需引用，使用 evidence 中 citation_kind �
             "query": query[:2000],
             "objective": plan.objective[:2000],
             "response_style": "detailed" if _DETAILED_ANSWER.search(query) else "brief",
+            "response_intent": "move_explanation" if _MOVE_ANSWER.search(query) else "recent_performance" if _PERFORMANCE_ANSWER.search(query) else "stock_research",
             "assumptions": list(plan.assumptions),
             "results": [
                 {

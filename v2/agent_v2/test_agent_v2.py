@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import date, timedelta
+from types import SimpleNamespace
 
 import pytest
 
 from v2.agent.llm import LLMResponse, ScriptedLLM
 from v2.agent_v2.adapters.lab import register_lab_capabilities
+from v2.agent_v2.adapters.market import register_market_capabilities
 from v2.agent_v2.adapters.research import register_research_capabilities
 from v2.agent_v2.adapters.tavily_web import TavilyWebSearchPort
 from v2.agent_v2.adapters.web import register_web_capability
@@ -32,6 +35,7 @@ from v2.agent_v2.models import (
     ToolEnvelope,
 )
 from v2.agent_v2.orchestrator import AgentV2, AgentV2Config
+from v2.agent_v2.planning import RulePlanner
 from v2.agent_v2.routing import normalize_request, route
 from v2.agent_v2.session import ShortTermSession
 from v2.agent_v2.verification import verify_answer
@@ -46,6 +50,28 @@ def test_router_separates_knowledge_research_lab_and_commands():
     assert route(normalize_request("比较 NVDA 和 AMD 的风险")).kind == RouteKind.RESEARCH
     assert route(normalize_request("回测 NVDA 动量策略")).kind == RouteKind.LAB
     assert route(normalize_request("把 NVDA 加入关注列表")).kind == RouteKind.COMMAND
+
+
+def test_recent_stock_performance_uses_market_data_instead_of_fundamentals():
+    request = normalize_request("AMD最近表现如何？")
+    plan = RulePlanner().plan(request, route(request))
+    assert plan.tasks[0].capability == "market.performance"
+    assert plan.tasks[0].arguments == {"ticker": "AMD"}
+
+
+def test_recent_earnings_quality_is_not_misrouted_as_price_performance():
+    request = normalize_request("AMD最近的收益质量如何？")
+    plan = RulePlanner().plan(request, route(request))
+    assert plan.tasks[0].capability == "research.stock"
+
+
+def test_move_explanation_cannot_be_overridden_by_the_llm_planner():
+    llm = ScriptedLLM([LLMResponse(text='{"tasks":[{"id":"wrong","capability":"research.stock","arguments":{"ticker":"AMD"}}]}')])
+    catalog = default_catalog()
+    request = normalize_request("AMD今天为什么涨？")
+    plan = StructuredLLMPlanner(llm, catalog).plan(request, route(request))
+    assert plan.tasks[0].capability == "market.explain_move"
+    assert not llm.calls
 
 
 def test_catalog_exposes_only_requested_packs():
@@ -63,6 +89,56 @@ def test_registry_blocks_unconfirmed_mutations():
     result = registry.execute(PlanTask("write", "state.mutate", {"operation": "add", "payload": {}}), _context())
     assert not result.ok
     assert "confirmation" in result.errors[0]
+
+
+def test_market_performance_adapter_returns_window_and_benchmark_evidence():
+    class Prices:
+        def get_prices(self, ticker, start, end):
+            base = 100.0
+            slope = 1.0 if ticker == "AMD" else 0.2
+            start_day = date(2026, 7, 1)
+            return [SimpleNamespace(time=(start_day + timedelta(days=index)).isoformat(), close=base + slope * index, volume=1_000_000 + index * 10_000) for index in range(35)]
+
+    catalog = default_catalog()
+    registry = CapabilityRegistry(catalog)
+    register_market_capabilities(registry, price_source_factory=Prices, move_provider=lambda ticker: None)
+    result = registry.execute(PlanTask("performance", "market.performance", {"ticker": "AMD"}), _context())
+    assert result.ok
+    assert result.metrics["returns"]["5d"] is not None
+    assert result.metrics["relative_returns"]["SMH"]["5d"] is not None
+    assert {item.metadata["evidence_scope"] for item in result.evidence} >= {"price", "returns", "volume", "benchmark"}
+
+
+def test_market_move_adapter_splits_facts_and_causal_confidence():
+    anomaly = SimpleNamespace(
+        date="2026-09-08",
+        price=508.71,
+        price_change_pct=0.0652,
+        volume_today=14_700_000,
+        volume_avg_30d=22_900_000,
+        volume_ratio=0.642,
+        sector_etf="SMH",
+        sector_return_1d=0.02,
+        relative_1d_pp=0.0452,
+        contrarian=False,
+        reasons=[
+            SimpleNamespace(text="公司发布直接利好", confidence="高", note="权威媒体同日报道"),
+            SimpleNamespace(text="期权市场波动", confidence="低", note="缺少直接证据"),
+        ],
+        sources=[{"title": "Same-day report", "url": "https://example.test/report"}],
+        next_steps=["观察 522 美元附近"],
+        filtered_count=2,
+    )
+    catalog = default_catalog()
+    registry = CapabilityRegistry(catalog)
+    register_market_capabilities(registry, price_source_factory=lambda: None, move_provider=lambda ticker: anomaly)
+    result = registry.execute(PlanTask("move", "market.explain_move", {"ticker": "AMD"}), _context())
+    scopes = [item.metadata["evidence_scope"] for item in result.evidence]
+    assert scopes[:3] == ["price", "volume", "benchmark"]
+    assert result.metrics["confirmed_driver_count"] == 1
+    assert result.findings[0]["confirmed"] is True
+    assert result.findings[1]["confirmed"] is False
+    assert next(item for item in result.evidence if item.metadata.get("claim_role") == "candidate_driver").confidence == 0.3
 
 
 def test_executor_collects_structured_evidence():
@@ -261,6 +337,7 @@ def test_llm_synthesizer_requires_evidence_ids_in_its_prompt_contract():
     payload = json.loads(llm.calls[0][1]["content"])
     assert "3—5 个短段落" in system
     assert payload["response_style"] == "brief"
+    assert payload["response_intent"] == "stock_research"
 
 
 def test_llm_synthesizer_only_requests_detailed_style_when_user_asks_for_it():
@@ -272,6 +349,20 @@ def test_llm_synthesizer_only_requests_detailed_style_when_user_asks_for_it():
     synthesizer.synthesize(request, plan, [], evidence)
     payload = json.loads(llm.calls[0][1]["content"])
     assert payload["response_style"] == "detailed"
+
+
+@pytest.mark.parametrize(
+    ("query", "intent"),
+    [("AMD最近表现如何", "recent_performance"), ("AMD今天是不是涨了，为什么？", "move_explanation")],
+)
+def test_llm_synthesizer_sets_market_response_intent(query, intent):
+    llm = ScriptedLLM([LLMResponse(text="有证据的回答。[E1]")])
+    synthesizer = LLMEvidenceSynthesizer(llm)
+    request = normalize_request(query)
+    evidence = [EvidenceItem("E1", "AMD", "支持结论")]
+    synthesizer.synthesize(request, ExecutionPlan(query, RouteKind.RESEARCH), [], evidence)
+    payload = json.loads(llm.calls[0][1]["content"])
+    assert payload["response_intent"] == intent
 
 
 def test_llm_synthesizer_normalizes_valid_result_paths_to_evidence_ids():
@@ -356,7 +447,10 @@ def test_verifier_rejects_an_invented_number_even_with_a_valid_citation():
 
 
 def test_verifier_grounds_result_metrics_and_scaled_evidence_values():
-    evidence = [EvidenceItem("evidence-999999", "NVDA", "Insider net transaction value was -349029376.")]
+    evidence = [
+        EvidenceItem("evidence-999999", "NVDA", "Insider net transaction value was -349029376."),
+        EvidenceItem("evidence-metrics", "NVDA", "Score 87/100 and completeness 0.857."),
+    ]
     result = ToolEnvelope(
         "research.stock",
         ResultStatus.COMPLETED,
@@ -365,13 +459,38 @@ def test_verifier_grounds_result_metrics_and_scaled_evidence_values():
         evidence=evidence,
     )
     report = verify_answer(
-        "综合评分 87/100，数据完整性 85.7%，内部人净卖出约 -3.49 亿美元。[evidence-999999]",
+        "综合评分 87/100，数据完整性 85.7%。[evidence-metrics] 内部人净卖出约 -3.49 亿美元。[evidence-999999]",
         evidence,
         answer_mode=AnswerMode.RESEARCH_GROUNDED,
         results=[result],
     )
     assert report.ok
     assert not report.ungrounded_numbers
+
+
+def test_verifier_requires_nearby_citation_to_support_nearby_number():
+    evidence = [
+        EvidenceItem("E-REVENUE", "NVDA", "Revenue growth was 10%."),
+        EvidenceItem("E-MARGIN", "NVDA", "Gross margin was 20%."),
+    ]
+    report = verify_answer(
+        "NVDA 收入增长 20%。[E-REVENUE]",
+        evidence,
+        answer_mode=AnswerMode.RESEARCH_GROUNDED,
+    )
+    assert not report.ok
+    assert any("邻近数字" in warning for warning in report.warnings)
+
+
+def test_verifier_rejects_candidate_driver_written_as_confirmed_cause():
+    evidence = [EvidenceItem("C1", "AMD", "低置信度候选解释：期权市场波动。", metadata={"claim_role": "candidate_driver"})]
+    report = verify_answer(
+        "AMD 上涨的主要原因是期权市场波动。[C1]",
+        evidence,
+        answer_mode=AnswerMode.RESEARCH_GROUNDED,
+    )
+    assert not report.ok
+    assert any("候选归因" in warning for warning in report.warnings)
 
 
 def test_verifier_does_not_treat_digits_in_opaque_ids_as_observations():

@@ -8,6 +8,9 @@ import re
 from v2.agent_v2.models import AnswerMode, EvidenceItem, ToolEnvelope, VerificationReport
 
 _CITATION = re.compile(r"\[([A-Za-z0-9_.:-]+)\]")
+_SENTENCE = re.compile(r"[^。！？!?\n]+(?:[。！？!?]+|$)(?:\s*\[[A-Za-z0-9_.:-]+\])*")
+_DIRECT_CAUSE = re.compile(r"主要原因|直接原因|直接驱动|由.{0,20}推动|因为|催化剂是|归因于")
+_HEDGED_CAUSE = re.compile(r"可能|或许|候选|低置信|中置信|尚未确认|无法确认|不能确认")
 
 
 def verify_answer(
@@ -58,6 +61,7 @@ def verify_answer(
             )
             observations = f"{evidence_observations}\n{result_observations}"
             ungrounded = tuple(grounding.check(answer_without_citations, observations).ungrounded)
+            warnings.extend(_citation_integrity_warnings(answer or "", evidence, results or [], grounding))
     return VerificationReport(
         ok=not unknown and not warnings and not ungrounded,
         unknown_citations=unknown,
@@ -80,3 +84,41 @@ def _without_identifiers(value):
     if isinstance(value, tuple):
         return tuple(_without_identifiers(item) for item in value)
     return value
+
+
+def _citation_integrity_warnings(answer: str, evidence: list[EvidenceItem], results: list[ToolEnvelope], grounding) -> list[str]:
+    """Require nearby citations to support nearby figures and causal certainty."""
+
+    known = {item.id: item for item in evidence}
+    warnings: list[str] = []
+    market_answer = any(result.capability.startswith("market.") for result in results)
+    for raw_sentence in _SENTENCE.findall(answer):
+        sentence = raw_sentence.strip()
+        if not sentence:
+            continue
+        cited_ids = [value for value in _CITATION.findall(sentence) if value in known]
+        plain = _CITATION.sub("", sentence)
+        if cited_ids:
+            cited_items = [known[value] for value in cited_ids]
+            cited_observations = "\n".join(
+                " ".join(
+                    value
+                    for value in (
+                        item.claim,
+                        str(item.value) if item.value is not None else "",
+                        json.dumps(item.metadata, ensure_ascii=False, default=str),
+                    )
+                    if value
+                )
+                for item in cited_items
+            )
+            local = grounding.check(plain, cited_observations)
+            if local.ungrounded:
+                warnings.append("引用未支持邻近数字：" + ", ".join(local.ungrounded[:4]))
+            if _DIRECT_CAUSE.search(plain) and not _HEDGED_CAUSE.search(plain):
+                weak = [item for item in cited_items if item.metadata.get("claim_role") == "candidate_driver"]
+                if weak:
+                    warnings.append("候选归因被表述为已确认原因：" + ", ".join(item.id for item in weak[:2]))
+        elif market_answer and grounding.check(plain, "").total:
+            warnings.append("行情事实缺少邻近引用")
+    return list(dict.fromkeys(warnings))
