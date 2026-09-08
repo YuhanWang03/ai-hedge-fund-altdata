@@ -203,6 +203,7 @@ class VerificationReport:
     ok: bool = True
     unknown_citations: tuple[str, ...] = ()
     ungrounded_numbers: tuple[str, ...] = ()
+    traced_numbers: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
 
 

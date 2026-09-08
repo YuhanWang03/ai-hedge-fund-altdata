@@ -487,11 +487,16 @@ def test_llm_synthesizer_normalizes_valid_result_paths_to_evidence_ids():
     assert "[evidence-research-limitations-1]" in answer
 
 
-def test_llm_synthesizer_keeps_invalid_result_paths_for_verifier_to_reject():
-    llm = ScriptedLLM([LLMResponse(text="虚构评分为 96。[results.metrics.scores.invented]")])
+def test_llm_synthesizer_repairs_an_invalid_result_path_instead_of_shipping_it():
+    llm = ScriptedLLM(
+        [
+            LLMResponse(text="虚构评分为 96。[results.metrics.scores.invented]"),
+            LLMResponse(text="基本面评分为 96。[evidence-research-metrics-1]"),
+        ]
+    )
     synthesizer = LLMEvidenceSynthesizer(llm)
     request = normalize_request("分析 NVDA")
-    plan = ExecutionPlan("分析 NVDA", RouteKind.RESEARCH)
+    plan = ExecutionPlan("分析 NVDA", RouteKind.RESEARCH, answer_mode=AnswerMode.RESEARCH_GROUNDED)
     result = ToolEnvelope(
         "research.stock",
         ResultStatus.COMPLETED,
@@ -508,10 +513,10 @@ def test_llm_synthesizer_keeps_invalid_result_paths_for_verifier_to_reject():
         )
     ]
     answer = synthesizer.synthesize(request, plan, [result], evidence)
-    assert "[results.metrics.scores.invented]" in answer
-    report = verify_answer(answer, evidence, answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result])
-    assert not report.ok
-    assert "results.metrics.scores.invented" in report.unknown_citations
+    assert answer == "基本面评分为 96。[evidence-research-metrics-1]"
+    assert len(llm.calls) == 2
+    assert "results.metrics.scores.invented" in llm.calls[1][3]["content"]
+    assert verify_answer(answer, evidence, answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result]).ok
 
 
 def test_verifier_rejects_an_invented_number_even_with_a_valid_citation():
@@ -799,3 +804,78 @@ def test_web_fallback_requires_runtime_and_per_request_opt_in():
     assert enabled.answer_mode == AnswerMode.WEB_GROUNDED
     assert enabled.plan.tasks[-1].capability == "web.research"
     assert "[WEB1]" in enabled.answer
+
+
+def test_router_requires_a_user_state_object_before_treating_english_verbs_as_commands():
+    assert route(normalize_request("AVGO 的 total addressable market 有多大")).kind != RouteKind.COMMAND
+    assert route(normalize_request("NVDA 加入标普指数会怎样")).kind != RouteKind.COMMAND
+    assert route(normalize_request("add NVDA to my watchlist")).kind == RouteKind.COMMAND
+    assert route(normalize_request("set an alert for AAPL")).kind == RouteKind.COMMAND
+    assert route(normalize_request("删除 TSLA 提醒")).kind == RouteKind.COMMAND
+
+
+@pytest.mark.parametrize(
+    ("query", "entities"),
+    [
+        ("分析 nvda 的估值", ("NVDA",)),
+        ("分析英伟达的估值", ("NVDA",)),
+        ("比较阿里巴巴和拼多多", ("BABA", "PDD")),
+        ("V 最近表现怎么样", ("V",)),
+        ("BRK.B 估值高吗", ("BRK.B",)),
+        ("what is the cost now", ()),
+        ("t+1 结算规则", ()),
+        ("NVDA 的 EPS 和 ROE", ("NVDA",)),
+    ],
+)
+def test_entities_resolve_aliases_and_known_symbols(query, entities):
+    assert normalize_request(query).entities == entities
+
+
+def test_llm_planner_trims_an_over_budget_plan_instead_of_failing():
+    rows = [
+        {"id": "t1", "capability": "research.stock", "arguments": {"ticker": "NVDA", "focus": "valuation"}},
+        {"id": "t2", "capability": "research.stock", "arguments": {"ticker": "NVDA", "focus": "earnings"}},
+        {"id": "t3", "capability": "research.stock", "arguments": {"ticker": "NVDA", "focus": "risk"}},
+        {"id": "t4", "capability": "market.performance", "arguments": {"ticker": "NVDA"}, "required": False},
+        {"id": "t5", "capability": "market.explain_move", "arguments": {"ticker": "NVDA"}, "depends_on": ["t4"]},
+        {"id": "t6", "capability": "research.changes", "arguments": {"ticker": "NVDA"}},
+    ]
+    llm = ScriptedLLM([LLMResponse(text=json.dumps({"objective": "x", "tasks": rows}))])
+    catalog = default_catalog()
+    request = normalize_request("深入分析 NVDA 的估值、财报和风险")
+    plan = StructuredLLMPlanner(llm, catalog).plan(request, route(request))
+    prompt = json.loads(llm.calls[0][1]["content"])
+    assert prompt["maximum_tasks"] == 5
+    assert plan.budget == BudgetClass.STANDARD
+    assert [task.id for task in plan.tasks] == ["t1", "t2", "t3", "t6"]
+    assert any("trimmed" in value for value in plan.assumptions)
+    ExecutionEngine(CapabilityRegistry(catalog)).run(plan, ExecutionContext("run", request, plan.budget))
+
+
+def _research_fixture():
+    request = normalize_request("分析 NVDA 的增长")
+    plan = ExecutionPlan("分析 NVDA 的增长", RouteKind.RESEARCH, answer_mode=AnswerMode.RESEARCH_GROUNDED)
+    evidence = [EvidenceItem("E1", "NVDA", "NVDA revenue growth was 10%.")]
+    results = [ToolEnvelope("research.stock", ResultStatus.COMPLETED, subject="NVDA", summary="NVDA revenue growth was 10%.", evidence=evidence)]
+    return request, plan, results, evidence
+
+
+def test_llm_synthesizer_repairs_an_ungrounded_draft_once():
+    llm = ScriptedLLM([LLMResponse(text="NVDA 收入增长 20%。[E1]"), LLMResponse(text="NVDA 收入增长 10%。[E1]")])
+    request, plan, results, evidence = _research_fixture()
+    answer = LLMEvidenceSynthesizer(llm).synthesize(request, plan, results, evidence)
+    assert answer == "NVDA 收入增长 10%。[E1]"
+    assert len(llm.calls) == 2
+    repair = llm.calls[1]
+    assert repair[2] == {"role": "assistant", "content": "NVDA 收入增长 20%。[E1]"}
+    assert "20" in repair[3]["content"]
+    assert "完整回答" in repair[3]["content"]
+
+
+def test_llm_synthesizer_falls_back_to_deterministic_prose_when_repair_still_fails():
+    llm = ScriptedLLM([LLMResponse(text="NVDA 收入增长 20%。[E1]"), LLMResponse(text="NVDA 收入增长 25%。[E1]")])
+    request, plan, results, evidence = _research_fixture()
+    answer = LLMEvidenceSynthesizer(llm).synthesize(request, plan, results, evidence)
+    assert "20%" not in answer and "25%" not in answer
+    assert "[E1]" in answer
+    assert verify_answer(answer, evidence, answer_mode=plan.answer_mode, results=results).ok

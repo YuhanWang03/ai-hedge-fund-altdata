@@ -29,6 +29,7 @@ def verify_answer(
     unknown = tuple(sorted(cited - known))
     warnings: list[str] = []
     ungrounded: tuple[str, ...] = ()
+    traced: tuple[str, ...] = ()
     if answer_mode not in {AnswerMode.GENERAL_KNOWLEDGE, AnswerMode.INSUFFICIENT_EVIDENCE}:
         if evidence and not cited:
             warnings.append("answer contains evidence but cites none of it")
@@ -64,12 +65,15 @@ def verify_answer(
                 default=str,
             )
             observations = f"{evidence_observations}\n{result_observations}"
-            ungrounded = tuple(grounding.check(answer_without_citations, observations).ungrounded)
+            report = grounding.check(answer_without_citations, observations)
+            ungrounded = tuple(report.ungrounded)
+            traced = tuple(dict.fromkeys(report.traced))
             warnings.extend(_citation_integrity_warnings(answer or "", evidence, results or [], grounding))
     return VerificationReport(
         ok=not unknown and not warnings and not ungrounded,
         unknown_citations=unknown,
         ungrounded_numbers=ungrounded,
+        traced_numbers=traced,
         warnings=tuple(warnings),
     )
 

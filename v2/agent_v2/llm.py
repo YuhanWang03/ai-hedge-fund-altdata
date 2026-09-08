@@ -10,6 +10,7 @@ from typing import Any
 from v2.agent import presentation
 from v2.agent.llm import LLMClient, LLMError
 from v2.agent_v2.catalog import CapabilityCatalog
+from v2.agent_v2.execution import task_limit
 from v2.agent_v2.models import (
     AnswerMode,
     BudgetClass,
@@ -20,6 +21,7 @@ from v2.agent_v2.models import (
     RouteDecision,
     RouteKind,
     ToolEnvelope,
+    VerificationReport,
 )
 from v2.agent_v2.planning import RulePlanner
 from v2.agent_v2.synthesis import EvidenceSummarySynthesizer, synthesize_market_answer
@@ -92,6 +94,10 @@ class StructuredLLMPlanner:
             return deterministic
         if route.kind not in {RouteKind.RESEARCH, RouteKind.LAB, RouteKind.ASYNC}:
             return deterministic
+        budget = _planner_budget(request, route)
+        limit = min(self.max_tasks, task_limit(budget))
+        if route.kind in {RouteKind.LAB, RouteKind.ASYNC}:
+            limit = min(limit, 2)
         allowed = self.catalog.specs(route.packs)
         capabilities = [
             {
@@ -111,7 +117,7 @@ class StructuredLLMPlanner:
             "query": request.text,
             "entities": list(request.entities),
             "capabilities": capabilities,
-            "maximum_tasks": self.max_tasks,
+            "maximum_tasks": limit,
         }
         try:
             response = self.llm.complete(
@@ -125,17 +131,21 @@ class StructuredLLMPlanner:
             tasks = self._tasks(raw.get("tasks"), {spec.name for spec in allowed})
             if not tasks:
                 raise ValueError("planner returned no executable tasks")
-            if route.kind in {RouteKind.LAB, RouteKind.ASYNC} and len(tasks) > 2:
-                raise ValueError("Lab plan exceeds two tasks")
+            assumptions = [str(value) for value in raw.get("assumptions", []) if value]
+            trimmed = _trim_to_budget(tasks, limit)
+            if len(trimmed) < len(tasks):
+                dropped = ", ".join(task.capability for task in tasks if task not in trimmed)
+                assumptions.append(f"Planner trimmed {len(tasks) - len(trimmed)} task(s) to the {budget.value} budget of {limit}: {dropped}")
+                tasks = trimmed
             answer_mode = AnswerMode.RESEARCH_GROUNDED if route.kind == RouteKind.RESEARCH else AnswerMode.TOOL_GROUNDED
             return ExecutionPlan(
                 objective=str(raw.get("objective") or request.text),
                 route=route.kind,
                 tasks=tasks,
-                budget=_planner_budget(request, route),
+                budget=budget,
                 answer_mode=answer_mode,
                 web_fallback_allowed=request.allow_web and route.kind == RouteKind.RESEARCH,
-                assumptions=tuple(str(value) for value in raw.get("assumptions", []) if value),
+                assumptions=tuple(assumptions),
                 stop_conditions=("required evidence acquired", "budget exhausted", "providers unavailable"),
             )
         except (LLMError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
@@ -143,7 +153,9 @@ class StructuredLLMPlanner:
             return replace(deterministic, assumptions=(*deterministic.assumptions, note))
 
     def _tasks(self, raw: Any, allowed: set[str]) -> tuple[PlanTask, ...]:
-        if not isinstance(raw, list) or len(raw) > self.max_tasks:
+        # Over-long lists are trimmed to the budget after parsing; only an
+        # absurd list is treated as a malformed plan.
+        if not isinstance(raw, list) or len(raw) > 4 * self.max_tasks:
             raise ValueError("invalid task list")
         tasks: list[PlanTask] = []
         seen: set[str] = set()
@@ -174,6 +186,21 @@ class StructuredLLMPlanner:
         if any(set(task.depends_on) - seen for task in tasks):
             raise ValueError("unknown task dependency")
         return tuple(tasks)
+
+
+def _trim_to_budget(tasks: tuple[PlanTask, ...], limit: int) -> tuple[PlanTask, ...]:
+    """Drop optional tasks from the end first, then required ones, then dangling dependents."""
+
+    kept = list(tasks)
+    while len(kept) > limit:
+        optional = [task for task in kept if not task.required]
+        kept.remove(optional[-1] if optional else kept[-1])
+    while True:
+        ids = {task.id for task in kept}
+        dangling = [task for task in kept if set(task.depends_on) - ids]
+        if not dangling:
+            return tuple(kept)
+        kept = [task for task in kept if task not in dangling]
 
 
 class LLMEvidenceSynthesizer:
@@ -219,28 +246,46 @@ results 中的评分或限制如需引用，使用 evidence 中 citation_kind �
 
 每个引用只支持它紧邻的那句话。不要用一条聚合引用同时支撑价格、成交量、新闻和期权等不同事实。"""
             payload = self._payload(request.text, plan, results, evidence)
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": payload},
+        ]
         try:
-            response = self.llm.complete(
-                [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": payload},
-                ],
-                None,
-            )
-            answer = presentation.strip_deliberation(response.text)
-            if not answer:
-                raise ValueError("synthesizer returned an empty answer")
-            answer = _normalize_result_citations(answer, results, evidence)
-            market_fallback = synthesize_market_answer(results, evidence)
-            if market_fallback is not None:
-                from v2.agent_v2.verification import verify_answer
+            answer = self._draft(messages, results, evidence)
+            if plan.answer_mode == AnswerMode.GENERAL_KNOWLEDGE:
+                return answer
+            from v2.agent_v2.verification import verify_answer
 
-                report = verify_answer(answer, evidence, answer_mode=plan.answer_mode, results=results)
-                if not report.ok:
-                    return market_fallback
-            return answer
-        except (LLMError, ValueError, TypeError) as exc:
-            return self.fallback.synthesize(request, plan, results, evidence)
+            report = verify_answer(answer, evidence, answer_mode=plan.answer_mode, results=results)
+            if report.ok:
+                return answer
+            # One repair round: the verifier names what failed and what must
+            # stay; a second failure falls back to deterministic prose rather
+            # than shipping flagged numbers to the user.
+            repair = self._draft(
+                [
+                    *messages,
+                    {"role": "assistant", "content": answer},
+                    {"role": "user", "content": repair_instruction(report)},
+                ],
+                results,
+                evidence,
+            )
+            if verify_answer(repair, evidence, answer_mode=plan.answer_mode, results=results).ok:
+                return repair
+        except (LLMError, ValueError, TypeError):
+            pass
+        market_fallback = synthesize_market_answer(results, evidence)
+        if market_fallback is not None:
+            return market_fallback
+        return self.fallback.synthesize(request, plan, results, evidence)
+
+    def _draft(self, messages: list[dict[str, str]], results: list[ToolEnvelope], evidence: list[EvidenceItem]) -> str:
+        response = self.llm.complete(messages, None)
+        answer = presentation.strip_deliberation(response.text)
+        if not answer:
+            raise ValueError("synthesizer returned an empty answer")
+        return _normalize_result_citations(answer, results, evidence)
 
     def _payload(self, query: str, plan: ExecutionPlan, results: list[ToolEnvelope], evidence) -> str:
         data = {
@@ -320,6 +365,25 @@ results 中的评分或限制如需引用，使用 evidence 中 citation_kind �
             }
             encoded = json.dumps(data, ensure_ascii=False, default=str)
         return encoded
+
+
+def repair_instruction(report: VerificationReport) -> str:
+    """Tell the model exactly what failed and what must survive the rewrite."""
+
+    lines = ["校验未通过，请重写完整回答。"]
+    if report.ungrounded_numbers:
+        lines.append(
+            "以下数字在本轮证据中找不到：" + "、".join(report.ungrounded_numbers[:12]) + "。"
+            "只能使用证据中出现的数字；若是你自己的计算，请把算式完整写出（例如 22.4% + 18.2% = 40.6%）；无法支持的数字直接删掉，宁可省略也不要编造。"
+        )
+    if report.unknown_citations:
+        lines.append("以下引用 id 不存在：" + "、".join(report.unknown_citations[:12]) + "。方括号内只能原样使用 evidence 数组中真实存在的 id。")
+    for warning in report.warnings[:6]:
+        lines.append(f"其他问题：{warning}。")
+    if report.traced_numbers:
+        lines.append("以下数字已通过校验，必须原样保留：" + "、".join(report.traced_numbers)[:400] + "。")
+    lines.append("请重新输出完整回答（所有段落），你的回复将完整替换初稿，是用户唯一会看到的文本。")
+    return "\n".join(lines)
 
 
 def _normalize_result_citations(

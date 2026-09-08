@@ -4,32 +4,19 @@ from __future__ import annotations
 
 import re
 
+from v2.agent_v2.entities import extract_entities
 from v2.agent_v2.models import NormalizedRequest, RouteDecision, RouteKind
 
-_TICKER = re.compile(r"(?<![A-Za-z0-9])[A-Z]{2,8}(?![A-Za-z0-9])")
-_NOT_TICKERS = frozenset(
-    {
-        "AI",
-        "API",
-        "CEO",
-        "CFO",
-        "CPI",
-        "ETF",
-        "EPS",
-        "FD",
-        "FOMC",
-        "GDP",
-        "LLM",
-        "NFP",
-        "PCE",
-        "PPI",
-        "ROE",
-        "SEC",
-        "USD",
-        "VS",
-    }
+# A mutation needs both a verb and a user-state object: bare English verbs
+# such as ``add`` used to match inside ``addressable`` and ``padded``.
+_COMMAND = re.compile(
+    r"添加|移除|删除|加入.{0,12}(?:关注|自选|提醒|列表)"
+    r"|设置.{0,8}提醒|取消.{0,8}提醒"
+    r"|\b(?:add|remove|delete)\b.{0,40}\b(?:watchlist|alerts?)\b"
+    r"|\b(?:watchlist|alerts?)\b.{0,40}\b(?:add|remove|delete)\b"
+    r"|\b(?:set|create|cancel)\s+(?:an?\s+|the\s+)?alerts?\b",
+    re.I,
 )
-_COMMAND = re.compile(r"添加|加入|移除|删除|设置.{0,8}提醒|取消.{0,8}提醒|add|remove|alert", re.I)
 _LAB = re.compile(r"筛选|选股|回测|参数扫描|事件研究|异常收益|委员会|大师投票|screen|backtest|event study", re.I)
 _DEEP = re.compile(r"完整报告|深度研究|全部模块|批量研究|全量研究", re.I)
 _RESEARCH = re.compile(
@@ -37,14 +24,6 @@ _RESEARCH = re.compile(
     re.I,
 )
 _KNOWLEDGE = re.compile(r"^(什么是|如何理解|怎么理解|解释一下|区别|原理|定义|为什么通常)", re.I)
-
-
-def _entities(text: str) -> tuple[str, ...]:
-    seen: list[str] = []
-    for ticker in _TICKER.findall(text or ""):
-        if ticker not in _NOT_TICKERS and ticker not in seen:
-            seen.append(ticker)
-    return tuple(seen)
 
 
 def normalize_request(
@@ -65,7 +44,7 @@ def normalize_request(
         original_text=original,
         text=cleaned,
         session_id=session_id,
-        entities=_entities(cleaned),
+        entities=extract_entities(cleaned),
         forced_agent=forced,
         allow_web=allow_web,
         metadata=dict(metadata or {}),

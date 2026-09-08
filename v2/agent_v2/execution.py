@@ -32,6 +32,11 @@ _TASK_LIMITS = {
 }
 
 
+def task_limit(budget: BudgetClass) -> int:
+    """Maximum number of tasks the executor accepts for one budget class."""
+    return _TASK_LIMITS[budget]
+
+
 class PlanValidationError(ValueError):
     """The planned task graph cannot be executed safely."""
 
