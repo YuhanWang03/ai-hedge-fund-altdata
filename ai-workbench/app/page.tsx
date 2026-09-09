@@ -763,12 +763,12 @@ function secSourceUrl(value: unknown) {
   try { const url = new URL(value); return ['https:', 'http:'].includes(url.protocol) ? url.href : null } catch { return null }
 }
 function SecSourceTitle({ row, title }: { row: Record<string,unknown>; title: string }) {
-  const url = secSourceUrl(row.source_url);
+  const url = secSourceUrl(row.section_url) || secSourceUrl(row.document_url) || secSourceUrl(row.source_url);
   return <b>{url ? <a className="sec-source-title" href={url} target="_blank" rel="noopener noreferrer" aria-label={`${title}：打开原始申报文件（新标签页）`}>{title} <span aria-hidden="true">↗</span></a> : title}</b>;
 }
 function SecSourceFooter({ row }: { row: Record<string,unknown> }) {
-  const url = secSourceUrl(row.source_url);
-  return <footer className="sec-source-footer"><span>{[row.filing_type, row.filing_date].filter(Boolean).map(String).join(' · ')}</span>{url ? <a href={url} target="_blank" rel="noopener noreferrer">打开原始文件 ↗</a> : <span>暂无出处链接</span>}</footer>;
+  const section = secSourceUrl(row.section_url); const document = secSourceUrl(row.document_url); const index = secSourceUrl(row.index_url) || secSourceUrl(row.source_url);
+  return <footer className="sec-source-footer"><span>{[row.filing_type, row.filing_date].filter(Boolean).map(String).join(' · ')}</span>{section && <a href={section} target="_blank" rel="noopener noreferrer">定位相关章节 ↗</a>}{document && <a href={document} target="_blank" rel="noopener noreferrer">报告正文 ↗</a>}{index && index !== document && <a href={index} target="_blank" rel="noopener noreferrer">申报目录 ↗</a>}{!document && <span>{index ? '正文链接暂未解析' : '暂无出处链接'}</span>}</footer>;
 }
 function SecDepthPanel({ result }: { result: StockResearchResult }) {
   const details = result.modules.sec.details as Record<string,unknown>; const findings = (details.sec_findings || []) as Record<string,unknown>[]; const changes = (details.risk_factor_changes || []) as Record<string,unknown>[];
