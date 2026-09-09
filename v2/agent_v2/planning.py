@@ -54,6 +54,8 @@ _RANK_LOW = re.compile(r"跌|亏|差|弱|回撤|惨", re.I)
 _RANK_HIGH = re.compile(r"涨|赚|好|强|盈利", re.I)
 #: Wording that turns a portfolio ranking into a per-holding market question:
 #: a time frame the card cannot answer, or a request for the reason.
+#: "Why" wording; with a position frame it asks about the loss since purchase.
+_WHY = re.compile(r"为什么|为啥|为何|什么原因|原因|怎么会|怎么回事|何故", re.I)
 _RECENT_OR_WHY = re.compile(r"今天|今日|当日|盘中|日内|最近|这周|本周|上周|这个月|本月|为什么|原因|怎么回事|什么事|何故", re.I)
 #: A list question needs an evaluative word before "which one" means "look at each".
 _LIST_EVALUATE = re.compile(r"最|值得|表现|怎么样|如何|强|弱|好|差|狠|危险", re.I)
@@ -235,6 +237,9 @@ class RulePlanner:
             return ExecutionPlan(objective=text, route=route.kind, answer_mode=AnswerMode.GENERAL_KNOWLEDGE, budget=BudgetClass.DIRECT, direct_answer=_HELP_ANSWER)
 
         tickers = tuple(ticker for ticker in entities if not _ARK_ETF.fullmatch(ticker))
+        frame = request.metadata.get("context_frame")
+        if len(tickers) == 1 and isinstance(frame, dict) and self._asks_about_drawdown(text, frame):
+            return self._drawdown(text, tickers[0], frame, route, request)
         if len(tickers) == 1 and _MOVE_EXPLANATION.search(text):
             tasks = [PlanTask("market-move", "market.explain_move", {"ticker": tickers[0]}, purpose="separate confirmed market facts from candidate move drivers")]
             for index, focus in enumerate(_focuses(text), 1):
@@ -263,6 +268,43 @@ class RulePlanner:
         )
 
     # -- pieces ---------------------------------------------------------------
+
+    @staticmethod
+    def _asks_about_drawdown(text: str, frame: dict) -> bool:
+        """A "why" follow-up about a position with an unrealized loss, not a question about a rise."""
+
+        value = frame.get("value")
+        if frame.get("kind") != "position" or frame.get("field") != "pl_pct" or not isinstance(value, (int, float)) or value >= 0:
+            return False
+        return bool(_WHY.search(text)) and not _RANK_HIGH.search(text)
+
+    @staticmethod
+    def _drawdown(text: str, ticker: str, frame: dict, route: RouteDecision, request: NormalizedRequest) -> ExecutionPlan:
+        """Explain a loss since purchase: cost basis, where in time the decline sits, events over the period; today's move only as an aside."""
+
+        value_text = frame.get("value_text") or frame.get("value")
+        entry = frame.get("avg_entry_price")
+        entry_text = f"（成本价 ${float(entry):.2f}）" if isinstance(entry, (int, float)) else ""
+        note = (
+            f"context_frame: 用户追问的是 {ticker} {frame.get('label') or '买入以来的浮动盈亏'} {value_text}{entry_text}，不是今日涨跌。"
+            "先回答这段跌幅落在哪个区间（对照 5 日、1 月等回报窗口）、期间有哪些可查的财报、公告或新闻；"
+            "今日盘中涨跌只作一句旁注，并点明它与买入以来的跌幅是不同区间；找不到区间归因就明说，不得用当日归因冒充。"
+        )
+        tasks = (
+            PlanTask("account-portfolio", "account.portfolio", purpose="restate the position's cost basis and unrealized P/L"),
+            PlanTask("market-performance", "market.performance", {"ticker": ticker}, purpose="locate the decline across return windows"),
+            PlanTask("research-catalysts", "research.stock", {"ticker": ticker, "focus": "catalysts"}, purpose="earnings, filings and news over the holding period"),
+            PlanTask("market-move", "market.explain_move", {"ticker": ticker}, purpose="today's move, as an aside"),
+        )
+        return ExecutionPlan(
+            objective=text,
+            route=route.kind,
+            tasks=tasks,
+            answer_mode=AnswerMode.RESEARCH_GROUNDED,
+            budget=BudgetClass.STANDARD,
+            web_fallback_allowed=request.allow_web,
+            assumptions=(note,),
+        )
 
     @staticmethod
     def _lab(text: str, entities: tuple[str, ...], route: RouteDecision) -> ExecutionPlan:

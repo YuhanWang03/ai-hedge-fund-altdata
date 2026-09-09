@@ -690,28 +690,67 @@ def test_short_term_session_resolves_a_follow_up_before_routing():
     assert second.to_dict()["request"]["metadata"]["antecedent"] == "NVDA"
 
 
-def test_short_term_session_carries_the_stock_an_answer_named_into_a_subjectless_follow_up():
+def _framed_registry() -> CapabilityRegistry:
     from v2.agent_v2.adapters.legacy import _wrap
 
-    catalog = default_catalog()
-    registry = CapabilityRegistry(catalog)
+    registry = CapabilityRegistry(default_catalog())
     registry.register("account.portfolio", lambda a, c: _wrap("account.portfolio", "portfolio", _PORTFOLIO_CARD))
-    registry.register("market.explain_move", lambda a, c: ToolEnvelope("market.explain_move", ResultStatus.COMPLETED, subject=a["ticker"], summary=f"{a['ticker']} 异动", evidence=[EvidenceItem(f"M-{a['ticker']}", a["ticker"], f"{a['ticker']} 异动")]))
+
+    def performance(a, c):
+        ticker = a["ticker"]
+        price = EvidenceItem(f"P-{ticker}", ticker, f"{ticker} 截至 2026-09-09 收盘价为 264.00 美元，单日涨跌幅为 +0.94%。", metadata={"evidence_scope": "price"})
+        windows = EvidenceItem(f"W-{ticker}", ticker, f"{ticker} 区间回报：1d +0.94%，5d +12.32%，1m -1.53%。", metadata={"evidence_scope": "returns"})
+        return ToolEnvelope("market.performance", ResultStatus.COMPLETED, subject=ticker, summary=f"{ticker} 近 1 月 -1.53%", metrics={"returns": {"1d": 0.0094, "5d": 0.1232, "1m": -0.0153}}, evidence=[price, windows], metadata={"narrative": f"{ticker} 近 5 日回报 +12.32%，近 1 月回报 -1.53%[W-{ticker}]。"})
+
+    registry.register("market.performance", performance)
+    registry.register("market.explain_move", lambda a, c: ToolEnvelope("market.explain_move", ResultStatus.COMPLETED, subject=a["ticker"], summary=f"{a['ticker']} 异动", metrics={"price_change_pct": 0.0094}, evidence=[EvidenceItem(f"M-{a['ticker']}", a["ticker"], f"{a['ticker']} 今日 +0.94%", metadata={"evidence_scope": "price"})]))
     registry.register("research.stock", lambda a, c: ToolEnvelope("research.stock", ResultStatus.COMPLETED, subject=a["ticker"], summary=f"{a['ticker']} {a['focus']}", evidence=[EvidenceItem(f"R-{a['ticker']}-{a['focus']}", a["ticker"], "研究")]))
+    return registry
+
+
+def test_short_term_session_carries_the_stock_an_answer_named_into_a_subjectless_follow_up():
     memory = ShortTermSession()
-    agent = AgentV2(catalog=catalog, registry=registry, session=memory)
+    agent = AgentV2(catalog=default_catalog(), registry=_framed_registry(), session=memory)
     first = agent.run("我的仓库里哪只跌的最多?", session_id="chat-2")
     assert first.request.entities == () and first.answer.startswith("按买入以来的浮动盈亏排序，最低的是 ARM")
-    second = agent.run("什么原因跌这么多?", session_id="chat-2")
-    assert second.request.text == "ARM 什么原因跌这么多?"
-    assert second.request.metadata["antecedent"] == "ARM" and "按上文补全" in second.request.metadata["resolution_note"]
-    assert [(result.capability, result.subject) for result in second.results] == [("market.explain_move", "ARM")]
     third = agent.run("它财报怎么样", session_id="chat-2")  # the pronoun path now finds the focus too
     assert third.request.text == "ARM财报怎么样" and third.results[0].subject == "ARM"
+    assert third.request.metadata["context_frame"]["ticker"] == "ARM"
     # Questions that name their own scope or stock are left alone.
     for query in ("宏观怎么样", "我的持仓风险怎么样", "NVDA 为什么跌", "把 HPE 加到关注列表"):
         assert not memory.resolve("chat-2", query).rewritten, query
     assert not memory.resolve("chat-fresh", "什么原因跌这么多?").rewritten  # nothing to refer back to
+
+
+def test_a_why_follow_up_after_a_loss_ranking_explains_the_loss_since_purchase_not_today():
+    memory = ShortTermSession()
+    agent = AgentV2(catalog=default_catalog(), registry=_framed_registry(), session=memory)
+    agent.run("我的仓库里哪只跌的最多?", session_id="chat-3")
+    resolution = memory.resolve("chat-3", "什么原因跌这么多?")
+    assert resolution.frame["ticker"] == "ARM" and resolution.frame["field"] == "pl_pct" and resolution.frame["value"] == -32.22
+    second = agent.run("什么原因跌这么多?", session_id="chat-3")
+    assert second.request.text == "ARM 什么原因跌这么多?"
+    assert [(task.capability, task.arguments.get("focus")) for task in second.plan.tasks] == [
+        ("account.portfolio", None),
+        ("market.performance", None),
+        ("research.stock", "catalysts"),
+        ("market.explain_move", None),
+    ]
+    assert second.plan.assumptions[0].startswith("context_frame: 用户追问的是 ARM 买入以来的浮动盈亏 -32.22%（成本价 $389.52）")
+    lines = second.answer.split("\n")
+    assert lines[0].startswith("你问的是 ARM 买入以来的浮动盈亏：-32.22%，成本价 $389.52[legacy-")
+    assert lines[1] == "今日为上涨（+0.94%），与买入以来的跌幅是不同区间[P-ARM]。" or lines[1].startswith("今日为上涨（+0.94%）")
+    assert "组合价值" not in second.answer and "近 1 月回报 -1.53%" in second.answer
+    assert second.verification.ok, second.verification
+    assert second.status == RunStatus.COMPLETED
+    # The frame survives the framed turn, and a question about a rise is not a drawdown question.
+    assert memory.resolve("chat-3", "为什么涨").frame["ticker"] == "ARM"
+    plan = RulePlanner().plan(normalize_request("ARM 为什么涨", metadata={"context_frame": resolution.frame}), route(normalize_request("ARM 为什么涨")))
+    assert [task.capability for task in plan.tasks] == ["market.explain_move"]
+    # The LLM planner leaves the framed plan to the rules.
+    llm = ScriptedLLM([LLMResponse(text="{}")])
+    framed = normalize_request("ARM 什么原因跌这么多?", metadata={"context_frame": resolution.frame})
+    assert len(StructuredLLMPlanner(llm, default_catalog()).plan(framed, route(framed)).tasks) == 4 and llm.calls == []
 
 
 def test_agent_v2_seed_eval_passes_offline():

@@ -90,6 +90,10 @@ class StructuredLLMPlanner:
         capabilities = {task.capability for task in deterministic.tasks}
         if "account.portfolio" in capabilities and portfolio_ranking(request.text) and capabilities <= {"account.portfolio", "account.performance", "market.explain_move", "market.performance"}:
             return deterministic
+        # A follow-up the session framed (a loss since purchase) has a rule
+        # plan built around that frame; the model would plan the bare words.
+        if any(str(note).startswith("context_frame:") for note in deterministic.assumptions):
+            return deterministic
         # Rules own market questions and non-thin lookups; the model gets
         # research and lab routes, plus lookups the rules could not resolve
         # beyond a scope read (the holdout wording the rules never saw).
@@ -354,6 +358,7 @@ class LLMEvidenceSynthesizer:
 方括号内只能原样使用 evidence 数组中真实存在的 id；严禁把 results.*、字段路径、source_id 或占位符当作引用。
 results 中的评分或限制如需引用，使用 evidence 中 citation_kind 为 metrics 或 limitations 的对应条目。
 推断必须标成“推断”；数据缺失必须明确说明。不得把一个主体的数据归给另一个主体。
+如果证据的方向与问题的前提相反（例如问为什么跌，证据显示今日上涨），先点明两者指的是不同区间或口径，再回答用户实际所指的那个区间；不要只否定前提，也不要用当日数据回答关于更长区间的问题。assumptions 中以 context_frame 开头的说明描述了用户追问所指的对象和区间，必须遵循。
 不要把历史回测写成未来收益保证。不要输出未在证据中出现的数字。
 
 严格遵循输入中的 response_style：

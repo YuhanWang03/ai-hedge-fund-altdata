@@ -111,6 +111,8 @@ class AgentV2:
                     "antecedent": resolution.antecedent,
                     "resolution_note": resolution.note,
                 }
+                if resolution.frame:
+                    resolution_metadata["context_frame"] = dict(resolution.frame)
         request = normalize_request(
             resolved_text,
             session_id=session_id,

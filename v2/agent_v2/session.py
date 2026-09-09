@@ -9,6 +9,7 @@ import time
 from v2.agent import session as legacy_session
 from v2.agent_v2.entities import extract_entities
 from v2.agent_v2.models import AgentResult, ExecutionPlan, SessionResolution
+from v2.agent_v2.synthesis import choose_rankable, position_row
 
 #: A follow-up that asks something about *the* stock without naming it: it
 #: opens with the question itself.  "什么原因跌这么多" after "哪只跌得最多"
@@ -31,6 +32,30 @@ def focus_entities(answer: str) -> tuple[str, ...]:
     return extract_entities(first)
 
 
+def position_frame(result: AgentResult, ticker: str) -> dict:
+    """What a turn said about ``ticker`` from a position table: column, label, value, cost basis."""
+
+    found = position_row(result.results, ticker) if ticker else None
+    if found is None:
+        return {}
+    source, row = found
+    choice = choose_rankable(result.request.text, source.metadata.get("rankable"))
+    rules = source.metadata.get("rankable") or []
+    rule = choice[0] if choice else (rules[0] if rules and isinstance(rules[0], dict) else {})
+    key = str(rule.get("field") or "pl_pct")
+    return {
+        "kind": "position",
+        "ticker": ticker,
+        "field": key,
+        "text": str(rule.get("text") or f"{key}_text"),
+        "label": str(rule.get("label") or key),
+        "value": row.get(key),
+        "value_text": row.get(str(rule.get("text") or f"{key}_text")),
+        "avg_entry_price": row.get("avg_entry_price"),
+        "source": source.capability,
+    }
+
+
 class ShortTermSession:
     """Per-session bounded memory; no database writes and no hidden reasoning."""
 
@@ -46,7 +71,18 @@ class ShortTermSession:
         )
         self.ttl_seconds = float(ttl_seconds)
         self._pending: dict[str, tuple[float, ExecutionPlan]] = {}
+        self._frames: dict[str, tuple[float, dict]] = {}
         self._lock = threading.Lock()
+
+    def _frame(self, session_id: str, ticker: str) -> dict:
+        with self._lock:
+            entry = self._frames.get(session_id)
+        if entry is None:
+            return {}
+        expires_at, frame = entry
+        if time.monotonic() >= expires_at or str(frame.get("ticker") or "").upper() != ticker.upper():
+            return {}
+        return dict(frame)
 
     def resolve(self, session_id: str, text: str) -> SessionResolution:
         raw = (text or "").strip()
@@ -56,13 +92,14 @@ class ShortTermSession:
             focus = self.store.last_ticker(session_id)
             if focus:
                 rewritten = f"{focus} {raw}"
-                return SessionResolution(text=rewritten, rewritten=True, antecedent=focus, note=f"「{raw}」按上文补全为「{rewritten}」")
+                return SessionResolution(text=rewritten, rewritten=True, antecedent=focus, note=f"「{raw}」按上文补全为「{rewritten}」", frame=self._frame(session_id, focus))
         result = self.store.resolve(session_id, text)
         return SessionResolution(
             text=result.text,
             rewritten=result.rewritten,
             antecedent=result.antecedent,
             note=result.note,
+            frame=self._frame(session_id, result.antecedent) if result.rewritten and result.antecedent else {},
         )
 
     def record(self, result: AgentResult) -> None:
@@ -71,6 +108,13 @@ class ShortTermSession:
         # A question with no ticker ("哪只跌得最多") gets its focus from the
         # answer, so the next turn can refer back to the stock it named.
         tickers = result.request.entities or focus_entities(result.answer)
+        frame = position_frame(result, tickers[0]) if tickers else {}
+        with self._lock:
+            if frame:
+                self._frames[result.request.session_id] = (time.monotonic() + self.ttl_seconds, frame)
+            elif not result.request.metadata.get("context_frame"):
+                # A turn about something else ends the frame; a framed follow-up keeps it.
+                self._frames.pop(result.request.session_id, None)
         self.store.record(
             result.request.session_id,
             legacy_session.Turn(
@@ -100,3 +144,4 @@ class ShortTermSession:
         self.store.clear(session_id)
         with self._lock:
             self._pending.pop(session_id, None)
+            self._frames.pop(session_id, None)

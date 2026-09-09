@@ -75,6 +75,9 @@ class SessionResolution:
     rewritten: bool = False
     antecedent: str = ""
     note: str = ""
+    #: What the previous turn was about beyond the stock itself (the column,
+    #: the period, the value), so a follow-up "为什么跌" keeps its referent.
+    frame: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

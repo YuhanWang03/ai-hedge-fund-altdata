@@ -32,6 +32,71 @@ class RankingLead:
         return bool(self.text)
 
 
+def choose_rankable(text: str, rules: Any) -> tuple[dict[str, Any], bool, bool] | None:
+    """The rankable rule the wording selects, with its direction (low, high)."""
+
+    if not isinstance(rules, list):
+        return None
+    usable = [rule for rule in rules if isinstance(rule, dict)]
+    candidates = [rule for rule in usable if rule.get("topic") and re.search(str(rule["topic"]), text)]
+    candidates += [rule for rule in usable if not rule.get("topic")]
+    for rule in candidates:
+        low = bool(re.search(str(rule.get("low") or "$^"), text))
+        high = bool(re.search(str(rule.get("high") or "$^"), text))
+        if low != high:
+            return rule, low, high
+    return None
+
+
+def position_row(results: list[ToolEnvelope], ticker: str) -> tuple[ToolEnvelope, dict[str, Any]] | None:
+    """The result and row describing ``ticker`` in a position table, if any result carries one."""
+
+    for result in results:
+        rows = result.metadata.get("positions")
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if isinstance(row, dict) and str(row.get("ticker") or "").upper() == ticker.upper():
+                return result, row
+    return None
+
+
+def frame_lead(frame: dict[str, Any], results: list[ToolEnvelope]) -> str:
+    """Open a framed follow-up by restating what it refers to, from this run's evidence.
+
+    A question like "为什么跌这么多" after a P/L ranking is about the loss
+    since purchase.  The restatement cites the freshly fetched position row,
+    and when today's move points the other way it says so in one clause
+    rather than letting the day's figure answer a question about months.
+    """
+
+    ticker = str(frame.get("ticker") or "")
+    found = position_row(results, ticker)
+    if not ticker or found is None:
+        return ""
+    source, row = found
+    key, text_key = str(frame.get("field") or "pl_pct"), str(frame.get("text") or "pl_pct_text")
+    value_text = row.get(text_key) or row.get(key)
+    citation = f"[{source.evidence[0].id}]" if source.evidence else ""
+    entry = row.get("avg_entry_price")
+    entry_text = f"，成本价 ${float(entry):.2f}" if isinstance(entry, (int, float)) else ""
+    lines = [f"你问的是 {ticker} {frame.get('label') or '这一项'}：{value_text}{entry_text}{citation}。"]
+    value = row.get(key)
+    for result in results:
+        if result.subject.upper() != ticker.upper() or not result.ok:
+            continue
+        returns = result.metrics.get("returns") if isinstance(result.metrics.get("returns"), dict) else {}
+        today = returns.get("1d", result.metrics.get("price_change_pct"))
+        if not isinstance(today, (int, float)) or not isinstance(value, (int, float)):
+            continue
+        if (today > 0) != (value > 0) and today != 0:
+            price = next((item for item in result.evidence if item.metadata.get("evidence_scope") == "price"), None)
+            direction = "上涨" if today > 0 else "下跌"
+            lines.append(f"今日为{direction}（{float(today):+.2%}），与{frame.get('label') or '上述区间'}是不同区间{f'[{price.id}]' if price else ''}。")
+            break
+    return "\n".join(lines)
+
+
 def ranking_lead(text: str, results: list[ToolEnvelope]) -> RankingLead:
     """Answer a superlative question directly from a result's ranked table.
 
@@ -48,21 +113,10 @@ def ranking_lead(text: str, results: list[ToolEnvelope]) -> RankingLead:
         rules = result.metadata.get("rankable")
         if not isinstance(rows, list) or not isinstance(rules, list) or not result.evidence:
             continue
-        # Rules whose topic words the question uses come first; a rule is
-        # only usable when the question also names a direction for it.
-        usable = [rule for rule in rules if isinstance(rule, dict)]
-        candidates = [rule for rule in usable if rule.get("topic") and re.search(str(rule["topic"]), text)]
-        candidates += [rule for rule in usable if not rule.get("topic")]
-        chosen: dict[str, Any] | None = None
-        low = high = False
-        for rule in candidates:
-            low = bool(re.search(str(rule.get("low") or "$^"), text))
-            high = bool(re.search(str(rule.get("high") or "$^"), text))
-            if low != high:
-                chosen = rule
-                break
-        if chosen is None:
+        choice = choose_rankable(text, rules)
+        if choice is None:
             continue
+        chosen, low, high = choice
         key, text_key = str(chosen.get("field") or ""), str(chosen.get("text") or "")
         ranked = [row for row in rows if isinstance(row, dict) and isinstance(row.get(key), (int, float))]
         if not ranked:
@@ -141,6 +195,15 @@ class EvidenceSummarySynthesizer:
                 return "该问题被识别为通用知识问题；尚未接入 Agent V2 的知识回答模型。"
             return "现有信息不足以确定需要调用的能力，请补充标的或希望查询的范围。"
 
+        frame = request.metadata.get("context_frame")
+        if isinstance(frame, dict) and frame.get("kind") == "position":
+            opening = frame_lead(frame, results)
+            if opening:
+                found = position_row(results, str(frame.get("ticker") or ""))
+                source = found[0] if found else None
+                blocks = [opening]
+                blocks.extend(self._render(result) for result in results if result is not source)
+                return "\n\n".join(block for block in blocks if block)
         lead = ranking_lead(request.text, results)
         if lead:
             # The ranking answer leads; results about the ranked objects
