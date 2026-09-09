@@ -64,6 +64,21 @@ def test_annual_report_never_uses_properties_as_management_discussion():
     assert not any(row['category'] == 'MD&A' for row in result['findings'])
 
 
+def test_eight_k_guidance_retains_section_and_source(monkeypatch):
+    from v2.sec import eight_k_parser
+    from v2.research.expectations import prepare_expectations
+    filing = Filing('8-K', '2026-08-26', 'release', {})
+    filing._object.text = 'Item 2.02 Results. We forecast revenue of $40 billion for next quarter. Item 9.01 Exhibits.'
+    monkeypatch.setattr(eight_k_parser, 'parse_eight_k_filing', lambda *args: SimpleNamespace(items=[]))
+    result = parse_sec_filings('NVDA', {'8-K': [filing]})
+    row = result['guidance'][0]
+    assert row['filing_type'] == '8-K'
+    assert row['source_section'] == '2.02'
+    assert row['source_url'] == filing.homepage_url
+    presented = prepare_expectations({'modules': {'expectations': {'details': {'guidance': [row]}}}})
+    assert presented['modules']['expectations']['details']['guidance'][0]['source_section'] == '2.02'
+
+
 def test_peer_preferences_persist_and_invalidate_cache(tmp_path: Path):
     path = tmp_path / "research.db"
     store = ResearchStore(path)

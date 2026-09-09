@@ -174,8 +174,8 @@ def _fetch_one(ticker: str) -> EarningsEvent | None:
         ticker=ticker,
         release_date=release_iso,
         when=_extract_when(cal),
-        eps_estimate=_extract_float(cal, "EPS Estimate", "epsEstimate"),
-        revenue_estimate=_extract_float(cal, "Revenue Estimate", "revenueEstimate"),
+        eps_estimate=_extract_float(cal, "Earnings Average", "EPS Estimate", "epsEstimate"),
+        revenue_estimate=_extract_float(cal, "Revenue Average", "Revenue Estimate", "revenueEstimate"),
         n_analysts=None,
         source="yfinance",
     )

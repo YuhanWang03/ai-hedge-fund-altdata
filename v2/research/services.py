@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any
 
 from v2.research.cache import CACHE_POLICY
+from v2.research.consensus import collect_consensus
+from v2.research.relationship_evidence import label_sources
 from v2.research.depth import parse_sec_filings, sanitize_error
 from v2.research.store import ResearchStore
 
@@ -98,6 +100,7 @@ class EarningsSecDataService:
 
         return {
             "expectations": {
+                "consensus": collect_consensus(ticker),
                 "upcoming_earnings": _model_dict(upcoming) or None,
                 "revision_history": [],
             },
@@ -263,7 +266,7 @@ class SupplyChainDataService:
                     verified_at = datetime.fromisoformat(row.get("last_verified_at") or "")
                 except ValueError:
                     verified_at = datetime.min.replace(tzinfo=timezone.utc)
-                if row.get("status") == "VERIFIED" and float(row.get("confidence") or 0) >= .7 and verified_at >= cutoff:
+                if row.get("status") in ("CO_MENTION", "EVIDENCE_FOUND") and datetime.fromisoformat(row['updated_at']) >= cutoff:
                     reusable.append(row)
                 else:
                     refreshable.append(row)
@@ -280,13 +283,13 @@ class SupplyChainDataService:
                         category = self._CATEGORY_MAP.get(row["relationship_type"], row["relationship_type"].lower())
                         neighbor = Neighbor(ticker=row["target_ticker"], labels=[Label(seed=ticker, category=category, reason=row.get("description") or "relationship revalidation")], exists=True)
                         tavily_calls += verify_relation(neighbor)
-                        status = "VERIFIED" if neighbor.relation_verified else "STALE"
-                        self.store.upsert_relationship({**row, "source_ticker": ticker, "target_ticker": row["target_ticker"], "relationship_type": row["relationship_type"], "status": status, "confidence": .9 if neighbor.relation_verified else min(float(row.get("confidence") or .4), .4)}, [{"provider": "Tavily", "url": neighbor.relation_evidence_url, "evidence_summary": row.get("description")}] if neighbor.relation_evidence_url else [])
+                        label = neighbor.labels[0]
+                        self.store.upsert_relationship({**row, "status": label.evidence_status, "confidence": 0}, label_sources(label))
                 except Exception:
                     pass
                 existing = self.store.relationships(ticker)
             if existing:
-                return {"date": date.today().isoformat(), "seeds": [ticker], "neighbors": [{"ticker": row["target_ticker"], "name": row.get("target_name"), "exists": True, "relation_verified": row.get("status") == "VERIFIED", "relation_checked": True, "relation_evidence_url": None, "labels": [{"seed": ticker, "category": self._CATEGORY_MAP.get(row["relationship_type"], row["relationship_type"].lower()), "reason": row.get("description") or "persisted relationship"}]} for row in existing], "llm_tokens": 0, "api_calls": 0, "tavily_calls": tavily_calls, "from_relationship_store": True, "reused_relationships": len(reusable), "revalidated_relationships": len(refreshable)}
+                return {"date": date.today().isoformat(), "seeds": [ticker], "neighbors": [{"ticker": row["target_ticker"], "name": row.get("target_name"), "exists": True, "relation_verified": row.get("status") == "VERIFIED", "relation_checked": True, "relation_evidence_url": next((s["url"] for s in row.get("sources", []) if s.get("url")), None), "labels": [{"seed": ticker, "category": self._CATEGORY_MAP.get(row["relationship_type"], row["relationship_type"].lower()), "reason": row.get("description") or "persisted relationship"}]} for row in existing], "llm_tokens": 0, "api_calls": 0, "tavily_calls": tavily_calls, "from_relationship_store": True, "reused_relationships": len(reusable), "revalidated_relationships": len(refreshable)}
         from v2.lateral import LATERAL_FILTERS, run_lateral_expansion
         from v2.screening import TECH_30
 
@@ -305,15 +308,15 @@ class SupplyChainDataService:
                 for label in neighbor.get("labels", []):
                     if str(label.get("seed", "")).upper() != ticker.upper():
                         continue
-                    status = "VERIFIED" if neighbor.get("relation_verified") else "DISCOVERED"
+                    status = label.get("evidence_status", "UNCHECKED")
                     relation = {
                         "source_ticker": ticker, "target_ticker": neighbor.get("ticker"),
                         "target_name": neighbor.get("name"), "relationship_type": self._TYPE_MAP.get(label.get("category", ""), "PARTNER"),
-                        "status": status, "confidence": .9 if status == "VERIFIED" else .45,
+                        "status": status, "confidence": 0,
                         "description": label.get("reason"),
                     }
-                    evidence_url = neighbor.get("relation_evidence_url")
-                    sources = [{"provider": "Tavily", "url": evidence_url, "evidence_summary": label.get("reason")}] if evidence_url else []
+                    from v2.lateral.models import Label
+                    sources = label_sources(Label(**label))
                     store.upsert_relationship(relation, sources)
         return payload
 

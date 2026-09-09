@@ -18,10 +18,11 @@ from v2.research.store import ResearchStore
 from v2.research.localization import localize_result
 from v2.research.sec_links import enrich_sec_links
 from v2.research.expectations import prepare_expectations
+from v2.research.relationship_evidence import present_relationships, label_sources
 
 
 def present_result(result):
-    return enrich_sec_links(localize_result(prepare_expectations(result)))
+    return enrich_sec_links(localize_result(prepare_expectations(present_relationships(result, _store()))))
 
 router = APIRouter(prefix="/api/research", tags=["research"], dependencies=[Depends(require_owner)])
 _RUNNING_TASKS: set[asyncio.Task[None]] = set()
@@ -219,8 +220,8 @@ async def revalidate_relationship(relationship_id: int) -> dict:
         category = {"SUPPLIER": "supplier", "CUSTOMER": "customer", "COMPETITOR": "smaller_peer", "BENEFICIARY": "beneficiary"}.get(relation["relationship_type"], "beneficiary")
         neighbor = Neighbor(ticker=relation["target_ticker"], labels=[Label(seed=relation["source_ticker"], category=category, reason=relation.get("description") or "relationship revalidation")], exists=True)
         calls = verify_relation(neighbor)
-        status = "VERIFIED" if neighbor.relation_verified else "STALE"
-        relation_id = _store().upsert_relationship({**relation, "status": status, "confidence": .9 if neighbor.relation_verified else min(float(relation["confidence"]), .4)}, [{"provider": "Tavily", "url": neighbor.relation_evidence_url, "evidence_summary": relation.get("description")} ] if neighbor.relation_evidence_url else [])
+        label = neighbor.labels[0]
+        relation_id = _store().upsert_relationship({**relation, "status": label.evidence_status, "confidence": 0}, label_sources(label))
         return {**(_store().relationship(relation_id) or {}), "tavily_calls": calls}
 
     return await run_in_threadpool(perform)
