@@ -209,9 +209,12 @@ def exhibit_texts(raw: Any, *, limit: int = 3, max_chars: int = 40_000) -> list[
 _SYSTEM = """你是申报阅读者，只输出 JSON，不回答用户问题。
 任务：在给定的 SEC 申报里找出与指定日期附近股价下跌可能相关的、有明确日期的事件（财报数字、指引、高管变动、诉讼、发行、重大合同、监管事项等）。
 每一轮只能做一件事：
-- 读一节：{"action":"read","filing":<申报序号>,"section":"<章节 id>"}
+- 读章节（一次最多 3 节）：{"action":"read","reads":[{"filing":<申报序号>,"section":"<章节 id>"}]}
 - 结束：{"action":"finish","events":[{"date":"YYYY-MM-DD","summary":"一句中文概括","quote":"从已读章节里原样复制的一段原文（不超过 300 字符）","filing":<申报序号>,"section":"<章节 id>"}],"note":"一句话说明还缺什么或为什么结束"}
-规则：quote 必须逐字来自你已经读过的章节文本，不能改写、不能翻译；没有相关事件就返回空的 events 并在 note 里说明；不要编造日期。"""
+优先读 EXHIBIT 99.1、Item 2.02（业绩）、Item 5.02（高管变动）、Item 8.01（其他事项）这类章节；封面页和 Item 9.01 通常没有内容。
+规则：quote 必须逐字来自你已经读过的章节文本，不能改写、不能翻译；没有相关事件就返回空的 events 并在 note 里说明；不要编造日期。轮次有限，读到足够内容就尽早结束。"""
+
+_FINISH_NOW = "轮次已用完。现在只允许 finish：把已读章节里有明确日期、且能逐字引用的事件整理出来；没有就返回空的 events 并说明。"
 
 
 class FilingReader:
@@ -254,7 +257,8 @@ class FilingReader:
         messages: list[dict[str, str]] = [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": task}]
         read: dict[tuple[int, str], str] = {}
         events: list[dict[str, Any]] = []
-        note = "达到轮次上限"
+        finished = False
+        note = ""
         rounds = calls = 0
         for _ in range(self.max_rounds):
             if time.monotonic() - started > self.max_seconds:
@@ -262,34 +266,63 @@ class FilingReader:
                 break
             rounds += 1
             calls += 1
-            try:
-                response = self.llm.complete(messages, None)
-                action = json.loads(_strip_fence(response.text))
-            except Exception as exc:  # noqa: BLE001 — a bad turn is data for the envelope
-                messages.append({"role": "user", "content": f"上一轮输出无法解析（{type(exc).__name__}），请只输出 JSON。"})
+            action = self._step(messages)
+            if action is None:
                 continue
-            messages.append({"role": "assistant", "content": json.dumps(action, ensure_ascii=False)})
             if action.get("action") == "finish":
                 events = [row for row in (action.get("events") or []) if isinstance(row, dict)]
                 note = str(action.get("note") or "")
+                finished = True
                 break
-            try:
-                index = int(action.get("filing"))
-                section_id = str(action.get("section") or "")
-            except (TypeError, ValueError):
-                messages.append({"role": "user", "content": "read 需要 filing 序号和 section id。"})
-                continue
-            if index not in outlines:
-                messages.append({"role": "user", "content": "没有这个申报序号。"})
-                continue
-            text = self.source.read(chosen[index - 1], section_id)[: self.max_chars]
-            read[(index, section_id)] = text
-            messages.append({"role": "user", "content": f"申报 {index} 章节 {section_id} 的文本：\n{text or '（空）'}"})
+            requests = action.get("reads")
+            if not isinstance(requests, list):
+                requests = [action]
+            served = 0
+            for request in requests[:3]:
+                try:
+                    index = int(request.get("filing"))
+                    section_id = str(request.get("section") or "")
+                except (AttributeError, TypeError, ValueError):
+                    continue
+                if index not in outlines:
+                    continue
+                text = self.source.read(chosen[index - 1], section_id)[: self.max_chars]
+                read[(index, section_id)] = text
+                messages.append({"role": "user", "content": f"申报 {index} 章节 {section_id} 的文本：\n{text or '（空）'}"})
+                served += 1
+            if not served:
+                messages.append({"role": "user", "content": "read 需要 reads 列表，每项含 filing 序号和 section id。"})
+        if not finished and read and time.monotonic() - started <= self.max_seconds:
+            # The rounds went on reading; one last call may only finish, so
+            # what was read is not thrown away.
+            messages.append({"role": "user", "content": _FINISH_NOW})
+            calls += 1
+            action = self._step(messages)
+            if action is not None and action.get("action") == "finish":
+                events = [row for row in (action.get("events") or []) if isinstance(row, dict)]
+                note = str(action.get("note") or "")
+                finished = True
+        if not finished:
+            note = note or "达到轮次上限"
         verified, dropped = _verify_events(events, read)
         if dropped:
             note = (note + "；" if note else "") + f"{dropped} 条事件的引文与已读文本不符，已丢弃"
         status = ResultStatus.COMPLETED if verified else ResultStatus.PARTIAL_DATA
         return self._envelope(ticker, window, around, chosen, verified, sorted(read), note=note, rounds=rounds, calls=calls, status=status)
+
+    def _step(self, messages: list[dict[str, str]]) -> dict[str, Any] | None:
+        """One model turn parsed as an action; a bad turn is answered and returns None."""
+
+        try:
+            response = self.llm.complete(messages, None)
+            action = json.loads(_strip_fence(response.text))
+            if not isinstance(action, dict):
+                raise ValueError("action must be an object")
+        except Exception as exc:  # noqa: BLE001 — a bad turn is data for the envelope
+            messages.append({"role": "user", "content": f"上一轮输出无法解析（{type(exc).__name__}），请只输出 JSON。"})
+            return None
+        messages.append({"role": "assistant", "content": json.dumps(action, ensure_ascii=False)})
+        return action
 
     def _envelope(self, ticker: str, window: str, around: str, refs: list[FilingRef], events: list[dict[str, Any]], read: list[tuple[int, str]], *, note: str, rounds: int, calls: int, status: ResultStatus) -> ToolEnvelope:
         evidence: list[EvidenceItem] = []

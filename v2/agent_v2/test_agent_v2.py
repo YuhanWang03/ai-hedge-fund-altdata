@@ -896,8 +896,8 @@ def test_filing_reader_reads_the_sections_it_chooses_and_keeps_only_quoted_event
     source = _FakeFilingSource(refs)
     llm = ScriptedLLM(
         [
-            LLMResponse(text='{"action":"read","filing":1,"section":"s1"}'),
-            LLMResponse(text='```json\n{"action":"read","filing":1,"section":"s2"}\n```'),
+            LLMResponse(text='{"action":"read","filing":1,"section":"s1"}'),  # the single-read form still works
+            LLMResponse(text='```json\n{"action":"read","reads":[{"filing":1,"section":"s2"},{"filing":9,"section":"s1"}]}\n```'),
             LLMResponse(
                 text=json.dumps(
                     {
@@ -925,10 +925,21 @@ def test_filing_reader_reads_the_sections_it_chooses_and_keeps_only_quoted_event
     assert "1 条事件的引文与已读文本不符，已丢弃" in result.limitations[0]
     assert result.metadata["narrative"].startswith("ARM 申报中读到的事件：2026-07-29 季度营收 10.5 亿美元低于指引区间[evidence-filing-event-")
     assert verify_answer(result.metadata["narrative"], result.evidence, answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result]).ok
-    # A reader that never finishes stops at the round cap with nothing but a limitation.
+    # A reader that keeps reading gets one forced finish so what it read is not wasted.
+    forced = ScriptedLLM(
+        [
+            LLMResponse(text='{"action":"read","filing":1,"section":"s1"}'),
+            LLMResponse(text='{"action":"read","filing":1,"section":"s2"}'),
+            LLMResponse(text=json.dumps({"action": "finish", "events": [{"date": "2026-07-29", "summary": "营收低于指引", "quote": "Revenue of $1.05 billion was below the guidance range", "filing": 1, "section": "s1"}], "note": "被要求结束"}, ensure_ascii=False)),
+        ]
+    )
+    rescued = FilingReader(forced, _FakeFilingSource(refs), max_rounds=2).run("ARM", _context(), around="2026-07-29", today=date(2026, 9, 9))
+    assert rescued.status == ResultStatus.COMPLETED and rescued.metrics == {"filings": 1, "sections_read": 2, "events": 1, "rounds": 2, "llm_calls": 3}
+    assert forced.calls[-1][-1]["content"].startswith("轮次已用完")
+    # If even the forced finish keeps reading, the cap holds and only a limitation comes back.
     endless = FilingReader(ScriptedLLM([LLMResponse(text='{"action":"read","filing":1,"section":"s1"}')] * 6), _FakeFilingSource(refs), max_rounds=2)
     capped = endless.run("ARM", _context(), around="2026-07-29", today=date(2026, 9, 9))
-    assert capped.status == ResultStatus.PARTIAL_DATA and capped.metrics["rounds"] == 2 and "达到轮次上限" in capped.limitations[0]
+    assert capped.status == ResultStatus.PARTIAL_DATA and capped.metrics == {"filings": 1, "sections_read": 1, "events": 0, "rounds": 2, "llm_calls": 3} and "达到轮次上限" in capped.limitations[0]
     assert capped.evidence[0].metadata["citation_kind"] == "limitations" and "未读到与2026-07-29 附近下跌相关的事件" in capped.evidence[0].claim
     # Without a model the capability still lists the filings and says it did not read them.
     listed = FilingReader(None, _FakeFilingSource(refs)).run("ARM", _context(), around="2026-07-29", today=date(2026, 9, 9))
