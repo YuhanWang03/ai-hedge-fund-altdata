@@ -77,8 +77,9 @@ def frame_lead(frame: dict[str, Any], results: list[ToolEnvelope]) -> str:
     found = position_row(results, ticker)
     lines: list[str] = []
     value: Any = None
-    if frame.get("kind") == "drawdown":
-        drawdown = next((result for result in results if result.capability == "market.drawdown" and result.ok and result.subject.upper() == ticker.upper()), None)
+    if frame.get("kind") in {"drawdown", "runup"}:
+        wanted = "market.runup" if frame.get("kind") == "runup" else "market.drawdown"
+        drawdown = next((result for result in results if result.capability == wanted and result.ok and result.subject.upper() == ticker.upper()), None)
         if drawdown is None:
             return ""
         peak = next((item for item in drawdown.evidence if item.metadata.get("evidence_scope") == "peak_trough"), None)
@@ -86,8 +87,8 @@ def frame_lead(frame: dict[str, Any], results: list[ToolEnvelope]) -> str:
         anchor = peak or window
         if anchor is None:
             return ""
-        lines.append(f"你问的是 {ticker} {frame.get('label') or '这段跌幅'}：{anchor.claim.rstrip('。')}[{anchor.id}]。")
-        number = drawdown.metrics.get("drawdown") if peak is not None else drawdown.metrics.get("window_return")
+        lines.append(f"你问的是 {ticker} {frame.get('label') or ('这段涨幅' if wanted == 'market.runup' else '这段跌幅')}：{anchor.claim.rstrip('。')}[{anchor.id}]。")
+        number = drawdown.metrics.get("move", drawdown.metrics.get("drawdown")) if peak is not None else drawdown.metrics.get("window_return")
         value = float(number) * 100 if isinstance(number, (int, float)) else None
         if found is not None:
             source, row = found
@@ -150,8 +151,10 @@ def decline_timing(total_pct: Any, returns: dict[str, Any], result: ToolEnvelope
     the run-up, which is said as well.
     """
 
-    if not isinstance(total_pct, (int, float)) or total_pct >= 0:
+    if not isinstance(total_pct, (int, float)) or total_pct == 0:
         return []
+    up = float(total_pct) > 0
+    word = "涨幅" if up else "跌幅"
     total = float(total_pct) / 100.0
     windows = [(key, label, float(returns[key])) for key, label in _WINDOW_LABELS if isinstance(returns.get(key), (int, float))]
     if not windows:
@@ -161,18 +164,23 @@ def decline_timing(total_pct: Any, returns: dict[str, Any], result: ToolEnvelope
     described = "、".join(f"{label} {value:+.2%}" for _, label, value in windows)
     sentences: list[str] = []
     for _, label, value in windows:
-        if value < 0 and value / total >= 0.5:
-            sentences.append(f"对照区间回报（{described}），这段跌幅大部分落在{label}内{citation}。")
+        if value * total > 0 and value / total >= 0.5:
+            sentences.append(f"对照区间回报（{described}），这段{word}大部分落在{label}内{citation}。")
             break
     else:
         _, longest_label, _ = windows[-1]
-        sentences.append(f"对照区间回报（{described}），这段跌幅主要发生在{longest_label}以前{citation}。")
+        sentences.append(f"对照区间回报（{described}），这段{word}主要发生在{longest_label}以前{citation}。")
     _, longest_label, longest_value = windows[-1]
-    if longest_value > 0:
+    if not up and longest_value > 0:
         if held:
             sentences.append(f"{longest_label} {longest_value:+.2%} 而该持仓仍在浮亏，说明买入点在这轮上涨之后的高位{citation}。")
         else:
             sentences.append(f"{longest_label}仍为 {longest_value:+.2%}，这段跌幅是一轮上涨之后的回撤{citation}。")
+    elif up and longest_value < 0:
+        if held:
+            sentences.append(f"{longest_label} {longest_value:+.2%} 而该持仓仍在浮盈，说明买入点在这轮下跌之后的低位{citation}。")
+        else:
+            sentences.append(f"{longest_label}仍为 {longest_value:+.2%}，这段涨幅是一轮下跌之后的反弹{citation}。")
     return sentences
 
 
@@ -253,12 +261,16 @@ def catalyst_lines(result: ToolEnvelope, since: str = "") -> str:
     return "\n".join(lines)
 
 
+_STRETCH = frozenset({"market.drawdown", "market.runup"})
+
+
 def drawdown_lines(result: ToolEnvelope) -> str:
     """The stretch itself: peak to trough and the worst days; the window return was in the lead."""
 
     peak = next((item for item in result.evidence if item.metadata.get("evidence_scope") == "peak_trough"), None)
     span = next((item for item in result.evidence if item.metadata.get("evidence_scope") == "benchmark_span"), None)
-    worst = [item for item in result.evidence if item.metadata.get("evidence_scope") == "worst_day"]
+    up = result.metadata.get("direction") == "up" or result.capability == "market.runup"
+    worst = [item for item in result.evidence if item.metadata.get("evidence_scope") == ("best_day" if up else "worst_day")]
     lines: list[str] = []
     if peak is not None:
         lines.append(f"{plain_text(peak.claim).rstrip('。')}[{peak.id}]。")
@@ -269,7 +281,7 @@ def drawdown_lines(result: ToolEnvelope) -> str:
         move = f"{float(item.value):+.2%}" if isinstance(item.value, (int, float)) else (_PERCENT.search(plain_text(item.claim)) or [""])[0]
         days.append(f"{item.metadata.get('date')} {move}[{item.id}]".replace("  ", " "))
     if days:
-        lines.append(f"{result.subject} 期间跌幅最大的交易日：" + "；".join(days) + "。")
+        lines.append(f"{result.subject} 期间{'涨幅' if up else '跌幅'}最大的交易日：" + "；".join(days) + "。")
     return "\n".join(lines) if lines else EvidenceSummarySynthesizer._render(result)
 
 
@@ -424,35 +436,37 @@ class EvidenceSummarySynthesizer:
             return "现有信息不足以确定需要调用的能力，请补充标的或希望查询的范围。"
 
         frame = plan.frame or request.metadata.get("context_frame")
-        if isinstance(frame, dict) and frame.get("kind") in {"position", "drawdown"}:
+        if isinstance(frame, dict) and frame.get("kind") in {"position", "drawdown", "runup"}:
             opening = frame_lead(frame, results)
             if opening:
                 found = position_row(results, str(frame.get("ticker") or ""))
                 # The position card was used by the opening (or is not about
                 # this stock at all); either way it is not pasted below.
                 source = found[0] if found else next((result for result in results if result.capability == "account.portfolio"), None)
-                drawdown = next((result for result in results if result.capability == "market.drawdown" and result.ok), None)
+                drawdown = next((result for result in results if result.capability in _STRETCH and result.ok), None)
                 since = str(drawdown.metrics.get("window_start") or "") if drawdown is not None else ""
-                # The decline itself: peak to trough.  Records after the
-                # trough belong to the recovery; filings get three more days,
-                # the same margin the attributor reads them with.
+                # The stretch itself: peak to trough (or trough to peak).
+                # Records after it belong to what came next; filings get
+                # three more days, the same margin the attributor reads with.
                 peak_date = str((drawdown.metrics.get("peak") or {}).get("date") or "") if drawdown is not None else ""
                 trough_date = str((drawdown.metrics.get("trough") or {}).get("date") or "") if drawdown is not None else ""
-                decline_start = peak_date or since
+                stretch = sorted(day for day in (peak_date, trough_date) if day)
+                decline_start = stretch[0] if stretch else since
+                trough_date = stretch[-1] if stretch else ""
                 filings_until = _days_after(trough_date, 3) if trough_date else ""
                 has_span = drawdown is not None and any(item.metadata.get("evidence_scope") == "benchmark_span" for item in drawdown.evidence)
                 attributed = frozenset(str(result.metadata.get("date") or "")[:10] for result in results if result.capability == "market.attribute_move" and result.ok)
                 blocks = [opening]
                 # A fixed reading order, not the order the tasks finished in:
                 # the stretch, its filings and watch records, then each day.
-                order = {"market.drawdown": 0, "market.performance": 1, "filings.recent": 2, "filings.read_events": 3, "market.anomaly_history": 4, "web.research": 5, "market.attribute_move": 6}
+                order = {"market.drawdown": 0, "market.runup": 0, "market.performance": 1, "filings.recent": 2, "filings.read_events": 3, "market.anomaly_history": 4, "web.research": 5, "market.attribute_move": 6}
                 ordered = sorted((result for result in results if result is not source), key=lambda result: (order.get(result.capability, 7), str(result.metadata.get("date") or result.as_of or "")))
                 for result in ordered:
                     if isinstance(result.metadata.get("fan_out_coverage"), dict):
                         blocks.append(self._render(result))  # just the coverage line
                     elif result.capability == "web.research":
                         blocks.append(web_lines(result, since))
-                    elif result.capability == "market.drawdown" and result.ok:
+                    elif result.capability in _STRETCH and result.ok:
                         blocks.append(drawdown_lines(result))
                     elif result.capability == "filings.recent" and result.ok and attributed:
                         # The attribution blocks below read the filings; here they are only listed.

@@ -76,6 +76,24 @@ def build_drawdown_registry() -> CapabilityRegistry:
         return ToolEnvelope("market.drawdown", ResultStatus.COMPLETED, subject=ticker, metrics={"window": "3m", "window_start": "2026-06-10", "window_return": -0.2140, "worst_days": [{"date": "2026-08-05", "return": -0.1321}], "peak": {"date": "2026-06-18", "close": 439.46}, "trough": {"date": "2026-08-05", "close": 275.10}, "drawdown": -0.3740}, evidence=[window, peak, worst], metadata={"narrative": narrative, "require_cited_numbers": True, "worst_dates": ["2026-08-05"], "queries": [f"why did {ticker} stock fall on 2026-08-05"]})
 
     registry.register("market.drawdown", drawdown)
+
+    def runup(a, c):
+        ticker = a["ticker"]
+        window = EvidenceItem(f"U-{ticker}-window", ticker, f"{ticker} 近 3 月（2026-06-10 至 2026-09-08）区间回报 +6.20%。", metadata={"evidence_scope": "window_return"})
+        best = EvidenceItem(f"U-{ticker}-0512", ticker, f"{ticker} 2026-05-12 单日 +3.50%，收盘 730.00 美元。", metadata={"evidence_scope": "best_day", "date": "2026-05-12"})
+        low_high = EvidenceItem(f"U-{ticker}-peak", ticker, f"{ticker} 从 2026-04-07 的低点 700.00 美元到 2026-07-10 的高点 760.00 美元上涨 +8.57%。", metadata={"evidence_scope": "peak_trough", "peak_date": "2026-07-10", "trough_date": "2026-04-07"})
+        span = EvidenceItem(f"U-{ticker}-span", ticker, f"同期行业基准 SPY 从 2026-04-07 到 2026-07-10 回报 +6.00%，{ticker} 比基准多涨 2.57 个百分点。", metadata={"evidence_scope": "benchmark_span", "benchmark": "SPY"})
+        narrative = f"{window.claim.rstrip('。')}[{window.id}]。\n{low_high.claim.rstrip('。')}[{low_high.id}]。\n{span.claim.rstrip('。')}[{span.id}]。\n{ticker} 近 3 月涨幅最大的交易日：2026-05-12 +3.50%[{best.id}]。"
+        return ToolEnvelope(
+            "market.runup",
+            ResultStatus.COMPLETED,
+            subject=ticker,
+            metrics={"window": "3m", "window_start": "2026-06-10", "window_return": 0.062, "best_days": [{"date": "2026-05-12", "return": 0.035}], "peak": {"date": "2026-07-10", "close": 760.0}, "trough": {"date": "2026-04-07", "close": 700.0}, "runup": 0.0857, "move": 0.0857},
+            evidence=[window, low_high, span, best],
+            metadata={"narrative": narrative, "require_cited_numbers": True, "direction": "up", "best_dates": ["2026-05-12"], "dates": ["2026-05-12"], "answer_constraints": [{"require_cited": {"metadata": {"evidence_scope": "benchmark_span"}, "warning": f"这段涨幅的回答必须引用同期行业基准对比那条证据 [{span.id}]"}}]},
+        )
+
+    registry.register("market.runup", runup)
     registry.register(
         "filings.recent",
         lambda a, c: ToolEnvelope(
@@ -100,6 +118,12 @@ def build_drawdown_registry() -> CapabilityRegistry:
     )
     def attribute(a, c):
         ticker, day = a["ticker"], a["date"]
+        if day == "2026-05-12":
+            # The one best day of the run-up fixture: a rise with no catalyst found.
+            price = EvidenceItem(f"AT-{ticker}-{day}-price", ticker, f"{ticker} 在 {day} 收于 730.00 美元，较前一交易日 +3.50%。", as_of=day, metadata={"evidence_scope": "price"})
+            assessment = EvidenceItem(f"AT-{ticker}-{day}-assessment", ticker, f"{ticker} {day} 异动归因中有 0 个高置信度直接驱动，0 个候选解释。", as_of=day, metadata={"evidence_scope": "attribution", "claim_role": "attribution_assessment"})
+            narrative = f"{price.claim.rstrip('。')}[{price.id}]。\n\n“为什么上涨”目前还不能下定论：暂未找到可核实的同日催化剂，具体触发原因尚未确认[{assessment.id}]。"
+            return ToolEnvelope("market.attribute_move", ResultStatus.COMPLETED, subject=ticker, as_of=day, summary=price.claim, metrics={"price_change_pct": 0.035, "confirmed_driver_count": 0}, evidence=[price, assessment], metadata={"narrative": narrative, "narrative_compact": f"{day} {ticker} +3.50%[{price.id}]。暂未找到可核实的同日催化剂[{assessment.id}]。", "require_cited_numbers": True, "date": day})
         price = EvidenceItem(f"AT-{ticker}-{day}-price", ticker, f"{ticker} 在 {day} 收于 275.10 美元，较前一交易日 -13.21%。", as_of=day, metadata={"evidence_scope": "price"})
         filing_event = EvidenceItem(f"E-{ticker}-{day}", ticker, f"{ticker} {day}：财报指引低于预期（6-K {day} s2：“guidance below expectations”）。", as_of=day, metadata={"evidence_scope": "filing_event", "date": day})
         reasons = [EvidenceItem(f"AT-{ticker}-{day}-filing", ticker, f"{ticker} {day} 中置信度候选解释：财报指引低于预期（申报：“guidance below expectations”）。", as_of=day, confidence=0.6, metadata={"evidence_scope": "candidate", "claim_role": "candidate_driver", "causal_confidence": "中", "driver_text": "财报指引低于预期", "source_kind": "filing"})]
@@ -231,10 +255,27 @@ SCENARIO_CASES: tuple[ScenarioCase, ...] = (
     ),
     ScenarioCase(
         "sc_rise_is_not_a_drawdown",
-        "哪只跌得最多 → 为什么涨：问的是上涨，不走回撤归因",
+        "哪只涨得最多 → 为什么涨这么多：浮盈持仓的追问走上涨归因链，不是回撤，也不是今日涨跌",
+        ("我的仓库里哪只涨的最多?", "为什么涨这么多?"),
+        frozenset({"account.portfolio", "market.performance", "market.runup", "filings.recent", "market.anomaly_history", "market.attribute_move"}),
+        frozenset({"market.drawdown", "market.explain_move", "filings.read_events"}),
+        (
+            "你问的是 IVV 买入以来的浮动盈亏：+2.03%，成本价 $755.41",
+            "这段涨幅大部分落在",
+            "IVV 从 2026-04-07 的低点 700.00 美元到 2026-07-10 的高点 760.00 美元上涨 +8.57%",
+            "同期行业基准 SPY 从 2026-04-07 到 2026-07-10 回报 +6.00%，IVV 比基准多涨 2.57 个百分点",
+            "IVV 期间涨幅最大的交易日：2026-05-12 +3.50%",
+            "“为什么上涨”目前还不能下定论",
+        ),
+        ("为什么下跌", "组合价值", "回撤"),
+        expect_rewritten=True,
+    ),
+    ScenarioCase(
+        "sc_rise_after_loss_ranking_is_todays_move",
+        "哪只跌得最多 → 为什么涨：对浮亏持仓问上涨，指今日涨跌，不走回撤归因",
         ("我的仓库里哪只跌的最多?", "为什么涨"),
         frozenset({"market.explain_move"}),
-        frozenset({"market.drawdown", "filings.read_events"}),
+        frozenset({"market.drawdown", "market.runup", "filings.read_events"}),
         expect_rewritten=True,
     ),
     ScenarioCase(

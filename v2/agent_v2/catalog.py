@@ -124,6 +124,16 @@ def default_catalog() -> CapabilityCatalog:
             ),
         ),
         CapabilitySpec(
+            "market.runup",
+            "research",
+            "Where in time a stock's rise happened: the return window that holds most of a gain, the low-to-high inside it, the sector ETF over the same stretch, and the best single trading days with dates. Use for a gain since purchase or a run-up, never for today's move.",
+            _object({"ticker": _TICKER, "gain_pct": {"type": "number"}, "window": {"type": "string", "enum": ["1m", "3m", "1y"]}, "top": {"type": "integer", "minimum": 1, "maximum": 5}}, ["ticker"]),
+            answer_guidance=(
+                "runup_timing：先说明涨幅落在哪个回报窗口、区间低点到高点的涨幅和同期行业基准对比，再按日期列出涨幅最大的交易日；每个日期和幅度紧跟对应的 [evidence_id]。"
+                "只能把申报、盯盘记录或新闻与日期相同或相邻的上涨日关联，不得把当日归因推广到整个区间。"
+            ),
+        ),
+        CapabilitySpec(
             "filings.recent",
             "research",
             "Dated SEC filings (8-K by default) for one stock over a date range, from EDGAR. Use to find what the company disclosed around specific dates.",

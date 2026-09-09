@@ -181,6 +181,9 @@ def test_market_move_adapter_splits_facts_and_causal_confidence():
     assert "盘中累计成交量" in next(item.claim for item in result.evidence if item.metadata.get("evidence_scope") == "volume")
     answer = result.metadata["narrative"]
     assert verify_answer(answer, result.evidence, answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result]).ok
+    # The sector sentence follows the sign of the relative return instead of always saying 跑赢.
+    relative = result.metrics["relative_1d"]
+    assert ("股价跑赢行业基准" in answer) == (relative > 0) and ("股价跑输行业基准" in answer) == (relative < 0)
 
 
 def _performance_envelope():
@@ -716,7 +719,7 @@ def test_a_why_follow_up_after_a_loss_ranking_explains_the_loss_since_purchase_n
     assert [task.capability for task in second.plan.tasks] == ["account.portfolio", "market.performance", "market.drawdown", "filings.recent", "market.anomaly_history", "market.attribute_move"]
     assert second.plan.tasks[2].arguments == {"ticker": "ARM", "loss_pct": -32.22, "top": 3}
     attributor = second.plan.tasks[5]
-    assert attributor.fan_out == {"from": "market-drawdown", "field": "worst_dates", "argument": "date", "max": 3} and not attributor.required
+    assert attributor.fan_out == {"from": "market-stretch", "field": "worst_dates", "argument": "date", "max": 3} and not attributor.required
     assert [result.subject for result in second.results if result.capability == "market.attribute_move"] == ["ARM"]
     assert "最相关的一条候选线索是“财报指引低于预期”，只能作为排查方向[AT-ARM-2026-08-05-filing]。" in second.answer
     assert second.plan.assumptions[0].startswith("context_frame: 用户追问的是 ARM 买入以来的浮动盈亏 -32.22%（成本价 $389.52）")
@@ -761,6 +764,22 @@ def test_a_why_follow_up_after_a_loss_ranking_explains_the_loss_since_purchase_n
     assert with_web.verification.ok
     assert second.verification.ok, second.verification
     assert second.status == RunStatus.COMPLETED
+    # The mirror image: the best gainer, then "why did it rise so much" → the run-up chain.
+    rising = AgentV2(catalog=default_catalog(), registry=_framed_registry(), session=memory)
+    top = rising.run("我的仓库里哪只涨的最多?", session_id="chat-5")
+    assert top.answer.startswith("按买入以来的浮动盈亏排序，最高的是 IVV（+2.03%）")
+    why_up = rising.run("为什么涨这么多?", session_id="chat-5")
+    assert [task.capability for task in why_up.plan.tasks] == ["account.portfolio", "market.performance", "market.runup", "filings.recent", "market.anomaly_history", "market.attribute_move"]
+    assert why_up.plan.tasks[2].arguments == {"ticker": "IVV", "gain_pct": 2.03, "top": 3} and why_up.plan.tasks[-1].fan_out["field"] == "best_dates"
+    assert why_up.plan.assumptions[0].startswith("context_frame: 用户追问的是 IVV 买入以来的浮动盈亏 +2.03%（成本价 $755.41）")
+    assert why_up.answer.startswith("你问的是 IVV 买入以来的浮动盈亏：+2.03%，成本价 $755.41[legacy-")
+    assert "这段涨幅大部分落在" in why_up.answer and "IVV 期间涨幅最大的交易日：2026-05-12 +3.50%[U-IVV-0512]。" in why_up.answer
+    assert "同期行业基准 SPY 从 2026-04-07 到 2026-07-10 回报 +6.00%，IVV 比基准多涨 2.57 个百分点[U-IVV-span]。" in why_up.answer
+    assert "“为什么上涨”目前还不能下定论" in why_up.answer and "为什么下跌" not in why_up.answer and "回撤" not in why_up.answer
+    assert why_up.verification.ok and why_up.status == RunStatus.COMPLETED
+    # Direct entry with run-up wording and no earlier turn.
+    direct_up = RulePlanner().plan(normalize_request("NVDA 买入以来为什么涨了这么多"), route(normalize_request("NVDA 买入以来为什么涨了这么多")))
+    assert direct_up.frame == {"kind": "runup", "ticker": "NVDA", "label": "这段涨幅", "window": ""} and direct_up.tasks[2].capability == "market.runup"
     # The frame survives the framed turn, and a question about a rise is not a drawdown question.
     assert memory.resolve("chat-3", "为什么涨").frame["ticker"] == "ARM"
     plan = RulePlanner().plan(normalize_request("ARM 为什么涨", metadata={"context_frame": resolution.frame}), route(normalize_request("ARM 为什么涨")))
@@ -938,7 +957,8 @@ def test_market_drawdown_locates_the_worst_days_and_the_peak_to_trough():
             if ticker != "SMH":
                 return rows
             # The sector fell half as much on the crash day and drifted the same way otherwise.
-            out, close = [], 100.0
+            close = 100.0
+            out = [SimpleNamespace(time=rows[0].time, close=close, volume=1)] if rows else []
             for previous, bar in zip(rows, rows[1:]):
                 step = float(bar.close) / float(previous.close)
                 close *= 0.90 if step < 0.85 else step
@@ -955,8 +975,21 @@ def test_market_drawdown_locates_the_worst_days_and_the_peak_to_trough():
     assert span.claim.rstrip("。") + f"[{span.id}]。" in result.metadata["narrative"]
     # An answer that skips the sector comparison is sent back; the narrative itself passes.
     skipped = verify_answer(f"ARM 从高点回撤 -37.40%[{result.evidence[1].id}]。", result.evidence, answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result])
-    assert any(w.startswith(f"回撤回答必须引用同期行业基准对比那条证据 [{span.id}]") for w in skipped.warnings), skipped
+    assert any(w.startswith(f"这段跌幅的回答必须引用同期行业基准对比那条证据 [{span.id}]") for w in skipped.warnings), skipped
     assert verify_answer(result.metadata["narrative"], result.evidence, answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result]).ok
+    # The mirror image: a run-up from the low to the high, with the best days.
+    register_market_capabilities(registry, price_source_factory=SectorPrices, move_provider=lambda ticker: None, now_factory=lambda: now, sector_for=lambda ticker: "SMH")
+    rise = registry.execute(PlanTask("u", "market.runup", {"ticker": "ARM", "gain_pct": 12.0, "top": 2}), _context())
+    assert rise.ok and rise.capability == "market.runup" and rise.metadata["direction"] == "up"
+    # The largest rise in the series runs from the first bar to the day before the crash.
+    assert rise.metrics["trough"]["date"] == "2026-01-05" and rise.metrics["peak"]["date"] == "2026-05-19" and 0.15 < rise.metrics["runup"] < 0.25
+    best = [row["date"] for row in rise.metrics["best_days"]]
+    assert best == sorted(best) and all(row["return"] > 0 for row in rise.metrics["best_days"]) and rise.metadata["best_dates"] == best
+    rise_span = next(item for item in rise.evidence if item.metadata["evidence_scope"] == "benchmark_span")
+    # The sector drifted the same way over that stretch, so the comparison says so.
+    assert rise_span.claim.startswith("同期行业基准 SMH 从 2026-01-05 到 2026-05-19 回报 +") and rise_span.claim.endswith("与基准基本同步。")
+    assert "上涨 +" in rise.metadata["narrative"] and "涨幅最大的交易日" in rise.metadata["narrative"]
+    assert verify_answer(rise.metadata["narrative"], rise.evidence, answer_mode=AnswerMode.TOOL_GROUNDED, results=[rise]).ok
     # No sector known: the block is simply absent, nothing fails.
     register_market_capabilities(registry, price_source_factory=Prices, move_provider=lambda ticker: None, now_factory=lambda: now, sector_for=lambda ticker: "")
     assert "benchmark_span" not in registry.execute(PlanTask("d", "market.drawdown", {"ticker": "ARM"}), _context()).metrics
@@ -1025,14 +1058,18 @@ def test_history_capabilities_wrap_edgar_filings_and_the_anomaly_memory():
         ("ARM 今年为什么回撤这么多", "1y", True),
         ("ARM 这个月为什么跌这么狠", "1m", True),
         ("NVDA 今天为什么跌这么多", "", False),
-        ("NVDA 为什么涨了这么多", "", False),
+        ("NVDA 为什么涨了这么多", "", "up"),
+        ("NVDA 今天为什么涨了这么多", "", False),
         ("TSLA 为什么跌，内部人在卖吗，财报什么时候", "", False),
     ],
 )
 def test_rule_planner_opens_a_drawdown_from_the_wording_alone(query, window, is_drawdown):
     plan = _plan(query)
     capabilities = [task.capability for task in plan.tasks]
-    if is_drawdown:
+    if is_drawdown == "up":
+        assert capabilities == ["account.portfolio", "market.performance", "market.runup", "filings.recent", "market.anomaly_history", "market.attribute_move"]
+        assert "gain_pct" not in plan.tasks[2].arguments and plan.frame["kind"] == "runup" and "从低点以来或这段时间的涨幅" in plan.assumptions[0]
+    elif is_drawdown:
         assert capabilities == ["account.portfolio", "market.performance", "market.drawdown", "filings.recent", "market.anomaly_history", "market.attribute_move"]
         drawdown = plan.tasks[2].arguments
         assert "loss_pct" not in drawdown and drawdown.get("window", "") == window
@@ -1041,7 +1078,7 @@ def test_rule_planner_opens_a_drawdown_from_the_wording_alone(query, window, is_
         request = normalize_request(query)
         assert len(StructuredLLMPlanner(llm, default_catalog()).plan(request, route(request)).tasks) == 6 and llm.calls == []
     else:
-        assert "market.drawdown" not in capabilities and "market.attribute_move" not in capabilities
+        assert "market.drawdown" not in capabilities and "market.runup" not in capabilities and "market.attribute_move" not in capabilities
 
 
 def test_decline_timing_reads_the_return_windows():
@@ -1053,7 +1090,9 @@ def test_decline_timing_reads_the_return_windows():
     assert decline_timing(-32.0, {"5d": -0.20, "1m": -0.25}, result)[0].endswith("这段跌幅大部分落在近 5 日内[W]。")
     sentences = decline_timing(-32.0, {"5d": 0.01, "1m": -0.02, "3m": -0.05, "1y": 0.90}, result)
     assert sentences[0].endswith("这段跌幅主要发生在近 1 年以前[W]。") and sentences[1].startswith("近 1 年 +90.00% 而该持仓仍在浮亏")
-    assert decline_timing(5.0, {"1m": -0.02}, result) == [] and decline_timing(-32.0, {}, result) == []
+    assert decline_timing(5.0, {"1m": -0.02}, result) == ["对照区间回报（近 1 月 -2.00%），这段涨幅主要发生在近 1 月以前[W]。", "近 1 月 -2.00% 而该持仓仍在浮盈，说明买入点在这轮下跌之后的低位[W]。"]
+    assert decline_timing(14.0, {"5d": 0.01, "1m": 0.09, "3m": 0.20}, result)[0] == "对照区间回报（近 5 日 +1.00%、近 1 月 +9.00%、近 3 月 +20.00%），这段涨幅大部分落在近 1 月内[W]。"
+    assert decline_timing(-32.0, {}, result) == [] and decline_timing(0, {"1m": 0.01}, result) == []
     undated = ToolEnvelope("research.stock", ResultStatus.COMPLETED, subject="ARM", evidence=[EvidenceItem("F", "ARM", "TTM P/E is 377.2x.")], limitations=["expectations: 34/100"])
     assert catalyst_lines(undated) == "ARM 期间未查到可核对的催化剂（财报、公告或新闻）。\n数据限制：expectations: 34/100"
 
@@ -2146,12 +2185,19 @@ def test_complete_citations_adds_the_one_item_that_carries_a_misattributed_figur
     assert completed.split("\n")[0] == "ARM 从高点 439.46 美元跌到低点 224.89 美元，回撤 -48.8%[AT-price][D-peak]。"
     assert "跑赢 SMH[B-SMH][W-ARM]。" in completed
     # A figure the model computed itself has no carrier and is left for the repair round.
-    assert "三只合计 -1,335 美元[AT-price]。" in completed and notes == ["439.46 → [D-peak]", "12.52 → [W-ARM]"]
+    assert "三只合计 -1,335 美元[AT-price]。" in completed and notes == ["439.46 → [D-peak]", "-48.8 → [D-peak]", "12.52 → [W-ARM]"]
     report = verify_answer(completed, evidence, answer_mode=AnswerMode.RESEARCH_GROUNDED, results=results)
     assert report.warnings == ("引用未支持邻近数字：-1,335",)
     # Vague figures and figures several items carry are not completed.
     untouched = "ARM 跌了 3 天，2026 年表现[B-SMH]。 收于 224.89 美元[B-SMH]。"
     assert complete_citations(untouched, evidence, results) == (untouched, [])
+    # A stray figure in the sentence does not block the ones that can be placed.
+    partial, partial_notes = complete_citations("从高点 439.46 跌到低点 224.89，回撤 -48.8%，成交 9755737183 股[AT-price]。", evidence, results)
+    assert partial == "从高点 439.46 跌到低点 224.89，回撤 -48.8%，成交 9755737183 股[AT-price][D-peak]。" and partial_notes == ["439.46 → [D-peak]", "-48.8 → [D-peak]"]
+    # A sentence with no citation is completed when every precise figure has one carrier.
+    uncited, uncited_notes = complete_citations("近 5 日 +12.52%，近 3 月 -18.66%。", evidence, results)
+    assert uncited == "近 5 日 +12.52%，近 3 月 -18.66%[W-ARM]。" and uncited_notes == ["12.52 → [W-ARM]", "-18.66 → [W-ARM]"]
+    assert complete_citations("近 5 日 +12.52%，成交 9755737183 股。", evidence, results)[0] == "近 5 日 +12.52%，成交 9755737183 股。"
     assert complete_citations("", evidence, results) == ("", [])
 
 
@@ -2165,5 +2211,5 @@ def test_llm_synthesizer_completes_citations_before_verifying_a_draft():
     assert answer == "ARM 从高点 439.46 美元跌到低点 224.89 美元，回撤 -48.8%[AT-price][D-peak]。近 5 日 +12.52%[B-SMH][W-ARM]。"
     assert len(llm.calls) == 1  # no repair round was needed
     diagnostics = synthesizer.diagnostics()
-    assert diagnostics["outcome"] == "clean" and diagnostics["citation_completions"] == ["439.46 → [D-peak]", "12.52 → [W-ARM]"]
+    assert diagnostics["outcome"] == "clean" and diagnostics["citation_completions"] == ["439.46 → [D-peak]", "-48.8 → [D-peak]", "12.52 → [W-ARM]"]
     assert verify_answer(answer, evidence, answer_mode=plan.answer_mode, results=results).ok

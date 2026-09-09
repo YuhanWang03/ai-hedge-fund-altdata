@@ -58,6 +58,7 @@ _RANK_HIGH = re.compile(r"涨|赚|好|强|盈利", re.I)
 _WHY = re.compile(r"为什么|为啥|为何|什么原因|原因|怎么会|怎么回事|何故", re.I)
 #: Wording that makes a "why did it fall" about a stretch, not a day, with no
 #: earlier turn to frame it: "从高点", "买入以来", "这几个月", "跌了这么多".
+_RUNUP_WORDING = re.compile(r"买入以来|买了以后|买入后|建仓以来|从低点|低点以来|低位以来|这几个月|这段时间|近几个月|几个月来|一路涨|涨了这么多|涨这么多|涨得这么|涨这么猛|涨了这么|赚了这么|赚这么多|翻倍|翻了.{0,2}倍|涨了.{0,3}成", re.I)
 _DRAWDOWN_WORDING = re.compile(r"买入以来|买了以后|买入后|建仓以来|从高点|高点以来|高位以来|回撤|这几个月|这段时间|近几个月|几个月来|一路跌|跌了这么多|跌这么多|跌得这么|跌这么狠|跌了这么|亏了这么|亏这么多|亏得这么|腰斩|跌了.{0,3}成", re.I)
 _TODAY = re.compile(r"今天|今日|当日|盘中|日内|昨天|昨日", re.I)
 _DRAWDOWN_WINDOW_WORDS = ((re.compile(r"这个月|近一个月|一个月|最近一个月|本月"), "1m"), (re.compile(r"今年|一年|去年|半年|年初"), "1y"))
@@ -244,13 +245,19 @@ class RulePlanner:
         tickers = tuple(ticker for ticker in entities if not _ARK_ETF.fullmatch(ticker))
         frame = request.metadata.get("context_frame")
         if len(tickers) == 1 and isinstance(frame, dict) and self._asks_about_drawdown(text, frame):
-            return self._drawdown(text, tickers[0], frame, route, request)
+            return self._stretch(text, tickers[0], frame, route, request, "down")
+        if len(tickers) == 1 and isinstance(frame, dict) and self._asks_about_runup(text, frame):
+            return self._stretch(text, tickers[0], frame, route, request, "up")
         if len(tickers) == 1 and not isinstance(frame, dict) and self._asks_about_a_stretch(text):
             # No earlier turn framed it, but the wording itself does: the
             # decline over a stretch, not today's move.
             window = next((key for pattern, key in _DRAWDOWN_WINDOW_WORDS if pattern.search(text)), "")
             direct = {"kind": "drawdown", "ticker": tickers[0], "label": "这段跌幅", "window": window}
-            return self._drawdown(text, tickers[0], direct, route, request)
+            return self._stretch(text, tickers[0], direct, route, request, "down")
+        if len(tickers) == 1 and not isinstance(frame, dict) and self._asks_about_a_rise(text):
+            window = next((key for pattern, key in _DRAWDOWN_WINDOW_WORDS if pattern.search(text)), "")
+            direct = {"kind": "runup", "ticker": tickers[0], "label": "这段涨幅", "window": window}
+            return self._stretch(text, tickers[0], direct, route, request, "up")
         if len(tickers) == 1 and _MOVE_EXPLANATION.search(text):
             tasks = [PlanTask("market-move", "market.explain_move", {"ticker": tickers[0]}, purpose="separate confirmed market facts from candidate move drivers")]
             for index, focus in enumerate(_focuses(text), 1):
@@ -287,6 +294,12 @@ class RulePlanner:
         return bool(_WHY.search(text) and _DRAWDOWN_WORDING.search(text) and not _TODAY.search(text) and not _RANK_HIGH.search(text))
 
     @staticmethod
+    def _asks_about_a_rise(text: str) -> bool:
+        """"为什么" plus run-up wording ("从低点", "涨了这么多") and no "今天"."""
+
+        return bool(_WHY.search(text) and _RUNUP_WORDING.search(text) and not _TODAY.search(text) and not _RANK_LOW.search(text))
+
+    @staticmethod
     def _asks_about_drawdown(text: str, frame: dict) -> bool:
         """A "why" follow-up about a position with an unrealized loss, not a question about a rise."""
 
@@ -296,18 +309,29 @@ class RulePlanner:
         return bool(_WHY.search(text)) and not _RANK_HIGH.search(text)
 
     @staticmethod
-    def _drawdown(text: str, ticker: str, frame: dict, route: RouteDecision, request: NormalizedRequest) -> ExecutionPlan:
-        """Explain a loss since purchase: cost basis, where in time the decline sits, events over the period; today's move only as an aside."""
+    def _asks_about_runup(text: str, frame: dict) -> bool:
+        """A "why" follow-up about a position with an unrealized gain, not a question about a fall."""
 
+        value = frame.get("value")
+        if frame.get("kind") != "position" or frame.get("field") != "pl_pct" or not isinstance(value, (int, float)) or value <= 0:
+            return False
+        return bool(_WHY.search(text)) and not _RANK_LOW.search(text)
+
+    @staticmethod
+    def _stretch(text: str, ticker: str, frame: dict, route: RouteDecision, request: NormalizedRequest, direction: str) -> ExecutionPlan:
+        """Explain a loss (or gain) since purchase: cost basis, where in time the stretch sits, events over the period; today's move only as an aside."""
+
+        up = direction == "up"
         value_text = frame.get("value_text") or frame.get("value")
         entry = frame.get("avg_entry_price")
         entry_text = f"（成本价 ${float(entry):.2f}）" if isinstance(entry, (int, float)) else ""
-        subject = f"{ticker} {frame.get('label') or '买入以来的浮动盈亏'} {value_text}{entry_text}" if value_text is not None else f"{ticker} 从高点以来或这段时间的跌幅"
+        word, extreme, days = ("涨幅", "低点到高点的涨幅", "上涨日") if up else ("跌幅", "高点到低点的回撤", "下跌日")
+        subject = f"{ticker} {frame.get('label') or '买入以来的浮动盈亏'} {value_text}{entry_text}" if value_text is not None else f"{ticker} 从{'低' if up else '高'}点以来或这段时间的{word}"
         note = (
             f"context_frame: 用户{'追' if value_text is not None else ''}问的是 {subject}，不是今日涨跌。"
-            "先回答这段跌幅落在哪个区间（对照 5 日、1 月、3 月、1 年回报窗口）和区间高点到低点的回撤，再按日期列出跌幅最大的交易日，"
-            "把日期相同或相邻的 SEC 申报（含申报阅读者从原文摘出的事件）、盯盘记录和新闻与这些下跌日对应起来，异动归因者对每个下跌日给出的高置信度驱动和候选解释要分开说；"
-            "今日涨跌只用区间回报里的单日数字作一句旁注，并点明它与买入以来的跌幅是不同区间；某个下跌日找不到对应事件就明说，不得用当日归因冒充。"
+            f"先回答这段{word}落在哪个区间（对照 5 日、1 月、3 月、1 年回报窗口）、区间{extreme}和同期行业基准对比，再按日期列出{word}最大的交易日，"
+            f"把日期相同或相邻的 SEC 申报（含从申报原文摘出的事件）、盯盘记录和新闻与这些{days}对应起来，每个{days}的高置信度驱动和候选解释要分开说；"
+            f"今日涨跌只用区间回报里的单日数字作一句旁注，并点明它与买入以来的{word}是不同区间；某个{days}找不到对应事件就明说，不得用当日归因冒充。"
         )
         loss = frame.get("value")
         # Today's move attribution is the slowest step and the one with the
@@ -317,21 +341,26 @@ class RulePlanner:
         # a web search keyed to the worst days.
         tasks = [
             PlanTask("account-portfolio", "account.portfolio", purpose="restate the position's cost basis and unrealized P/L"),
-            PlanTask("market-performance", "market.performance", {"ticker": ticker}, purpose="locate the decline across return windows"),
-            PlanTask("market-drawdown", "market.drawdown", {"ticker": ticker, **({"loss_pct": float(loss)} if isinstance(loss, (int, float)) else {}), **({"window": str(frame["window"])} if frame.get("window") else {}), "top": 3}, purpose="peak-to-trough and the worst trading days in the window"),
+            PlanTask("market-performance", "market.performance", {"ticker": ticker}, purpose=f"locate the {'rise' if up else 'decline'} across return windows"),
+            PlanTask(
+                "market-stretch",
+                "market.runup" if up else "market.drawdown",
+                {"ticker": ticker, **({("gain_pct" if up else "loss_pct"): float(loss)} if isinstance(loss, (int, float)) else {}), **({"window": str(frame["window"])} if frame.get("window") else {}), "top": 3},
+                purpose="low-to-high and the best trading days in the window" if up else "peak-to-trough and the worst trading days in the window",
+            ),
             PlanTask("filings-recent", "filings.recent", {"ticker": ticker}, purpose="dated SEC filings (8-K, or 6-K for a foreign issuer) over the past year", required=False),
-            PlanTask("anomaly-history", "market.anomaly_history", {"ticker": ticker, "lookback_days": 365}, purpose="what the monitor recorded on the worst days", required=False),
-            # One sub-agent per worst day: it reads the filings through the
+            PlanTask("anomaly-history", "market.anomaly_history", {"ticker": ticker, "lookback_days": 365}, purpose=f"what the monitor recorded on the {'best' if up else 'worst'} days", required=False),
+            # One sub-agent per extreme day: it reads the filings through the
             # filing reader, consults the monitor's memory and, with the
             # user's web consent, the news, then remembers what it found.
             PlanTask(
-                "attribute-worst-days",
+                "attribute-best-days" if up else "attribute-worst-days",
                 "market.attribute_move",
                 {"ticker": ticker},
-                purpose="explain each of the worst days with verifiable sources",
-                depends_on=("market-drawdown",),
+                purpose=f"explain each of the {'best' if up else 'worst'} days with verifiable sources",
+                depends_on=("market-stretch",),
                 required=False,
-                fan_out={"from": "market-drawdown", "field": "worst_dates", "argument": "date", "max": 3},
+                fan_out={"from": "market-stretch", "field": "best_dates" if up else "worst_dates", "argument": "date", "max": 3},
             ),
         ]
         return ExecutionPlan(

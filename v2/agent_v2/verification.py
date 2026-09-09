@@ -116,30 +116,32 @@ def complete_citations(answer: str, evidence: list[EvidenceItem], results: list[
     for match in _SENTENCE.finditer(answer):
         raw = match.group(0)
         cited = [known[value] for value in _CITATION.findall(raw) if value in known]
-        if not cited:
-            continue
         plain = _CITATION.sub("", raw)
-        local = grounding.check(plain, _observations(cited))
+        # A sentence with no citation at all is completed only when every
+        # one of its precise figures has a single carrier; a cited sentence
+        # gets the figures that can be placed, the rest go to the repair.
+        local = grounding.check(plain, _observations(cited) if cited else "")
         if not local.ungrounded:
             continue
         additions: list[str] = []
+        placed: list[tuple[str, str]] = []  # (figure, carrier id)
+        unplaced = False
         for token in dict.fromkeys(local.ungrounded):
-            if _significant_digits(token) < 3:
-                additions = []
-                break
-            carriers = [item for item in candidates if item not in cited and not grounding.check(token, _observations([item])).ungrounded]
+            carriers = [] if _significant_digits(token) < 3 else [item for item in candidates if item not in cited and not grounding.check(token, _observations([item])).ungrounded]
             if len(carriers) != 1:
-                additions = []
-                break
+                unplaced = True
+                continue
+            placed.append((token, carriers[0].id))
             if carriers[0].id not in additions:
                 additions.append(carriers[0].id)
-                notes.append(f"{token} → [{carriers[0].id}]")
-        if not additions:
+        if not additions or (not cited and unplaced):
             continue
-        # Verify the completed sentence grounds, then splice it in.
+        # The completed sentence must ground every figure that was placed.
         completed_items = cited + [known[value] for value in additions]
-        if grounding.check(plain, _observations(completed_items)).ungrounded:
+        remaining = set(grounding.check(plain, _observations(completed_items)).ungrounded)
+        if any(token in remaining for token, _ in placed):
             continue
+        notes.extend(f"{token} → [{carrier}]" for token, carrier in placed)
         # Splice the ids in before the sentence's closing punctuation, next
         # to the citation that was there.
         stripped = raw.rstrip()

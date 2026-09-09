@@ -417,26 +417,35 @@ def _move_narrative(market: ToolEnvelope) -> str:
         note = str(candidate.metadata.get("note") or "").strip().rstrip("。")
         note_text = f"；但{note}" if note else ""
         second += f"目前最相关的一条候选线索是“{_driver_text(candidate)}”{note_text}，因此它仍只能作为排查方向{_cite(candidate)}。"
-    if market.metrics.get("is_intraday"):
-        third = f"从盘面看，股价明显跑赢行业基准{_cite(benchmarks[0] if benchmarks else None)}。但当前成交量仍是盘中累计值{_cite(volume)}，不能用它推断放量、缩量或上涨持续性；应待收盘后再判断量能，并等待公司公告或可核验的同日新闻确认催化剂。"
+    relative = market.metrics.get("relative_1d")
+    if isinstance(relative, (int, float)) and abs(float(relative)) >= 0.0005:
+        relation = f"股价{'跑赢' if float(relative) > 0 else '跑输'}行业基准"
+    elif isinstance(relative, (int, float)):
+        relation = "股价与行业基准基本同步"
     else:
-        third = f"从盘面看，股价明显跑赢行业基准{_cite(benchmarks[0] if benchmarks else None)}，但成交量未同比例放大{_cite(volume)}，因此不宜单凭涨幅追认某个原因。接下来应观察放量延续性，并等待公司公告或可核验的同日新闻确认催化剂。"
+        relation = "行业基准对比暂缺"
+    move_word = "涨幅" if direction == "上涨" else "跌幅" if direction == "下跌" else "涨跌"
+    if market.metrics.get("is_intraday"):
+        third = f"从盘面看，{relation}{_cite(benchmarks[0] if benchmarks else None)}。但当前成交量仍是盘中累计值{_cite(volume)}，不能用它推断放量、缩量或{direction}的持续性；应待收盘后再判断量能，并等待公司公告或可核验的同日新闻确认催化剂。"
+    else:
+        third = f"从盘面看，{relation}{_cite(benchmarks[0] if benchmarks else None)}，但成交量未同比例放大{_cite(volume)}，因此不宜单凭{move_word}追认某个原因。接下来应观察放量延续性，并等待公司公告或可核验的同日新闻确认催化剂。"
     return "\n\n".join(("".join(first_parts), second, third))
 
 
 _DRAWDOWN_WINDOWS = (("1m", 21, "1 月"), ("3m", 63, "3 月"), ("1y", 252, "1 年"))
 
 
-def _pick_window(loss_pct: float | None, window: str | None, returns: dict[str, float | None]) -> str:
-    """The window to inspect: the caller's, else the shortest one holding at least half of the loss, else 1y."""
+def _pick_window(move_pct: float | None, window: str | None, returns: dict[str, float | None], *, direction: str = "down") -> str:
+    """The window to inspect: the caller's, else the shortest one holding at least half of the move, else 1y."""
 
     if window in {key for key, _, _ in _DRAWDOWN_WINDOWS}:
         return str(window)
-    if isinstance(loss_pct, (int, float)) and loss_pct < 0:
-        loss = float(loss_pct) / 100.0
+    sign = -1 if direction == "down" else 1
+    if isinstance(move_pct, (int, float)) and move_pct * sign > 0:
+        move = float(move_pct) / 100.0
         for key, _, _ in _DRAWDOWN_WINDOWS:
             value = returns.get(key)
-            if value is not None and value < 0 and value / loss >= 0.5:
+            if value is not None and value * sign > 0 and value / move >= 0.5:
                 return key
         return "1y"
     return "3m"
@@ -459,9 +468,44 @@ def _close_on_or_before(prices, day: str) -> float | None:
     return close if close and close > 0 else None
 
 
-def _drawdown_envelope(ticker: str, context: ExecutionContext, price_source, *, loss_pct: float | None = None, window: str | None = None, top: int = 3, now: datetime | None = None, sector_for: Callable[[str], str] | None = None) -> ToolEnvelope:
-    """Locate a decline in time from daily closes: window, peak-to-trough, worst days."""
+def _extreme_stretch(span, *, up: bool) -> tuple[int, int, float | None]:
+    """The largest drawdown (or run-up) inside ``span``: (peak index, trough index, move).
 
+    A running high (or low) is carried along; the bar with the deepest fall
+    from it (or the highest rise above it) closes the stretch.  ``move`` is
+    None when no bar sits below a previous high (or above a previous low).
+    """
+
+    best_move: float | None = None
+    best_pair = (0, 0)
+    anchor = 0
+    for index in range(len(span)):
+        close = float(span[index].close)
+        anchor_close = float(span[anchor].close)
+        if (up and close < anchor_close) or (not up and close > anchor_close):
+            anchor = index
+            continue
+        if index == anchor or anchor_close <= 0:
+            continue
+        move = close / anchor_close - 1
+        if best_move is None or (move > best_move if up else move < best_move):
+            best_move, best_pair = move, (anchor, index)
+    if best_move is None or best_move == 0:
+        return 0, 0, None
+    start, end = best_pair
+    return (end, start, best_move) if up else (start, end, best_move)
+
+
+def _drawdown_envelope(ticker: str, context: ExecutionContext, price_source, *, loss_pct: float | None = None, window: str | None = None, top: int = 3, now: datetime | None = None, sector_for: Callable[[str], str] | None = None, direction: str = "down") -> ToolEnvelope:
+    """Locate a stretch in time from daily closes: window, peak-to-trough (or trough-to-peak), the extreme days.
+
+    ``direction`` "down" is a drawdown (a loss since purchase); "up" is the
+    mirror image, a run-up (a gain since purchase): the window that holds
+    most of the gain, the low to the high inside it, and the best days.
+    """
+
+    up = direction == "up"
+    capability = "market.runup" if up else "market.drawdown"
     current = _as_et(now)
     today = current.date()
     start = today - timedelta(days=430)
@@ -470,9 +514,9 @@ def _drawdown_envelope(ticker: str, context: ExecutionContext, price_source, *, 
     if prices and _observation_state(str(prices[-1].time)[:10], current)["is_intraday"]:
         prices = prices[:-1]
     if len(prices) < 3:
-        return ToolEnvelope("market.drawdown", ResultStatus.FAILED, subject=ticker, errors=["no recent price history"])
+        return ToolEnvelope(capability, ResultStatus.FAILED, subject=ticker, errors=["no recent price history"])
     returns = {key: _return(prices, bars) for key, bars, _ in _DRAWDOWN_WINDOWS}
-    chosen = _pick_window(loss_pct, window, returns)
+    chosen = _pick_window(loss_pct, window, returns, direction=direction)
     bars, label = next((bars, label) for key, bars, label in _DRAWDOWN_WINDOWS if key == chosen)
     span = prices[-(bars + 1):]
     window_return = float(span[-1].close) / float(span[0].close) - 1 if float(span[0].close) > 0 else None
@@ -486,22 +530,28 @@ def _drawdown_envelope(ticker: str, context: ExecutionContext, price_source, *, 
     for previous, bar in zip(span, span[1:]):
         if float(previous.close) > 0:
             daily.append((str(bar.time)[:10], float(bar.close) / float(previous.close) - 1, float(bar.close)))
-    worst = sorted((row for row in daily if row[1] < 0), key=lambda row: row[1])[: max(1, min(int(top or 3), 5))]
+    if up:
+        worst = sorted((row for row in daily if row[1] > 0), key=lambda row: -row[1])[: max(1, min(int(top or 3), 5))]
+    else:
+        worst = sorted((row for row in daily if row[1] < 0), key=lambda row: row[1])[: max(1, min(int(top or 3), 5))]
     worst.sort(key=lambda row: row[0])
+    day_scope, days_key = ("best_day", "best_days") if up else ("worst_day", "worst_days")
     for day, change, close in worst:
-        evidence.append(_item("worst_day", ticker, day, f"{ticker} {day} 单日 {change:+.2%}，收盘 {close:.2f} 美元。", context, metric="daily_return", value=change, metadata={"date": day, "close": close}))
-    metrics["worst_days"] = [{"date": day, "return": change, "close": close} for day, change, close in worst]
-    peak_index = max(range(len(span)), key=lambda index: float(span[index].close))
-    after = span[peak_index:]
-    trough_index = peak_index + min(range(len(after)), key=lambda index: float(after[index].close))
+        evidence.append(_item(day_scope, ticker, day, f"{ticker} {day} 单日 {change:+.2%}，收盘 {close:.2f} 美元。", context, metric="daily_return", value=change, metadata={"date": day, "close": close}))
+    metrics[days_key] = [{"date": day, "return": change, "close": close} for day, change, close in worst]
+    peak_index, trough_index, drawdown = _extreme_stretch(span, up=up)
     peak, trough = span[peak_index], span[trough_index]
-    drawdown = float(trough.close) / float(peak.close) - 1 if trough_index > peak_index and float(peak.close) > 0 else None
     if drawdown is not None:
         peak_day, trough_day = str(peak.time)[:10], str(trough.time)[:10]
-        evidence.append(_item("peak_trough", ticker, trough_day, f"{ticker} 从 {peak_day} 的高点 {float(peak.close):.2f} 美元到 {trough_day} 的低点 {float(trough.close):.2f} 美元回撤 {drawdown:+.2%}。", context, metric="drawdown", value=drawdown, metadata={"peak_date": peak_day, "trough_date": trough_day}))
+        if up:
+            claim = f"{ticker} 从 {trough_day} 的低点 {float(trough.close):.2f} 美元到 {peak_day} 的高点 {float(peak.close):.2f} 美元上涨 {drawdown:+.2%}。"
+        else:
+            claim = f"{ticker} 从 {peak_day} 的高点 {float(peak.close):.2f} 美元到 {trough_day} 的低点 {float(trough.close):.2f} 美元回撤 {drawdown:+.2%}。"
+        evidence.append(_item("peak_trough", ticker, peak_day if up else trough_day, claim, context, metric="runup" if up else "drawdown", value=drawdown, metadata={"peak_date": peak_day, "trough_date": trough_day}))
         metrics["peak"] = {"date": peak_day, "close": float(peak.close)}
         metrics["trough"] = {"date": trough_day, "close": float(trough.close)}
-        metrics["drawdown"] = drawdown
+        metrics["runup" if up else "drawdown"] = drawdown
+        metrics["move"] = drawdown
         # The sector ETF over the same stretch: how much of the fall was the
         # sector's, and how much was this stock's own.
         benchmark = ""
@@ -509,48 +559,57 @@ def _drawdown_envelope(ticker: str, context: ExecutionContext, price_source, *, 
             benchmark = str(sector_for(ticker) or "") if sector_for else ""
         except Exception:  # noqa: BLE001 — an unknown ticker has no sector; that is data, not a crash
             benchmark = ""
+        span_start, span_end = (trough_day, peak_day) if up else (peak_day, trough_day)
         if benchmark and benchmark.upper() != ticker.upper():
             try:
-                benchmark_prices = list(price_source.get_prices(benchmark, (date.fromisoformat(peak_day) - timedelta(days=7)).isoformat(), trough_day) or [])
+                benchmark_prices = list(price_source.get_prices(benchmark, (date.fromisoformat(span_start) - timedelta(days=7)).isoformat(), span_end) or [])
             except Exception as exc:  # noqa: BLE001
                 benchmark_prices = []
                 limitations_extra = f"{benchmark} 同期行情不可用：{type(exc).__name__}"
             else:
                 limitations_extra = ""
-            start_close, end_close = _close_on_or_before(benchmark_prices, peak_day), _close_on_or_before(benchmark_prices, trough_day)
+            start_close, end_close = _close_on_or_before(benchmark_prices, span_start), _close_on_or_before(benchmark_prices, span_end)
             if start_close and end_close:
                 benchmark_return = end_close / start_close - 1
-                gap = (benchmark_return - drawdown) * 100  # positive: the stock fell more than its sector
+                if up:
+                    gap = (drawdown - benchmark_return) * 100  # positive: the stock rose more than its sector
+                    more, less = "多涨", "少涨"
+                else:
+                    gap = (benchmark_return - drawdown) * 100  # positive: the stock fell more than its sector
+                    more, less = "多跌", "少跌"
                 if abs(gap) < 0.05:
                     relation = "与基准基本同步"
                 else:
-                    relation = f"{ticker} 比基准{'多跌' if gap > 0 else '少跌'} {abs(gap):.2f} 个百分点"
-                evidence.append(_item("benchmark_span", ticker, trough_day, f"同期行业基准 {benchmark} 从 {peak_day} 到 {trough_day} 回报 {benchmark_return:+.2%}，{relation}。", context, metric="benchmark_span_return", value=benchmark_return, metadata={"benchmark": benchmark, "peak_date": peak_day, "trough_date": trough_day, "gap_pp": gap}))
+                    relation = f"{ticker} 比基准{more if gap > 0 else less} {abs(gap):.2f} 个百分点"
+                evidence.append(_item("benchmark_span", ticker, span_end, f"同期行业基准 {benchmark} 从 {span_start} 到 {span_end} 回报 {benchmark_return:+.2%}，{relation}。", context, metric="benchmark_span_return", value=benchmark_return, metadata={"benchmark": benchmark, "peak_date": peak_day, "trough_date": trough_day, "gap_pp": gap}))
                 metrics["benchmark_span"] = {"benchmark": benchmark, "return": benchmark_return, "gap_pp": gap}
             elif limitations_extra:
                 metrics["benchmark_span_error"] = limitations_extra
-    limitations = [] if worst else ["区间内没有下跌的交易日"]
+    word = "涨幅" if up else "跌幅"
+    limitations = [] if worst else [f"区间内没有{'上涨' if up else '下跌'}的交易日"]
     if metrics.get("benchmark_span_error"):
         limitations.append(str(metrics.pop("benchmark_span_error")))
     envelope = ToolEnvelope(
-        "market.drawdown",
+        capability,
         ResultStatus.COMPLETED if worst else ResultStatus.PARTIAL_DATA,
         subject=ticker,
         as_of=as_of,
-        summary=f"{ticker} 近 {label} 区间回报 {_pct(window_return)}，跌幅最大的交易日：" + ("、".join(f"{day} {change:+.2%}" for day, change, _ in worst) or "无"),
+        summary=f"{ticker} 近 {label} 区间回报 {_pct(window_return)}，{word}最大的交易日：" + ("、".join(f"{day} {change:+.2%}" for day, change, _ in worst) or "无"),
         metrics=metrics,
         evidence=evidence,
         limitations=limitations,
         metadata={
             "require_cited_numbers": True,
-            "worst_dates": [day for day, _, _ in worst],
-            "queries": [f"why did {ticker} stock fall on {day}" for day, _, _ in worst],
+            "direction": direction,
+            ("best_dates" if up else "worst_dates"): [day for day, _, _ in worst],
+            "dates": [day for day, _, _ in worst],
+            "queries": [f"why did {ticker} stock {'rise' if up else 'fall'} on {day}" for day, _, _ in worst],
         },
     )
     span_item = next(iter(_scoped(evidence, "benchmark_span")), None)
     if span_item is not None:
-        # "Sector or stock" is the one comparison a drawdown answer cannot skip.
-        envelope.metadata["answer_constraints"] = [{"require_cited": {"metadata": {"evidence_scope": "benchmark_span"}, "warning": f"回撤回答必须引用同期行业基准对比那条证据 [{span_item.id}]（同期 {span_item.metadata['benchmark']} 的回报和 {ticker} 多跌/少跌的百分点）"}}]
+        # "Sector or stock" is the one comparison a stretch answer cannot skip.
+        envelope.metadata["answer_constraints"] = [{"require_cited": {"metadata": {"evidence_scope": "benchmark_span"}, "warning": f"这段{word}的回答必须引用同期行业基准对比那条证据 [{span_item.id}]（同期 {span_item.metadata['benchmark']} 的回报和 {ticker} 比基准多/少{'涨' if up else '跌'}的百分点）"}}]
     envelope.metadata["narrative"] = _drawdown_narrative(envelope, label)
     return envelope
 
@@ -559,7 +618,8 @@ def _drawdown_narrative(result: ToolEnvelope, label: str) -> str:
     ticker = result.subject
     window_item = next(iter(_scoped(result.evidence, "window_return")), None)
     peak_item = next(iter(_scoped(result.evidence, "peak_trough")), None)
-    worst_items = _scoped(result.evidence, "worst_day")
+    up = result.metadata.get("direction") == "up"
+    worst_items = _scoped(result.evidence, "best_day" if up else "worst_day")
     parts: list[str] = []
     if window_item is not None:
         parts.append(f"{window_item.claim.rstrip('。')}{_cite(window_item)}。")
@@ -569,9 +629,9 @@ def _drawdown_narrative(result: ToolEnvelope, label: str) -> str:
     if span_item is not None:
         parts.append(f"{span_item.claim.rstrip('。')}{_cite(span_item)}。")
     if worst_items:
-        parts.append(f"{ticker} 近 {label}跌幅最大的交易日：" + "；".join(f"{item.metadata['date']} {float(item.value):+.2%}{_cite(item)}" for item in worst_items) + "。")
+        parts.append(f"{ticker} 近 {label}{'涨幅' if up else '跌幅'}最大的交易日：" + "；".join(f"{item.metadata['date']} {float(item.value):+.2%}{_cite(item)}" for item in worst_items) + "。")
     else:
-        parts.append(f"{ticker} 近 {label}区间内没有下跌的交易日。")
+        parts.append(f"{ticker} 近 {label}区间内没有{'上涨' if up else '下跌'}的交易日。")
     return "\n".join(parts)
 
 
@@ -591,6 +651,21 @@ def register_market_capabilities(
         ticker = str(arguments.get("ticker") or "").upper()
         return _move_envelope(ticker, context, move_provider(ticker), now=now_factory())
 
+    def runup(arguments: dict[str, Any], context: ExecutionContext) -> ToolEnvelope:
+        ticker = str(arguments.get("ticker") or "").upper()
+        gain = arguments.get("gain_pct")
+        return _drawdown_envelope(
+            ticker,
+            context,
+            price_source_factory(),
+            loss_pct=float(gain) if isinstance(gain, (int, float)) else None,
+            window=arguments.get("window"),
+            sector_for=sector_for,
+            direction="up",
+            top=int(arguments.get("top") or 3),
+            now=now_factory(),
+        )
+
     def drawdown(arguments: dict[str, Any], context: ExecutionContext) -> ToolEnvelope:
         ticker = str(arguments.get("ticker") or "").upper()
         loss = arguments.get("loss_pct")
@@ -608,3 +683,4 @@ def register_market_capabilities(
     registry.register("market.performance", performance)
     registry.register("market.explain_move", explain)
     registry.register("market.drawdown", drawdown)
+    registry.register("market.runup", runup)
