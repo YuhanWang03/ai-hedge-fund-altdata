@@ -265,6 +265,17 @@ def parse_sec_filings(ticker: str, filings_by_form: dict[str, list[Any]]) -> dic
             url = str(_attr(filing, "homepage_url", _attr(filing, "filing_url"))) or None
             for item in event.items:
                 findings.append(SecFinding("8-K", meta.filing_date, meta.accession_number, "MATERIAL_EVENT", f"Item {item.code}: {item.description}", item.description, item.description, url, .9, "NEW"))
+            # Earnings announcements and voluntary disclosures may contain
+            # guidance outside annual/quarterly MD&A. Keep their own provenance.
+            from v2.sec.eight_k_parser import get_item_text
+            try:
+                obj = filing.obj()
+                for code in ('2.02', '7.01', '8.01'):
+                    text = get_item_text(obj, code)
+                    guidance.extend({**row, 'filing_type': '8-K', 'source_section': code}
+                                    for row in _guidance_from_text(text, meta.filing_date, url))
+            except Exception:
+                pass
     except Exception:
         pass
 

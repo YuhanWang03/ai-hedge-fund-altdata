@@ -550,6 +550,8 @@ class ResearchEngine:
     def _expectations(self, d: StockResearchDataset) -> dict:
         earnings = self._earnings(d)
         upcoming = d.expectations.get("upcoming_earnings") or (asdict(d.upcoming_earnings) if d.upcoming_earnings else None)
+        if d.expectations.get("consensus") is not None:
+            upcoming = {**(upcoming or {}), **d.expectations["consensus"]}
         surprise = earnings["metrics"].get("latest_eps_surprise")
         beat_rate = earnings["metrics"].get("beat_rate")
         score = _weighted([(_ratio_score(surprise, -.1, .1), .55), (_ratio_score(beat_rate, 0, 1), .45)])
@@ -676,7 +678,9 @@ class ResearchEngine:
                     "target_company": neighbor.get("ticker"),
                     "relationship_type": label.get("category"),
                     "description": label.get("reason"),
-                    "source": neighbor.get("relation_evidence_url"),
+                    "source": label.get("evidence_url") or neighbor.get("relation_evidence_url"),
+                    "evidence_status": label.get("evidence_status", "UNCHECKED"),
+                    "evidence_text": label.get("evidence_text", ""),
                     "confidence": .9 if neighbor.get("relation_verified") else .45,
                     "verified": bool(neighbor.get("relation_verified")),
                     "updated_at": raw.get("date") or _now(),

@@ -59,7 +59,8 @@ def test_old_cache_reclassified_deduplicated_without_mutation():
 
 def test_empty_results_do_not_advertise_data():
     details = prepare_expectations({'modules': {'expectations': {'details': {}}}})['modules']['expectations']['details']
-    assert all(row['status'] == 'UNAVAILABLE' for row in details['capability_matrix'].values())
+    assert details['capability_matrix']['current_consensus']['status'] == 'UNKNOWN'
+    assert details['capability_matrix']['revision_30d']['status'] == 'NOT_CONNECTED'
     assert details['guidance'] == []
 
 
@@ -69,3 +70,45 @@ def test_scan_past_introduction_and_keep_actual_guidance():
     rows = extract_statements(text, '2026-08-26', 'https://www.sec.gov/example')
     assert len(rows) == 1
     assert rows[0]['group'] == 'guidance'
+
+
+def test_consensus_calendar_average_without_release_date():
+    from types import SimpleNamespace
+    from v2.research.consensus import collect_consensus
+    client = SimpleNamespace(earnings_estimate=None, revenue_estimate=None,
+                             calendar={'Earnings Average': 0, 'Revenue Average': 123})
+    result = collect_consensus('TEST', client)
+    assert result['eps_estimate'] == 0
+    assert result['revenue_estimate'] == 123
+
+
+def test_consensus_tables_same_period_no_calendar_mixing():
+    import pandas as pd
+    from types import SimpleNamespace
+    from v2.research.consensus import collect_consensus
+    client = SimpleNamespace(earnings_estimate=pd.DataFrame({'avg': [2, 10]}, index=['0q', '+1y']),
+                             revenue_estimate=None, calendar={'Revenue Average': 123})
+    result = collect_consensus('TEST', client)
+    assert result['eps_estimate'] == 2
+    assert result['revenue_estimate'] is None
+    assert result['period'] == '0q'
+
+
+def test_consensus_failures_do_not_expose_exception():
+    from v2.research.consensus import collect_consensus
+    class Failed:
+        def __getattr__(self, name):
+            raise RuntimeError('secret request metadata')
+    result = collect_consensus('TEST', Failed())
+    assert 'secret' not in str(result)
+    source = {'modules': {'expectations': {'details': {'upcoming_earnings': result}}}}
+    matrix = prepare_expectations(source)['modules']['expectations']['details']['capability_matrix']
+    assert matrix['current_consensus']['status'] == 'FETCH_FAILED'
+
+
+def test_empty_consensus_distinguished_from_failure():
+    from types import SimpleNamespace
+    from v2.research.consensus import collect_consensus
+    result = collect_consensus('TEST', SimpleNamespace(earnings_estimate=None, revenue_estimate=None, calendar={}))
+    source = {'modules': {'expectations': {'details': {'upcoming_earnings': result}}}}
+    assert prepare_expectations(source)['modules']['expectations']['details']['capability_matrix']['current_consensus']['status'] == 'NO_DATA'

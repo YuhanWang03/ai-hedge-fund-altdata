@@ -92,16 +92,21 @@ def prepare_expectations(source):
     eps = metrics.get('forward_eps') if metrics.get('forward_eps') is not None else upcoming.get('eps_estimate')
     revenue = metrics.get('revenue_consensus') if metrics.get('revenue_consensus') is not None else upcoming.get('revenue_estimate')
     available = [label for label, value in [('每股收益', eps), ('营收', revenue)] if _number(value)]
+    attempts = upcoming.get('attempts', [])
+    missing_status = 'FETCH_FAILED' if any(a.get('status') == 'FETCH_FAILED' for a in attempts) else 'NO_DATA' if attempts else 'UNKNOWN'
+    missing_reason = {'FETCH_FAILED': '数据源请求或解析失败，请重新研究；不是确认没有预期数据',
+                      'NO_DATA': '数据源未返回有效预期值；也可能是上游静默失败，可稍后重试',
+                      'UNKNOWN': '旧研究未记录获取详情，请重新研究以核查原因'}[missing_status]
     history = modules.get('earnings', {}).get('details', {}).get('history', [])
     comparable = [row for row in history if any(_number(row.get(key)) for key in ('eps_surprise', 'revenue_surprise'))]
     matrix = {
-        'current_consensus': {'status': 'AVAILABLE' if len(available) == 2 else 'PARTIAL_DATA' if available else 'UNAVAILABLE',
-            'reason': '本次已取得：' + '、'.join(available) if available else '本次没有取得可用的一致预期数值'},
-        'earnings_surprise_history': {'status': 'AVAILABLE' if comparable else 'UNAVAILABLE',
+        'current_consensus': {'status': 'AVAILABLE' if len(available) == 2 else 'PARTIAL_DATA' if available else missing_status,
+            'reason': ('本次已取得：' + '、'.join(available) + '；' + upcoming.get('period_label', '期间以数据源为准')) if available else missing_reason},
+        'earnings_surprise_history': {'status': 'AVAILABLE' if comparable else 'NO_DATA',
             'reason': f'本次有 {len(comparable)} 个报告期可比较实际值与预期值' if comparable else '本次缺少实际值与预期值的有效对照'},
     }
     for days in (30, 60, 90):
-        matrix[f'revision_{days}d'] = {'status': 'UNAVAILABLE', 'reason': '尚未接入同一目标报告期的历史预期快照，无法比较修正幅度'}
+        matrix[f'revision_{days}d'] = {'status': 'NOT_CONNECTED', 'reason': '尚未接入同一目标报告期的历史预期快照；刷新无法补齐，需历史数据源或持续积累快照'}
     details['capability_matrix'] = matrix
     raw = details.get('guidance', [])
     rows, seen, filtered, duplicates = [], set(), 0, 0
@@ -117,6 +122,7 @@ def prepare_expectations(source):
             continue
         seen.add(key)
         row['filing_type'] = old.get('filing_type', '')
+        row['source_section'] = old.get('source_section', 'MD&A')
         rows.append(row)
     details['guidance'] = rows[:30]
     details['guidance_quality'] = {'filtered': filtered, 'duplicates': duplicates,

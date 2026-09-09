@@ -107,7 +107,7 @@ def enrich_sec_links(result):
         if not row.get('filing_type'):
             match = next((r for r in findings if r.get('source_url') == row.get('source_url')), None)
             if match: row['filing_type'] = match.get('filing_type', '')
-        rows.append((row, 'MD&A'))
+        rows.append((row, row.get('source_section', 'MD&A')))
     keys = list(dict.fromkeys((r.get('source_url'), r.get('filing_type', '')) for r, _ in rows if archive_url(r.get('source_url'))))
     with ThreadPoolExecutor(max_workers=3) as pool:
         resolved = dict(zip(keys, pool.map(lambda key: resolve_document(*key), keys)))

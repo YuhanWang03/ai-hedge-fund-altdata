@@ -49,14 +49,19 @@ def verify(neighbor: Neighbor, fd: FDClient, universe: set[str]) -> int:
 
 
 def verify_relation(neighbor: Neighbor) -> int:
-    """Search Tavily for evidence of the seed-neighbor relationship.
+    """Collect per-edge search evidence, without certifying LLM descriptions.
 
-    Iterates through neighbor.labels (each is a seed/category pair). Stops at
-    the first label whose relationship is confirmed. Sets relation_verified
-    and relation_evidence_url in-place.
-
-    Returns the number of Tavily calls actually made (≥ 0).
+    Returns successful Tavily calls. Explicit directional snippets are retained
+    for review; co-mention alone never sets relation_verified.
     """
+    from v2.research.relationship_evidence import assess
+    neighbor.relation_verified = False
+    neighbor.relation_evidence_url = None
+    for label in neighbor.labels:
+        label.evidence_status = 'NOT_CONNECTED'
+        label.evidence_url = None
+        label.evidence_text = ''
+        label.evidence_title = ''
     api_key = os.environ.get("TAVILY_API_KEY", "").strip()
     if not api_key or not neighbor.labels:
         return 0
@@ -71,6 +76,7 @@ def verify_relation(neighbor: Neighbor) -> int:
     calls = 0
 
     for label in neighbor.labels:
+        label.evidence_status = 'NO_EVIDENCE'
         keywords = _RELATION_KEYWORDS.get(label.category, "")
         query = f"{label.seed} {neighbor.ticker} {keywords}".strip()
 
@@ -82,23 +88,23 @@ def verify_relation(neighbor: Neighbor) -> int:
                 days=365,
                 search_depth="basic",
             )
-        except Exception as exc:
-            logger.warning("Tavily relation search failed for %s/%s: %s",
-                           label.seed, neighbor.ticker, exc)
+        except Exception:
+            label.evidence_status = 'FETCH_FAILED'
+            logger.warning("Tavily relation search failed for %s/%s", label.seed, neighbor.ticker)
             continue
 
         calls += 1
         results = response.get("results", []) if response else []
 
-        # Confirm: at least one result text mentions BOTH tickers
-        seed_up = label.seed.upper()
-        nb_up = neighbor.ticker.upper()
+        # Evaluate each edge separately; co-mention never verifies a relation.
         for r in results:
-            text = ((r.get("title") or "") + " " +
-                    (r.get("content") or "")).upper()
-            if seed_up in text and nb_up in text:
-                neighbor.relation_verified = True
-                neighbor.relation_evidence_url = (r.get("url") or "")[:200]
-                return calls       # first hit is enough
+            evidence = assess(label.seed, neighbor.ticker, label.category, r)
+            if evidence and (not label.evidence_url or evidence['status'] == 'EVIDENCE_FOUND'):
+                label.evidence_status = evidence['status']
+                label.evidence_url = evidence['url']
+                label.evidence_text = evidence['text']
+                label.evidence_title = evidence['title']
+                if evidence['status'] == 'EVIDENCE_FOUND':
+                    break
 
     return calls

@@ -443,7 +443,9 @@ class ResearchStore:
             for item in sources or []:
                 conn.execute(
                     """INSERT OR IGNORE INTO relationship_sources
-                    (relationship_id,provider,title,url,published_at,fetched_at,evidence_text,evidence_summary) VALUES (?,?,?,?,?,?,?,?)""",
+                    (relationship_id,provider,title,url,published_at,fetched_at,evidence_text,evidence_summary) VALUES (?,?,?,?,?,?,?,?)
+                    ON CONFLICT(relationship_id,url) DO UPDATE SET provider=excluded.provider,title=excluded.title,
+                    fetched_at=excluded.fetched_at,evidence_text=excluded.evidence_text,evidence_summary=excluded.evidence_summary""",
                     (relation_id, item.get("provider"), item.get("title"), item.get("url"), item.get("published_at"), item.get("fetched_at", now), item.get("evidence_text"), item.get("evidence_summary")),
                 )
         return int(relation_id)
@@ -451,10 +453,11 @@ class ResearchStore:
     def relationships(self, ticker: str) -> list[dict]:
         with self._conn() as conn:
             rows = conn.execute("SELECT * FROM company_relationships WHERE source_ticker=? ORDER BY confidence DESC,updated_at DESC", (ticker.upper(),)).fetchall()
-        return [dict(row) for row in rows]
+            sources = conn.execute("SELECT s.* FROM relationship_sources s JOIN company_relationships r ON r.id=s.relationship_id WHERE r.source_ticker=? ORDER BY s.fetched_at DESC,s.id DESC", (ticker.upper(),)).fetchall()
+        return [{**dict(row), 'sources': [dict(s) for s in sources if s['relationship_id'] == row['id']]} for row in rows]
 
     def relationship(self, relation_id: int) -> dict | None:
         with self._conn() as conn:
             row = conn.execute("SELECT * FROM company_relationships WHERE id=?", (relation_id,)).fetchone()
-            sources = conn.execute("SELECT * FROM relationship_sources WHERE relationship_id=?", (relation_id,)).fetchall() if row else []
+            sources = conn.execute("SELECT * FROM relationship_sources WHERE relationship_id=? ORDER BY fetched_at,id", (relation_id,)).fetchall() if row else []
         return {**dict(row), "sources": [dict(item) for item in sources]} if row else None

@@ -27,6 +27,10 @@ class Label(BaseModel):
     seed: str
     category: str          # one of CATEGORIES
     reason: str            # LLM's one-line rationale, ≤ 30 chars
+    evidence_status: str = 'UNCHECKED'
+    evidence_url: str | None = None
+    evidence_text: str = ''
+    evidence_title: str = ''
 
 
 class Neighbor(BaseModel):

@@ -78,7 +78,7 @@ def run_lateral_expansion(
     # Each unique neighbor costs ≤ 1 Tavily call.
     tavily_calls = 0
     for n in neighbors:
-        if n.exists and not n.already_in_universe:
+        if n.exists:
             tavily_calls += verify_relation(n)
     logger.info("Tavily relation checks: %d calls, %d verified",
                 tavily_calls,
