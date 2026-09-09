@@ -236,3 +236,32 @@
 
 @media(max-width:760px){.header-cost-link{order:4}.header-clock.eastern{order:5;width:auto}.cost-page{padding:12px}.cost-summary-grid{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:620px){.module-health>details summary{grid-template-columns:85px 65px 75px minmax(0,1fr)}.module-health>details summary button{grid-column:4}.research-diagnostic-detail{margin-left:0}.catalyst-list article{grid-template-columns:92px minmax(0,1fr) 55px}}
+
+/* Evidence disclosure is a secondary action, not a card heading. */
+.research-page .relationship-grid article > details { margin: 4px 0 8px; }
+.research-page .relationship-grid article > details > summary {
+  width: fit-content;
+  padding: 4px 0;
+  color: #768398;
+  font-size: 10px;
+  font-weight: 400;
+  line-height: 1.5;
+  cursor: pointer;
+}
+.research-page .relationship-grid article > details > summary::marker { font-size: 8px; }
+.research-page .relationship-grid article > details > summary:hover { color: #4773bc; }
+.research-page .relationship-grid article > details > summary:focus-visible {
+  outline: 2px solid #91b4ee;
+  outline-offset: 3px;
+  border-radius: 3px;
+}
+.research-page .relationship-grid article > details > p {
+  min-height: 0;
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: #f2f5fa;
+  font-size: 11px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
