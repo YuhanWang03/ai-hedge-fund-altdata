@@ -154,7 +154,13 @@ async def add_cost_price(payload: dict) -> dict:
     try:
         return await run_in_threadpool(add_price, payload)
     except (ValueError, KeyError, TypeError, OverflowError):
-        raise HTTPException(400, '价格配置无效：请检查模型、USD 单价、生效时间、复核期限及来源说明')
+        raise HTTPException(400, '价格配置无效：请检查模型、币种（CNY／USD）、单价、生效时间、复核期限及来源说明')
+
+
+@router.post('/costs/prices/sync')
+async def sync_official_prices() -> dict:
+    from v2.data.price_sync import sync_prices
+    return await run_in_threadpool(sync_prices, force=True)
 
 
 @router.get('/costs/deepseek-balance')

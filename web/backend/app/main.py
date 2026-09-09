@@ -11,6 +11,9 @@ old dashboard/ is frozen. Run:
 from __future__ import annotations
 
 import sys
+import asyncio
+import logging
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,7 +25,26 @@ if repo_root not in sys.path:
 
 from app.routers import agent_v2, chat, committee, dashboard, health, portfolio, research, workspace  # noqa: E402
 
-app = FastAPI(title="AI Hedge Fund · Web", version="0.1.0")
+@asynccontextmanager
+async def lifespan(app):
+    async def poll_prices():
+        from v2.data.price_sync import sync_prices
+        while True:
+            try:
+                await asyncio.to_thread(sync_prices)
+            except Exception:
+                logging.getLogger(__name__).warning('Official price sync unavailable')
+            await asyncio.sleep(6 * 3600)
+    task = asyncio.create_task(poll_prices())
+    try:
+        yield
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+app = FastAPI(title="AI Hedge Fund · Web", version="0.1.0", lifespan=lifespan)
 
 
 @app.middleware('http')
