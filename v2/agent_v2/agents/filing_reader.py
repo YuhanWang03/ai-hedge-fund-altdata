@@ -327,7 +327,10 @@ class FilingReader:
             note = (note + "；" if note else "") + f"{dropped} 条事件的引文与已读文本不符，已丢弃"
         status = ResultStatus.COMPLETED if verified else ResultStatus.PARTIAL_DATA
         metrics = {"rounds": outcome.rounds, "llm_calls": outcome.calls, "elapsed_ms": outcome.elapsed_ms, "stop_reason": outcome.stop_reason, "seconds_allowed": round(outcome.seconds_allowed, 1)}
-        return self._envelope(ticker, window, around, chosen, verified, sorted(loop.read), note=note, metrics=metrics, status=status)
+        envelope = self._envelope(ticker, window, around, chosen, verified, sorted(loop.read), note=note, metrics=metrics, status=status)
+        envelope.metadata["trace"] = list(outcome.trace)
+        envelope.metadata["agent"] = {"name": "filing_reader", "label": "申报阅读", "subject": f"{ticker} {around or window}", "rounds": outcome.rounds, "llm_calls": outcome.calls, "elapsed_ms": outcome.elapsed_ms, "seconds_allowed": round(outcome.seconds_allowed, 1), "stop_reason": outcome.stop_reason, "calls": {"read": len(loop.read)}}
+        return envelope
 
     def _envelope(self, ticker: str, window: str, around: str, refs: list[FilingRef], events: list[dict[str, Any]], read: list[tuple[int, str]], *, note: str, metrics: dict[str, Any], status: ResultStatus) -> ToolEnvelope:
         evidence: list[EvidenceItem] = []

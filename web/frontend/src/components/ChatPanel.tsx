@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { getAgentV2Job, postAgentV2, postChat } from "../api";
-import type { AgentV2Evidence, AgentV2Job, AgentV2Resp, ChatResp } from "../types";
+import type { AgentV2Evidence, AgentV2Job, AgentV2Resp, AgentV2SubAgent, ChatResp } from "../types";
 
 type ChatMode = "classic" | "agent_v2";
 
@@ -13,6 +13,33 @@ interface AgentMeta {
   capabilities: string[];
   webAllowed: boolean;
   synthesis: string;
+  subAgents: AgentV2SubAgent[];
+}
+
+const STOP_LABELS: Record<string, string> = { finished: "完成", rounds: "轮次用尽", time: "超时", no_model: "无模型", no_budget: "无预算" };
+const CALL_LABELS: Record<string, string> = { news: "新闻", filing_events: "读申报", memory: "记忆", search: "搜索", read: "读正文", filings: "申报", sections_read: "读节", events: "事件" };
+
+function callSummary(calls: Record<string, number | null | undefined>): string {
+  return Object.entries(calls).filter(([, value]) => value).map(([key, value]) => `${CALL_LABELS[key] || key} ${value}`).join("、");
+}
+
+function SubAgentTrace({ label, rounds, elapsedMs, stop, calls, trace, intraday }: { label: string; rounds: number; elapsedMs: number; stop: string; calls: Record<string, number | null | undefined>; trace: { round: number; action: string; detail: string; ms: number }[]; intraday?: boolean }) {
+  const summary = [label, `${rounds} 轮`, `${(elapsedMs / 1000).toFixed(1)}s`, callSummary(calls), STOP_LABELS[stop] || stop, intraday ? "盘中" : ""].filter(Boolean).join(" · ");
+  return (
+    <details className="mt-1">
+      <summary className="cursor-pointer text-slate-600">{summary}</summary>
+      <ol className="mt-1 list-decimal space-y-0.5 pl-5">
+        {trace.map((step, index) => (
+          <li key={`${step.round}-${index}`}>
+            <code className="rounded bg-slate-100 px-1">{step.action}</code>
+            {step.detail && <span className="ml-1 break-all text-slate-600">{step.detail}</span>}
+            <span className="ml-1 text-slate-400">{step.ms} ms</span>
+          </li>
+        ))}
+        {trace.length === 0 && <li className="text-slate-400">没有记录到模型轮次</li>}
+      </ol>
+    </details>
+  );
 }
 
 interface Msg {
@@ -107,6 +134,7 @@ export default function ChatPanel({ inject }: { inject?: { text: string; nonce: 
           capabilities: result.plan.tasks.map((task) => task.capability),
           webAllowed: result.policy.web_allowed,
           synthesis: result.synthesis?.outcome || "",
+          subAgents: result.sub_agents || [],
         },
         sources: uniqueSources(result.evidence || []),
       },
@@ -228,12 +256,22 @@ export default function ChatPanel({ inject }: { inject?: { text: string; nonce: 
               )}
               {message.agent && message.agent.capabilities.length > 0 && (
                 <details className="mt-2 border-t border-slate-100 pt-2 text-xs text-slate-500">
-                  <summary className="cursor-pointer">执行工具（{message.agent.capabilities.length}）</summary>
+                  <summary className="cursor-pointer">执行工具（{message.agent.capabilities.length}）{message.agent.subAgents.length > 0 && ` · 子智能体 ${message.agent.subAgents.length}`}</summary>
                   <div className="mt-1 flex flex-wrap gap-1">
                     {message.agent.capabilities.map((capability, capabilityIndex) => (
                       <code key={`${capability}-${capabilityIndex}`} className="rounded bg-slate-100 px-1 py-0.5">{capability}</code>
                     ))}
                   </div>
+                  {message.agent.subAgents.map((agent, agentIndex) => (
+                    <div key={`${agent.capability}-${agentIndex}`} className="mt-1">
+                      <SubAgentTrace label={`${agent.label} ${agent.subject}`} rounds={agent.rounds} elapsedMs={agent.elapsed_ms} stop={agent.stop_reason} calls={agent.calls} trace={agent.trace} intraday={agent.intraday} />
+                      {agent.nested.map((nested, nestedIndex) => (
+                        <div key={nestedIndex} className="ml-4">
+                          <SubAgentTrace label={nested.label} rounds={nested.rounds} elapsedMs={nested.elapsed_ms} stop={nested.stop_reason} calls={nested.calls} trace={nested.trace} />
+                        </div>
+                      ))}
+                    </div>
+                  ))}
                 </details>
               )}
               {message.sources && message.sources.length > 0 && (

@@ -169,8 +169,9 @@ def default_catalog() -> CapabilityCatalog:
         CapabilitySpec(
             "market.explain_move",
             "research",
-            "Explain a recent price move and relative-market divergence.",
+            "Explain today's (the latest session's) price move: the day's facts against the sector, a filing dated within three days read first, news with the user's web consent, the monitor's memory; confirmed drivers separated from candidates.",
             _object({"ticker": _TICKER}, ["ticker"]),
+            long_running=True,
             answer_guidance=(
                 "move_explanation：第一句回答是否上涨/下跌、日期、幅度和成交量。把已确认行情事实、高置信度直接驱动、普通候选解释分开。"
                 "只有 metadata.claim_role=confirmed_driver 的证据才能写成已确认原因；candidate_driver 必须写成“可能相关”并说明中/低置信度。"

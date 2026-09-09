@@ -231,6 +231,29 @@ def completion_note(result: AgentResult) -> str:
     return f"引用补全 {len(completions)} 处" if completions else ""
 
 
+_STOP_LABELS = {"finished": "完成", "rounds": "轮次用尽", "time": "超时", "no_model": "无模型", "no_budget": "无预算"}
+_CALL_LABELS = {"news": "新闻", "filing_events": "读申报", "memory": "记忆", "search": "搜索", "read": "读正文", "filings": "申报", "sections_read": "读节", "events": "事件"}
+
+
+def agent_lines(result: AgentResult, *, limit: int = 8) -> list[str]:
+    """One plain-text line per sub-agent run (and its nested reader), for the message footer."""
+
+    from v2.agent_v2.models import sub_agent_summaries
+
+    lines: list[str] = []
+    for entry in sub_agent_summaries(result.results):
+        calls = "、".join(f"{_CALL_LABELS.get(key, key)} {value}" for key, value in entry["calls"].items() if value)
+        stop = _STOP_LABELS.get(entry["stop_reason"], entry["stop_reason"])
+        seconds = entry["elapsed_ms"] / 1000
+        lines.append(f"{entry['label']} {entry['subject']}：{entry['rounds']} 轮 · {seconds:.1f}s" + (f" · {calls}" if calls else "") + (f" · {stop}" if stop else "") + ("（盘中）" if entry["intraday"] else ""))
+        for nested in entry["nested"]:
+            nested_calls = "、".join(f"{_CALL_LABELS.get(key, key)} {value}" for key, value in nested["calls"].items() if value)
+            lines.append(f"  ↳ {nested['label']}：{nested['rounds']} 轮 · {nested['elapsed_ms'] / 1000:.1f}s" + (f" · {nested_calls}" if nested_calls else "") + (f" · {_STOP_LABELS.get(nested['stop_reason'], nested['stop_reason'])}" if nested["stop_reason"] else ""))
+        if len(lines) >= limit:
+            break
+    return lines[:limit]
+
+
 def web_label(*, requested: bool, enabled: bool) -> str:
     """The 网页 field of the header, and the hint that tells the user how to change it."""
 

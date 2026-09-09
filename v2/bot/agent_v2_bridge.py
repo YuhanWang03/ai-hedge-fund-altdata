@@ -120,6 +120,9 @@ class TelegramBotTransport:
                 label = f'<a href="{html.escape(entry.url, quote=True)}">{label}</a>'
             sources.append(f"{html.escape(entry.numbers)}. {label}")
         suffix = "\n\n<b>来源</b>\n" + "\n".join(sources) if sources else ""
+        agents = telegram_format.agent_lines(result)
+        if agents:
+            suffix += "\n\n<b>子智能体</b>\n" + "\n".join(html.escape(line) for line in agents)
         await delivery._deliver(self.placeholder, header + answer + suffix)
 
     def _header(self, result) -> str:

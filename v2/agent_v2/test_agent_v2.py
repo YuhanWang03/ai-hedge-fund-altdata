@@ -1151,6 +1151,9 @@ def test_sub_agent_loop_is_bounded_by_the_coordinators_remaining_time():
     # A normal finish records rounds, calls and the final action.
     done = Echo(ScriptedLLM([LLMResponse(text='{"action":"read"}'), LLMResponse(text='{"action":"finish","x":1}')]), LoopLimits(max_rounds=3)).run("sys", "task", finish_prompt="finish")
     assert done.finished and done.final == {"action": "finish", "x": 1} and (done.rounds, done.calls, done.stop_reason) == (2, 2, "finished")
+    assert [(step["round"], step["action"], step["detail"]) for step in done.trace] == [(1, "read", ""), (2, "finish", "")]
+    exhausted = Echo(ScriptedLLM([LLMResponse(text='{"action":"read","ids":["a"]}'), LLMResponse(text='{"action":"finish","events":[1,2]}')]), LoopLimits(max_rounds=1)).run("sys", "task", finish_prompt="finish")
+    assert exhausted.finished and [(step["action"], step["detail"]) for step in exhausted.trace] == [("read", '{"ids": ["a"]}'), ("forced_finish", "events=2")]
 
     # The engine hands the deadline to handlers: a reader called with almost no time left says so instead of reading.
     refs = [FilingRef("ARM", "8-K", "2026-07-29", "0001-26-000777", "https://www.sec.gov/x/777/")]
@@ -2290,3 +2293,123 @@ def test_move_attributor_reads_a_filing_dated_just_before_the_day_without_being_
     quiet = ScriptedLLM([LLMResponse(text='{"action":"finish","reasons":[],"next_steps":[],"note":""}')])
     MoveAttributor(quiet, price_source_factory=lambda: SimpleNamespace(get_prices=_attributor_prices), news=None, filing_reader=Reader(), memory_recall=None, memory_remember=None, sector_for=lambda ticker: "SMH").run("ARM", ExecutionContext("run", NormalizedRequest("q", "q"), BudgetClass.PORTFOLIO), day="2026-07-29", today=date(2026, 9, 9))
     assert Reader.calls == 0 and len(quiet.calls[0]) == 2
+
+
+def test_todays_move_goes_to_the_attributor_with_intraday_wording_when_the_session_is_open():
+    from v2.agent_v2.agents.move_attributor import register_move_attributor
+    from v2.agent_v2.interfaces import telegram_format
+    from v2.agent_v2.models import sub_agent_summaries
+
+    class Source:
+        def list_filings(self, ticker, since, until):
+            return []
+
+    remembered = []
+    finish = LLMResponse(text=json.dumps({"action": "finish", "reasons": [], "next_steps": [], "note": "盘中无新闻"}, ensure_ascii=False))
+    registry = CapabilityRegistry(default_catalog())
+    register_market_capabilities(registry, price_source_factory=lambda: SimpleNamespace(get_prices=_attributor_prices), move_provider=lambda ticker: None, now_factory=lambda: datetime(2026, 9, 9, 11, 0, tzinfo=ZoneInfo("America/New_York")))
+    open_session = datetime(2026, 9, 9, 11, 0, tzinfo=ZoneInfo("America/New_York"))
+    register_move_attributor(registry, ScriptedLLM([finish]), price_source_factory=lambda: SimpleNamespace(get_prices=_attributor_prices), news=None, filing_source=Source(), memory_recall=None, memory_remember=lambda facts, reasons: remembered.append(facts.date) or "x", sector_for=lambda ticker: "SMH", today_factory=lambda: date(2026, 9, 9), now_factory=lambda: open_session)
+    result = registry.execute(PlanTask("m", "market.explain_move", {"ticker": "ARM"}), _context())
+    assert result.capability == "market.explain_move" and result.metadata["is_intraday"] is True and result.metadata["date"] == "2026-09-09"
+    price = next(item for item in result.evidence if item.metadata["evidence_scope"] == "price")
+    assert price.claim.startswith("ARM 截至 2026-09-09 11:00 ET 盘中报 ") and price.metadata["constraints"]
+    assert "当日未收盘，价格、成交量和归因都以收盘后为准" in result.metadata["narrative"] and "盘中 " in result.metadata["narrative_compact"]
+    assert verify_answer(result.metadata["narrative"], result.evidence, answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result]).ok
+    assert remembered == []  # nothing is remembered while the bar is not final
+    # The run is visible as a sub-agent with its trace, on every surface.
+    (summary,) = sub_agent_summaries([result])
+    assert summary["name"] == "move_attributor" and summary["intraday"] is True and summary["stop_reason"] == "finished" and [step["action"] for step in summary["trace"]] == ["finish"]
+    telegram = _telegram_result("x[evidence-news-1]。", outcome="clean")
+    telegram.results = [result]
+    assert telegram_format.agent_lines(telegram) == [f"异动归因 ARM 2026-09-09：1 轮 · {summary['elapsed_ms'] / 1000:.1f}s · 完成（盘中）"]
+    assert telegram.to_dict()["sub_agents"][0]["label"] == "异动归因"
+    # After the close the same capability reads as a completed bar and is remembered.
+    closed = datetime(2026, 9, 9, 18, 0, tzinfo=ZoneInfo("America/New_York"))
+    register_move_attributor(registry, ScriptedLLM([finish]), price_source_factory=lambda: SimpleNamespace(get_prices=_attributor_prices), news=None, filing_source=Source(), memory_recall=None, memory_remember=lambda facts, reasons: remembered.append(facts.date) or "x", sector_for=lambda ticker: "SMH", today_factory=lambda: date(2026, 9, 9), now_factory=lambda: closed)
+    settled = registry.execute(PlanTask("m", "market.explain_move", {"ticker": "ARM"}), _context())
+    assert settled.metadata["is_intraday"] is False and "收于" in settled.evidence[0].claim and remembered == ["2026-09-09"]
+    # Without a model the V1 explainer stays registered.
+    plain = CapabilityRegistry(default_catalog())
+    register_market_capabilities(plain, price_source_factory=lambda: None, move_provider=lambda ticker: None, now_factory=lambda: closed)
+    register_move_attributor(plain, None, price_source_factory=lambda: None, news=None, filing_source=Source(), memory_recall=None, memory_remember=None)
+    assert plain.execute(PlanTask("m", "market.explain_move", {"ticker": "ARM"}), _context()).errors == ["no recent move data"]
+
+
+def test_news_checker_reports_dated_events_with_quotes_it_located():
+    from v2.agent_v2.agents.news_checker import NewsChecker
+    from v2.agent_v2.synthesis import web_lines
+
+    page = "Arm Holdings shares slid 8% on Wednesday, July 29, after the company's revenue guidance came in below Wall Street expectations. Analysts had expected stronger smartphone royalty growth."
+    searches: list[str] = []
+
+    def search(query, *, days, max_results):
+        searches.append(query)
+        return [
+            {"title": "Arm falls as guidance disappoints", "url": "https://example.com/arm-guidance#top", "content": "Arm shares slid after guidance came in below expectations.", "published_date": "2026-07-29", "raw_content": page},
+            {"title": "Arm at 2030: a long-term view", "url": "https://example.com/opinion", "content": "Why Arm could double by 2030.", "published_date": "2026-07-28"},
+            {"title": "junk", "url": "ftp://nope", "content": "x"},
+        ]
+
+    llm = ScriptedLLM(
+        [
+            LLMResponse(text='{"action":"search","query":"Arm Holdings stock July 29 2026 falls"}'),
+            LLMResponse(text='{"action":"read","ids":["r1"]}'),
+            LLMResponse(
+                text=json.dumps(
+                    {
+                        "action": "finish",
+                        "events": [
+                            {"date": "2026-07-29", "text": "营收指引低于华尔街预期，股价下跌 8%", "source": "r1", "quote": "revenue guidance came in below Wall Street expectations"},
+                            {"date": "2026-07-28", "text": "看多到 2030 年的观点", "source": "r2", "quote": "Why Arm could double by 2030"},
+                            {"date": "", "text": "没有日期的事件", "source": "r1", "quote": "shares slid 8% on Wednesday"},
+                            {"date": "2026-07-29", "text": "编造", "source": "r1", "quote": "takeover rumours swirled"},
+                        ],
+                        "note": "一篇正文一篇摘要",
+                    },
+                    ensure_ascii=False,
+                )
+            ),
+        ]
+    )
+    checker = NewsChecker(llm, search)
+    result = checker.run("ARM", _context(), query="ARM 为什么在 7 月 29 日大跌", topic="company_event", recency_days=60, today=date(2026, 9, 9))
+    assert result.capability == "web.research" and result.ok and searches == ["Arm Holdings stock July 29 2026 falls"]
+    events = [item for item in result.evidence if item.metadata.get("evidence_type") == "news_event"]
+    assert [(item.as_of, item.source_url, item.metadata["read"]) for item in events] == [("2026-07-29", "https://example.com/arm-guidance", True), ("2026-07-28", "https://example.com/opinion", False)]
+    assert events[0].claim == "ARM 2026-07-29：营收指引低于华尔街预期，股价下跌 8%（新闻：“revenue guidance came in below Wall Street expectations”）。"
+    assert result.metrics["events"] == 2 and result.metrics["reads"] == 1 and "2 条事件没有日期或引文与正文不符，已丢弃" in result.limitations[0]
+    assert verify_answer(result.metadata["narrative"], result.evidence, answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result]).ok
+    assert result.metadata["agent"]["name"] == "news_checker" and [step["action"] for step in result.metadata["trace"]] == ["search", "read", "finish"]
+    assert web_lines(result, "2026-07-01").startswith("- Arm falls as guidance disappoints（2026-07-29）：ARM 2026-07-29：营收指引低于华尔街预期")
+    # No events at all: a limitations item says so and the envelope is partial, never empty.
+    silent = NewsChecker(ScriptedLLM([LLMResponse(text='{"action":"finish","events":[],"note":"没有找到"}')]), search)
+    none = silent.run("ARM", _context(), query="q", today=date(2026, 9, 9))
+    assert none.status == ResultStatus.PARTIAL_DATA and none.evidence[0].metadata["citation_kind"] == "limitations" and "未找到可核实、带日期的事件" in none.evidence[0].claim
+
+
+def test_live_registry_puts_the_news_checker_behind_web_research_when_a_model_is_present():
+    from v2.agent_v2.runtime import build_live_registry
+
+    class Provider:
+        def search(self, query, *, days, max_results):
+            return [{"title": "t", "url": "https://example.com/a", "content": "Arm shares slid after guidance came in below expectations on July 29.", "published_date": "2026-07-29"}]
+
+    class Port:
+        provider = Provider()
+
+        def search(self, query, *, topic, ticker="", recency_days=30, run_id=""):
+            raise AssertionError("the one-shot adapter must not be used when a model is present")
+
+    llm = ScriptedLLM([LLMResponse(text='{"action":"search","query":"Arm July 29"}'), LLMResponse(text=json.dumps({"action": "finish", "events": [{"date": "2026-07-29", "text": "指引不及预期", "source": "r1", "quote": "guidance came in below expectations on July 29"}]}, ensure_ascii=False))])
+    registry = build_live_registry(default_catalog(), lab=None, web_search=Port(), llm=llm)
+    consenting = ExecutionContext("run", NormalizedRequest("q", "q"), BudgetClass.STANDARD, allow_web=True)
+    result = registry.execute(PlanTask("w", "web.research", {"query": "why did ARM fall", "topic": "company_event", "ticker": "ARM", "recency_days": 60}), consenting)
+    assert result.ok and result.metadata["agent"]["name"] == "news_checker" and result.metadata["dates"] == ["2026-07-29"]
+    # No model: the snippet adapter answers, as before.
+    class SnippetPort(Port):
+        def search(self, query, *, topic, ticker="", recency_days=30, run_id=""):
+            return ToolEnvelope("web.research", ResultStatus.COMPLETED, subject=ticker, evidence=[EvidenceItem("W", ticker, "snippet")])
+
+    plain = build_live_registry(default_catalog(), lab=None, web_search=SnippetPort(), llm=None)
+    assert plain.execute(PlanTask("w", "web.research", {"query": "q", "topic": "general", "ticker": "ARM"}), consenting).evidence[0].id == "W"

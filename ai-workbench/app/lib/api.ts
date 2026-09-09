@@ -42,6 +42,23 @@ export type AgentV2Evidence = {
   confidence: number | null;
 };
 
+export type AgentV2TraceStep = { round: number; action: string; detail: string; ms: number };
+export type AgentV2SubAgent = {
+  capability: string;
+  name: string;
+  label: string;
+  subject: string;
+  rounds: number;
+  llm_calls: number;
+  elapsed_ms: number;
+  seconds_allowed?: number | null;
+  stop_reason: string;
+  calls: Record<string, number | null | undefined>;
+  intraday?: boolean;
+  trace: AgentV2TraceStep[];
+  nested: { label: string; rounds: number; elapsed_ms: number; stop_reason: string; calls: Record<string, number | null | undefined>; trace: AgentV2TraceStep[] }[];
+};
+
 export type AgentV2Response = {
   run_id: string;
   status: string;
@@ -55,6 +72,7 @@ export type AgentV2Response = {
     assumptions: string[];
   };
   evidence: AgentV2Evidence[];
+  sub_agents?: AgentV2SubAgent[];
   verification: {
     ok: boolean;
     warnings: string[];

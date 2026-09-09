@@ -39,6 +39,16 @@ class LoopLimits:
         return max(0.0, min(self.max_seconds, self.outer_seconds - BUDGET_MARGIN_SECONDS))
 
 
+def describe_action(action: dict[str, Any], limit: int = 90) -> str:
+    """One line for a trace: the action's arguments, without its kind."""
+
+    rest = {key: value for key, value in action.items() if key != "action"}
+    if not rest:
+        return ""
+    text = json.dumps(rest, ensure_ascii=False)
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
 @dataclass
 class LoopOutcome:
     """What the loop did, for the envelope's metrics and the answer's limitations."""
@@ -51,6 +61,8 @@ class LoopOutcome:
     #: ``finished``, ``rounds``, ``time``, ``no_model`` or ``no_budget``.
     stop_reason: str = ""
     seconds_allowed: float = 0.0
+    #: One entry per model turn: what it asked for and how long the step took.
+    trace: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def note(self) -> str:
@@ -120,24 +132,38 @@ class BoundedLoop:
                 break
             outcome.rounds += 1
             outcome.calls += 1
+            turn_started = time.monotonic()
             action = self.step(messages)
             if action is None:
+                outcome.trace.append({"round": outcome.rounds, "action": "bad_turn", "detail": "", "ms": int((time.monotonic() - turn_started) * 1000)})
                 continue
             if action.get("action") == "finish":
                 outcome.finished, outcome.final, stop = True, action, "finished"
+                outcome.trace.append({"round": outcome.rounds, "action": "finish", "detail": self.describe_finish(action), "ms": int((time.monotonic() - turn_started) * 1000)})
                 break
             self.handle(action, messages)
+            outcome.trace.append({"round": outcome.rounds, "action": str(action.get("action") or "?"), "detail": describe_action(action), "ms": int((time.monotonic() - turn_started) * 1000)})
         if not outcome.finished and stop == "rounds" and time.monotonic() - started <= self.limits.seconds:
             # One last call that may only finish: what the loop gathered is
             # not thrown away because it kept exploring.
             messages.append({"role": "user", "content": finish_prompt})
             outcome.calls += 1
+            turn_started = time.monotonic()
             action = self.step(messages)
             if action is not None and action.get("action") == "finish":
                 outcome.finished, outcome.final, stop = True, action, "finished"
+            outcome.trace.append({"round": outcome.rounds + 1, "action": "forced_finish", "detail": self.describe_finish(action) if action else "", "ms": int((time.monotonic() - turn_started) * 1000)})
         outcome.stop_reason = stop
         outcome.elapsed_ms = int((time.monotonic() - started) * 1000)
         return outcome
+
+    def describe_finish(self, action: dict[str, Any]) -> str:
+        """What the finish carried, for the trace; subclasses know their own payload."""
+
+        for key in ("reasons", "events"):
+            if isinstance(action.get(key), list):
+                return f"{key}={len(action[key])}"
+        return ""
 
     def step(self, messages: list[dict[str, str]]) -> dict[str, Any] | None:
         """One model turn parsed as an action; a bad turn is answered and returns None."""

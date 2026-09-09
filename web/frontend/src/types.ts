@@ -55,7 +55,25 @@ export interface AgentV2Evidence {
   confidence: number | null;
 }
 
+export interface AgentV2TraceStep { round: number; action: string; detail: string; ms: number }
+export interface AgentV2SubAgent {
+  capability: string;
+  name: string;
+  label: string;
+  subject: string;
+  rounds: number;
+  llm_calls: number;
+  elapsed_ms: number;
+  seconds_allowed?: number | null;
+  stop_reason: string;
+  calls: Record<string, number | null | undefined>;
+  intraday?: boolean;
+  trace: AgentV2TraceStep[];
+  nested: { label: string; rounds: number; elapsed_ms: number; stop_reason: string; calls: Record<string, number | null | undefined>; trace: AgentV2TraceStep[] }[];
+}
+
 export interface AgentV2Resp {
+  sub_agents?: AgentV2SubAgent[];
   run_id: string;
   status: string;
   answer: string;

@@ -290,6 +290,7 @@ class AgentResult:
             "answer": self.answer,
             "answer_mode": self.answer_mode.value,
             "results": [result.to_dict() for result in self.results],
+            "sub_agents": sub_agent_summaries(self.results),
             "evidence": [item.to_dict() for item in self.evidence],
             "verification": {
                 "ok": self.verification.ok,
@@ -311,3 +312,40 @@ class AgentResult:
                 else None
             ),
         }
+
+
+def sub_agent_summaries(results: list[ToolEnvelope]) -> list[dict[str, Any]]:
+    """What each sub-agent did during the run: rounds, calls, stop reason and its per-round trace.
+
+    A sub-agent's envelope carries ``metadata["agent"]`` (its summary) and
+    ``metadata["trace"]`` (one entry per model turn); a reader the
+    attributor called shows up nested under it.  Surfaces render this list
+    instead of digging through envelopes.
+    """
+
+    summaries: list[dict[str, Any]] = []
+    for result in results:
+        agent = result.metadata.get("agent")
+        if not isinstance(agent, dict):
+            continue
+        entry = {
+            "capability": result.capability,
+            "name": str(agent.get("name") or ""),
+            "label": str(agent.get("label") or agent.get("name") or ""),
+            "subject": str(agent.get("subject") or result.subject),
+            "rounds": int(agent.get("rounds") or 0),
+            "llm_calls": int(agent.get("llm_calls") or 0),
+            "elapsed_ms": int(agent.get("elapsed_ms") or 0),
+            "seconds_allowed": agent.get("seconds_allowed"),
+            "stop_reason": str(agent.get("stop_reason") or ""),
+            "calls": dict(agent.get("calls") or {}),
+            "intraday": bool(agent.get("intraday", False)),
+            "trace": [dict(step) for step in (result.metadata.get("trace") or []) if isinstance(step, dict)],
+            "nested": [
+                {"label": "申报阅读", "rounds": int(run.get("rounds") or 0), "elapsed_ms": int(run.get("elapsed_ms") or 0), "stop_reason": str(run.get("stop_reason") or ""), "calls": {"filings": run.get("filings"), "sections_read": run.get("sections_read"), "events": run.get("events")}, "trace": [dict(step) for step in (run.get("trace") or []) if isinstance(step, dict)]}
+                for run in (agent.get("reader_runs") or [])
+                if isinstance(run, dict)
+            ],
+        }
+        summaries.append(entry)
+    return summaries

@@ -15,12 +15,32 @@ from v2.agent_v2.adapters import (
     WorkspaceLabPort,
 )
 from v2.agent_v2.agents.filing_reader import register_filing_reader
+from v2.agent_v2.agents.news_checker import register_news_checker
 from v2.agent_v2.agents.move_attributor import register_move_attributor
 from v2.agent_v2.catalog import CapabilityCatalog, default_catalog
 from v2.agent_v2.execution import CapabilityRegistry
 from v2.agent_v2.llm import LLMEvidenceSynthesizer, StructuredLLMPlanner
 from v2.agent_v2.orchestrator import AgentV2, AgentV2Config
 from v2.agent_v2.session import ShortTermSession
+
+
+def _search_via(web_search):
+    """A search callable for the news checker from a WebSearchPort's provider, raw page text included when it can."""
+
+    provider = getattr(web_search, "provider", None)
+    client = getattr(provider, "_client", None)
+
+    def search(query: str, *, days: int, max_results: int) -> list:
+        if client is not None:
+            recent = days <= 30
+            response = client.search(query=query, max_results=max_results, topic="news" if recent else "general", days=days, search_depth="basic", include_raw_content=True)
+            return list(response.get("results", []))
+        if provider is not None:
+            return list(provider.search(query, days=days, max_results=max_results) or [])
+        envelope = web_search.search(query, topic="general", recency_days=days)
+        return [dict(finding) for finding in envelope.findings]
+
+    return search
 
 
 def build_live_registry(
@@ -45,7 +65,13 @@ def build_live_registry(
     if lab is not None:
         register_lab_capabilities(registry, lab)
     if web_search is not None:
-        register_web_capability(registry, web_search)
+        if llm is not None:
+            # With a model, the web step is a bounded sub-agent: it searches,
+            # reads the pages that matter and reports dated events with
+            # located quotes.  Without one, the one-shot snippet adapter.
+            register_news_checker(registry, llm, search=_search_via(web_search))
+        else:
+            register_web_capability(registry, web_search)
     return registry
 
 

@@ -15,7 +15,7 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable
 
 from v2.agent_v2.agents.base import BoundedLoop, LoopLimits, limits_for
@@ -45,6 +45,9 @@ class DayFacts:
     sector_return_1d: float | None = None
     relative_1d: float | None = None
     is_latest: bool = False
+    #: The day is today and the session is still open: the bar is not final.
+    is_intraday: bool = False
+    observed_at_label: str = ""
 
 
 @dataclass
@@ -52,6 +55,7 @@ class Gathered:
     """What the loop fetched, keyed the way the finish action must refer to it."""
 
     news: dict[str, dict[str, Any]] = field(default_factory=dict)
+    reader_runs: list[dict[str, Any]] = field(default_factory=list)
     filing_events: dict[str, EvidenceItem] = field(default_factory=dict)
     filing_notes: list[EvidenceItem] = field(default_factory=list)
     memory: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -60,8 +64,12 @@ class Gathered:
     memory_calls: int = 0
 
 
-def day_facts(ticker: str, day: str, prices: list[Any], sector_etf: str = "", sector_prices: list[Any] | None = None) -> DayFacts | None:
-    """The day's price, move, volume ratio and 52-week range from daily bars."""
+def day_facts(ticker: str, day: str, prices: list[Any], sector_etf: str = "", sector_prices: list[Any] | None = None, *, now: datetime | None = None) -> DayFacts | None:
+    """The day's price, move, volume ratio and 52-week range from daily bars.
+
+    With ``now`` given, a bar dated today during the regular session is
+    marked intraday: its close is the last trade and its volume is partial.
+    """
 
     rows = [row for row in prices if str(row.time)[:10] <= day]
     if len(rows) < 2:
@@ -90,7 +98,17 @@ def day_facts(ticker: str, day: str, prices: list[Any], sector_etf: str = "", se
         sector_return_1d=sector_return,
         relative_1d=(change - sector_return) if change is not None and sector_return is not None else None,
         is_latest=rows[-1] is prices[-1],
+        **_session_state(str(latest.time)[:10], now),
     )
+
+
+def _session_state(day: str, now: datetime | None) -> dict[str, Any]:
+    if now is None:
+        return {}
+    from v2.agent_v2.adapters.market import _observation_state
+
+    observation = _observation_state(day, now)
+    return {"is_intraday": bool(observation["is_intraday"]), "observed_at_label": str(observation["observed_at_label"]) if observation["is_intraday"] else ""}
 
 
 _SYSTEM = """你是异动归因者，只输出 JSON，不回答用户问题。
@@ -140,6 +158,7 @@ class _AttributionLoop(BoundedLoop):
                 return False
             self.gathered.reader_calls += 1
             envelope = self.filing_events()
+            self.gathered.reader_runs.append({"filings": envelope.metrics.get("filings"), "sections_read": envelope.metrics.get("sections_read"), "events": envelope.metrics.get("events"), "rounds": envelope.metrics.get("rounds"), "stop_reason": envelope.metrics.get("stop_reason"), "elapsed_ms": envelope.metrics.get("elapsed_ms"), "trace": list(envelope.metadata.get("trace") or [])})
             lines = []
             for item in envelope.evidence:
                 if item.metadata.get("evidence_scope") == "filing_event":
@@ -239,17 +258,24 @@ class MoveAttributor:
         self.max_rounds = max(1, max_rounds)
         self.max_seconds = max(5.0, max_seconds)
 
-    def run(self, ticker: str, context: ExecutionContext, *, day: str = "", today: date | None = None) -> ToolEnvelope:
-        current = today or date.today()
+    def run(self, ticker: str, context: ExecutionContext, *, day: str = "", today: date | None = None, now: datetime | None = None, capability: str = "market.attribute_move") -> ToolEnvelope:
+        """Explain one day's move.  ``day`` empty means the latest bar (today's, when the market is open).
+
+        ``now`` marks a bar dated today as intraday while the session runs;
+        ``capability`` names the envelope (``market.explain_move`` when the
+        attributor answers a question about today).
+        """
+
+        current = today or (now.date() if now is not None else date.today())
         source = self.price_source_factory()
         start = (current - timedelta(days=430)).isoformat()
         prices = list(source.get_prices(ticker, start, current.isoformat()) or [])
         target = (day or current.isoformat())[:10]
         sector = self.sector_for(ticker) if self.sector_for else ""
         sector_prices = list(source.get_prices(sector, start, current.isoformat()) or []) if sector and sector != ticker else []
-        facts = day_facts(ticker, target, prices, sector, sector_prices)
+        facts = day_facts(ticker, target, prices, sector, sector_prices, now=now)
         if facts is None:
-            return ToolEnvelope("market.attribute_move", ResultStatus.FAILED, subject=ticker, errors=["no price history for that date"])
+            return ToolEnvelope(capability, ResultStatus.FAILED, subject=ticker, errors=["no price history for that date"])
         limits = limits_for(context, max_rounds=self.max_rounds, max_seconds=self.max_seconds)
         allow_news = bool(getattr(context, "allow_web", False)) and self.news is not None
         loop = _AttributionLoop(
@@ -261,7 +287,7 @@ class MoveAttributor:
             recall=(lambda query: self.memory_recall(ticker, query, max(30, (current - date.fromisoformat(facts.date)).days + 30))) if self.memory_recall is not None else None,
         )
         task = (
-            f"股票：{ticker}\n日期：{facts.date}\n当日涨跌：{_pct(facts.change)}，收盘 {facts.close:.2f} 美元\n"
+            f"股票：{ticker}\n日期：{facts.date}{'（今日，盘中，价格和成交量都不是最终值）' if facts.is_intraday else ''}\n当日涨跌：{_pct(facts.change)}，{'盘中价' if facts.is_intraday else '收盘'} {facts.close:.2f} 美元\n"
             f"成交量：{facts.volume} 股，为 30 日均量的 {facts.volume_ratio:.2f} 倍\n" if facts.volume_ratio is not None else f"股票：{ticker}\n日期：{facts.date}\n当日涨跌：{_pct(facts.change)}，收盘 {facts.close:.2f} 美元\n"
         )
         if facts.sector_return_1d is not None:
@@ -284,12 +310,34 @@ class MoveAttributor:
             note = (note + "；" if note else "") + f"{dropped} 条原因没有可核对的来源，已丢弃"
         next_steps = [str(step) for step in (outcome.final.get("next_steps") or []) if step] if outcome.finished else []
         remembered = ""
-        if self.memory_remember is not None and outcome.finished:
+        # An open session's facts are not final: nothing is written to memory yet.
+        if self.memory_remember is not None and outcome.finished and not facts.is_intraday:
             try:
                 remembered = self.memory_remember(facts, reasons)
             except Exception:  # noqa: BLE001 — memory is optional infrastructure
                 remembered = ""
-        return self._envelope(facts, reasons, loop.gathered, note=note, next_steps=next_steps, metrics={"rounds": outcome.rounds, "llm_calls": outcome.calls, "elapsed_ms": outcome.elapsed_ms, "stop_reason": outcome.stop_reason, "seconds_allowed": round(outcome.seconds_allowed, 1), "news_calls": loop.gathered.news_calls, "reader_calls": loop.gathered.reader_calls, "memory_calls": loop.gathered.memory_calls, "remembered_as": remembered}, allow_news=allow_news)
+        envelope = self._envelope(facts, reasons, loop.gathered, note=note, next_steps=next_steps, metrics={"rounds": outcome.rounds, "llm_calls": outcome.calls, "elapsed_ms": outcome.elapsed_ms, "stop_reason": outcome.stop_reason, "seconds_allowed": round(outcome.seconds_allowed, 1), "news_calls": loop.gathered.news_calls, "reader_calls": loop.gathered.reader_calls, "memory_calls": loop.gathered.memory_calls, "remembered_as": remembered}, allow_news=allow_news)
+        envelope.capability = capability
+        # What the sub-agent did, for the surfaces to show: one line per
+        # round, plus the reader's own rounds when it was called.
+        trace = list(outcome.trace)
+        if preamble:
+            trace.insert(0, {"round": 0, "action": "filing_events", "detail": "当日或前 3 天内有申报，先读", "ms": 0})
+        envelope.metadata["trace"] = trace
+        envelope.metadata["agent"] = {
+            "name": "move_attributor",
+            "label": "异动归因",
+            "subject": f"{ticker} {facts.date}",
+            "rounds": outcome.rounds,
+            "llm_calls": outcome.calls,
+            "elapsed_ms": outcome.elapsed_ms,
+            "seconds_allowed": round(outcome.seconds_allowed, 1),
+            "stop_reason": outcome.stop_reason,
+            "calls": {"news": loop.gathered.news_calls, "filing_events": loop.gathered.reader_calls, "memory": loop.gathered.memory_calls},
+            "reader_runs": loop.gathered.reader_runs,
+            "intraday": facts.is_intraday,
+        }
+        return envelope
 
     def _filing_just_before(self, ticker: str, day: str) -> bool:
         """Whether EDGAR lists a filing dated within the three days up to ``day``."""
@@ -313,15 +361,26 @@ class MoveAttributor:
             metadata = {"evidence_scope": kind, **extra.pop("metadata", {})}
             return EvidenceItem(id=f"evidence-attribute-{kind}-{digest}", entity=ticker, claim=claim, as_of=day, source_id=extra.pop("source_id", "market_data"), source_title=extra.pop("source_title", "Daily OHLCV market data"), metadata=metadata, **extra)
 
-        price_claim = f"{ticker} 在 {day} 收于 {facts.close:.2f} 美元，较前一交易日 {_pct(facts.change)}。"
-        evidence.append(item("price", price_claim, metric="price_change_pct", value=facts.change))
+        from v2.agent_v2.adapters.market import _INTRADAY_PRICE_RULE, _INTRADAY_VOLUME_RULE
+
+        session = {"is_intraday": facts.is_intraday, "market_session": "REGULAR" if facts.is_intraday else "CLOSED", "volume_is_final": not facts.is_intraday}
+        if facts.is_intraday:
+            price_claim = f"{ticker} 截至 {facts.observed_at_label} 盘中报 {facts.close:.2f} 美元，相对前一交易日收盘价 {_pct(facts.change)}。"
+            evidence.append(item("price", price_claim, metric="price_change_pct", value=facts.change, metadata={**session, "constraints": [_INTRADAY_PRICE_RULE]}))
+        else:
+            price_claim = f"{ticker} 在 {day} 收于 {facts.close:.2f} 美元，较前一交易日 {_pct(facts.change)}。"
+            evidence.append(item("price", price_claim, metric="price_change_pct", value=facts.change, metadata=session))
         volume = None
         if facts.volume_ratio is not None:
-            volume = item("volume", f"{ticker} {day} 成交量为 {facts.volume} 股，30 日均量为 {facts.average_volume_30d:.0f} 股，量比 {facts.volume_ratio:.2f} 倍。", metric="volume_ratio", value=facts.volume_ratio)
+            if facts.is_intraday:
+                volume = item("volume", f"{ticker} 截至查询时的盘中累计成交量为 {facts.volume} 股，相当于 30 日完整交易日均量 {facts.average_volume_30d:.0f} 股的 {facts.volume_ratio:.2f} 倍；当日未收盘，不能据此判定是否放量或缩量。", metric="volume_ratio", value=facts.volume_ratio, metadata={**session, "constraints": [_INTRADAY_VOLUME_RULE]})
+            else:
+                volume = item("volume", f"{ticker} {day} 成交量为 {facts.volume} 股，30 日均量为 {facts.average_volume_30d:.0f} 股，量比 {facts.volume_ratio:.2f} 倍。", metric="volume_ratio", value=facts.volume_ratio, metadata=session)
             evidence.append(volume)
         benchmark = None
         if facts.sector_return_1d is not None:
-            benchmark = item("benchmark", f"{ticker} {day} 行业基准 {facts.sector_etf} 单日回报为 {_pct(facts.sector_return_1d)}，{ticker} 相对回报为 {_pct(facts.relative_1d)}。", metadata={"benchmark": facts.sector_etf})
+            prefix = f"{ticker} 截至同一查询时点的盘中" if facts.is_intraday else f"{ticker} {day} "
+            benchmark = item("benchmark", f"{prefix}行业基准 {facts.sector_etf} 单日回报为 {_pct(facts.sector_return_1d)}，{ticker} 相对回报为 {_pct(facts.relative_1d)}。", metadata={"benchmark": facts.sector_etf, **session})
             evidence.append(benchmark)
         high = 0
         reason_items: list[EvidenceItem] = []
@@ -358,11 +417,11 @@ class MoveAttributor:
             subject=ticker,
             as_of=day,
             summary=price_claim,
-            metrics={"price": facts.close, "price_change_pct": facts.change, "volume_ratio": facts.volume_ratio, "sector_etf": facts.sector_etf, "sector_return_1d": facts.sector_return_1d, "relative_1d": facts.relative_1d, "confirmed_driver_count": high, "candidate_driver_count": len(reasons) - high, **metrics},
+            metrics={"is_intraday": facts.is_intraday, "price": facts.close, "price_change_pct": facts.change, "volume_ratio": facts.volume_ratio, "sector_etf": facts.sector_etf, "sector_return_1d": facts.sector_return_1d, "relative_1d": facts.relative_1d, "confirmed_driver_count": high, "candidate_driver_count": len(reasons) - high, **metrics},
             findings=[{"claim": reason["text"], "causal_confidence": reason["confidence"], "confirmed": reason["confidence"] == "高", "evidence_ids": [reason_item.id]} for reason, reason_item in zip(reasons, reason_items)],
             evidence=evidence,
             limitations=limitations,
-            metadata={"next_steps": next_steps, "require_cited_numbers": True, "answer_constraints": answer_constraints, "narrative": narrative, "narrative_compact": compact, "date": day},
+            metadata={"next_steps": next_steps, "require_cited_numbers": True, "answer_constraints": answer_constraints, "narrative": narrative, "narrative_compact": compact, "date": day, "is_intraday": facts.is_intraday},
         )
 
     @staticmethod
@@ -384,9 +443,12 @@ class MoveAttributor:
             second += f"最相关的一条候选线索是“{best.metadata['driver_text']}”，只能作为排查方向[{best.id}]。"
         if benchmark is not None and facts.relative_1d is not None:
             relation = "跑赢" if facts.relative_1d > 0 else "跑输"
-            third = f"从盘面看，当天{relation}行业基准 {facts.sector_etf} 约 {abs(facts.relative_1d):.2%}[{benchmark.id}]。"
+            when = "截至查询时盘中" if facts.is_intraday else "当天"
+            third = f"从盘面看，{when}{relation}行业基准 {facts.sector_etf} 约 {abs(facts.relative_1d):.2%}[{benchmark.id}]。"
+            if facts.is_intraday:
+                third += "当日未收盘，价格、成交量和归因都以收盘后为准。"
         else:
-            third = ""
+            third = "当日未收盘，价格、成交量和归因都以收盘后为准。" if facts.is_intraday else ""
         return "\n\n".join(part for part in (first, second, third) if part)
 
     @staticmethod
@@ -397,7 +459,7 @@ class MoveAttributor:
         lead; the full narrative keeps the volume figure and the second lead.
         """
 
-        sentence = f"{facts.date} {facts.ticker} {_pct(facts.change)}[{price.id}]"
+        sentence = f"{facts.date} {facts.ticker} {'盘中 ' if facts.is_intraday else ''}{_pct(facts.change)}[{price.id}]"
         if benchmark is not None and facts.relative_1d is not None:
             relation = "跑赢" if facts.relative_1d > 0 else "跑输"
             sentence += f"，{relation} {facts.sector_etf} 约 {abs(facts.relative_1d):.2%}[{benchmark.id}]"
@@ -493,12 +555,23 @@ def register_move_attributor(
     memory_remember: Callable[[DayFacts, list[dict[str, Any]]], str] | None = _default_remember,
     sector_for: Callable[[str], str] | None = _default_sector,
     today_factory: Callable[[], date] = date.today,
+    now_factory: Callable[[], datetime | None] = lambda: datetime.now(tz=timezone.utc),
     **limits: Any,
 ) -> None:
     reader = FilingReader(llm, filing_source or EdgarFilingSource()) if llm is not None else None
     attributor = MoveAttributor(llm, price_source_factory=price_source_factory, news=news, filing_reader=reader, memory_recall=memory_recall, memory_remember=memory_remember, sector_for=sector_for, **limits)
 
     def handler(arguments: dict[str, Any], context: ExecutionContext) -> ToolEnvelope:
-        return attributor.run(str(arguments.get("ticker") or "").upper(), context, day=str(arguments.get("date") or ""), today=today_factory())
+        return attributor.run(str(arguments.get("ticker") or "").upper(), context, day=str(arguments.get("date") or ""), today=today_factory(), now=now_factory())
 
     registry.register("market.attribute_move", handler)
+
+    def explain_today(arguments: dict[str, Any], context: ExecutionContext) -> ToolEnvelope:
+        # "Why did it move today" is the same job on the latest bar: the
+        # filing of the day is read first, the news searched with consent,
+        # the memory consulted; the envelope keeps the capability's name so
+        # routing, guidance and the eval see market.explain_move.
+        return attributor.run(str(arguments.get("ticker") or "").upper(), context, day="", today=today_factory(), now=now_factory(), capability="market.explain_move")
+
+    if llm is not None:
+        registry.register("market.explain_move", explain_today)
