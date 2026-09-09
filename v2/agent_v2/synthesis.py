@@ -443,9 +443,11 @@ class EvidenceSummarySynthesizer:
                 has_span = drawdown is not None and any(item.metadata.get("evidence_scope") == "benchmark_span" for item in drawdown.evidence)
                 attributed = frozenset(str(result.metadata.get("date") or "")[:10] for result in results if result.capability == "market.attribute_move" and result.ok)
                 blocks = [opening]
-                for result in results:
-                    if result is source:
-                        continue
+                # A fixed reading order, not the order the tasks finished in:
+                # the stretch, its filings and watch records, then each day.
+                order = {"market.drawdown": 0, "market.performance": 1, "filings.recent": 2, "filings.read_events": 3, "market.anomaly_history": 4, "web.research": 5, "market.attribute_move": 6}
+                ordered = sorted((result for result in results if result is not source), key=lambda result: (order.get(result.capability, 7), str(result.metadata.get("date") or result.as_of or "")))
+                for result in ordered:
                     if isinstance(result.metadata.get("fan_out_coverage"), dict):
                         blocks.append(self._render(result))  # just the coverage line
                     elif result.capability == "web.research":

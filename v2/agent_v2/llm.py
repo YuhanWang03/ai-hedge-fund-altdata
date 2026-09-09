@@ -542,6 +542,9 @@ def _select_evidence(results: list[ToolEnvelope], evidence: list[EvidenceItem], 
     return [by_id[value] for value in chosen]
 
 
+_NEARBY_UNGROUNDED = re.compile(r"^引用未支持邻近数字：(.+)$")
+
+
 def repair_instruction(report: VerificationReport, evidence: list[EvidenceItem] | None = None) -> str:
     """Tell the model exactly what failed and what must survive the rewrite.
 
@@ -551,10 +554,18 @@ def repair_instruction(report: VerificationReport, evidence: list[EvidenceItem] 
     """
 
     lines = ["校验未通过，请重写完整回答。"]
-    if report.ungrounded_numbers:
+    # Figures the verifier could not ground: the answer-wide list, plus the
+    # ones a sentence cited with the wrong item (those arrive as warnings).
+    numbers = list(report.ungrounded_numbers[:12])
+    for warning in report.warnings:
+        match = _NEARBY_UNGROUNDED.match(str(warning))
+        if match:
+            numbers.extend(value.strip() for value in match.group(1).split(",") if value.strip())
+    numbers = list(dict.fromkeys(numbers))[:12]
+    if numbers:
         located = []
         missing = []
-        for number in report.ungrounded_numbers[:12]:
+        for number in numbers:
             ids = locate_number(number, list(evidence or []))
             (located if ids else missing).append((number, ids))
         if located:
@@ -567,6 +578,8 @@ def repair_instruction(report: VerificationReport, evidence: list[EvidenceItem] 
     if report.unknown_citations:
         lines.append("以下引用 id 不存在：" + "、".join(report.unknown_citations[:12]) + "。方括号内只能原样使用 evidence 数组中真实存在的 id。")
     for warning in report.warnings[:6]:
+        if _NEARBY_UNGROUNDED.match(str(warning)):
+            continue  # handled above, with the ids that carry the figures
         lines.append(f"其他问题：{warning}。")
     if report.traced_numbers:
         lines.append("以下数字已通过校验，必须原样保留：" + "、".join(report.traced_numbers)[:400] + "。")

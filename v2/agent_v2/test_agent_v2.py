@@ -734,6 +734,9 @@ def test_a_why_follow_up_after_a_loss_ranking_explains_the_loss_since_purchase_n
     # The 08-05 watch record is superseded by that day's attribution block; the
     # filings are listed on one line because the attributor read them.
     assert "盯盘记录" not in second.answer and "ARM 这段下跌期间 1 份申报：2026-08-05 8-K[F-ARM-0805]。" in second.answer
+    # Reading order is fixed: the stretch, then the filings, then the day blocks.
+    positions = [second.answer.index(marker) for marker in ("从 2026-06-18 的高点", "这段下跌期间 1 份申报", "ARM 在 2026-08-05 收于")]
+    assert positions == sorted(positions)
     from v2.agent_v2.synthesis import anomaly_lines, filing_line
 
     history = ToolEnvelope("market.anomaly_history", ResultStatus.COMPLETED, subject="ARM", evidence=[
@@ -2091,6 +2094,11 @@ def test_repair_instruction_points_at_the_evidence_that_carries_each_number():
     assert "439.46 见 [D-peak]；224.89 见 [D-peak]、[AT-price]" in text
     assert "以下数字在本轮证据中找不到：12.34。" in text and "439.46" not in text.split("找不到")[1]
     assert repair_instruction(report).count("找不到：439.46、224.89、12.34") == 1  # without evidence, the old wording
+    # A sentence that cited the wrong item reports its figures as a warning; those get the same hint.
+    nearby = VerificationReport(ok=False, warnings=("引用未支持邻近数字：439.46, 224.89, -48.8", "行情事实缺少邻近引用"))
+    text = repair_instruction(nearby, [peak, price])
+    assert "439.46 见 [D-peak]；224.89 见 [D-peak]、[AT-price]；-48.8 见 [D-peak]" in text
+    assert "其他问题：行情事实缺少邻近引用。" in text and "其他问题：引用未支持" not in text
 
 
 def test_attributor_lead_text_keeps_a_quoted_lead_in_one_sentence():
