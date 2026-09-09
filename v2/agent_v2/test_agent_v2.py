@@ -783,7 +783,7 @@ def test_a_why_follow_up_after_a_loss_ranking_explains_the_loss_since_purchase_n
     assert [task.capability for task in second.plan.tasks] == ["account.portfolio", "market.performance", "market.drawdown", "filings.recent", "market.anomaly_history", "filings.read_events"]
     assert second.plan.tasks[2].arguments == {"ticker": "ARM", "loss_pct": -32.22, "top": 3}
     reader = second.plan.tasks[5]
-    assert reader.fan_out == {"from": "market-drawdown", "field": "worst_dates", "argument": "around", "max": 2} and not reader.required
+    assert reader.fan_out == {"from": "market-drawdown", "field": "worst_dates", "argument": "around", "max": 3} and not reader.required
     assert [result.subject for result in second.results if result.capability == "filings.read_events"] == ["ARM"]
     assert "- ARM 2026-08-05：财报指引低于预期（6-K 2026-08-05 s2：“guidance below expectations”）。 [E-ARM-2026-08-05]" in second.answer
     assert second.plan.assumptions[0].startswith("context_frame: 用户追问的是 ARM 买入以来的浮动盈亏 -32.22%（成本价 $389.52）")
@@ -850,11 +850,47 @@ class _FakeFilingSource:
         return next((body for candidate, _, body in sections_of(_FILING_TEXT, ref.form) if candidate == section_id), "")
 
 
+def test_edgar_source_appends_a_6k_exhibit_so_the_reader_can_choose_it():
+    from v2.agent_v2.agents.filing_reader import EdgarFilingSource
+
+    class Attachment:
+        def __init__(self, kind, description, body):
+            self.document_type, self.description, self._body = kind, description, body
+
+        def text(self):
+            return self._body
+
+    class Raw:
+        accession_number = "0001-26-000900"
+        filing_date = "2026-07-29"
+        form = "6-K"
+        cik = "0001973239"
+        homepage_url = "https://www.sec.gov/x/900/"
+        attachments = [
+            Attachment("6-K", "cover", "FORM 6-K Report of foreign private issuer"),
+            Attachment("EX-99.1", "Press release", "<html><body><p>Arm Holdings plc reports results for the first quarter. Revenue was $1.05 billion, below the guidance range of $1.10 to $1.20 billion.</p></body></html>"),
+            Attachment("EX-99.2", "Shareholder letter", "Second   exhibit   text."),
+        ]
+
+        def text(self):
+            return "FORM 6-K\nReport of foreign private issuer pursuant to Rule 13a-16.\nArm Holdings plc furnishes the exhibits listed herein."
+
+    source = EdgarFilingSource(fetch=lambda ticker, form, since, until: [Raw()] if form == "6-K" else [])
+    refs = source.list_filings("ARM", "2026-07-15", "2026-08-01")
+    assert [ref.form for ref in refs] == ["6-K"] and refs[0].url == "https://www.sec.gov/x/900/"
+    outline = source.outline(refs[0])
+    assert [section.title for section in outline][1:] == ["EXHIBIT 99.1 Press release", "EXHIBIT 99.2 Shareholder letter"]
+    body = source.read(refs[0], outline[1].id)
+    assert "Revenue was $1.05 billion" in body and "<p>" not in body
+    assert source.read(refs[0], outline[2].id).endswith("Second exhibit text.")
+
+
 def test_filing_reader_reads_the_sections_it_chooses_and_keeps_only_quoted_events():
     from v2.agent_v2.agents.filing_reader import FilingReader, FilingRef, sections_of
 
     parts = sections_of(_FILING_TEXT, "8-K")
-    assert [part[0] for part in parts] == ["s1", "s2", "s3"] and parts[0][1].startswith("Item 2.02")
+    assert [part[0] for part in parts] == ["s0", "s1", "s2", "s3"] and parts[1][1].startswith("Item 2.02")
+    assert parts[0][1] == "UNITED STATES SECURITIES AND EXCHANGE COMMISSION"  # the cover page stays readable
     assert [part[0] for part in sections_of("x" * 8000, "6-K")] == ["part-1", "part-2", "part-3"]
     refs = [FilingRef("ARM", "8-K", "2026-07-29", "0001-26-000777", "https://www.sec.gov/x/777/"), FilingRef("ARM", "8-K", "2026-05-02", "0001-26-000500", "https://www.sec.gov/x/500/")]
     source = _FakeFilingSource(refs)

@@ -47,7 +47,7 @@ class FilingSource(Protocol):
 
 
 _ITEM_HEADER = re.compile(r"(?im)^\s*item\s+(\d{1,2}\.\d{2})\b[^\n]{0,90}")
-_HEADING = re.compile(r"(?m)^\s*(?:exhibit\s+\d+(?:\.\d+)?|[A-Z][A-Z &,'()/-]{6,70})\s*$")
+_HEADING = re.compile(r"(?mi)^\s*(?:exhibit\s+\d+(?:\.\d+)?[^\n]{0,80}|[A-Z][A-Z &,'()/-]{6,70})\s*$")
 _WS = re.compile(r"\s+")
 
 
@@ -67,6 +67,10 @@ def sections_of(text: str, form: str, *, chunk: int = 3500) -> list[tuple[str, s
         matches = [match for match in _HEADING.finditer(text) if len(match.group(0).strip()) >= 8]
     if len(matches) >= 2:
         parts: list[tuple[str, str, str]] = []
+        preamble = text[: matches[0].start()].strip()
+        if preamble:
+            # The cover page before the first heading is a section too.
+            parts.append(("s0", _WS.sub(" ", preamble.splitlines()[0]).strip()[:90] or "正文", preamble))
         for index, match in enumerate(matches):
             end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
             title = _WS.sub(" ", match.group(0)).strip()[:90]
@@ -114,16 +118,13 @@ class EdgarFilingSource:
     def _text(self, ref: FilingRef) -> str:
         if ref.accession in self._texts:
             return self._texts[ref.accession]
-        text = ""
-        for attr in ("text", "markdown"):
-            method = getattr(ref.raw, attr, None)
-            if callable(method):
-                try:
-                    text = str(method() or "")
-                except Exception:  # noqa: BLE001 — a document that fails to load reads as empty
-                    text = ""
-                if text.strip():
-                    break
+        text = _document_text(ref.raw)
+        # A 6-K (and many 8-Ks) is a cover page; the press release or
+        # results live in the EX-99 exhibits.  Append them under their own
+        # headings so the outline offers them as sections.
+        if ref.form.upper().startswith("6-K") or len(text) < 1500:
+            for title, body in exhibit_texts(ref.raw):
+                text = f"{text}\n\n{title}\n{body}" if text.strip() else f"{title}\n{body}"
         self._texts[ref.accession] = text
         return text
 
@@ -138,6 +139,71 @@ class EdgarFilingSource:
             if candidate == section_id:
                 return body
         return ""
+
+
+def _document_text(raw: Any) -> str:
+    """The primary document's text through whichever accessor the SDK object offers."""
+
+    for attr in ("text", "markdown"):
+        method = getattr(raw, attr, None)
+        if callable(method):
+            try:
+                text = str(method() or "")
+            except Exception:  # noqa: BLE001 — a document that fails to load reads as empty
+                continue
+            if text.strip():
+                return text
+    return ""
+
+
+_EXHIBIT_TYPE = re.compile(r"^EX-99", re.IGNORECASE)
+
+
+def exhibit_texts(raw: Any, *, limit: int = 3, max_chars: int = 40_000) -> list[tuple[str, str]]:
+    """(heading, text) for the EX-99 exhibits of a filing, in document order.
+
+    edgartools exposes ``filing.attachments``; each attachment names its
+    ``document_type`` and can render its text.  Anything that fails to
+    load is skipped, so a filing without readable exhibits reads as its
+    cover page alone.
+    """
+
+    attachments = getattr(raw, "attachments", None)
+    if attachments is None:
+        return []
+    try:
+        rows = list(attachments)
+    except TypeError:
+        rows = list(getattr(attachments, "documents", None) or [])
+    found: list[tuple[str, str]] = []
+    for row in rows:
+        kind = str(getattr(row, "document_type", None) or getattr(row, "type", None) or "")
+        if not _EXHIBIT_TYPE.match(kind.strip()):
+            continue
+        body = ""
+        for attr in ("text", "markdown", "download"):
+            method = getattr(row, attr, None)
+            if not callable(method):
+                continue
+            try:
+                value = method()
+            except Exception:  # noqa: BLE001 — one exhibit failing to load is not the filing failing
+                continue
+            if isinstance(value, bytes):
+                value = value.decode("utf-8", "ignore")
+            body = str(value or "")
+            if "<" in body[:200] and ">" in body[:400]:
+                body = re.sub(r"<[^>]+>", " ", body)
+            if body.strip():
+                break
+        if not body.strip():
+            continue
+        description = str(getattr(row, "description", None) or "").strip()
+        heading = f"EXHIBIT {kind.upper().replace('EX-', '')}" + (f" {description}" if description else "")
+        found.append((heading, _WS.sub(" ", body).strip()[:max_chars]))
+        if len(found) >= limit:
+            break
+    return found
 
 
 _SYSTEM = """你是申报阅读者，只输出 JSON，不回答用户问题。

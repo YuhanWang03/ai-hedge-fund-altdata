@@ -310,7 +310,7 @@ class RulePlanner:
                 purpose="read what the company filed around the worst days",
                 depends_on=("market-drawdown",),
                 required=False,
-                fan_out={"from": "market-drawdown", "field": "worst_dates", "argument": "around", "max": 2},
+                fan_out={"from": "market-drawdown", "field": "worst_dates", "argument": "around", "max": 3},
             ),
         ]
         if request.allow_web:
