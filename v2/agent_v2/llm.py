@@ -301,6 +301,7 @@ class LLMEvidenceSynthesizer:
         self._diagnostics.outcome = "fallback"
         self._diagnostics.draft = ""
         self._diagnostics.attempts = []
+        self._diagnostics.completions = []
 
     @property
     def last_outcome(self) -> str:
@@ -329,7 +330,21 @@ class LLMEvidenceSynthesizer:
             "outcome": self.last_outcome,
             "draft": self.last_draft[:4000],
             "attempts": [dict(attempt) for attempt in getattr(self._diagnostics, "attempts", [])],
+            "citation_completions": list(getattr(self._diagnostics, "completions", [])),
         }
+
+    def _complete(self, answer: str, evidence, results) -> str:
+        """Deterministic citation completion before the verifier sees a draft."""
+
+        from v2.agent_v2.verification import complete_citations
+
+        completed, notes = complete_citations(answer, evidence, results)
+        if notes:
+            existing = getattr(self._diagnostics, "completions", None)
+            if existing is None:
+                existing = self._diagnostics.completions = []
+            existing.extend(notes)
+        return completed
 
     def _record_attempt(self, stage: str, *, ok: bool, warnings=(), unknown_citations=(), ungrounded_numbers=()) -> None:
         attempts = getattr(self._diagnostics, "attempts", None)
@@ -385,6 +400,7 @@ results 中的评分或限制如需引用，使用 evidence 中 citation_kind �
                 return answer
             from v2.agent_v2.verification import verify_answer
 
+            answer = self._complete(answer, evidence, results)
             report = verify_answer(answer, evidence, answer_mode=plan.answer_mode, results=results)
             self._record_report("draft", report)
             if report.ok:
@@ -402,6 +418,7 @@ results 中的评分或限制如需引用，使用 evidence 中 citation_kind �
                 results,
                 evidence,
             )
+            repair = self._complete(repair, evidence, results)
             repair_report = verify_answer(repair, evidence, answer_mode=plan.answer_mode, results=results)
             self._record_report("repair", repair_report)
             if repair_report.ok:

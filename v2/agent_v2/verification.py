@@ -81,6 +81,79 @@ def verify_answer(
     )
 
 
+_DIGITS = re.compile(r"\d")
+
+
+def _significant_digits(token: str) -> int:
+    digits = _DIGITS.findall(str(token))
+    return len("".join(digits).lstrip("0"))
+
+
+def complete_citations(answer: str, evidence: list[EvidenceItem], results: list[ToolEnvelope] | None = None) -> tuple[str, list[str]]:
+    """Add the one citation a sentence is missing when the evidence leaves no doubt.
+
+    A model that rewrites a paragraph tends to move a citation one sentence
+    over; the figures are right, the id next to them is not.  For each
+    sentence whose cited items do not carry one of its figures, when that
+    figure has at least three significant digits and exactly one citable
+    item in this run's evidence carries it, that item's id is appended to
+    the sentence.  Existing citations stay; vaguer figures (a year, "3") and
+    figures several items carry are left for the model's repair round.
+
+    Returns the completed text and one note per completion.
+    """
+
+    if not answer or not evidence:
+        return answer or "", []
+    from v2.agent import grounding
+
+    known = {item.id: item for item in evidence}
+    candidates = [item for item in evidence if item.metadata.get("citable", True)]
+    notes: list[str] = []
+    pieces: list[str] = []
+    cursor = 0
+    for match in _SENTENCE.finditer(answer):
+        raw = match.group(0)
+        cited = [known[value] for value in _CITATION.findall(raw) if value in known]
+        if not cited:
+            continue
+        plain = _CITATION.sub("", raw)
+        local = grounding.check(plain, _observations(cited))
+        if not local.ungrounded:
+            continue
+        additions: list[str] = []
+        for token in dict.fromkeys(local.ungrounded):
+            if _significant_digits(token) < 3:
+                additions = []
+                break
+            carriers = [item for item in candidates if item not in cited and not grounding.check(token, _observations([item])).ungrounded]
+            if len(carriers) != 1:
+                additions = []
+                break
+            if carriers[0].id not in additions:
+                additions.append(carriers[0].id)
+                notes.append(f"{token} → [{carriers[0].id}]")
+        if not additions:
+            continue
+        # Verify the completed sentence grounds, then splice it in.
+        completed_items = cited + [known[value] for value in additions]
+        if grounding.check(plain, _observations(completed_items)).ungrounded:
+            continue
+        # Splice the ids in before the sentence's closing punctuation, next
+        # to the citation that was there.
+        stripped = raw.rstrip()
+        trailing = raw[len(stripped):]
+        body = stripped.rstrip("。！？!?")
+        closing = stripped[len(body):]
+        pieces.append(answer[cursor : match.start()])
+        pieces.append(body + "".join(f"[{value}]" for value in additions) + closing + trailing)
+        cursor = match.end()
+    if not pieces:
+        return answer, []
+    pieces.append(answer[cursor:])
+    return "".join(pieces), notes
+
+
 def _observations(items: list[EvidenceItem]) -> str:
     return "\n".join(
         " ".join(

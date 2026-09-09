@@ -1424,6 +1424,9 @@ def test_telegram_delivery_numbers_citations_and_compacts_worst_days(monkeypatch
     transport = TelegramBotTransport(object(), placeholder, web_requested=True)
     asyncio.run(transport.deliver(7, clean))
     assert "合成：模型回答 · 校验：通过 · 网页：已启用" in placeholder.sent[-1] and "模型自己的话[1]。" in placeholder.sent[-1]
+    clean.synthesis["citation_completions"] = ["439.46 → [x]", "12.52 → [y]"]
+    asyncio.run(transport.deliver(7, clean))
+    assert "合成：模型回答，引用补全 2 处 · 校验：通过" in placeholder.sent[-1]
     assert "⚠ 校验" not in placeholder.sent[-1] and "兜底原因" not in placeholder.sent[-1]
     monkeypatch.setenv("AGENT_V2_WEB_ENABLED", "0")
     asyncio.run(transport.deliver(7, clean))
@@ -2111,3 +2114,47 @@ def test_attributor_lead_text_keeps_a_quoted_lead_in_one_sentence():
     sentence = f"最相关的一条候选线索是“{lead}”，只能作为排查方向[lead-1]。"
     report = verify_answer(sentence, [item], answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[ToolEnvelope("market.attribute_move", ResultStatus.COMPLETED, evidence=[item], metadata={"require_cited_numbers": True})])
     assert report.ok, report
+
+
+def _drawdown_citation_fixture():
+    peak = EvidenceItem("D-peak", "ARM", "ARM 从 2026-06-18 的高点 439.46 美元到 2026-07-29 的低点 224.89 美元回撤 -48.83%。", value=-0.4883)
+    price = EvidenceItem("AT-price", "ARM", "ARM 在 2026-07-29 收于 224.89 美元，较前一交易日 -8.11%。", value=-0.0811)
+    perf = EvidenceItem("W-ARM", "ARM", "ARM 区间回报：1d +1.03%，5d +12.52%，1m -1.35%，3m -18.66%，1y +89.90%。")
+    bench = EvidenceItem("B-SMH", "ARM", "同期基准 SMH 回报：1d +0.10%（ARM 相对 +0.93%），5d +5.33%（ARM 相对 +7.19%）。")
+    hidden = EvidenceItem("H-1", "ARM", "内部：ARM 目标价 439.46。", metadata={"citable": False})
+    evidence = [peak, price, perf, bench, hidden]
+    results = [ToolEnvelope("market.drawdown", ResultStatus.COMPLETED, subject="ARM", evidence=evidence, metadata={"require_cited_numbers": True})]
+    return evidence, results
+
+
+def test_complete_citations_adds_the_one_item_that_carries_a_misattributed_figure():
+    from v2.agent_v2.verification import complete_citations
+
+    evidence, results = _drawdown_citation_fixture()
+    draft = "ARM 从高点 439.46 美元跌到低点 224.89 美元，回撤 -48.8%[AT-price]。\n近 5 日 +12.52%，跑赢 SMH[B-SMH]。 三只合计 -1,335 美元[AT-price]。"
+    completed, notes = complete_citations(draft, evidence, results)
+    # The ids go next to the existing citation, before the closing punctuation.
+    assert completed.split("\n")[0] == "ARM 从高点 439.46 美元跌到低点 224.89 美元，回撤 -48.8%[AT-price][D-peak]。"
+    assert "跑赢 SMH[B-SMH][W-ARM]。" in completed
+    # A figure the model computed itself has no carrier and is left for the repair round.
+    assert "三只合计 -1,335 美元[AT-price]。" in completed and notes == ["439.46 → [D-peak]", "12.52 → [W-ARM]"]
+    report = verify_answer(completed, evidence, answer_mode=AnswerMode.RESEARCH_GROUNDED, results=results)
+    assert report.warnings == ("引用未支持邻近数字：-1,335",)
+    # Vague figures and figures several items carry are not completed.
+    untouched = "ARM 跌了 3 天，2026 年表现[B-SMH]。 收于 224.89 美元[B-SMH]。"
+    assert complete_citations(untouched, evidence, results) == (untouched, [])
+    assert complete_citations("", evidence, results) == ("", [])
+
+
+def test_llm_synthesizer_completes_citations_before_verifying_a_draft():
+    evidence, results = _drawdown_citation_fixture()
+    request = normalize_request("ARM 为什么跌这么多")
+    plan = ExecutionPlan("ARM 为什么跌这么多", RouteKind.RESEARCH, answer_mode=AnswerMode.RESEARCH_GROUNDED)
+    llm = ScriptedLLM([LLMResponse(text="ARM 从高点 439.46 美元跌到低点 224.89 美元，回撤 -48.8%[AT-price]。近 5 日 +12.52%[B-SMH]。")])
+    synthesizer = LLMEvidenceSynthesizer(llm)
+    answer = synthesizer.synthesize(request, plan, results, evidence)
+    assert answer == "ARM 从高点 439.46 美元跌到低点 224.89 美元，回撤 -48.8%[AT-price][D-peak]。近 5 日 +12.52%[B-SMH][W-ARM]。"
+    assert len(llm.calls) == 1  # no repair round was needed
+    diagnostics = synthesizer.diagnostics()
+    assert diagnostics["outcome"] == "clean" and diagnostics["citation_completions"] == ["439.46 → [D-peak]", "12.52 → [W-ARM]"]
+    assert verify_answer(answer, evidence, answer_mode=plan.answer_mode, results=results).ok

@@ -207,6 +207,13 @@ def fallback_reason(result: AgentResult) -> str:
     return "；".join(clauses[:2]) if clauses else "模型草稿未通过校验"
 
 
+def completion_note(result: AgentResult) -> str:
+    """How many citations the code completed on the model's drafts, or empty."""
+
+    completions = (result.synthesis or {}).get("citation_completions") or []
+    return f"引用补全 {len(completions)} 处" if completions else ""
+
+
 def web_label(*, requested: bool, enabled: bool) -> str:
     """The 网页 field of the header, and the hint that tells the user how to change it."""
 

@@ -129,7 +129,8 @@ class TelegramBotTransport:
         ]
         synthesis = telegram_format.synthesis_label(result)
         if synthesis:
-            fields.append(f"合成：{html.escape(synthesis)}")
+            note = telegram_format.completion_note(result)
+            fields.append(f"合成：{html.escape(synthesis + (f'，{note}' if note else ''))}")
         fields.append(f"校验：{html.escape(telegram_format.verification_label(result))}")
         fields.append(
             "网页：" + html.escape(telegram_format.web_label(requested=self.web_requested, enabled=_web_enabled()))
