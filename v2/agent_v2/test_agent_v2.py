@@ -722,6 +722,29 @@ def _framed_registry() -> CapabilityRegistry:
             ],
         ),
     )
+
+    def drawdown(a, c):
+        ticker = a["ticker"]
+        window = EvidenceItem(f"D-{ticker}-window", ticker, f"{ticker} 近 3 月（2026-06-10 至 2026-09-08）区间回报 -21.40%。", metadata={"evidence_scope": "window_return"})
+        worst = EvidenceItem(f"D-{ticker}-0805", ticker, f"{ticker} 2026-08-05 单日 -13.21%，收盘 275.10 美元。", metadata={"evidence_scope": "worst_day", "date": "2026-08-05"})
+        narrative = f"{ticker} 近 3 月（2026-06-10 至 2026-09-08）区间回报 -21.40%[D-{ticker}-window]。\n{ticker} 近 3 月跌幅最大的交易日：2026-08-05 -13.21%[D-{ticker}-0805]。"
+        return ToolEnvelope("market.drawdown", ResultStatus.COMPLETED, subject=ticker, metrics={"window": "3m", "window_start": "2026-06-10", "worst_days": [{"date": "2026-08-05", "return": -0.1321}]}, evidence=[window, worst], metadata={"narrative": narrative, "require_cited_numbers": True, "queries": [f"why did {ticker} stock fall on 2026-08-05"]})
+
+    registry.register("market.drawdown", drawdown)
+    registry.register(
+        "filings.recent",
+        lambda a, c: ToolEnvelope(
+            "filings.recent",
+            ResultStatus.COMPLETED,
+            subject=a["ticker"],
+            evidence=[
+                EvidenceItem(f"F-{a['ticker']}-0805", a["ticker"], f"{a['ticker']} 于 2026-08-05 向 SEC 提交了 8-K（0001-25-000001）。", metadata={"evidence_scope": "filing", "date": "2026-08-05"}),
+                EvidenceItem(f"F-{a['ticker']}-0301", a["ticker"], f"{a['ticker']} 于 2026-03-01 向 SEC 提交了 8-K（0001-25-000000）。", metadata={"evidence_scope": "filing", "date": "2026-03-01"}),
+            ],
+        ),
+    )
+    registry.register("market.anomaly_history", lambda a, c: ToolEnvelope("market.anomaly_history", ResultStatus.COMPLETED, subject=a["ticker"], evidence=[EvidenceItem(f"A-{a['ticker']}-0805", a["ticker"], f"{a['ticker']} 2026-08-05 盯盘记录：volume_spike,gap_down；财报后跳空低开。", metadata={"evidence_scope": "anomaly", "date": "2026-08-05"})]))
+    registry.register("web.research", lambda a, c: ToolEnvelope("web.research", ResultStatus.COMPLETED, subject=a["ticker"], evidence=[EvidenceItem(f"WEB-{a['ticker']}", a["ticker"], f"{a['ticker']} shares slid after the 2026-08-05 report as guidance disappointed.", as_of="2026-08-06", source_url="https://example.com/arm", metadata={"evidence_type": "search_snippet"})]))
     return registry
 
 
@@ -747,11 +770,8 @@ def test_a_why_follow_up_after_a_loss_ranking_explains_the_loss_since_purchase_n
     assert resolution.frame["ticker"] == "ARM" and resolution.frame["field"] == "pl_pct" and resolution.frame["value"] == -32.22
     second = agent.run("什么原因跌这么多?", session_id="chat-3")
     assert second.request.text == "ARM 什么原因跌这么多?"
-    assert [(task.capability, task.arguments.get("focus")) for task in second.plan.tasks] == [
-        ("account.portfolio", None),
-        ("market.performance", None),
-        ("research.stock", "catalysts"),
-    ]
+    assert [task.capability for task in second.plan.tasks] == ["account.portfolio", "market.performance", "market.drawdown", "filings.recent", "market.anomaly_history"]
+    assert second.plan.tasks[2].arguments == {"ticker": "ARM", "loss_pct": -32.22, "top": 3}
     assert second.plan.assumptions[0].startswith("context_frame: 用户追问的是 ARM 买入以来的浮动盈亏 -32.22%（成本价 $389.52）")
     lines = second.answer.split("\n")
     assert lines[0].startswith("你问的是 ARM 买入以来的浮动盈亏：-32.22%，成本价 $389.52[legacy-")
@@ -760,8 +780,19 @@ def test_a_why_follow_up_after_a_loss_ranking_explains_the_loss_since_purchase_n
     assert lines[3] == "近 1 年 +89.85% 而该持仓仍在浮亏，说明买入点在这轮上涨之后的高位[W-ARM]。"
     assert "组合价值" not in second.answer and "近 1 月回报 -1.53%" not in second.answer  # the narrative's returns line is not repeated
     assert "相对 SMH，单日超额 +0.94%[B-ARM]。" in second.answer and "成交量尚未定型" not in second.answer
-    assert "- ARM 2026-08-05 发布财报，指引低于预期。 [R-ARM-catalysts]" in second.answer
-    assert "Revenue growth" not in second.answer and "[R-ARM-metrics]" not in second.answer
+    assert "ARM 近 3 月跌幅最大的交易日：2026-08-05 -13.21%[D-ARM-0805]。" in second.answer
+    assert "- ARM 于 2026-08-05 向 SEC 提交了 8-K（0001-25-000001）。 [F-ARM-0805]" in second.answer
+    assert "2026-03-01" not in second.answer  # a filing before the decline window is left out
+    assert "- ARM 2026-08-05 盯盘记录：volume_spike,gap_down；财报后跳空低开。 [A-ARM-0805]" in second.answer
+    assert "WEB-ARM" not in second.answer  # no web consent, no web task
+    # With web consent the plan fans a news search out over the worst days.
+    consenting = AgentV2(catalog=default_catalog(), registry=_framed_registry(), session=memory, config=AgentV2Config(enable_web_fallback=True))
+    consenting.run("我的仓库里哪只跌的最多?", session_id="chat-4")
+    with_web = consenting.run("为什么跌这么多?", session_id="chat-4", allow_web=True)
+    assert [task.capability for task in with_web.plan.tasks][-1] == "web.research" and with_web.plan.tasks[-1].fan_out["from"] == "market-drawdown"
+    assert [result.subject for result in with_web.results if result.capability == "web.research"] == ["ARM"]
+    assert "- ARM shares slid after the 2026-08-05 report as guidance disappointed. [WEB-ARM]" in with_web.answer
+    assert with_web.verification.ok
     assert second.verification.ok, second.verification
     assert second.status == RunStatus.COMPLETED
     # The frame survives the framed turn, and a question about a rise is not a drawdown question.
@@ -771,7 +802,78 @@ def test_a_why_follow_up_after_a_loss_ranking_explains_the_loss_since_purchase_n
     # The LLM planner leaves the framed plan to the rules.
     llm = ScriptedLLM([LLMResponse(text="{}")])
     framed = normalize_request("ARM 什么原因跌这么多?", metadata={"context_frame": resolution.frame})
-    assert len(StructuredLLMPlanner(llm, default_catalog()).plan(framed, route(framed)).tasks) == 3 and llm.calls == []
+    assert len(StructuredLLMPlanner(llm, default_catalog()).plan(framed, route(framed)).tasks) == 5 and llm.calls == []
+
+
+def test_market_drawdown_locates_the_worst_days_and_the_peak_to_trough():
+    class Prices:
+        def get_prices(self, ticker, start, end):
+            first = date(2026, 1, 5)
+            rows = []
+            close = 300.0
+            for index in range(180):
+                day = first + timedelta(days=index)
+                if day.weekday() >= 5:
+                    continue
+                if day == date(2026, 5, 20):
+                    close *= 0.80  # the crash day
+                elif day == date(2026, 6, 3):
+                    close *= 0.95
+                elif day < date(2026, 5, 20):
+                    close *= 1.002
+                else:
+                    close *= 0.999
+                if day.isoformat() <= str(end):
+                    rows.append(SimpleNamespace(time=day.isoformat(), close=round(close, 2), volume=1_000_000))
+            return rows
+
+    registry = CapabilityRegistry(default_catalog())
+    now = datetime(2026, 7, 3, 18, 0, tzinfo=ZoneInfo("America/New_York"))
+    register_market_capabilities(registry, price_source_factory=Prices, move_provider=lambda ticker: None, now_factory=lambda: now)
+    result = registry.execute(PlanTask("d", "market.drawdown", {"ticker": "ARM", "loss_pct": -30.0, "top": 2}), _context())
+    assert result.ok and result.metrics["window"] == "3m"
+    assert [row["date"] for row in result.metrics["worst_days"]] == ["2026-05-20", "2026-06-03"]
+    assert result.metrics["peak"]["date"] == "2026-05-19" and result.metrics["drawdown"] < -0.15
+    assert result.metadata["queries"] == ["why did ARM stock fall on 2026-05-20", "why did ARM stock fall on 2026-06-03"]
+    narrative = result.metadata["narrative"]
+    assert "2026-05-20 -20.00%" in narrative and "从 2026-05-19 的高点" in narrative
+    assert verify_answer(narrative, result.evidence, answer_mode=AnswerMode.TOOL_GROUNDED, results=[result]).ok
+    explicit = registry.execute(PlanTask("d", "market.drawdown", {"ticker": "ARM", "window": "1m"}), _context())
+    assert explicit.metrics["window"] == "1m" and explicit.metrics["worst_days"]
+    # A session still in progress is not a completed bar: the last row is dropped.
+    intraday_now = datetime(2026, 7, 2, 11, 0, tzinfo=ZoneInfo("America/New_York"))
+    register_market_capabilities(registry, price_source_factory=Prices, move_provider=lambda ticker: None, now_factory=lambda: intraday_now)
+    assert registry.execute(PlanTask("d", "market.drawdown", {"ticker": "ARM"}), _context()).metrics["as_of"] == "2026-07-01"
+
+
+def test_history_capabilities_wrap_edgar_filings_and_the_anomaly_memory():
+    from v2.agent_v2.adapters.history import register_history_capabilities
+
+    registry = CapabilityRegistry(default_catalog())
+    rows = [
+        SimpleNamespace(filing_date="2026-08-05", form="8-K", accession_number="0001-25-000001", cik="0001973239"),
+        SimpleNamespace(filing_date="2026-08-20", form="8-K", accession_number="0001-25-000002", cik="0001973239"),
+    ]
+    calls: list[tuple] = []
+
+    def fetch(ticker, form, since, until):
+        calls.append((ticker, form, since, until))
+        return list(rows) if form == "8-K" else []
+
+    recalls = SimpleNamespace(date="2026-08-05", flags="gap_down,volume_spike", doc="ARM  gapped down after earnings;   guidance missed.")
+    register_history_capabilities(registry, filings_fetch=fetch, anomaly_recall=lambda ticker, query, days: [recalls], today_factory=lambda: date(2026, 9, 9))
+    filings = registry.execute(PlanTask("f", "filings.recent", {"ticker": "ARM", "forms": ["8-K", "10-Q"]}), _context())
+    assert filings.ok and calls[0] == ("ARM", "8-K", "2025-09-09", "2026-09-09")
+    assert [item.metadata["date"] for item in filings.evidence] == ["2026-08-20", "2026-08-05"]
+    assert filings.evidence[0].source_url == "https://www.sec.gov/Archives/edgar/data/1973239/000125000002/"
+    assert "2026-08-20 8-K[" in filings.metadata["narrative"]
+    empty = registry.execute(PlanTask("f", "filings.recent", {"ticker": "ARM", "forms": ["10-Q"]}), _context())
+    assert empty.ok and empty.evidence[0].metadata["citation_kind"] == "limitations" and "未查到 10-Q 申报" in empty.evidence[0].claim
+    anomalies = registry.execute(PlanTask("a", "market.anomaly_history", {"ticker": "ARM", "lookback_days": 365}), _context())
+    assert anomalies.ok and anomalies.evidence[0].claim == "ARM 2026-08-05 盯盘记录：gap_down,volume_spike；ARM gapped down after earnings; guidance missed."
+    register_history_capabilities(registry, filings_fetch=fetch, anomaly_recall=lambda *args: (_ for _ in ()).throw(RuntimeError("chroma down")))
+    broken = registry.execute(PlanTask("a", "market.anomaly_history", {"ticker": "ARM"}), _context())
+    assert not broken.ok and "anomaly memory unavailable" in broken.errors[0]
 
 
 def test_decline_timing_reads_the_return_windows():

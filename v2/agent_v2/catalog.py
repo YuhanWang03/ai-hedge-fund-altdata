@@ -114,6 +114,30 @@ def default_catalog() -> CapabilityCatalog:
             ),
         ),
         CapabilitySpec(
+            "market.drawdown",
+            "research",
+            "Where in time a stock's decline happened: the return window that holds most of a loss, the peak-to-trough inside it, and the worst single trading days with dates. Use for a loss since purchase or a drawdown, never for today's move.",
+            _object({"ticker": _TICKER, "loss_pct": {"type": "number"}, "window": {"type": "string", "enum": ["1m", "3m", "1y"]}, "top": {"type": "integer", "minimum": 1, "maximum": 5}}, ["ticker"]),
+            answer_guidance=(
+                "drawdown_timing：先说明跌幅落在哪个回报窗口、区间高点到低点的回撤，再按日期列出跌幅最大的交易日；每个日期和幅度紧跟对应的 [evidence_id]。"
+                "只能把申报、盯盘记录或新闻与日期相同或相邻的下跌日关联，不得把当日归因推广到整个区间。"
+            ),
+        ),
+        CapabilitySpec(
+            "filings.recent",
+            "research",
+            "Dated SEC filings (8-K by default) for one stock over a date range, from EDGAR. Use to find what the company disclosed around specific dates.",
+            _object({"ticker": _TICKER, "since": {"type": "string"}, "until": {"type": "string"}, "forms": {"type": "array", "items": {"type": "string"}}}, ["ticker"]),
+            answer_guidance="filings：只陈述申报的日期、表格类型和链接；申报内容未读取时不得推测其影响。",
+        ),
+        CapabilitySpec(
+            "market.anomaly_history",
+            "research",
+            "Past intraday anomalies the monitor recorded for one stock (date, flags, attribution notes) within a lookback window.",
+            _object({"ticker": _TICKER, "lookback_days": {"type": "integer", "minimum": 1, "maximum": 730}, "query": {"type": "string"}}, ["ticker"]),
+            answer_guidance="anomaly_history：盯盘记录只说明那一天触发了什么标志和当时的归因备注，日期必须原样给出。",
+        ),
+        CapabilitySpec(
             "market.explain_move",
             "research",
             "Explain a recent price move and relative-market divergence.",

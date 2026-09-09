@@ -162,8 +162,12 @@ def benchmark_line(result: ToolEnvelope) -> str:
     return ""
 
 
-def catalyst_lines(result: ToolEnvelope) -> str:
-    """A research result in a framed answer: its dated, citable findings, not the engine's thesis."""
+def catalyst_lines(result: ToolEnvelope, since: str = "") -> str:
+    """A research or history result in a framed answer: its dated, citable findings, not a thesis.
+
+    ``since`` (ISO date) keeps only events inside the decline window when
+    the item carries a date in its metadata or ``as_of``.
+    """
 
     lines: list[str] = []
     for item in result.evidence:
@@ -172,8 +176,12 @@ def catalyst_lines(result: ToolEnvelope) -> str:
         claim = plain_text(item.claim)
         # A catalyst is an event: it has a date.  Undated fundamentals and
         # valuation figures are not what "why did it fall" asks for.
-        if claim and _DATED.search(claim):
-            lines.append(f"- {claim} [{item.id}]")
+        if not claim or not _DATED.search(claim):
+            continue
+        day = str(item.metadata.get("date") or item.as_of or "")[:10]
+        if since and day and day < since:
+            continue
+        lines.append(f"- {claim} [{item.id}]")
         if len(lines) >= 6:
             break
     if not lines:
@@ -291,12 +299,14 @@ class EvidenceSummarySynthesizer:
             if opening:
                 found = position_row(results, str(frame.get("ticker") or ""))
                 source = found[0] if found else None
+                drawdown = next((result for result in results if result.capability == "market.drawdown" and result.ok), None)
+                since = str(drawdown.metrics.get("window_start") or "") if drawdown is not None else ""
                 blocks = [opening]
                 for result in results:
                     if result is source:
                         continue
-                    if result.capability.startswith("research."):
-                        blocks.append(catalyst_lines(result))
+                    if result.capability in {"research.stock", "research.compare", "filings.recent", "market.anomaly_history", "web.research"}:
+                        blocks.append(catalyst_lines(result, since))
                     elif result.capability == "market.performance" and result.ok:
                         blocks.append(benchmark_line(result))
                     else:

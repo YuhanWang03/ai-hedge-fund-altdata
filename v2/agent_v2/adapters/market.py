@@ -424,6 +424,104 @@ def _move_narrative(market: ToolEnvelope) -> str:
     return "\n\n".join(("".join(first_parts), second, third))
 
 
+_DRAWDOWN_WINDOWS = (("1m", 21, "1 月"), ("3m", 63, "3 月"), ("1y", 252, "1 年"))
+
+
+def _pick_window(loss_pct: float | None, window: str | None, returns: dict[str, float | None]) -> str:
+    """The window to inspect: the caller's, else the shortest one holding at least half of the loss, else 1y."""
+
+    if window in {key for key, _, _ in _DRAWDOWN_WINDOWS}:
+        return str(window)
+    if isinstance(loss_pct, (int, float)) and loss_pct < 0:
+        loss = float(loss_pct) / 100.0
+        for key, _, _ in _DRAWDOWN_WINDOWS:
+            value = returns.get(key)
+            if value is not None and value < 0 and value / loss >= 0.5:
+                return key
+        return "1y"
+    return "3m"
+
+
+def _drawdown_envelope(ticker: str, context: ExecutionContext, price_source, *, loss_pct: float | None = None, window: str | None = None, top: int = 3, now: datetime | None = None) -> ToolEnvelope:
+    """Locate a decline in time from daily closes: window, peak-to-trough, worst days."""
+
+    current = _as_et(now)
+    today = current.date()
+    start = today - timedelta(days=430)
+    prices = list(price_source.get_prices(ticker, start.isoformat(), today.isoformat()) or [])
+    # A session still in progress is not a completed daily bar.
+    if prices and _observation_state(str(prices[-1].time)[:10], current)["is_intraday"]:
+        prices = prices[:-1]
+    if len(prices) < 3:
+        return ToolEnvelope("market.drawdown", ResultStatus.FAILED, subject=ticker, errors=["no recent price history"])
+    returns = {key: _return(prices, bars) for key, bars, _ in _DRAWDOWN_WINDOWS}
+    chosen = _pick_window(loss_pct, window, returns)
+    bars, label = next((bars, label) for key, bars, label in _DRAWDOWN_WINDOWS if key == chosen)
+    span = prices[-(bars + 1):]
+    window_return = float(span[-1].close) / float(span[0].close) - 1 if float(span[0].close) > 0 else None
+    as_of = str(span[-1].time)[:10]
+    window_start = str(span[1].time)[:10] if len(span) > 1 else as_of
+    evidence: list[EvidenceItem] = []
+    metrics: dict[str, Any] = {"window": chosen, "window_start": window_start, "as_of": as_of, "window_return": window_return, "returns": {key: value for key, value in returns.items() if value is not None}}
+    if window_return is not None:
+        evidence.append(_item("window_return", ticker, as_of, f"{ticker} 近 {label}（{window_start} 至 {as_of}）区间回报 {window_return:+.2%}。", context, metric="window_return", value=window_return, metadata={"window": chosen}))
+    daily = []
+    for previous, bar in zip(span, span[1:]):
+        if float(previous.close) > 0:
+            daily.append((str(bar.time)[:10], float(bar.close) / float(previous.close) - 1, float(bar.close)))
+    worst = sorted((row for row in daily if row[1] < 0), key=lambda row: row[1])[: max(1, min(int(top or 3), 5))]
+    worst.sort(key=lambda row: row[0])
+    for day, change, close in worst:
+        evidence.append(_item("worst_day", ticker, day, f"{ticker} {day} 单日 {change:+.2%}，收盘 {close:.2f} 美元。", context, metric="daily_return", value=change, metadata={"date": day, "close": close}))
+    metrics["worst_days"] = [{"date": day, "return": change, "close": close} for day, change, close in worst]
+    peak_index = max(range(len(span)), key=lambda index: float(span[index].close))
+    after = span[peak_index:]
+    trough_index = peak_index + min(range(len(after)), key=lambda index: float(after[index].close))
+    peak, trough = span[peak_index], span[trough_index]
+    drawdown = float(trough.close) / float(peak.close) - 1 if trough_index > peak_index and float(peak.close) > 0 else None
+    if drawdown is not None:
+        peak_day, trough_day = str(peak.time)[:10], str(trough.time)[:10]
+        evidence.append(_item("peak_trough", ticker, trough_day, f"{ticker} 从 {peak_day} 的高点 {float(peak.close):.2f} 美元到 {trough_day} 的低点 {float(trough.close):.2f} 美元回撤 {drawdown:+.2%}。", context, metric="drawdown", value=drawdown, metadata={"peak_date": peak_day, "trough_date": trough_day}))
+        metrics["peak"] = {"date": peak_day, "close": float(peak.close)}
+        metrics["trough"] = {"date": trough_day, "close": float(trough.close)}
+        metrics["drawdown"] = drawdown
+    limitations = [] if worst else ["区间内没有下跌的交易日"]
+    envelope = ToolEnvelope(
+        "market.drawdown",
+        ResultStatus.COMPLETED if worst else ResultStatus.PARTIAL_DATA,
+        subject=ticker,
+        as_of=as_of,
+        summary=f"{ticker} 近 {label} 区间回报 {_pct(window_return)}，跌幅最大的交易日：" + ("、".join(f"{day} {change:+.2%}" for day, change, _ in worst) or "无"),
+        metrics=metrics,
+        evidence=evidence,
+        limitations=limitations,
+        metadata={
+            "require_cited_numbers": True,
+            "worst_dates": [day for day, _, _ in worst],
+            "queries": [f"why did {ticker} stock fall on {day}" for day, _, _ in worst],
+        },
+    )
+    envelope.metadata["narrative"] = _drawdown_narrative(envelope, label)
+    return envelope
+
+
+def _drawdown_narrative(result: ToolEnvelope, label: str) -> str:
+    ticker = result.subject
+    window_item = next(iter(_scoped(result.evidence, "window_return")), None)
+    peak_item = next(iter(_scoped(result.evidence, "peak_trough")), None)
+    worst_items = _scoped(result.evidence, "worst_day")
+    parts: list[str] = []
+    if window_item is not None:
+        parts.append(f"{window_item.claim.rstrip('。')}{_cite(window_item)}。")
+    if peak_item is not None:
+        parts.append(f"{peak_item.claim.rstrip('。')}{_cite(peak_item)}。")
+    if worst_items:
+        parts.append(f"{ticker} 近 {label}跌幅最大的交易日：" + "；".join(f"{item.metadata['date']} {float(item.value):+.2%}{_cite(item)}" for item in worst_items) + "。")
+    else:
+        parts.append(f"{ticker} 近 {label}区间内没有下跌的交易日。")
+    return "\n".join(parts)
+
+
 def register_market_capabilities(
     registry: CapabilityRegistry,
     *,
@@ -439,5 +537,19 @@ def register_market_capabilities(
         ticker = str(arguments.get("ticker") or "").upper()
         return _move_envelope(ticker, context, move_provider(ticker), now=now_factory())
 
+    def drawdown(arguments: dict[str, Any], context: ExecutionContext) -> ToolEnvelope:
+        ticker = str(arguments.get("ticker") or "").upper()
+        loss = arguments.get("loss_pct")
+        return _drawdown_envelope(
+            ticker,
+            context,
+            price_source_factory(),
+            loss_pct=float(loss) if isinstance(loss, (int, float)) else None,
+            window=arguments.get("window"),
+            top=int(arguments.get("top") or 3),
+            now=now_factory(),
+        )
+
     registry.register("market.performance", performance)
     registry.register("market.explain_move", explain)
+    registry.register("market.drawdown", drawdown)

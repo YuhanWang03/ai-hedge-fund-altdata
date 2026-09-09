@@ -287,23 +287,41 @@ class RulePlanner:
         entry_text = f"（成本价 ${float(entry):.2f}）" if isinstance(entry, (int, float)) else ""
         note = (
             f"context_frame: 用户追问的是 {ticker} {frame.get('label') or '买入以来的浮动盈亏'} {value_text}{entry_text}，不是今日涨跌。"
-            "先回答这段跌幅落在哪个区间（对照 5 日、1 月、3 月、1 年回报窗口）、期间有哪些可查的财报、公告或新闻；"
-            "今日涨跌只用区间回报里的单日数字作一句旁注，并点明它与买入以来的跌幅是不同区间；找不到区间归因就明说，不得用当日归因冒充。"
+            "先回答这段跌幅落在哪个区间（对照 5 日、1 月、3 月、1 年回报窗口）和区间高点到低点的回撤，再按日期列出跌幅最大的交易日，"
+            "把日期相同或相邻的 SEC 申报、盯盘记录和新闻与这些下跌日对应起来；"
+            "今日涨跌只用区间回报里的单日数字作一句旁注，并点明它与买入以来的跌幅是不同区间；某个下跌日找不到对应事件就明说，不得用当日归因冒充。"
         )
+        loss = frame.get("value")
         # Today's move attribution is the slowest step and the one with the
         # most figures to misquote; the single-day return in the performance
-        # windows is enough for the aside.
-        tasks = (
+        # windows is enough for the aside.  The dated history comes from the
+        # price series itself, EDGAR, the monitor's memory and, with consent,
+        # a web search keyed to the worst days.
+        tasks = [
             PlanTask("account-portfolio", "account.portfolio", purpose="restate the position's cost basis and unrealized P/L"),
             PlanTask("market-performance", "market.performance", {"ticker": ticker}, purpose="locate the decline across return windows"),
-            PlanTask("research-catalysts", "research.stock", {"ticker": ticker, "focus": "catalysts"}, purpose="earnings, filings and news over the holding period"),
-        )
+            PlanTask("market-drawdown", "market.drawdown", {"ticker": ticker, **({"loss_pct": float(loss)} if isinstance(loss, (int, float)) else {}), "top": 3}, purpose="peak-to-trough and the worst trading days in the window"),
+            PlanTask("filings-recent", "filings.recent", {"ticker": ticker, "forms": ["8-K"]}, purpose="dated SEC filings over the past year", required=False),
+            PlanTask("anomaly-history", "market.anomaly_history", {"ticker": ticker, "lookback_days": 365}, purpose="what the monitor recorded on the worst days", required=False),
+        ]
+        if request.allow_web:
+            tasks.append(
+                PlanTask(
+                    "web-worst-days",
+                    "web.research",
+                    {"topic": "news", "ticker": ticker, "recency_days": 400},
+                    purpose="news for the worst trading days",
+                    depends_on=("market-drawdown",),
+                    required=False,
+                    fan_out={"from": "market-drawdown", "field": "queries", "argument": "query", "max": 2},
+                )
+            )
         return ExecutionPlan(
             objective=text,
             route=route.kind,
-            tasks=tasks,
+            tasks=tuple(tasks),
             answer_mode=AnswerMode.RESEARCH_GROUNDED,
-            budget=BudgetClass.STANDARD,
+            budget=BudgetClass.PORTFOLIO,
             web_fallback_allowed=request.allow_web,
             assumptions=(note,),
         )
