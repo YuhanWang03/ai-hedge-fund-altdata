@@ -1071,7 +1071,8 @@ def _plan(query: str) -> ExecutionPlan:
         ("现在是加仓的好时候吗", {"macro.overview", "account.risk"}),
         ("帮我看看要不要减仓", {"macro.overview", "account.risk", "account.portfolio"}),
         ("CRWD 占仓多少，超没超过集中度阈值", {"account.risk", "state.read", "research.stock"}),
-        ("我的仓库里哪只跌的最多?", {"account.portfolio", "market.explain_move"}),
+        ("我的仓库里哪只跌的最多?", {"account.portfolio"}),
+        ("我的仓库里今天哪只跌的最多?", {"account.portfolio", "market.explain_move"}),
         ("仓库里哪个亏最多", {"account.performance", "account.portfolio"}),
     ],
 )
@@ -1235,10 +1236,8 @@ def test_fallback_synthesizer_answers_a_ranking_question_from_the_position_table
     request = normalize_request("我的仓库里哪只跌的最多?")
     plan = ExecutionPlan(request.text, RouteKind.RESEARCH, tasks=(PlanTask("p", "account.portfolio"),), answer_mode=AnswerMode.TOOL_GROUNDED)
     answer = EvidenceSummarySynthesizer().synthesize(request, plan, [portfolio], portfolio.evidence)
-    first = answer.split("\n")[0]
-    assert first.startswith("按买入以来的浮动盈亏排序，最低的是 ARM（-32.22%），其次是 MRVL（-27.33%）、BRK.B（-0.17%）")
-    assert f"[{portfolio.evidence[0].id}]" in first
-    assert "<b>" not in answer
+    assert answer == f"按买入以来的浮动盈亏排序，最低的是 ARM（-32.22%），其次是 MRVL（-27.33%）、BRK.B（-0.17%）[{portfolio.evidence[0].id}]。"
+    assert "组合价值" not in answer  # the card stays in the evidence list, not the answer
     assert verify_answer(answer, portfolio.evidence, answer_mode=AnswerMode.TOOL_GROUNDED, results=[portfolio]).ok
     winners = EvidenceSummarySynthesizer().synthesize(normalize_request("持仓里哪只赚得最多"), plan, [portfolio], portfolio.evidence)
     assert winners.startswith("按买入以来的浮动盈亏排序，最高的是 IVV（+2.03%）")
@@ -1257,7 +1256,7 @@ def test_executor_orders_a_ranked_fan_out_by_the_source_table_and_discloses_the_
     catalog = default_catalog()
     registry = CapabilityRegistry(catalog)
     registry.register("account.portfolio", lambda a, c: _wrap("account.portfolio", "portfolio", _PORTFOLIO_CARD))
-    registry.register("market.explain_move", lambda a, c: ToolEnvelope("market.explain_move", ResultStatus.COMPLETED, subject=a["ticker"], evidence=[EvidenceItem(f"M-{a['ticker']}", a["ticker"], "move")]))
+    registry.register("market.explain_move", lambda a, c: ToolEnvelope("market.explain_move", ResultStatus.COMPLETED, subject=a["ticker"], summary=f"{a['ticker']} moved", evidence=[EvidenceItem(f"M-{a['ticker']}", a["ticker"], f"{a['ticker']} moved")]))
     plan = ExecutionPlan(
         "q",
         RouteKind.RESEARCH,
@@ -1273,6 +1272,19 @@ def test_executor_orders_a_ranked_fan_out_by_the_source_table_and_discloses_the_
     note = outcome.results[1]
     assert "按相关性排序后" in note.limitations[0] and "未覆盖：BRK.B, IVV" in note.limitations[0]
     assert note.evidence[0].metadata["citation_kind"] == "limitations"
+    # The ranking answer: conclusion, one line per named holding, what was not covered.
+    request = normalize_request("我持仓里今天哪只跌得最多")
+    answer = EvidenceSummarySynthesizer().synthesize(request, plan, outcome.results, outcome.ledger.items())
+    lines = answer.split("\n")
+    assert lines[0].startswith("按买入以来的浮动盈亏排序，最低的是 ARM（-32.22%）")
+    assert lines[1:3] == ["ARM moved [M-ARM]", "MRVL moved [M-MRVL]"]
+    assert lines[-1] == "market.explain_move 未覆盖：BRK.B、IVV [fan-out-coverage-each]。"
+    assert "组合价值" not in answer and len(lines) == 4
+    assert verify_answer(answer, outcome.ledger.items(), answer_mode=AnswerMode.TOOL_GROUNDED, results=outcome.results).ok
+    # A compound question keeps the other results it asked for.
+    risk = ToolEnvelope("account.risk", ResultStatus.COMPLETED, subject="portfolio", summary="集中度 54.7%", evidence=[EvidenceItem("K", "portfolio", "集中度 54.7%")])
+    compound = EvidenceSummarySynthesizer().synthesize(normalize_request("我持仓里今天哪只跌得最多，组合风险怎么样"), plan, [*outcome.results, risk], [*outcome.ledger.items(), *risk.evidence])
+    assert compound.startswith(answer) and compound.endswith("集中度 54.7% [K]")
     bad = ExecutionPlan("q", RouteKind.RESEARCH, tasks=(PlanTask("h", "account.portfolio"), PlanTask("e", "market.explain_move", {}, depends_on=("h",), fan_out={"from": "h", "argument": "ticker", "rank": {"field": "positions"}})))
     with pytest.raises(PlanValidationError):
         ExecutionEngine(registry).run(bad, ExecutionContext("run", NormalizedRequest("q", "q"), BudgetClass.DIRECT))
@@ -1281,8 +1293,9 @@ def test_executor_orders_a_ranked_fan_out_by_the_source_table_and_discloses_the_
 @pytest.mark.parametrize(
     ("query", "expected"),
     [
-        ("我的仓库里哪只跌的最多?", {"field": "positions", "key": "pl_pct", "descending": False}),
-        ("我持仓里哪只涨得最多", {"field": "positions", "key": "pl_pct", "descending": True}),
+        ("我的仓库里今天哪只跌的最多?", {"field": "positions", "key": "pl_pct", "descending": False}),
+        ("我持仓里最近哪只涨得最多", {"field": "positions", "key": "pl_pct", "descending": True}),
+        ("我持仓里跌得最狠的那只是什么原因", {"field": "positions", "key": "pl_pct", "descending": False}),
         ("我持仓里每只最近怎么样", None),
     ],
 )
@@ -1293,14 +1306,33 @@ def test_rule_planner_ranks_portfolio_fan_out_by_direction(query, expected):
     assert template.fan_out.get("rank") == expected
 
 
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("我的仓库里哪只跌的最多?", ["account.portfolio"]),
+        ("我持仓里哪只跌得最多", ["account.portfolio"]),
+        ("持仓里谁赚得最多", ["account.performance", "account.portfolio"]),
+    ],
+)
+def test_rule_planner_answers_a_portfolio_ranking_from_the_card_alone(query, expected):
+    plan = _plan(query)
+    assert [task.capability for task in plan.tasks] == expected
+    assert not any(task.fan_out for task in plan.tasks)
+    llm = ScriptedLLM([LLMResponse(text="{}")])
+    request = normalize_request(query)
+    assert [task.capability for task in StructuredLLMPlanner(llm, default_catalog()).plan(request, route(request)).tasks] == expected
+    assert llm.calls == []  # the rules own it; the model is not consulted
+
+
 def test_llm_planner_inherits_the_rules_fan_out_rank():
     rows = [
         {"id": "t1", "capability": "account.portfolio", "arguments": {}},
         {"id": "t2", "capability": "market.performance", "arguments": {}, "fan_out": {"from": "t1", "argument": "ticker"}},
     ]
     llm = ScriptedLLM([LLMResponse(text=json.dumps({"tasks": rows}))])
-    request = normalize_request("帮我研究一下我的仓库里哪只跌的最多")
+    request = normalize_request("帮我研究一下我持仓里跌得最多的几只，财报和估值怎么样")
     plan = StructuredLLMPlanner(llm, default_catalog()).plan(request, route(request))
+    assert len(llm.calls) == 1
     template = next(task for task in plan.tasks if task.fan_out)
     assert template.fan_out["rank"] == {"field": "positions", "key": "pl_pct", "descending": False}
 

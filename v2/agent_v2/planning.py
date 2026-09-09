@@ -52,6 +52,9 @@ _LIST_RANKING = re.compile(r"哪只|哪个|哪几只|哪些|每只|每个|那几
 #: Ranking direction words; with a portfolio source they order the fan-out by P/L.
 _RANK_LOW = re.compile(r"跌|亏|差|弱|回撤|惨", re.I)
 _RANK_HIGH = re.compile(r"涨|赚|好|强|盈利", re.I)
+#: Wording that turns a portfolio ranking into a per-holding market question:
+#: a time frame the card cannot answer, or a request for the reason.
+_RECENT_OR_WHY = re.compile(r"今天|今日|当日|盘中|日内|最近|这周|本周|上周|这个月|本月|为什么|原因|怎么回事|什么事|何故", re.I)
 #: A list question needs an evaluative word before "which one" means "look at each".
 _LIST_EVALUATE = re.compile(r"最|值得|表现|怎么样|如何|强|弱|好|差|狠|危险", re.I)
 _HELP = re.compile(r"你能帮我做什么|你能做什么|能做什么|有什么功能|会做什么|怎么用|如何使用", re.I)
@@ -184,6 +187,12 @@ def _budget(tasks: list[PlanTask]) -> BudgetClass:
     if count <= 7:
         return BudgetClass.PORTFOLIO
     return BudgetClass.DEEP
+
+
+def portfolio_ranking(text: str) -> bool:
+    """Whether the wording ranks the user's holdings by a direction ("哪只跌得最多")."""
+
+    return _fan_out_rank(text) is not None
 
 
 def _fan_out_rank(text: str) -> dict | None:
@@ -357,18 +366,23 @@ class RulePlanner:
                 focuses = [focus for focus in focuses if focus != "risk"]
             if "earnings" in focuses and _EARNINGS_SCHEDULE.search(text) and not _EARNINGS_EACH.search(text):
                 focuses = [focus for focus in focuses if focus != "earnings"]
+            source = "state-watchlist" if watchlist_scope and not explicit_portfolio else "account-portfolio"
+            rank = _fan_out_rank(text) if source == "account-portfolio" else None
+            # "哪只跌得最多" is answered by the position card's own P/L column;
+            # only a time frame or a "why" needs the per-holding market look.
+            card_answers = rank is not None and not _RECENT_OR_WHY.search(text)
+            if card_answers:
+                explain = False
             per_ticker = explain or bool(focuses) or bool(_EARNINGS_EACH.search(text))
             if _EARNINGS_EACH.search(text) and "earnings" not in focuses:
                 focuses = [*focuses, "earnings"]
             only_scope = all(task.capability in {"account.portfolio", "state.read"} for task in tasks)
-            if not per_ticker and _LIST_RANKING.search(text) and _LIST_EVALUATE.search(text) and only_scope:
+            if not per_ticker and not card_answers and _LIST_RANKING.search(text) and _LIST_EVALUATE.search(text) and only_scope:
                 explain, per_ticker = True, True
-            source = "state-watchlist" if watchlist_scope and not explicit_portfolio else "account-portfolio"
             if source == "account-portfolio" and (explicit_portfolio or per_ticker or not tasks):
                 add("account-portfolio", "account.portfolio", purpose="identify positions and weights")
             if per_ticker:
                 fan_out = {"from": source, "field": "tickers", "argument": "ticker", "max": 8}
-                rank = _fan_out_rank(text) if source == "account-portfolio" else None
                 if rank is not None:
                     fan_out["rank"] = rank
                 if explain:

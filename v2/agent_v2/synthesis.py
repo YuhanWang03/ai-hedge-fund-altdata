@@ -8,6 +8,7 @@ render its own result better than a claim list puts the prose in
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, field
 from typing import Any
 
 from v2.agent_v2.models import (
@@ -21,7 +22,17 @@ from v2.agent_v2.text import plain_text
 _SUPERLATIVE = re.compile(r"最|哪只|哪个|哪几|哪些|排名|排序|前几|谁")
 
 
-def ranking_lead(text: str, results: list[ToolEnvelope]) -> str:
+@dataclass
+class RankingLead:
+    text: str = ""
+    entities: tuple[str, ...] = ()
+    result: ToolEnvelope | None = field(default=None, repr=False)
+
+    def __bool__(self) -> bool:
+        return bool(self.text)
+
+
+def ranking_lead(text: str, results: list[ToolEnvelope]) -> RankingLead:
     """Answer a superlative question directly from a result's ranked table.
 
     An adapter that returns a table publishes ``metadata["positions"]`` (rows)
@@ -31,7 +42,7 @@ def ranking_lead(text: str, results: list[ToolEnvelope]) -> str:
     """
 
     if not _SUPERLATIVE.search(text or ""):
-        return ""
+        return RankingLead()
     for result in results:
         rows = result.metadata.get("positions")
         rules = result.metadata.get("rankable")
@@ -68,8 +79,42 @@ def ranking_lead(text: str, results: list[ToolEnvelope]) -> str:
         lead = f"按{chosen.get('label') or key}排序，{direction}的是 {label(head)}"
         if rest:
             lead += "，其次是 " + "、".join(label(row) for row in rest)
-        return f"{lead}{citation}。"
-    return ""
+        entities = tuple(str(row.get("ticker", "")) for row in (head, *rest) if row.get("ticker"))
+        return RankingLead(f"{lead}{citation}。", entities, result)
+    return RankingLead()
+
+
+def ranked_answer(lead: RankingLead, results: list[ToolEnvelope]) -> str:
+    """A ranking answer: the conclusion, one line per named entity, and what was not covered.
+
+    Everything else the run fetched stays in the evidence list; the reader
+    asked which one, not for a tour of every holding.
+    """
+
+    lines = [lead.text]
+    for entity in lead.entities:
+        for result in results:
+            if result is lead.result or result.subject.upper() != entity.upper():
+                continue
+            if not result.ok:
+                detail = result.errors[0] if result.errors else "未知错误"
+                lines.append(f"{entity} {result.capability} 未完成：{detail}")
+                continue
+            narrative = plain_text(str(result.metadata.get("narrative") or "").strip() or result.summary)
+            first = narrative.split("\n")[0].strip()
+            if first and "[" not in first and result.evidence:
+                first += f" [{result.evidence[0].id}]"
+            if first:
+                lines.append(first)
+    for result in results:
+        coverage = result.metadata.get("fan_out_coverage")
+        if not isinstance(coverage, dict):
+            continue
+        uncovered = [str(value) for value in coverage.get("uncovered") or []]
+        citation = f" [{result.evidence[0].id}]" if result.evidence else ""
+        if uncovered:
+            lines.append(f"{result.capability} 未覆盖：{'、'.join(uncovered)}{citation}。")
+    return "\n".join(lines)
 
 
 class EvidenceSummarySynthesizer:
@@ -96,37 +141,49 @@ class EvidenceSummarySynthesizer:
                 return "该问题被识别为通用知识问题；尚未接入 Agent V2 的知识回答模型。"
             return "现有信息不足以确定需要调用的能力，请补充标的或希望查询的范围。"
 
-        blocks: list[str] = []
         lead = ranking_lead(request.text, results)
         if lead:
-            blocks.append(lead)
-        for result in results:
-            narrative = str(result.metadata.get("narrative") or "").strip()
-            if result.ok and narrative:
-                blocks.append(narrative)
+            # The ranking answer leads; results about the ranked objects
+            # themselves stay in the evidence list, anything else the question
+            # also asked for (P&L, risk, macro) is still rendered below.
+            source = lead.result
+            ranked_subjects = {str(value).upper() for value in ((source.metadata.get("tickers") if source is not None else None) or [])}
+            blocks = [ranked_answer(lead, results)]
+            others = [
+                result
+                for result in results
+                if result is not source and result.subject.upper() not in ranked_subjects and not isinstance(result.metadata.get("fan_out_coverage"), dict)
+            ]
+            blocks.extend(self._render(result) for result in others)
+            return "\n\n".join(block for block in blocks if block)
+        return "\n\n".join(block for block in (self._render(result) for result in results) if block)
+
+    @staticmethod
+    def _render(result: ToolEnvelope) -> str:
+        narrative = str(result.metadata.get("narrative") or "").strip()
+        if result.ok and narrative:
+            return narrative
+        lines: list[str] = []
+        only_limitations = bool(result.evidence) and all(item.metadata.get("citation_kind") == "limitations" for item in result.evidence)
+        if result.summary:
+            lines.append(plain_text(result.summary))
+        elif not result.ok:
+            detail = result.errors[0] if result.errors else "未知错误"
+            lines.append(f"{result.capability} 未完成：{detail}")
+        elif not only_limitations:
+            lines.append(f"{result.capability} 已完成。")
+        # A limitations-only result (a fan-out coverage note) is rendered
+        # by its limitation line below, which already cites the item.
+        for item in [] if only_limitations else result.evidence[:4]:
+            if not item.metadata.get("citable", True):
                 continue
-            lines: list[str] = []
-            only_limitations = bool(result.evidence) and all(item.metadata.get("citation_kind") == "limitations" for item in result.evidence)
-            if result.summary:
-                lines.append(plain_text(result.summary))
-            elif not result.ok:
-                detail = result.errors[0] if result.errors else "未知错误"
-                lines.append(f"{result.capability} 未完成：{detail}")
-            elif not only_limitations:
-                lines.append(f"{result.capability} 已完成。")
-            # A limitations-only result (a fan-out coverage note) is rendered
-            # by its limitation line below, which already cites the item.
-            for item in [] if only_limitations else result.evidence[:4]:
-                if not item.metadata.get("citable", True):
-                    continue
-                if item.claim and item.claim != result.summary:
-                    lines.append(f"- {plain_text(item.claim)} [{item.id}]")
-                elif item.claim and lines:
-                    lines[-1] += f" [{item.id}]"
-            # Limitations often carry figures; cite the adapter's limitation
-            # evidence when it exists so the line stays verifiable.
-            limitation_item = next((item for item in result.evidence if item.metadata.get("citation_kind") == "limitations"), None)
-            suffix = f" [{limitation_item.id}]" if limitation_item is not None else ""
-            lines.extend(f"数据限制：{item}{suffix}" for item in result.limitations[:3])
-            blocks.append("\n".join(lines))
-        return "\n\n".join(block for block in blocks if block)
+            if item.claim and item.claim != result.summary:
+                lines.append(f"- {plain_text(item.claim)} [{item.id}]")
+            elif item.claim and lines:
+                lines[-1] += f" [{item.id}]"
+        # Limitations often carry figures; cite the adapter's limitation
+        # evidence when it exists so the line stays verifiable.
+        limitation_item = next((item for item in result.evidence if item.metadata.get("citation_kind") == "limitations"), None)
+        suffix = f" [{limitation_item.id}]" if limitation_item is not None else ""
+        lines.extend(f"数据限制：{item}{suffix}" for item in result.limitations[:3])
+        return "\n".join(lines)

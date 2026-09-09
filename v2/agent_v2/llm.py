@@ -24,7 +24,7 @@ from v2.agent_v2.models import (
     ToolEnvelope,
     VerificationReport,
 )
-from v2.agent_v2.planning import RulePlanner
+from v2.agent_v2.planning import RulePlanner, portfolio_ranking
 from v2.agent_v2.synthesis import EvidenceSummarySynthesizer
 
 _RESULT_CITATION = re.compile(r"\[results\.(metrics|limitations)([^\]]*)\]")
@@ -84,6 +84,11 @@ class StructuredLLMPlanner:
     def plan(self, request: NormalizedRequest, route: RouteDecision) -> ExecutionPlan:
         deterministic = self.fallback.plan(request, route)
         if deterministic.tasks and deterministic.tasks[0].capability in {"market.performance", "market.explain_move"}:
+            return deterministic
+        # Rules also own a ranking of the user's holdings: the position card
+        # answers it, and the model tends to fan out over every holding.
+        capabilities = {task.capability for task in deterministic.tasks}
+        if "account.portfolio" in capabilities and portfolio_ranking(request.text) and capabilities <= {"account.portfolio", "account.performance", "market.explain_move", "market.performance"}:
             return deterministic
         # Rules own market questions and non-thin lookups; the model gets
         # research and lab routes, plus lookups the rules could not resolve
@@ -352,7 +357,7 @@ results 中的评分或限制如需引用，使用 evidence 中 citation_kind �
 不要把历史回测写成未来收益保证。不要输出未在证据中出现的数字。
 
 严格遵循输入中的 response_style：
-- brief：先用一句话直接回答用户问的那个量或对象（总额、盈亏、名单、日期、谁更强），这些被直接询问的数字和名字必须原样给出，不得因为篇幅省略；比较或排名问题必须点名每个候选并给出用来比较的数字。然后用 3—5 个短段落、约 300—500 个中文字完成回答，挑选最有决策价值的 3—5 条事实，只讲一个主要风险和最重要的数据缺口，最后指出接下来值得观察什么。不要使用标题、表格、分隔线、编号清单、“正面/负面/中性”标签、“必须说明”或单独的免责声明章节；不要重复同一事实。
+- brief：先用一句话直接回答用户问的那个量或对象（总额、盈亏、名单、日期、谁更强），这些被直接询问的数字和名字必须原样给出，不得因为篇幅省略；比较或排名问题必须点名每个候选并给出用来比较的数字；只展开被点名的对象，未被问到的个股不要逐一复述；覆盖不全时用一句话说明未覆盖的对象。然后用 3—5 个短段落、约 300—500 个中文字完成回答，挑选最有决策价值的 3—5 条事实，只讲一个主要风险和最重要的数据缺口，最后指出接下来值得观察什么。不要使用标题、表格、分隔线、编号清单、“正面/负面/中性”标签、“必须说明”或单独的免责声明章节；不要重复同一事实。
 - detailed：用户明确要求详细、完整、全面、表格或逐项展开时，才允许使用小标题与列表，但仍应合并重复内容并保持自然。
 
 把 BULLISH、MEDIUM、forward_pe、revision_trend 等内部英文标签翻译或解释成自然中文；必要的通用缩写可以保留。不要逐项复述所有模块，也不要把工具输出改写成机械评分单。"""
