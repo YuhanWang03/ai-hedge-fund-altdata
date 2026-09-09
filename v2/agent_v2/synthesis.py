@@ -8,6 +8,7 @@ render its own result better than a claim list puts the prose in
 from __future__ import annotations
 
 import re
+from datetime import date, timedelta
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -256,10 +257,13 @@ def drawdown_lines(result: ToolEnvelope) -> str:
     """The stretch itself: peak to trough and the worst days; the window return was in the lead."""
 
     peak = next((item for item in result.evidence if item.metadata.get("evidence_scope") == "peak_trough"), None)
+    span = next((item for item in result.evidence if item.metadata.get("evidence_scope") == "benchmark_span"), None)
     worst = [item for item in result.evidence if item.metadata.get("evidence_scope") == "worst_day"]
     lines: list[str] = []
     if peak is not None:
         lines.append(f"{plain_text(peak.claim).rstrip('。')}[{peak.id}]。")
+    if span is not None:
+        lines.append(f"{plain_text(span.claim).rstrip('。')}[{span.id}]。")
     days = []
     for item in worst:
         move = f"{float(item.value):+.2%}" if isinstance(item.value, (int, float)) else (_PERCENT.search(plain_text(item.claim)) or [""])[0]
@@ -273,29 +277,30 @@ _FORM = re.compile(r"提交了\s*([0-9A-Z-]+[A-Z])")
 _PERCENT = re.compile(r"[+-]\d+(?:\.\d+)?%")
 
 
-def filing_line(result: ToolEnvelope, since: str = "") -> str:
-    """The filings inside the window on one line; their contents were read per worst day."""
+def filing_line(result: ToolEnvelope, since: str = "", until: str = "") -> str:
+    """The filings inside the decline on one line; their contents were read per worst day."""
 
     dated = []
     for item in result.evidence:
         if item.metadata.get("evidence_scope") != "filing":
             continue
         day = str(item.metadata.get("date") or item.as_of or "")[:10]
-        if since and day and day < since:
+        if (since and day and day < since) or (until and day and day > until):
             continue
         match = _FORM.search(plain_text(item.claim))
         form = str(item.metadata.get("form") or (match.group(1) if match else "申报"))
         dated.append(f"{day} {form}[{item.id}]")
     if not dated:
         return ""
-    return f"{result.subject} 窗口内 {len(dated)} 份申报：" + "；".join(dated) + "。"
+    return f"{result.subject} 这段下跌期间 {len(dated)} 份申报：" + "；".join(dated) + "。"
 
 
-def anomaly_lines(result: ToolEnvelope, since: str = "", covered: frozenset[str] = frozenset()) -> str:
-    """Watch records inside the window that no attribution block already explains.
+def anomaly_lines(result: ToolEnvelope, since: str = "", until: str = "", covered: frozenset[str] = frozenset()) -> str:
+    """Watch records inside the decline that no attribution block already explains.
 
     A retro-attribution record is the memory of an earlier attribution run;
-    the fresh attribution of that day supersedes it.
+    the fresh attribution of that day supersedes it.  Records after the
+    trough are about the recovery, not the fall.
     """
 
     lines: list[str] = []
@@ -303,7 +308,7 @@ def anomaly_lines(result: ToolEnvelope, since: str = "", covered: frozenset[str]
         if item.metadata.get("evidence_scope") != "anomaly":
             continue
         day = str(item.metadata.get("date") or item.as_of or "")[:10]
-        if (since and day and day < since) or day in covered:
+        if (since and day and day < since) or (until and day and day > until) or day in covered:
             continue
         if "retro_attribution" in str(item.metadata.get("flags") or ""):
             continue
@@ -311,6 +316,13 @@ def anomaly_lines(result: ToolEnvelope, since: str = "", covered: frozenset[str]
         if len(lines) >= 3:
             break
     return "\n".join(lines)
+
+
+def _days_after(day: str, days: int) -> str:
+    try:
+        return (date.fromisoformat(day[:10]) + timedelta(days=days)).isoformat()
+    except ValueError:
+        return day
 
 
 def ranking_lead(text: str, results: list[ToolEnvelope]) -> RankingLead:
@@ -421,6 +433,14 @@ class EvidenceSummarySynthesizer:
                 source = found[0] if found else next((result for result in results if result.capability == "account.portfolio"), None)
                 drawdown = next((result for result in results if result.capability == "market.drawdown" and result.ok), None)
                 since = str(drawdown.metrics.get("window_start") or "") if drawdown is not None else ""
+                # The decline itself: peak to trough.  Records after the
+                # trough belong to the recovery; filings get three more days,
+                # the same margin the attributor reads them with.
+                peak_date = str((drawdown.metrics.get("peak") or {}).get("date") or "") if drawdown is not None else ""
+                trough_date = str((drawdown.metrics.get("trough") or {}).get("date") or "") if drawdown is not None else ""
+                decline_start = peak_date or since
+                filings_until = _days_after(trough_date, 3) if trough_date else ""
+                has_span = drawdown is not None and any(item.metadata.get("evidence_scope") == "benchmark_span" for item in drawdown.evidence)
                 attributed = frozenset(str(result.metadata.get("date") or "")[:10] for result in results if result.capability == "market.attribute_move" and result.ok)
                 blocks = [opening]
                 for result in results:
@@ -434,13 +454,16 @@ class EvidenceSummarySynthesizer:
                         blocks.append(drawdown_lines(result))
                     elif result.capability == "filings.recent" and result.ok and attributed:
                         # The attribution blocks below read the filings; here they are only listed.
-                        blocks.append(filing_line(result, since))
+                        blocks.append(filing_line(result, decline_start, filings_until))
                     elif result.capability == "market.anomaly_history" and result.ok and attributed:
-                        blocks.append(anomaly_lines(result, since, attributed))
+                        blocks.append(anomaly_lines(result, decline_start, trough_date, attributed))
                     elif result.capability in {"research.stock", "research.compare", "filings.recent", "filings.read_events", "market.anomaly_history"}:
                         blocks.append(catalyst_lines(result, since))
                     elif result.capability == "market.performance" and result.ok:
-                        blocks.append(benchmark_line(result))
+                        # The sector over the same stretch (in the drawdown block)
+                        # answers "sector or stock"; last month's relatives do not.
+                        if not has_span:
+                            blocks.append(benchmark_line(result))
                     else:
                         blocks.append(self._render(result))
                 return "\n\n".join(block for block in blocks if block)

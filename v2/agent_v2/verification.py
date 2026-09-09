@@ -96,6 +96,16 @@ def _observations(items: list[EvidenceItem]) -> str:
     )
 
 
+def locate_number(number: str, evidence: list[EvidenceItem], *, limit: int = 3) -> list[str]:
+    """Ids of the evidence items whose observations contain ``number`` verbatim."""
+
+    needle = str(number).strip()
+    if not needle:
+        return []
+    found = [item.id for item in evidence if needle in _observations([item])]
+    return found[:limit]
+
+
 def _without_identifiers(value):
     """Remove opaque IDs before numeric grounding; digits inside IDs are not facts."""
 

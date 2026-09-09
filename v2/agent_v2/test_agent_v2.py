@@ -733,7 +733,21 @@ def test_a_why_follow_up_after_a_loss_ranking_explains_the_loss_since_purchase_n
     assert "2026-03-01" not in second.answer  # a filing before the decline window is left out
     # The 08-05 watch record is superseded by that day's attribution block; the
     # filings are listed on one line because the attributor read them.
-    assert "盯盘记录" not in second.answer and "ARM 窗口内 1 份申报：2026-08-05 8-K[F-ARM-0805]。" in second.answer
+    assert "盯盘记录" not in second.answer and "ARM 这段下跌期间 1 份申报：2026-08-05 8-K[F-ARM-0805]。" in second.answer
+    from v2.agent_v2.synthesis import anomaly_lines, filing_line
+
+    history = ToolEnvelope("market.anomaly_history", ResultStatus.COMPLETED, subject="ARM", evidence=[
+        EvidenceItem(f"A-{day}", "ARM", f"ARM {day} 盯盘记录：{flags}；note。", metadata={"evidence_scope": "anomaly", "date": day, "flags": flags})
+        for day, flags in (("2026-09-09", ""), ("2026-07-24", "retro_attribution"), ("2026-07-10", "volume_spike"), ("2026-06-23", "gap_down"), ("2026-06-01", "gap_down"))
+    ])
+    # Inside peak→trough only, minus attributed days and retro memories: 07-10 survives.
+    assert anomaly_lines(history, "2026-06-18", "2026-07-29", frozenset({"2026-06-23"})) == "- ARM 2026-07-10 盯盘记录：volume_spike；note。 [A-2026-07-10]"
+    filings = ToolEnvelope("filings.recent", ResultStatus.COMPLETED, subject="ARM", evidence=[
+        EvidenceItem(f"F-{day}", "ARM", f"ARM 于 {day} 向 SEC 提交了 6-K（x）。", metadata={"evidence_scope": "filing", "date": day, "form": "6-K"})
+        for day in ("2026-08-10", "2026-08-01", "2026-07-29")
+    ])
+    # Three days after the trough is the attributor's own reading margin; 08-10 is out.
+    assert filing_line(filings, "2026-06-18", "2026-08-01") == "ARM 这段下跌期间 2 份申报：2026-08-01 6-K[F-2026-08-01]；2026-07-29 6-K[F-2026-07-29]。"
     assert "AT-ARM-2026-08-05-news" not in second.answer  # no web consent: the attributor had no news to cite
     # With web consent the same plan lets the attributor use the news.
     consenting = AgentV2(catalog=default_catalog(), registry=_framed_registry(), session=memory, config=AgentV2Config(enable_web_fallback=True))
@@ -915,11 +929,31 @@ def test_market_drawdown_locates_the_worst_days_and_the_peak_to_trough():
                     rows.append(SimpleNamespace(time=day.isoformat(), close=round(close, 2), volume=1_000_000))
             return rows
 
+    class SectorPrices(Prices):
+        def get_prices(self, ticker, start, end):
+            rows = super().get_prices("ARM", start, end)
+            if ticker != "SMH":
+                return rows
+            # The sector fell half as much on the crash day and drifted the same way otherwise.
+            out, close = [], 100.0
+            for previous, bar in zip(rows, rows[1:]):
+                step = float(bar.close) / float(previous.close)
+                close *= 0.90 if step < 0.85 else step
+                out.append(SimpleNamespace(time=bar.time, close=round(close, 2), volume=1))
+            return out
+
     registry = CapabilityRegistry(default_catalog())
     now = datetime(2026, 7, 3, 18, 0, tzinfo=ZoneInfo("America/New_York"))
-    register_market_capabilities(registry, price_source_factory=Prices, move_provider=lambda ticker: None, now_factory=lambda: now)
+    register_market_capabilities(registry, price_source_factory=SectorPrices, move_provider=lambda ticker: None, now_factory=lambda: now, sector_for=lambda ticker: "SMH")
     result = registry.execute(PlanTask("d", "market.drawdown", {"ticker": "ARM", "loss_pct": -30.0, "top": 2}), _context())
     assert result.ok and result.metrics["window"] == "3m"
+    span = next(item for item in result.evidence if item.metadata["evidence_scope"] == "benchmark_span")
+    assert span.claim.startswith("同期行业基准 SMH 从 2026-05-19 到 ") and "ARM 比基准多跌 " in span.claim and result.metrics["benchmark_span"]["gap_pp"] > 5
+    assert span.claim.rstrip("。") + f"[{span.id}]。" in result.metadata["narrative"]
+    # No sector known: the block is simply absent, nothing fails.
+    register_market_capabilities(registry, price_source_factory=Prices, move_provider=lambda ticker: None, now_factory=lambda: now, sector_for=lambda ticker: "")
+    assert "benchmark_span" not in registry.execute(PlanTask("d", "market.drawdown", {"ticker": "ARM"}), _context()).metrics
+    register_market_capabilities(registry, price_source_factory=Prices, move_provider=lambda ticker: None, now_factory=lambda: now)
     assert [row["date"] for row in result.metrics["worst_days"]] == ["2026-05-20", "2026-06-03"]
     assert result.metrics["peak"]["date"] == "2026-05-19" and result.metrics["drawdown"] < -0.15
     assert result.metadata["queries"] == ["why did ARM stock fall on 2026-05-20", "why did ARM stock fall on 2026-06-03"]
@@ -1363,6 +1397,8 @@ def test_telegram_delivery_numbers_citations_and_compacts_worst_days(monkeypatch
     many[3] = EvidenceItem("m4", "ARM", "card\n━━━\nrow", source_title="Existing deterministic responder")
     grouped = telegram_format.source_entries(tuple(item.id for item in many), many)
     assert [(entry.numbers, entry.label) for entry in grouped] == [("1–3、5–7", "日线行情"), ("4", "账户卡片")]
+    filing = EvidenceItem("f1", "ARM", "ARM 于 2026-07-29 向 SEC 提交了 6-K（0001）。", source_id="sec_edgar", source_title="ARM 6-K 2026-07-29", source_url="https://www.sec.gov/x")
+    assert telegram_format.source_entries(("f1",), [filing])[0].label == "ARM 6-K 2026-07-29"
 
     class Placeholder:
         sent: list[str] = []
@@ -2042,6 +2078,19 @@ def test_yfinance_price_source_uses_the_dash_share_class_spelling():
     YFinancePriceSource(ticker_factory=factory).get_prices("BRK.B", "2026-01-01", "2026-01-10")
     assert requested == ["BRK-B"]
     assert YFinancePriceSource.yfinance_symbol("nvda") == "NVDA"
+
+
+def test_repair_instruction_points_at_the_evidence_that_carries_each_number():
+    from v2.agent_v2.llm import repair_instruction
+    from v2.agent_v2.models import VerificationReport
+
+    peak = EvidenceItem("D-peak", "ARM", "ARM 从 2026-06-18 的高点 439.46 美元到 2026-07-29 的低点 224.89 美元回撤 -48.83%。", value=-0.4883)
+    price = EvidenceItem("AT-price", "ARM", "ARM 在 2026-07-29 收于 224.89 美元，较前一交易日 -8.11%。")
+    report = VerificationReport(ok=False, ungrounded_numbers=("439.46", "224.89", "12.34"))
+    text = repair_instruction(report, [peak, price])
+    assert "439.46 见 [D-peak]；224.89 见 [D-peak]、[AT-price]" in text
+    assert "以下数字在本轮证据中找不到：12.34。" in text and "439.46" not in text.split("找不到")[1]
+    assert repair_instruction(report).count("找不到：439.46、224.89、12.34") == 1  # without evidence, the old wording
 
 
 def test_attributor_lead_text_keeps_a_quoted_lead_in_one_sentence():

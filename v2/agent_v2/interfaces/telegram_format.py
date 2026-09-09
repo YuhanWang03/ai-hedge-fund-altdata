@@ -142,7 +142,8 @@ def source_entries(ids: tuple[str, ...], evidence: list[EvidenceItem], *, max_li
         url = link_for(item)
         if url and len(linked) < max_linked:
             title = _one_line(item.source_title) or _origin(item)
-            claim = _one_line(item.claim, 60)
+            # A filing's title already says what its claim says.
+            claim = "" if item.source_id == "sec_edgar" else _one_line(item.claim, 60)
             label = title if not claim or claim.startswith(title) else f"{title} · {claim}"
             linked.append(SourceEntry(str(index), label, url))
         elif url:

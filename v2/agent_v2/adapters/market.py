@@ -442,7 +442,24 @@ def _pick_window(loss_pct: float | None, window: str | None, returns: dict[str, 
     return "3m"
 
 
-def _drawdown_envelope(ticker: str, context: ExecutionContext, price_source, *, loss_pct: float | None = None, window: str | None = None, top: int = 3, now: datetime | None = None) -> ToolEnvelope:
+def _default_sector_etf(ticker: str) -> str:
+    from v2.universe import sector_etf_for
+
+    return sector_etf_for(ticker)
+
+
+def _close_on_or_before(prices, day: str) -> float | None:
+    """The last daily close dated ``day`` or earlier, or None when the history starts later."""
+
+    close = None
+    for bar in prices:
+        if str(bar.time)[:10] > day:
+            break
+        close = float(bar.close)
+    return close if close and close > 0 else None
+
+
+def _drawdown_envelope(ticker: str, context: ExecutionContext, price_source, *, loss_pct: float | None = None, window: str | None = None, top: int = 3, now: datetime | None = None, sector_for: Callable[[str], str] | None = None) -> ToolEnvelope:
     """Locate a decline in time from daily closes: window, peak-to-trough, worst days."""
 
     current = _as_et(now)
@@ -485,7 +502,36 @@ def _drawdown_envelope(ticker: str, context: ExecutionContext, price_source, *, 
         metrics["peak"] = {"date": peak_day, "close": float(peak.close)}
         metrics["trough"] = {"date": trough_day, "close": float(trough.close)}
         metrics["drawdown"] = drawdown
+        # The sector ETF over the same stretch: how much of the fall was the
+        # sector's, and how much was this stock's own.
+        benchmark = ""
+        try:
+            benchmark = str(sector_for(ticker) or "") if sector_for else ""
+        except Exception:  # noqa: BLE001 — an unknown ticker has no sector; that is data, not a crash
+            benchmark = ""
+        if benchmark and benchmark.upper() != ticker.upper():
+            try:
+                benchmark_prices = list(price_source.get_prices(benchmark, (date.fromisoformat(peak_day) - timedelta(days=7)).isoformat(), trough_day) or [])
+            except Exception as exc:  # noqa: BLE001
+                benchmark_prices = []
+                limitations_extra = f"{benchmark} 同期行情不可用：{type(exc).__name__}"
+            else:
+                limitations_extra = ""
+            start_close, end_close = _close_on_or_before(benchmark_prices, peak_day), _close_on_or_before(benchmark_prices, trough_day)
+            if start_close and end_close:
+                benchmark_return = end_close / start_close - 1
+                gap = (benchmark_return - drawdown) * 100  # positive: the stock fell more than its sector
+                if abs(gap) < 0.05:
+                    relation = "与基准基本同步"
+                else:
+                    relation = f"{ticker} 比基准{'多跌' if gap > 0 else '少跌'} {abs(gap):.2f} 个百分点"
+                evidence.append(_item("benchmark_span", ticker, trough_day, f"同期行业基准 {benchmark} 从 {peak_day} 到 {trough_day} 回报 {benchmark_return:+.2%}，{relation}。", context, metric="benchmark_span_return", value=benchmark_return, metadata={"benchmark": benchmark, "peak_date": peak_day, "trough_date": trough_day, "gap_pp": gap}))
+                metrics["benchmark_span"] = {"benchmark": benchmark, "return": benchmark_return, "gap_pp": gap}
+            elif limitations_extra:
+                metrics["benchmark_span_error"] = limitations_extra
     limitations = [] if worst else ["区间内没有下跌的交易日"]
+    if metrics.get("benchmark_span_error"):
+        limitations.append(str(metrics.pop("benchmark_span_error")))
     envelope = ToolEnvelope(
         "market.drawdown",
         ResultStatus.COMPLETED if worst else ResultStatus.PARTIAL_DATA,
@@ -515,6 +561,9 @@ def _drawdown_narrative(result: ToolEnvelope, label: str) -> str:
         parts.append(f"{window_item.claim.rstrip('。')}{_cite(window_item)}。")
     if peak_item is not None:
         parts.append(f"{peak_item.claim.rstrip('。')}{_cite(peak_item)}。")
+    span_item = next(iter(_scoped(result.evidence, "benchmark_span")), None)
+    if span_item is not None:
+        parts.append(f"{span_item.claim.rstrip('。')}{_cite(span_item)}。")
     if worst_items:
         parts.append(f"{ticker} 近 {label}跌幅最大的交易日：" + "；".join(f"{item.metadata['date']} {float(item.value):+.2%}{_cite(item)}" for item in worst_items) + "。")
     else:
@@ -528,6 +577,7 @@ def register_market_capabilities(
     price_source_factory: Callable[[], Any] = _default_price_source,
     move_provider: Callable[[str], Any] = _default_move_provider,
     now_factory: Callable[[], datetime] = _now_et,
+    sector_for: Callable[[str], str] | None = _default_sector_etf,
 ) -> None:
     def performance(arguments: dict[str, Any], context: ExecutionContext) -> ToolEnvelope:
         ticker = str(arguments.get("ticker") or "").upper()
@@ -546,6 +596,7 @@ def register_market_capabilities(
             price_source_factory(),
             loss_pct=float(loss) if isinstance(loss, (int, float)) else None,
             window=arguments.get("window"),
+            sector_for=sector_for,
             top=int(arguments.get("top") or 3),
             now=now_factory(),
         )

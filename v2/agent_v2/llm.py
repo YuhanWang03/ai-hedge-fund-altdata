@@ -26,6 +26,7 @@ from v2.agent_v2.models import (
 )
 from v2.agent_v2.planning import RulePlanner, portfolio_ranking
 from v2.agent_v2.synthesis import EvidenceSummarySynthesizer
+from v2.agent_v2.verification import locate_number
 
 _RESULT_CITATION = re.compile(r"\[results\.(metrics|limitations)([^\]]*)\]")
 _DETAILED_ANSWER = re.compile(r"详细|完整|全面|深度|报告|逐项|表格|清单|所有|展开")
@@ -396,7 +397,7 @@ results 中的评分或限制如需引用，使用 evidence 中 citation_kind �
                 [
                     *messages,
                     {"role": "assistant", "content": answer},
-                    {"role": "user", "content": repair_instruction(report)},
+                    {"role": "user", "content": repair_instruction(report, evidence)},
                 ],
                 results,
                 evidence,
@@ -541,15 +542,28 @@ def _select_evidence(results: list[ToolEnvelope], evidence: list[EvidenceItem], 
     return [by_id[value] for value in chosen]
 
 
-def repair_instruction(report: VerificationReport) -> str:
-    """Tell the model exactly what failed and what must survive the rewrite."""
+def repair_instruction(report: VerificationReport, evidence: list[EvidenceItem] | None = None) -> str:
+    """Tell the model exactly what failed and what must survive the rewrite.
+
+    An ungrounded number is usually a real figure cited with the wrong id;
+    naming the items that do carry it turns the repair into swapping an id
+    instead of guessing.
+    """
 
     lines = ["校验未通过，请重写完整回答。"]
     if report.ungrounded_numbers:
-        lines.append(
-            "以下数字在本轮证据中找不到：" + "、".join(report.ungrounded_numbers[:12]) + "。"
-            "只能使用证据中出现的数字；若是你自己的计算，请把算式完整写出（例如 22.4% + 18.2% = 40.6%）；无法支持的数字直接删掉，宁可省略也不要编造。"
-        )
+        located = []
+        missing = []
+        for number in report.ungrounded_numbers[:12]:
+            ids = locate_number(number, list(evidence or []))
+            (located if ids else missing).append((number, ids))
+        if located:
+            lines.append("以下数字引用的证据不含该数字，但下列证据含有它，请改用这些 id 引用：" + "；".join(f"{number} 见 " + "、".join(f"[{value}]" for value in ids) for number, ids in located) + "。")
+        if missing:
+            lines.append(
+                "以下数字在本轮证据中找不到：" + "、".join(number for number, _ in missing) + "。"
+                "只能使用证据中出现的数字；若是你自己的计算，请把算式完整写出（例如 22.4% + 18.2% = 40.6%）；无法支持的数字直接删掉，宁可省略也不要编造。"
+            )
     if report.unknown_citations:
         lines.append("以下引用 id 不存在：" + "、".join(report.unknown_citations[:12]) + "。方括号内只能原样使用 evidence 数组中真实存在的 id。")
     for warning in report.warnings[:6]:
