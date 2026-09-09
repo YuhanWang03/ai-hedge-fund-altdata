@@ -697,10 +697,14 @@ def _framed_registry() -> CapabilityRegistry:
     registry.register("account.portfolio", lambda a, c: _wrap("account.portfolio", "portfolio", _PORTFOLIO_CARD))
 
     def performance(a, c):
+        from v2.agent_v2.adapters.market import _INTRADAY_PRICE_RULE
+
         ticker = a["ticker"]
-        price = EvidenceItem(f"P-{ticker}", ticker, f"{ticker} 截至 2026-09-09 收盘价为 264.00 美元，单日涨跌幅为 +0.94%。", metadata={"evidence_scope": "price"})
-        windows = EvidenceItem(f"W-{ticker}", ticker, f"{ticker} 区间回报：1d +0.94%，5d +12.32%，1m -1.53%，3m -21.40%，1y -35.10%。", metadata={"evidence_scope": "returns"})
-        return ToolEnvelope("market.performance", ResultStatus.COMPLETED, subject=ticker, summary=f"{ticker} 近 1 月 -1.53%", metrics={"returns": {"1d": 0.0094, "5d": 0.1232, "1m": -0.0153, "3m": -0.2140, "1y": -0.3510}}, evidence=[price, windows], metadata={"narrative": f"{ticker} 近 5 日回报 +12.32%，近 1 月回报 -1.53%[W-{ticker}]。"})
+        price = EvidenceItem(f"P-{ticker}", ticker, f"{ticker} 截至 2026-09-09 13:42 ET 的盘中价格为 264.00 美元，相对前一交易日收盘价 +0.94%。", metadata={"evidence_scope": "price", "is_intraday": True, "constraints": [_INTRADAY_PRICE_RULE]})
+        windows = EvidenceItem(f"W-{ticker}", ticker, f"{ticker} 截至查询时的区间回报（含当前盘中价格）：1d +0.94%，5d +12.32%，1m -1.53%，3m -21.40%，1y +89.85%。", metadata={"evidence_scope": "returns"})
+        benchmark = EvidenceItem(f"B-{ticker}", ticker, f"{ticker} 相对 SMH：1d +0.94%。", metadata={"evidence_scope": "benchmark"})
+        narrative = f"{ticker} 最近的股价表现分化。近 5 日回报 +12.32%，近 1 月回报 -1.53%[W-{ticker}]。\n相对 SMH，单日超额 +0.94%[B-{ticker}]。\n成交量尚未定型。"
+        return ToolEnvelope("market.performance", ResultStatus.COMPLETED, subject=ticker, summary=f"{ticker} 近 1 月 -1.53%", metrics={"returns": {"1d": 0.0094, "5d": 0.1232, "1m": -0.0153, "3m": -0.2140, "1y": 0.8985}, "is_intraday": True}, evidence=[price, windows, benchmark], metadata={"narrative": narrative, "require_cited_numbers": True})
 
     registry.register("market.performance", performance)
     registry.register("market.explain_move", lambda a, c: ToolEnvelope("market.explain_move", ResultStatus.COMPLETED, subject=a["ticker"], summary=f"{a['ticker']} 异动", metrics={"price_change_pct": 0.0094}, evidence=[EvidenceItem(f"M-{a['ticker']}", a["ticker"], f"{a['ticker']} 今日 +0.94%", metadata={"evidence_scope": "price"})]))
@@ -713,6 +717,7 @@ def _framed_registry() -> CapabilityRegistry:
             summary=f"{a['ticker']}: the evidence currently balances growth against valuation risk.",
             evidence=[
                 EvidenceItem(f"R-{a['ticker']}-{a['focus']}", a["ticker"], f"{a['ticker']} 2026-08-05 发布财报，指引低于预期。"),
+                EvidenceItem(f"R-{a['ticker']}-fundamental", a["ticker"], "Revenue growth is +22.8% on the latest available basis."),
                 EvidenceItem(f"R-{a['ticker']}-metrics", a["ticker"], "派生评分", metadata={"citation_kind": "metrics"}),
             ],
         ),
@@ -750,11 +755,13 @@ def test_a_why_follow_up_after_a_loss_ranking_explains_the_loss_since_purchase_n
     assert second.plan.assumptions[0].startswith("context_frame: 用户追问的是 ARM 买入以来的浮动盈亏 -32.22%（成本价 $389.52）")
     lines = second.answer.split("\n")
     assert lines[0].startswith("你问的是 ARM 买入以来的浮动盈亏：-32.22%，成本价 $389.52[legacy-")
-    assert lines[1].startswith("今日为上涨（+0.94%）") and "[P-ARM]" in lines[1]
-    assert lines[2] == "对照区间回报（近 5 日 +12.32%、近 1 月 -1.53%、近 3 月 -21.40%、近 1 年 -35.10%），这段跌幅大部分落在近 3 月内[W-ARM]。"
-    assert "组合价值" not in second.answer and "近 1 月回报 -1.53%" in second.answer
+    assert lines[1] == "今日盘中为上涨（+0.94%），与买入以来的浮动盈亏是不同区间[P-ARM]。"
+    assert lines[2] == "对照区间回报（近 5 日 +12.32%、近 1 月 -1.53%、近 3 月 -21.40%、近 1 年 +89.85%），这段跌幅大部分落在近 3 月内[W-ARM]。"
+    assert lines[3] == "近 1 年 +89.85% 而该持仓仍在浮亏，说明买入点在这轮上涨之后的高位[W-ARM]。"
+    assert "组合价值" not in second.answer and "近 1 月回报 -1.53%" not in second.answer  # the narrative's returns line is not repeated
+    assert "相对 SMH，单日超额 +0.94%[B-ARM]。" in second.answer and "成交量尚未定型" not in second.answer
     assert "- ARM 2026-08-05 发布财报，指引低于预期。 [R-ARM-catalysts]" in second.answer
-    assert "the evidence currently balances" not in second.answer and "[R-ARM-metrics]" not in second.answer
+    assert "Revenue growth" not in second.answer and "[R-ARM-metrics]" not in second.answer
     assert second.verification.ok, second.verification
     assert second.status == RunStatus.COMPLETED
     # The frame survives the framed turn, and a question about a rise is not a drawdown question.
@@ -768,14 +775,31 @@ def test_a_why_follow_up_after_a_loss_ranking_explains_the_loss_since_purchase_n
 
 
 def test_decline_timing_reads_the_return_windows():
-    from v2.agent_v2.synthesis import decline_timing
+    from v2.agent_v2.synthesis import catalyst_lines, decline_timing
 
     item = EvidenceItem("W", "ARM", "区间回报", metadata={"evidence_scope": "returns"})
     result = ToolEnvelope("market.performance", ResultStatus.COMPLETED, subject="ARM", evidence=[item])
-    assert decline_timing(-32.0, {"5d": 0.12, "1m": -0.015, "3m": -0.214, "1y": -0.351}, result).endswith("这段跌幅大部分落在近 3 月内[W]。")
-    assert decline_timing(-32.0, {"5d": -0.20, "1m": -0.25}, result).endswith("这段跌幅大部分落在近 5 日内[W]。")
-    assert decline_timing(-32.0, {"5d": 0.01, "1m": -0.02, "3m": -0.05, "1y": -0.08}, result).endswith("这段跌幅主要发生在近 1 年以前[W]。")
-    assert decline_timing(5.0, {"1m": -0.02}, result) == "" and decline_timing(-32.0, {}, result) == ""
+    assert decline_timing(-32.0, {"5d": 0.12, "1m": -0.015, "3m": -0.214, "1y": -0.351}, result)[0].endswith("这段跌幅大部分落在近 3 月内[W]。")
+    assert decline_timing(-32.0, {"5d": -0.20, "1m": -0.25}, result)[0].endswith("这段跌幅大部分落在近 5 日内[W]。")
+    sentences = decline_timing(-32.0, {"5d": 0.01, "1m": -0.02, "3m": -0.05, "1y": 0.90}, result)
+    assert sentences[0].endswith("这段跌幅主要发生在近 1 年以前[W]。") and sentences[1].startswith("近 1 年 +90.00% 而该持仓仍在浮亏")
+    assert decline_timing(5.0, {"1m": -0.02}, result) == [] and decline_timing(-32.0, {}, result) == []
+    undated = ToolEnvelope("research.stock", ResultStatus.COMPLETED, subject="ARM", evidence=[EvidenceItem("F", "ARM", "TTM P/E is 377.2x.")], limitations=["expectations: 34/100"])
+    assert catalyst_lines(undated) == "ARM 期间未查到可核对的催化剂（财报、公告或新闻）。\n数据限制：expectations: 34/100"
+
+
+def test_frame_lead_drops_a_sentence_its_own_verifier_rejects():
+    from v2.agent_v2.adapters.legacy import _wrap
+    from v2.agent_v2.synthesis import frame_lead
+
+    portfolio = _wrap("account.portfolio", "portfolio", _PORTFOLIO_CARD)
+    # A price item whose rule no generated wording can satisfy: the aside must be dropped, the rest kept.
+    price = EvidenceItem("P", "ARM", "ARM 盘中 +0.94%。", metadata={"evidence_scope": "price", "constraints": [{"require": "永远不会出现的标记", "warning": "rule"}]})
+    windows = EvidenceItem("W", "ARM", "ARM 区间回报：1d +0.94%，1m -1.53%，3m -21.40%。", metadata={"evidence_scope": "returns"})
+    performance = ToolEnvelope("market.performance", ResultStatus.COMPLETED, subject="ARM", metrics={"returns": {"1d": 0.0094, "1m": -0.0153, "3m": -0.2140}}, evidence=[price, windows])
+    frame = {"kind": "position", "ticker": "ARM", "field": "pl_pct", "text": "pl_pct_text", "label": "买入以来的浮动盈亏"}
+    lead = frame_lead(frame, [portfolio, performance])
+    assert "今日" not in lead and "这段跌幅大部分落在近 3 月内[W]" in lead
 
 
 def test_agent_v2_seed_eval_passes_offline():

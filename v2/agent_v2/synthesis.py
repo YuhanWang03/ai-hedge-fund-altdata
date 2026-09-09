@@ -89,42 +89,77 @@ def frame_lead(frame: dict[str, Any], results: list[ToolEnvelope]) -> str:
         today = returns.get("1d", result.metrics.get("price_change_pct"))
         if not isinstance(today, (int, float)) or not isinstance(value, (int, float)):
             continue
+        candidates: list[str] = []
         if (today > 0) != (value > 0) and today != 0:
             price = next((item for item in result.evidence if item.metadata.get("evidence_scope") == "price"), None)
             direction = "上涨" if today > 0 else "下跌"
-            lines.append(f"今日为{direction}（{float(today):+.2%}），与{frame.get('label') or '上述区间'}是不同区间{f'[{price.id}]' if price else ''}。")
-        timing = decline_timing(value, returns, result)
-        if timing:
-            lines.append(timing)
+            # An intraday price carries a wording rule: the sentence citing
+            # it must say it is intraday, or the verifier rejects it.
+            intraday = price is not None and (price.metadata.get("is_intraday") or any(isinstance(rule, dict) and rule.get("require") for rule in price.metadata.get("constraints") or []))
+            when = "今日盘中" if intraday else "今日"
+            candidates.append(f"{when}为{direction}（{float(today):+.2%}），与{frame.get('label') or '上述区间'}是不同区间{f'[{price.id}]' if price else ''}。")
+        candidates.extend(decline_timing(value, returns, result))
+        # Sentences the code writes go through the same verifier as the
+        # model's; one that fails is dropped rather than shipped.
+        lines.extend(sentence for sentence in candidates if _self_checks(sentence, result))
         break
     return "\n".join(lines)
+
+
+def _self_checks(sentence: str, result: ToolEnvelope) -> bool:
+    from v2.agent_v2.models import AnswerMode
+    from v2.agent_v2.verification import verify_answer
+
+    return verify_answer(sentence, list(result.evidence), answer_mode=AnswerMode.TOOL_GROUNDED, results=[result]).ok
 
 
 _WINDOW_LABELS = (("5d", "近 5 日"), ("1m", "近 1 月"), ("3m", "近 3 月"), ("1y", "近 1 年"))
 
 
-def decline_timing(total_pct: Any, returns: dict[str, Any], result: ToolEnvelope) -> str:
+def decline_timing(total_pct: Any, returns: dict[str, Any], result: ToolEnvelope) -> list[str]:
     """Where in time a loss since purchase sits, read off the return windows.
 
     Each window's return is compared with the loss: the first window that
     accounts for at least half of it is where the decline mostly happened;
-    when none does, the decline predates the longest window.
+    when none does, the decline predates the longest window.  A positive
+    longest window while the position loses means the purchase came after
+    the run-up, which is said as well.
     """
 
     if not isinstance(total_pct, (int, float)) or total_pct >= 0:
-        return ""
+        return []
     total = float(total_pct) / 100.0
     windows = [(key, label, float(returns[key])) for key, label in _WINDOW_LABELS if isinstance(returns.get(key), (int, float))]
     if not windows:
-        return ""
+        return []
     item = next((item for item in result.evidence if item.metadata.get("evidence_scope") == "returns"), None)
     citation = f"[{item.id}]" if item is not None else ""
     described = "、".join(f"{label} {value:+.2%}" for _, label, value in windows)
+    sentences: list[str] = []
     for _, label, value in windows:
         if value < 0 and value / total >= 0.5:
-            return f"对照区间回报（{described}），这段跌幅大部分落在{label}内{citation}。"
-    _, longest_label, _ = windows[-1]
-    return f"对照区间回报（{described}），这段跌幅主要发生在{longest_label}以前{citation}。"
+            sentences.append(f"对照区间回报（{described}），这段跌幅大部分落在{label}内{citation}。")
+            break
+    else:
+        _, longest_label, _ = windows[-1]
+        sentences.append(f"对照区间回报（{described}），这段跌幅主要发生在{longest_label}以前{citation}。")
+    _, longest_label, longest_value = windows[-1]
+    if longest_value > 0:
+        sentences.append(f"{longest_label} {longest_value:+.2%} 而该持仓仍在浮亏，说明买入点在这轮上涨之后的高位{citation}。")
+    return sentences
+
+
+_DATED = re.compile(r"\d{4}-\d{2}-\d{2}|\d{4}\s*年\s*\d{1,2}\s*月|\d{1,2}\s*月\s*\d{1,2}\s*日|\b(?:Q[1-4]|FY)\s?\d{2,4}\b")
+
+
+def benchmark_line(result: ToolEnvelope) -> str:
+    """Only the benchmark-relative sentence of a performance narrative; the returns were used above."""
+
+    narrative = plain_text(str(result.metadata.get("narrative") or ""))
+    for line in narrative.split("\n"):
+        if "相对" in line and "[" in line:
+            return line.strip()
+    return ""
 
 
 def catalyst_lines(result: ToolEnvelope) -> str:
@@ -135,12 +170,14 @@ def catalyst_lines(result: ToolEnvelope) -> str:
         if not item.metadata.get("citable", True) or item.metadata.get("citation_kind") in {"metrics", "limitations"}:
             continue
         claim = plain_text(item.claim)
-        if claim:
+        # A catalyst is an event: it has a date.  Undated fundamentals and
+        # valuation figures are not what "why did it fall" asks for.
+        if claim and _DATED.search(claim):
             lines.append(f"- {claim} [{item.id}]")
         if len(lines) >= 6:
             break
     if not lines:
-        lines.append(f"{result.subject} 期间未查到可核对的催化剂。")
+        lines.append(f"{result.subject} 期间未查到可核对的催化剂（财报、公告或新闻）。")
     limitation_item = next((item for item in result.evidence if item.metadata.get("citation_kind") == "limitations"), None)
     suffix = f" [{limitation_item.id}]" if limitation_item is not None else ""
     lines.extend(f"数据限制：{item}{suffix}" for item in result.limitations[:2])
@@ -258,7 +295,12 @@ class EvidenceSummarySynthesizer:
                 for result in results:
                     if result is source:
                         continue
-                    blocks.append(catalyst_lines(result) if result.capability.startswith("research.") else self._render(result))
+                    if result.capability.startswith("research."):
+                        blocks.append(catalyst_lines(result))
+                    elif result.capability == "market.performance" and result.ok:
+                        blocks.append(benchmark_line(result))
+                    else:
+                        blocks.append(self._render(result))
                 return "\n\n".join(block for block in blocks if block)
         lead = ranking_lead(request.text, results)
         if lead:
