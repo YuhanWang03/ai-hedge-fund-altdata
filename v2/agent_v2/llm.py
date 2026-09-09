@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from dataclasses import replace
 from typing import Any
 
@@ -135,6 +136,7 @@ class StructuredLLMPlanner:
                 # A thin rule plan is a floor, not a draft: keep its scope reads
                 # and let the model add what the wording implies on top.
                 tasks = _merge_tasks(deterministic.tasks, tasks)
+            tasks = _inherit_fan_out_rank(tasks, deterministic.tasks)
             trimmed = _trim_to_budget(tasks, limit)
             if len(trimmed) < len(tasks):
                 dropped = ", ".join(task.capability for task in tasks if task not in trimmed)
@@ -198,6 +200,37 @@ class StructuredLLMPlanner:
         return tuple(tasks)
 
 
+def _inherit_fan_out_rank(tasks: tuple[PlanTask, ...], deterministic: tuple[PlanTask, ...]) -> tuple[PlanTask, ...]:
+    """Carry the rules' fan-out ordering onto the model's plan.
+
+    The rules read the ranking intent of the wording ("跌得最多" orders by
+    P/L); the model's fan-out over the same source inherits it so the cap
+    keeps the relevant holdings.
+    """
+
+    ranks: dict[str, dict] = {}
+    by_id = {task.id: task for task in deterministic}
+    for task in deterministic:
+        rank = (task.fan_out or {}).get("rank")
+        source = by_id.get(str((task.fan_out or {}).get("from") or ""))
+        if isinstance(rank, dict) and source is not None:
+            ranks[source.capability] = rank
+    if not ranks:
+        return tasks
+    ids = {task.id: task for task in tasks}
+    updated: list[PlanTask] = []
+    for task in tasks:
+        fan_out = task.fan_out
+        if fan_out and "rank" not in fan_out:
+            source = ids.get(str(fan_out.get("from") or ""))
+            rank = ranks.get(source.capability) if source is not None else None
+            if rank is not None:
+                fan_out = {**fan_out, "rank": dict(rank)}
+                task = replace(task, fan_out=fan_out)
+        updated.append(task)
+    return tuple(updated)
+
+
 def _merge_tasks(base: tuple[PlanTask, ...], extra: tuple[PlanTask, ...]) -> tuple[PlanTask, ...]:
     """Append model-proposed tasks that the rule plan does not already contain."""
 
@@ -250,13 +283,60 @@ class LLMEvidenceSynthesizer:
         self.catalog = catalog or default_catalog()
         self.fallback = fallback or EvidenceSummarySynthesizer()
         self.max_context_chars = max(4_000, max_context_chars)
-        #: Diagnostic only: how the most recent answer was produced
-        #: (``clean``, ``repaired``, ``fallback`` or ``knowledge``).  Written
-        #: per call without locking; evaluation reads it, production ignores it.
-        self.last_outcome = ""
-        #: Diagnostic only: the first draft of the most recent answer, so an
-        #: evaluation can tell "the repair lost a fact" from "the draft was wrong".
-        self.last_draft = ""
+        # Per-thread diagnostics of the most recent call: the web backend and
+        # the benchmark both run several answers at once on one synthesizer.
+        self._diagnostics = threading.local()
+
+    def _reset_diagnostics(self) -> None:
+        self._diagnostics.outcome = "fallback"
+        self._diagnostics.draft = ""
+        self._diagnostics.attempts = []
+
+    @property
+    def last_outcome(self) -> str:
+        """How the most recent answer on this thread was produced: ``clean``, ``repaired``, ``fallback`` or ``knowledge``."""
+
+        return getattr(self._diagnostics, "outcome", "")
+
+    @last_outcome.setter
+    def last_outcome(self, value: str) -> None:
+        self._diagnostics.outcome = value
+
+    @property
+    def last_draft(self) -> str:
+        """The first draft of the most recent answer on this thread."""
+
+        return getattr(self._diagnostics, "draft", "")
+
+    @last_draft.setter
+    def last_draft(self, value: str) -> None:
+        self._diagnostics.draft = value
+
+    def diagnostics(self) -> dict[str, Any]:
+        """What happened to the model's drafts on this thread's most recent call."""
+
+        return {
+            "outcome": self.last_outcome,
+            "draft": self.last_draft[:4000],
+            "attempts": [dict(attempt) for attempt in getattr(self._diagnostics, "attempts", [])],
+        }
+
+    def _record_attempt(self, stage: str, *, ok: bool, warnings=(), unknown_citations=(), ungrounded_numbers=()) -> None:
+        attempts = getattr(self._diagnostics, "attempts", None)
+        if attempts is None:
+            attempts = self._diagnostics.attempts = []
+        attempts.append(
+            {
+                "stage": stage,
+                "ok": bool(ok),
+                "warnings": [str(value) for value in warnings],
+                "unknown_citations": [str(value) for value in unknown_citations],
+                "ungrounded_numbers": [str(value) for value in ungrounded_numbers],
+            }
+        )
+
+    def _record_report(self, stage: str, report) -> None:
+        self._record_attempt(stage, ok=report.ok, warnings=report.warnings, unknown_citations=report.unknown_citations, ungrounded_numbers=report.ungrounded_numbers)
 
     def synthesize(self, request, plan, results, evidence) -> str:
         if plan.answer_mode == AnswerMode.GENERAL_KNOWLEDGE:
@@ -285,8 +365,7 @@ results 中的评分或限制如需引用，使用 evidence 中 citation_kind �
             {"role": "system", "content": system},
             {"role": "user", "content": payload},
         ]
-        self.last_outcome = "fallback"
-        self.last_draft = ""
+        self._reset_diagnostics()
         try:
             answer = self._draft(messages, results, evidence)
             self.last_draft = answer
@@ -296,6 +375,7 @@ results 中的评分或限制如需引用，使用 evidence 中 citation_kind �
             from v2.agent_v2.verification import verify_answer
 
             report = verify_answer(answer, evidence, answer_mode=plan.answer_mode, results=results)
+            self._record_report("draft", report)
             if report.ok:
                 self.last_outcome = "clean"
                 return answer
@@ -311,11 +391,13 @@ results 中的评分或限制如需引用，使用 evidence 中 citation_kind �
                 results,
                 evidence,
             )
-            if verify_answer(repair, evidence, answer_mode=plan.answer_mode, results=results).ok:
+            repair_report = verify_answer(repair, evidence, answer_mode=plan.answer_mode, results=results)
+            self._record_report("repair", repair_report)
+            if repair_report.ok:
                 self.last_outcome = "repaired"
                 return repair
-        except (LLMError, ValueError, TypeError):
-            pass
+        except (LLMError, ValueError, TypeError) as exc:
+            self._record_attempt("error", ok=False, warnings=(f"{type(exc).__name__}: {str(exc)[:200]}",))
         return self.fallback.synthesize(request, plan, results, evidence)
 
     def _guidance(self, plan: ExecutionPlan, results: list[ToolEnvelope]) -> str:

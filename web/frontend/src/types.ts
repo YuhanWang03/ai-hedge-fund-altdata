@@ -80,6 +80,7 @@ export interface AgentV2Resp {
   };
   elapsed_ms: number;
   error: string;
+  synthesis?: { outcome: string; draft: string; attempts: { stage: string; ok: boolean; warnings: string[] }[] };
   interface: "web";
   policy: {
     web_requested: boolean;

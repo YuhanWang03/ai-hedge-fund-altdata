@@ -5,11 +5,13 @@ from __future__ import annotations
 import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
+from typing import Any
 
 from v2.agent_v2.catalog import CapabilityCatalog
 from v2.agent_v2.evidence import EvidenceLedger
 from v2.agent_v2.models import (
     BudgetClass,
+    EvidenceItem,
     ExecutionPlan,
     NormalizedRequest,
     PlanTask,
@@ -173,16 +175,76 @@ class ExecutionEngine:
                 raise PlanValidationError(f"fan-out task {task.id} names an unknown source")
             if not task.fan_out.get("argument"):
                 raise PlanValidationError(f"fan-out task {task.id} has no target argument")
+            rank = task.fan_out.get("rank")
+            if rank is not None and (not isinstance(rank, dict) or not rank.get("field") or not rank.get("key")):
+                raise PlanValidationError(f"fan-out task {task.id} has an invalid rank spec")
 
     @staticmethod
-    def _expand(task: PlanTask, completed: dict[str, ToolEnvelope]) -> list[PlanTask]:
-        """Replace a fan-out template with one child per source value."""
+    def _ordered_values(spec: dict[str, Any], source: ToolEnvelope | None) -> list[Any]:
+        """Source values in fan-out order: ranked by a row field when the plan asks for it."""
+
+        field_name = str(spec.get("field") or "tickers")
+        values = list((source.metadata.get(field_name) if source is not None else None) or [])
+        rank = spec.get("rank")
+        if not isinstance(rank, dict) or source is None:
+            return values
+        rows = source.metadata.get(str(rank.get("field") or ""))
+        key = str(rank.get("key") or "")
+        argument = str(spec.get("argument") or "")
+        if not isinstance(rows, list) or not key:
+            return values
+        ranked: list[tuple[float, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            value = row.get(argument, row.get("ticker"))
+            number = row.get(key)
+            if value is None or not isinstance(number, (int, float)):
+                continue
+            ranked.append((float(number), value))
+        if not ranked:
+            return values
+        ranked.sort(key=lambda pair: pair[0], reverse=bool(rank.get("descending")))
+        ordered = [value for _, value in ranked]
+        # Values the table did not cover keep their original place after the ranked ones.
+        return list(dict.fromkeys([*ordered, *values]))
+
+    @classmethod
+    def _expand(cls, task: PlanTask, completed: dict[str, ToolEnvelope]) -> tuple[list[PlanTask], ToolEnvelope | None]:
+        """Replace a fan-out template with one child per source value.
+
+        Returns the children and, when the source listed more values than the
+        cap allows, a coverage note the answer must disclose.
+        """
 
         spec = task.fan_out or {}
         source = completed.get(str(spec.get("from") or ""))
-        field_name = str(spec.get("field") or "tickers")
-        values = list((source.metadata.get(field_name) if source is not None else None) or [])
+        values = cls._ordered_values(spec, source)
         limit = max(1, min(int(spec.get("max") or FAN_OUT_MAX), FAN_OUT_MAX))
+        note: ToolEnvelope | None = None
+        if len(values) > limit:
+            chosen = ", ".join(str(value) for value in values[:limit])
+            rest = ", ".join(str(value) for value in values[limit:])
+            ordering = "按相关性排序后" if isinstance(spec.get("rank"), dict) else "按列表顺序"
+            claim = f"{task.capability} 只覆盖了 {len(values)} 个对象中的 {limit} 个（{ordering}）：{chosen}；未覆盖：{rest}。"
+            note = ToolEnvelope(
+                task.capability,
+                ResultStatus.PARTIAL_DATA,
+                subject=task.id,
+                summary="",
+                evidence=[
+                    EvidenceItem(
+                        id=f"fan-out-coverage-{task.id}",
+                        entity=task.id,
+                        claim=claim,
+                        source_id="execution_engine",
+                        source_title="Fan-out coverage",
+                        metadata={"citation_kind": "limitations", "verified": True, "covered": list(values[:limit]), "uncovered": list(values[limit:])},
+                    )
+                ],
+                limitations=[claim],
+                metadata={"fan_out_coverage": {"covered": list(values[:limit]), "uncovered": list(values[limit:])}},
+            )
         children: list[PlanTask] = []
         for value in values[:limit]:
             children.append(
@@ -195,7 +257,7 @@ class ExecutionEngine:
                     purpose=task.purpose,
                 )
             )
-        return children
+        return children, note
 
     def run(self, plan: ExecutionPlan, context: ExecutionContext) -> ExecutionOutcome:
         self.validate(plan)
@@ -236,8 +298,13 @@ class ExecutionEngine:
                     finish(task, ToolEnvelope(task.capability, ResultStatus.SKIPPED, errors=["required dependency failed"]))
                     continue
                 if task.fan_out is not None:
-                    children = self._expand(task, completed)
+                    children, note = self._expand(task, completed)
                     pending.pop(task.id, None)
+                    if note is not None:
+                        # The truncation is a limitation of this run's evidence,
+                        # so it travels with the results and is citable.
+                        outcome.results.append(note)
+                        outcome.ledger.ingest(note)
                     if not children:
                         expanded[task.id] = []
                         result = ToolEnvelope(task.capability, ResultStatus.SKIPPED, errors=["fan-out source listed no values"])

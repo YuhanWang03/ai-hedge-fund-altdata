@@ -12,6 +12,7 @@ interface AgentMeta {
   verified: boolean;
   capabilities: string[];
   webAllowed: boolean;
+  synthesis: string;
 }
 
 interface Msg {
@@ -27,6 +28,7 @@ interface Msg {
 const CLASSIC_SUGGESTIONS = ["微软资金流怎么样", "我的当日盈亏", "NVDA 为什么动", "特斯拉最近财报"];
 const AGENT_SUGGESTIONS = ["比较 NVDA 和 AMD 的风险", "分析 AAPL 的估值", "回测 NVDA 动量策略", "什么是自由现金流？"];
 const SESSION_KEY = "agentV2SessionId";
+const SYNTHESIS_LABELS: Record<string, string> = { clean: "模型回答", repaired: "模型回答（修复一轮）", fallback: "兜底摘要（模型草稿未通过校验）", knowledge: "知识回答", deterministic: "规则摘要" };
 
 function sessionId(): string {
   const stored = sessionStorage.getItem(SESSION_KEY);
@@ -104,6 +106,7 @@ export default function ChatPanel({ inject }: { inject?: { text: string; nonce: 
           verified: result.verification.ok,
           capabilities: result.plan.tasks.map((task) => task.capability),
           webAllowed: result.policy.web_allowed,
+          synthesis: result.synthesis?.outcome || "",
         },
         sources: uniqueSources(result.evidence || []),
       },
@@ -207,6 +210,11 @@ export default function ChatPanel({ inject }: { inject?: { text: string; nonce: 
                   <span className={`rounded px-1.5 py-0.5 ${message.agent.verified ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
                     {message.agent.verified ? "证据校验通过" : "证据校验有警告"}
                   </span>
+                  {message.agent.synthesis && (
+                    <span className={`rounded px-1.5 py-0.5 ${message.agent.synthesis === "fallback" ? "bg-amber-50 text-amber-700" : "bg-slate-100"}`}>
+                      {SYNTHESIS_LABELS[message.agent.synthesis] || message.agent.synthesis}
+                    </span>
+                  )}
                   {message.agent.webAllowed && <span className="rounded bg-violet-50 px-1.5 py-0.5 text-violet-700">Web</span>}
                   <span className="rounded bg-slate-100 px-1.5 py-0.5">{(message.agent.elapsedMs / 1000).toFixed(1)}s</span>
                 </div>

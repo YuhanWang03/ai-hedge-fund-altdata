@@ -5,11 +5,13 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import re
 from typing import Any, Callable
 
 from v2.agent_v2.entities import extract_entities
 from v2.agent_v2.execution import CapabilityRegistry, ExecutionContext
 from v2.agent_v2.models import EvidenceItem, ResultStatus, ToolEnvelope
+from v2.agent_v2.text import plain_text
 
 #: Capabilities whose card lists the user's own tickers; fan-out tasks read them.
 _LISTS_TICKERS = frozenset({"account.portfolio", "state.read"})
@@ -28,8 +30,69 @@ def _text(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, default=str)
 
 
+_POSITION_HEAD = re.compile(r"^(?:[^\w\s]+\s*)?(?P<ticker>[A-Z][A-Z0-9.\-]{0,9})\s+(?P<qty>[\d,]+(?:\.\d+)?)\s*sh\s*@\s*\$(?P<entry>[\d,]+(?:\.\d+)?)")
+_POSITION_TAIL = re.compile(r"市值\s*(?P<value>\$[\d,.]+[KMBT]?)\s*·\s*P/L\s*(?P<pl>\$[\d,.]+[KMBT]?)\s*(?P<pct>[+-]\d+(?:\.\d+)?%)")
+_SCALE = {"K": 1e3, "M": 1e6, "B": 1e9, "T": 1e12}
+
+#: How a ranking question maps onto the position table; the synthesizer reads
+#: these instead of knowing what a portfolio is.
+PORTFOLIO_RANKABLE: tuple[dict[str, str], ...] = (
+    {"field": "pl_pct", "text": "pl_pct_text", "label": "买入以来的浮动盈亏", "low": "跌|亏|差|弱|回撤|最惨", "high": "涨|赚|好|强|盈利"},
+    {"field": "market_value", "text": "market_value_text", "label": "市值", "low": "小|轻", "high": "大|重", "topic": "市值|仓位|占比|权重|头寸"},
+)
+
+
+def _money(text: str) -> float | None:
+    raw = text.lstrip("$").replace(",", "")
+    scale = 1.0
+    if raw and raw[-1].upper() in _SCALE:
+        scale = _SCALE[raw[-1].upper()]
+        raw = raw[:-1]
+    try:
+        return float(raw) * scale
+    except ValueError:
+        return None
+
+
+def parse_portfolio_card(text: str) -> list[dict[str, Any]]:
+    """Read the position rows of the portfolio card into structured rows.
+
+    The card prints ``TICKER qty sh @ $entry`` and, on the next line,
+    ``市值 $value · P/L $abs +pct%``; the sign of the percentage carries the
+    direction of the dollar P/L.  Rows that do not parse are skipped.
+    """
+
+    lines = [line.strip() for line in plain_text(text).split("\n")]
+    rows: list[dict[str, Any]] = []
+    for index, line in enumerate(lines):
+        head = _POSITION_HEAD.match(line)
+        if head is None or index + 1 >= len(lines):
+            continue
+        tail = _POSITION_TAIL.search(lines[index + 1])
+        if tail is None:
+            continue
+        pct_text = tail.group("pct")
+        pct = float(pct_text.rstrip("%"))
+        pl_abs = _money(tail.group("pl"))
+        rows.append(
+            {
+                "ticker": head.group("ticker"),
+                "qty": float(head.group("qty").replace(",", "")),
+                "avg_entry_price": float(head.group("entry").replace(",", "")),
+                "market_value": _money(tail.group("value")),
+                "market_value_text": tail.group("value"),
+                "pl": None if pl_abs is None else (pl_abs if pct >= 0 else -pl_abs),
+                "pl_pct": pct,
+                "pl_pct_text": pct_text,
+            }
+        )
+    return rows
+
+
 def _wrap(capability: str, subject: str, value: Any) -> ToolEnvelope:
-    content = _text(value)
+    # Responder cards are Telegram HTML; the answer layer wants prose, and the
+    # verifier traces numbers through the claim text either way.
+    content = plain_text(_text(value))
     digest = hashlib.sha256(f"{capability}:{subject}:{content}".encode("utf-8")).hexdigest()[:16]
     evidence = EvidenceItem(
         id=f"legacy-{digest}",
@@ -39,12 +102,23 @@ def _wrap(capability: str, subject: str, value: Any) -> ToolEnvelope:
         source_title="Existing deterministic responder",
         metadata={"legacy_formatted_output": True},
     )
-    metadata = {"tickers": list(extract_entities(content))} if capability in _LISTS_TICKERS else {}
+    metadata: dict[str, Any] = {}
+    metrics: dict[str, Any] = {}
+    if capability in _LISTS_TICKERS:
+        metadata["tickers"] = list(extract_entities(content))
+    if capability == "account.portfolio":
+        positions = parse_portfolio_card(content)
+        if positions:
+            metadata["positions"] = positions
+            metadata["rankable"] = [dict(rule) for rule in PORTFOLIO_RANKABLE]
+            metadata["tickers"] = [row["ticker"] for row in positions]
+            metrics["positions"] = [{key: row[key] for key in ("ticker", "qty", "market_value", "pl", "pl_pct")} for row in positions]
     return ToolEnvelope(
         capability,
         ResultStatus.COMPLETED,
         subject=subject,
         summary=content[:6000],
+        metrics=metrics,
         evidence=[evidence],
         limitations=["Legacy formatted output; structured field-level evidence is not yet available."],
         metadata=metadata,

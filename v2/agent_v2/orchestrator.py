@@ -210,6 +210,7 @@ class AgentV2:
         self._emit(on_progress, run_id, RunStatus.SYNTHESIZING, "synthesizing evidence")
         evidence = outcome.ledger.items()
         answer = self.synthesizer.synthesize(request, plan, results, evidence)
+        synthesis = self._synthesis_diagnostics()
         answer_mode = plan.answer_mode
         if not plan.tasks and decision.kind != RouteKind.GENERAL_KNOWLEDGE:
             answer_mode = AnswerMode.INSUFFICIENT_EVIDENCE
@@ -234,7 +235,17 @@ class AgentV2:
             evidence=evidence,
             verification=verification,
             stop_reason=outcome.stop_reason,
+            synthesis=synthesis,
         )
+
+    def _synthesis_diagnostics(self) -> dict:
+        diagnostics = getattr(self.synthesizer, "diagnostics", None)
+        if not callable(diagnostics):
+            return {}
+        try:
+            return dict(diagnostics())
+        except Exception:  # noqa: BLE001 — diagnostics never break an answer
+            return {}
 
     def _web_fallback(self, request, decision, plan, outcome: ExecutionOutcome, context: ExecutionContext):
         """Make one bounded web attempt only after internal evidence is absent or failed."""
@@ -287,6 +298,7 @@ class AgentV2:
         error: str = "",
         stop_reason: str = "",
         pending_mutation: PendingMutation | None = None,
+        synthesis: dict | None = None,
     ) -> AgentResult:
         result = AgentResult(
             run_id=run_id,
@@ -303,6 +315,7 @@ class AgentV2:
             error=error,
             stop_reason=stop_reason,
             pending_mutation=pending_mutation,
+            synthesis=dict(synthesis or {}),
         )
         if self.session is not None:
             self.session.record(result)

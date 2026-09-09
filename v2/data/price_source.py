@@ -128,7 +128,18 @@ class YFinancePriceSource:
         """
         self._ticker_factory = ticker_factory
 
+    @staticmethod
+    def yfinance_symbol(ticker: str) -> str:
+        """Map a broker/FD symbol onto yfinance's spelling.
+
+        Share classes use a dot elsewhere (``BRK.B``, ``BF.B``) but a dash
+        on yfinance (``BRK-B``); the dotted form comes back empty.
+        """
+
+        return (ticker or "").strip().upper().replace(".", "-")
+
     def _make_ticker(self, symbol: str):
+        symbol = self.yfinance_symbol(symbol)
         if self._ticker_factory is not None:
             return self._ticker_factory(symbol)
         import yfinance as yf

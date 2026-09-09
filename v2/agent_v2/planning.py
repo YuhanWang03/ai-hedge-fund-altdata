@@ -49,6 +49,9 @@ _PORTFOLIO_WORDS = re.compile(r"持仓|仓位|仓库|组合|账户|portfolio", r
 _SELF = re.compile(r"我(?!们)")
 _WATCHLIST_SCOPE = re.compile(r"关注列表|关注了|自选|watchlist|关注的", re.I)
 _LIST_RANKING = re.compile(r"哪只|哪个|哪几只|哪些|每只|每个|那几只|那些|谁|最", re.I)
+#: Ranking direction words; with a portfolio source they order the fan-out by P/L.
+_RANK_LOW = re.compile(r"跌|亏|差|弱|回撤|惨", re.I)
+_RANK_HIGH = re.compile(r"涨|赚|好|强|盈利", re.I)
 #: A list question needs an evaluative word before "which one" means "look at each".
 _LIST_EVALUATE = re.compile(r"最|值得|表现|怎么样|如何|强|弱|好|差|狠|危险", re.I)
 _HELP = re.compile(r"你能帮我做什么|你能做什么|能做什么|有什么功能|会做什么|怎么用|如何使用", re.I)
@@ -181,6 +184,21 @@ def _budget(tasks: list[PlanTask]) -> BudgetClass:
     if count <= 7:
         return BudgetClass.PORTFOLIO
     return BudgetClass.DEEP
+
+
+def _fan_out_rank(text: str) -> dict | None:
+    """Order a portfolio fan-out by P/L when the question ranks holdings by direction.
+
+    "哪只跌得最多" over twelve holdings and a cap of eight must look at the
+    biggest losers, not the eight largest positions the card lists first.
+    """
+
+    if not _LIST_RANKING.search(text):
+        return None
+    low, high = bool(_RANK_LOW.search(text)), bool(_RANK_HIGH.search(text))
+    if low == high:
+        return None
+    return {"field": "positions", "key": "pl_pct", "descending": high}
 
 
 class RulePlanner:
@@ -349,8 +367,12 @@ class RulePlanner:
             if source == "account-portfolio" and (explicit_portfolio or per_ticker or not tasks):
                 add("account-portfolio", "account.portfolio", purpose="identify positions and weights")
             if per_ticker:
+                fan_out = {"from": source, "field": "tickers", "argument": "ticker", "max": 8}
+                rank = _fan_out_rank(text) if source == "account-portfolio" else None
+                if rank is not None:
+                    fan_out["rank"] = rank
                 if explain:
-                    add("move-each", "market.explain_move", {}, purpose="explain each holding's recent move", depends_on=(source,), fan_out={"from": source, "field": "tickers", "argument": "ticker", "max": 8})
+                    add("move-each", "market.explain_move", {}, purpose="explain each holding's recent move", depends_on=(source,), fan_out=dict(fan_out))
                 for focus in focuses[:2]:
-                    add(f"research-each-{focus}", "research.stock", {"focus": focus}, purpose=f"{focus} research for each holding", depends_on=(source,), fan_out={"from": source, "field": "tickers", "argument": "ticker", "max": 8})
+                    add(f"research-each-{focus}", "research.stock", {"focus": focus}, purpose=f"{focus} research for each holding", depends_on=(source,), fan_out=dict(fan_out))
         return tasks[:7]

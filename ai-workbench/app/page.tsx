@@ -10,7 +10,15 @@ import { LabPage, labMenu, type LabTool } from './lab';
 type MainSection = 'core' | 'research' | 'lab';
 type ResearchTool = 'stock' | 'fundamentals' | 'valuation' | 'earnings' | 'expectations' | 'institutional' | 'moneyflow' | 'macro' | 'chain' | 'risk';
 type ChatMode = 'classic' | 'agent_v2';
-type AgentChatMeta = { status: string; route: string; answerMode: string; elapsedMs: number; verified: boolean; capabilities: string[]; webRequested: boolean; webEnabled: boolean; webAllowed: boolean; warnings: string[] };
+type AgentChatMeta = { status: string; route: string; answerMode: string; elapsedMs: number; verified: boolean; capabilities: string[]; webRequested: boolean; webEnabled: boolean; webAllowed: boolean; warnings: string[]; synthesis: string; synthesisFallback: boolean };
+const SYNTHESIS_LABELS: Record<string, string> = { clean: '模型回答', repaired: '模型回答（修复一轮）', fallback: '兜底摘要（模型草稿未通过校验）', knowledge: '知识回答', deterministic: '规则摘要' };
+function synthesisWarnings(synthesis: AgentV2Response['synthesis']): string[] {
+  if (!synthesis) return [];
+  return synthesis.attempts.filter(attempt => !attempt.ok).flatMap(attempt => {
+    const stage = attempt.stage === 'draft' ? '草稿' : attempt.stage === 'repair' ? '修复稿' : '模型调用';
+    return [...attempt.warnings, ...attempt.unknown_citations.map(id => `未知证据引用：${id}`), ...attempt.ungrounded_numbers.map(value => `未落地数字：${value}`)].map(item => `${stage}被拒：${item}`);
+  });
+}
 type ChatMessage = { id: number; role: 'user' | 'assistant'; text: string; image?: string; meta?: string; mode?: ChatMode; agent?: AgentChatMeta; evidence?: AgentV2Evidence[] };
 type Position = { symbol: string; current_price: number; market_value: number; unrealized_pl: number; unrealized_pl_pct: number };
 type PortfolioResponse = { account: { cash: number; portfolio_value: number; paper: boolean }; positions: Position[]; pnl: { intraday_pl_pct: number; portfolio_value: number; cash: number }; history?: { timestamp: number[]; equity: number[] } };
@@ -416,7 +424,9 @@ export default function Home() {
             webRequested: response.policy.web_requested,
             webEnabled: response.policy.web_enabled,
             webAllowed: response.policy.web_allowed,
-            warnings: [...response.verification.warnings, ...response.verification.unknown_citations.map(id => `未知证据引用：${id}`), ...response.verification.ungrounded_numbers.map(value => `未落地数字：${value}`)],
+            warnings: [...response.verification.warnings, ...response.verification.unknown_citations.map(id => `未知证据引用：${id}`), ...response.verification.ungrounded_numbers.map(value => `未落地数字：${value}`), ...synthesisWarnings(response.synthesis)],
+            synthesis: SYNTHESIS_LABELS[response.synthesis?.outcome || ''] || '',
+            synthesisFallback: response.synthesis?.outcome === 'fallback',
           },
           evidence: uniqueEvidence(response.evidence || []),
         };
@@ -488,7 +498,7 @@ export default function Home() {
         <div className="message-list" ref={messageListRef} aria-live="polite">
           {messages.map(message => <div key={message.id} className={`message ${message.role}`}>
             {message.role === 'user' && message.mode && <div className="message-mode">{message.mode === 'agent_v2' ? 'Agent V2' : '经典'}</div>}
-            {message.agent && <div className="agent-badges"><span>{message.agent.status}</span><span>{message.agent.route}</span><span>{message.agent.answerMode}</span><span className={message.agent.verified ? 'verified' : 'warning'}>{message.agent.verified ? '引用与数字校验通过' : '引用或数字校验有警告'}</span>{message.agent.webAllowed && <span className="web">Web 已授权</span>}{message.agent.webRequested && !message.agent.webEnabled && <span className="warning">服务端未启用 Web</span>}<span>{(message.agent.elapsedMs / 1000).toFixed(1)}s</span></div>}
+            {message.agent && <div className="agent-badges"><span>{message.agent.status}</span><span>{message.agent.route}</span><span>{message.agent.answerMode}</span><span className={message.agent.verified ? 'verified' : 'warning'}>{message.agent.verified ? '引用与数字校验通过' : '引用或数字校验有警告'}</span>{message.agent.synthesis && <span className={message.agent.synthesisFallback ? 'warning' : ''}>{message.agent.synthesis}</span>}{message.agent.webAllowed && <span className="web">Web 已授权</span>}{message.agent.webRequested && !message.agent.webEnabled && <span className="warning">服务端未启用 Web</span>}<span>{(message.agent.elapsedMs / 1000).toFixed(1)}s</span></div>}
             <div className="message-body">{message.role === 'assistant' ? <AgentAnswer text={message.text} evidence={message.evidence} messageId={message.id}/> : message.text}</div>
             {message.image && <Image src={message.image} width={900} height={600} unoptimized alt="AI 查询生成的分析图表"/>}
             {message.agent && message.agent.capabilities.length > 0 && <details className="agent-detail"><summary>执行工具（{message.agent.capabilities.length}）</summary><div className="capability-list">{message.agent.capabilities.map((capability, index) => <code key={`${capability}-${index}`}>{capability}</code>)}</div></details>}

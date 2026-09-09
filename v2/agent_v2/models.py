@@ -238,6 +238,9 @@ class AgentResult:
     error: str = ""
     stop_reason: str = ""
     pending_mutation: PendingMutation | None = None
+    #: How the answer text was produced (model draft, repaired draft,
+    #: deterministic fallback) and what the verifier said about each attempt.
+    synthesis: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -290,6 +293,7 @@ class AgentResult:
             "elapsed_ms": self.elapsed_ms,
             "error": self.error,
             "stop_reason": self.stop_reason,
+            "synthesis": dict(self.synthesis),
             "pending_mutation": (
                 {
                     "operation": self.pending_mutation.operation,
