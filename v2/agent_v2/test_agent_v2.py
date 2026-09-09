@@ -972,6 +972,34 @@ def test_history_capabilities_wrap_edgar_filings_and_the_anomaly_memory():
     assert not broken.ok and "anomaly memory unavailable" in broken.errors[0]
 
 
+@pytest.mark.parametrize(
+    ("query", "window", "is_drawdown"),
+    [
+        ("ARM 从 6 月高点为什么跌了这么多?", "", True),
+        ("ARM 我买入以来为什么亏了 30%", "", True),
+        ("QCOM 这几个月为什么一路跌", "", True),
+        ("ARM 今年为什么回撤这么多", "1y", True),
+        ("ARM 这个月为什么跌这么狠", "1m", True),
+        ("NVDA 今天为什么跌这么多", "", False),
+        ("NVDA 为什么涨了这么多", "", False),
+        ("TSLA 为什么跌，内部人在卖吗，财报什么时候", "", False),
+    ],
+)
+def test_rule_planner_opens_a_drawdown_from_the_wording_alone(query, window, is_drawdown):
+    plan = _plan(query)
+    capabilities = [task.capability for task in plan.tasks]
+    if is_drawdown:
+        assert capabilities == ["account.portfolio", "market.performance", "market.drawdown", "filings.recent", "market.anomaly_history", "market.attribute_move"]
+        drawdown = plan.tasks[2].arguments
+        assert "loss_pct" not in drawdown and drawdown.get("window", "") == window
+        assert plan.assumptions[0].startswith("context_frame: 用户问的是") and "从高点以来或这段时间的跌幅" in plan.assumptions[0]
+        llm = ScriptedLLM([LLMResponse(text="{}")])
+        request = normalize_request(query)
+        assert len(StructuredLLMPlanner(llm, default_catalog()).plan(request, route(request)).tasks) == 6 and llm.calls == []
+    else:
+        assert "market.drawdown" not in capabilities and "market.attribute_move" not in capabilities
+
+
 def test_decline_timing_reads_the_return_windows():
     from v2.agent_v2.synthesis import catalyst_lines, decline_timing
 

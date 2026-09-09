@@ -56,6 +56,11 @@ _RANK_HIGH = re.compile(r"涨|赚|好|强|盈利", re.I)
 #: a time frame the card cannot answer, or a request for the reason.
 #: "Why" wording; with a position frame it asks about the loss since purchase.
 _WHY = re.compile(r"为什么|为啥|为何|什么原因|原因|怎么会|怎么回事|何故", re.I)
+#: Wording that makes a "why did it fall" about a stretch, not a day, with no
+#: earlier turn to frame it: "从高点", "买入以来", "这几个月", "跌了这么多".
+_DRAWDOWN_WORDING = re.compile(r"买入以来|买了以后|买入后|建仓以来|从高点|高点以来|高位以来|回撤|这几个月|这段时间|近几个月|几个月来|一路跌|跌了这么多|跌这么多|跌得这么|跌这么狠|跌了这么|亏了这么|亏这么多|亏得这么|腰斩|跌了.{0,3}成", re.I)
+_TODAY = re.compile(r"今天|今日|当日|盘中|日内|昨天|昨日", re.I)
+_DRAWDOWN_WINDOW_WORDS = ((re.compile(r"这个月|近一个月|一个月|最近一个月|本月"), "1m"), (re.compile(r"今年|一年|去年|半年|年初"), "1y"))
 _RECENT_OR_WHY = re.compile(r"今天|今日|当日|盘中|日内|最近|这周|本周|上周|这个月|本月|为什么|原因|怎么回事|什么事|何故", re.I)
 #: A list question needs an evaluative word before "which one" means "look at each".
 _LIST_EVALUATE = re.compile(r"最|值得|表现|怎么样|如何|强|弱|好|差|狠|危险", re.I)
@@ -240,6 +245,12 @@ class RulePlanner:
         frame = request.metadata.get("context_frame")
         if len(tickers) == 1 and isinstance(frame, dict) and self._asks_about_drawdown(text, frame):
             return self._drawdown(text, tickers[0], frame, route, request)
+        if len(tickers) == 1 and not isinstance(frame, dict) and self._asks_about_a_stretch(text):
+            # No earlier turn framed it, but the wording itself does: the
+            # decline over a stretch, not today's move.
+            window = next((key for pattern, key in _DRAWDOWN_WINDOW_WORDS if pattern.search(text)), "")
+            direct = {"kind": "drawdown", "ticker": tickers[0], "label": "这段跌幅", "window": window}
+            return self._drawdown(text, tickers[0], direct, route, request)
         if len(tickers) == 1 and _MOVE_EXPLANATION.search(text):
             tasks = [PlanTask("market-move", "market.explain_move", {"ticker": tickers[0]}, purpose="separate confirmed market facts from candidate move drivers")]
             for index, focus in enumerate(_focuses(text), 1):
@@ -270,6 +281,12 @@ class RulePlanner:
     # -- pieces ---------------------------------------------------------------
 
     @staticmethod
+    def _asks_about_a_stretch(text: str) -> bool:
+        """"为什么" plus stretch wording ("从高点", "买入以来", "跌了这么多") and no "今天"."""
+
+        return bool(_WHY.search(text) and _DRAWDOWN_WORDING.search(text) and not _TODAY.search(text) and not _RANK_HIGH.search(text))
+
+    @staticmethod
     def _asks_about_drawdown(text: str, frame: dict) -> bool:
         """A "why" follow-up about a position with an unrealized loss, not a question about a rise."""
 
@@ -285,8 +302,9 @@ class RulePlanner:
         value_text = frame.get("value_text") or frame.get("value")
         entry = frame.get("avg_entry_price")
         entry_text = f"（成本价 ${float(entry):.2f}）" if isinstance(entry, (int, float)) else ""
+        subject = f"{ticker} {frame.get('label') or '买入以来的浮动盈亏'} {value_text}{entry_text}" if value_text is not None else f"{ticker} 从高点以来或这段时间的跌幅"
         note = (
-            f"context_frame: 用户追问的是 {ticker} {frame.get('label') or '买入以来的浮动盈亏'} {value_text}{entry_text}，不是今日涨跌。"
+            f"context_frame: 用户{'追' if value_text is not None else ''}问的是 {subject}，不是今日涨跌。"
             "先回答这段跌幅落在哪个区间（对照 5 日、1 月、3 月、1 年回报窗口）和区间高点到低点的回撤，再按日期列出跌幅最大的交易日，"
             "把日期相同或相邻的 SEC 申报（含申报阅读者从原文摘出的事件）、盯盘记录和新闻与这些下跌日对应起来，异动归因者对每个下跌日给出的高置信度驱动和候选解释要分开说；"
             "今日涨跌只用区间回报里的单日数字作一句旁注，并点明它与买入以来的跌幅是不同区间；某个下跌日找不到对应事件就明说，不得用当日归因冒充。"
@@ -300,7 +318,7 @@ class RulePlanner:
         tasks = [
             PlanTask("account-portfolio", "account.portfolio", purpose="restate the position's cost basis and unrealized P/L"),
             PlanTask("market-performance", "market.performance", {"ticker": ticker}, purpose="locate the decline across return windows"),
-            PlanTask("market-drawdown", "market.drawdown", {"ticker": ticker, **({"loss_pct": float(loss)} if isinstance(loss, (int, float)) else {}), "top": 3}, purpose="peak-to-trough and the worst trading days in the window"),
+            PlanTask("market-drawdown", "market.drawdown", {"ticker": ticker, **({"loss_pct": float(loss)} if isinstance(loss, (int, float)) else {}), **({"window": str(frame["window"])} if frame.get("window") else {}), "top": 3}, purpose="peak-to-trough and the worst trading days in the window"),
             PlanTask("filings-recent", "filings.recent", {"ticker": ticker}, purpose="dated SEC filings (8-K, or 6-K for a foreign issuer) over the past year", required=False),
             PlanTask("anomaly-history", "market.anomaly_history", {"ticker": ticker, "lookback_days": 365}, purpose="what the monitor recorded on the worst days", required=False),
             # One sub-agent per worst day: it reads the filings through the
@@ -324,6 +342,7 @@ class RulePlanner:
             budget=BudgetClass.PORTFOLIO,
             web_fallback_allowed=request.allow_web,
             assumptions=(note,),
+            frame=dict(frame),
         )
 
     @staticmethod

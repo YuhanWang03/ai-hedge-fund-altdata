@@ -116,6 +116,9 @@ class ExecutionPlan:
     #: A complete answer the planner can give without running anything: a
     #: capability overview, or the exact clarification a request needs.
     direct_answer: str = ""
+    #: What the question refers to beyond its words (a position's loss, a
+    #: stretch of decline), when the planner built the plan around it.
+    frame: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

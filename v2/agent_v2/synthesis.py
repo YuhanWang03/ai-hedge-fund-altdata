@@ -71,17 +71,40 @@ def frame_lead(frame: dict[str, Any], results: list[ToolEnvelope]) -> str:
     """
 
     ticker = str(frame.get("ticker") or "")
-    found = position_row(results, ticker)
-    if not ticker or found is None:
+    if not ticker:
         return ""
-    source, row = found
-    key, text_key = str(frame.get("field") or "pl_pct"), str(frame.get("text") or "pl_pct_text")
-    value_text = row.get(text_key) or row.get(key)
-    citation = f"[{source.evidence[0].id}]" if source.evidence else ""
-    entry = row.get("avg_entry_price")
-    entry_text = f"，成本价 ${float(entry):.2f}" if isinstance(entry, (int, float)) else ""
-    lines = [f"你问的是 {ticker} {frame.get('label') or '这一项'}：{value_text}{entry_text}{citation}。"]
-    value = row.get(key)
+    found = position_row(results, ticker)
+    lines: list[str] = []
+    value: Any = None
+    if frame.get("kind") == "drawdown":
+        drawdown = next((result for result in results if result.capability == "market.drawdown" and result.ok and result.subject.upper() == ticker.upper()), None)
+        if drawdown is None:
+            return ""
+        peak = next((item for item in drawdown.evidence if item.metadata.get("evidence_scope") == "peak_trough"), None)
+        window = next((item for item in drawdown.evidence if item.metadata.get("evidence_scope") == "window_return"), None)
+        anchor = peak or window
+        if anchor is None:
+            return ""
+        lines.append(f"你问的是 {ticker} {frame.get('label') or '这段跌幅'}：{anchor.claim.rstrip('。')}[{anchor.id}]。")
+        number = drawdown.metrics.get("drawdown") if peak is not None else drawdown.metrics.get("window_return")
+        value = float(number) * 100 if isinstance(number, (int, float)) else None
+        if found is not None:
+            source, row = found
+            entry = row.get("avg_entry_price")
+            entry_text = f"，成本价 ${float(entry):.2f}" if isinstance(entry, (int, float)) else ""
+            citation = f"[{source.evidence[0].id}]" if source.evidence else ""
+            lines.append(f"你持有该股，买入以来的浮动盈亏 {row.get('pl_pct_text') or row.get('pl_pct')}{entry_text}{citation}。")
+    elif found is not None:
+        source, row = found
+        key, text_key = str(frame.get("field") or "pl_pct"), str(frame.get("text") or "pl_pct_text")
+        value_text = row.get(text_key) or row.get(key)
+        citation = f"[{source.evidence[0].id}]" if source.evidence else ""
+        entry = row.get("avg_entry_price")
+        entry_text = f"，成本价 ${float(entry):.2f}" if isinstance(entry, (int, float)) else ""
+        lines.append(f"你问的是 {ticker} {frame.get('label') or '这一项'}：{value_text}{entry_text}{citation}。")
+        value = row.get(key)
+    else:
+        return ""
     for result in results:
         if result.subject.upper() != ticker.upper() or not result.ok:
             continue
@@ -98,7 +121,7 @@ def frame_lead(frame: dict[str, Any], results: list[ToolEnvelope]) -> str:
             intraday = price is not None and (price.metadata.get("is_intraday") or any(isinstance(rule, dict) and rule.get("require") for rule in price.metadata.get("constraints") or []))
             when = "今日盘中" if intraday else "今日"
             candidates.append(f"{when}为{direction}（{float(today):+.2%}），与{frame.get('label') or '上述区间'}是不同区间{f'[{price.id}]' if price else ''}。")
-        candidates.extend(decline_timing(value, returns, result))
+        candidates.extend(decline_timing(value, returns, result, held=found is not None))
         # Sentences the code writes go through the same verifier as the
         # model's; one that fails is dropped rather than shipped.
         lines.extend(sentence for sentence in candidates if _self_checks(sentence, result))
@@ -116,7 +139,7 @@ def _self_checks(sentence: str, result: ToolEnvelope) -> bool:
 _WINDOW_LABELS = (("5d", "近 5 日"), ("1m", "近 1 月"), ("3m", "近 3 月"), ("1y", "近 1 年"))
 
 
-def decline_timing(total_pct: Any, returns: dict[str, Any], result: ToolEnvelope) -> list[str]:
+def decline_timing(total_pct: Any, returns: dict[str, Any], result: ToolEnvelope, *, held: bool = True) -> list[str]:
     """Where in time a loss since purchase sits, read off the return windows.
 
     Each window's return is compared with the loss: the first window that
@@ -145,7 +168,10 @@ def decline_timing(total_pct: Any, returns: dict[str, Any], result: ToolEnvelope
         sentences.append(f"对照区间回报（{described}），这段跌幅主要发生在{longest_label}以前{citation}。")
     _, longest_label, longest_value = windows[-1]
     if longest_value > 0:
-        sentences.append(f"{longest_label} {longest_value:+.2%} 而该持仓仍在浮亏，说明买入点在这轮上涨之后的高位{citation}。")
+        if held:
+            sentences.append(f"{longest_label} {longest_value:+.2%} 而该持仓仍在浮亏，说明买入点在这轮上涨之后的高位{citation}。")
+        else:
+            sentences.append(f"{longest_label}仍为 {longest_value:+.2%}，这段跌幅是一轮上涨之后的回撤{citation}。")
     return sentences
 
 
@@ -324,12 +350,14 @@ class EvidenceSummarySynthesizer:
                 return "该问题被识别为通用知识问题；尚未接入 Agent V2 的知识回答模型。"
             return "现有信息不足以确定需要调用的能力，请补充标的或希望查询的范围。"
 
-        frame = request.metadata.get("context_frame")
-        if isinstance(frame, dict) and frame.get("kind") == "position":
+        frame = plan.frame or request.metadata.get("context_frame")
+        if isinstance(frame, dict) and frame.get("kind") in {"position", "drawdown"}:
             opening = frame_lead(frame, results)
             if opening:
                 found = position_row(results, str(frame.get("ticker") or ""))
-                source = found[0] if found else None
+                # The position card was used by the opening (or is not about
+                # this stock at all); either way it is not pasted below.
+                source = found[0] if found else next((result for result in results if result.capability == "account.portfolio"), None)
                 drawdown = next((result for result in results if result.capability == "market.drawdown" and result.ok), None)
                 since = str(drawdown.metrics.get("window_start") or "") if drawdown is not None else ""
                 blocks = [opening]

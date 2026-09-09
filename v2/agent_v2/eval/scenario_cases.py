@@ -71,8 +71,9 @@ def build_drawdown_registry() -> CapabilityRegistry:
         ticker = a["ticker"]
         window = EvidenceItem(f"D-{ticker}-window", ticker, f"{ticker} 近 3 月（2026-06-10 至 2026-09-08）区间回报 -21.40%。", metadata={"evidence_scope": "window_return"})
         worst = EvidenceItem(f"D-{ticker}-0805", ticker, f"{ticker} 2026-08-05 单日 -13.21%，收盘 275.10 美元。", metadata={"evidence_scope": "worst_day", "date": "2026-08-05"})
-        narrative = f"{ticker} 近 3 月（2026-06-10 至 2026-09-08）区间回报 -21.40%[D-{ticker}-window]。\n{ticker} 近 3 月跌幅最大的交易日：2026-08-05 -13.21%[D-{ticker}-0805]。"
-        return ToolEnvelope("market.drawdown", ResultStatus.COMPLETED, subject=ticker, metrics={"window": "3m", "window_start": "2026-06-10", "worst_days": [{"date": "2026-08-05", "return": -0.1321}]}, evidence=[window, worst], metadata={"narrative": narrative, "require_cited_numbers": True, "worst_dates": ["2026-08-05"], "queries": [f"why did {ticker} stock fall on 2026-08-05"]})
+        peak = EvidenceItem(f"D-{ticker}-peak", ticker, f"{ticker} 从 2026-06-18 的高点 439.46 美元到 2026-08-05 的低点 275.10 美元回撤 -37.40%。", metadata={"evidence_scope": "peak_trough", "peak_date": "2026-06-18", "trough_date": "2026-08-05"})
+        narrative = f"{ticker} 近 3 月（2026-06-10 至 2026-09-08）区间回报 -21.40%[D-{ticker}-window]。\n{peak.claim.rstrip('。')}[D-{ticker}-peak]。\n{ticker} 近 3 月跌幅最大的交易日：2026-08-05 -13.21%[D-{ticker}-0805]。"
+        return ToolEnvelope("market.drawdown", ResultStatus.COMPLETED, subject=ticker, metrics={"window": "3m", "window_start": "2026-06-10", "window_return": -0.2140, "worst_days": [{"date": "2026-08-05", "return": -0.1321}], "peak": {"date": "2026-06-18", "close": 439.46}, "trough": {"date": "2026-08-05", "close": 275.10}, "drawdown": -0.3740}, evidence=[window, peak, worst], metadata={"narrative": narrative, "require_cited_numbers": True, "worst_dates": ["2026-08-05"], "queries": [f"why did {ticker} stock fall on 2026-08-05"]})
 
     registry.register("market.drawdown", drawdown)
     registry.register(
@@ -194,6 +195,31 @@ SCENARIO_CASES: tuple[ScenarioCase, ...] = (
         ("组合价值", "尚未确认"),
         allow_web=True,
         expect_rewritten=True,
+    ),
+    ScenarioCase(
+        "sc_direct_drawdown_question",
+        "单独一句「ARM 从 6 月高点为什么跌了这么多」：措辞本身建框架，不依赖前一轮",
+        ("ARM 从 6 月高点为什么跌了这么多?",),
+        frozenset({"account.portfolio", "market.performance", "market.drawdown", "filings.recent", "market.anomaly_history", "market.attribute_move"}),
+        frozenset({"market.explain_move", "research.stock"}),
+        (
+            "你问的是 ARM 这段跌幅：ARM 从 2026-06-18 的高点 439.46 美元到 2026-08-05 的低点 275.10 美元回撤 -37.40%[D-ARM-peak]。",
+            "你持有该股，买入以来的浮动盈亏 -32.22%，成本价 $389.52[legacy-",
+            "今日盘中为上涨（+0.94%），与这段跌幅是不同区间",
+            "这段跌幅大部分落在近 3 月内",
+            "ARM 近 3 月跌幅最大的交易日：2026-08-05 -13.21%",
+            "最相关的一条候选线索是“财报指引低于预期”",
+        ),
+        ("组合价值", "IVV 70 sh"),
+        expect_rewritten=False,
+    ),
+    ScenarioCase(
+        "sc_today_is_not_a_stretch",
+        "「NVDA 今天为什么跌这么多」带「今天」：仍是当日异动解释",
+        ("NVDA 今天为什么跌这么多?",),
+        frozenset({"market.explain_move"}),
+        frozenset({"market.drawdown", "market.attribute_move"}),
+        expect_rewritten=False,
     ),
     ScenarioCase(
         "sc_pronoun_follow_up",
