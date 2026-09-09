@@ -60,7 +60,7 @@ def render_moneyflow_chart(
         return None
     price = closes[-n:]
     rsi = rsi_full[-n:]
-    cmf = [c if c is not None else 0.0 for c in cmf_full[-n:]]
+    cmf = [c if c is not None else float('nan') for c in cmf_full[-n:]]
     x = list(range(n))
 
     fig, (ax_p, ax_c, ax_r) = plt.subplots(

@@ -267,6 +267,19 @@
 }
 
 .research-module-overview { overflow: hidden; margin-bottom: 10px; }
+.flow-axis-grid { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 10px; padding: 12px 14px; }
+.flow-axis-grid article { border: 1px solid #e2e8f1; border-radius: 8px; padding: 12px; background: #f8faff; }
+.flow-axis-grid h3 { margin: 0 0 8px; font-size: 12px; color: #5c7190; font-weight: 500; }
+.flow-axis-grid strong { font-size: 20px; color: #2c5fae; }
+.flow-axis-grid p,.flow-method,.flow-rules p { font-size: 11px; color: #657286; line-height: 1.7; }
+.flow-method { margin: 10px 14px; }
+.flow-chart { margin: 10px auto; max-width: 800px; padding: 0 14px; }
+.flow-chart img { display: block; width: 100%; height: auto; border-radius: 8px; }
+.flow-chart figcaption { margin-top: 6px; font-size: 10px; color: #7c8899; line-height: 1.6; }
+.flow-narration { grid-template-columns: repeat(2,minmax(0,1fr)); }
+.flow-rules { margin: 12px 14px; }
+.flow-rules summary { font-size: 11px; color: #657286; cursor: pointer; }
+@media(max-width:620px) { .flow-axis-grid { grid-template-columns: 1fr; } }
 .relationship-map { container-type: inline-size; }
 .relation-map-layout { position: relative; margin: 18px; display: grid; grid-template-columns: minmax(0,1fr) 130px minmax(0,1fr); grid-template-areas: "supplier supplier supplier" "smaller_peer center beneficiary" "customer customer customer"; gap: 54px 70px; align-items: center; }
 .relation-map-wires { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }

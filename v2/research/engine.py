@@ -585,9 +585,10 @@ class ResearchEngine:
         return self._module(d.ticker, "institutional", status, summary, score=score, metrics={"insider_buy_value_90d": buys, "insider_sell_value_90d": sells, "institutional_holders": len(holdings), "13f_changes": len(changes), "etf_exposure_count": len(etf_exposure), "institutional_flow": None, "etf_flow": None, "institutional_flow_available": False, "etf_flow_available": False}, risks=[{"title": "内部人净卖出", "description": _money(sells - buys), "confidence": .8, "source_ids": ["fd_insiders"]}] if sells > buys else [], sources=sources, confidence=.78 if holdings and d.insiders else .55 if available else .1, details={"institutional_holdings": holdings, "13f_changes": changes, "insider_transactions": d.institutional.get("insider_transactions", []), "ownership_changes": d.institutional.get("ownership_changes", []), "etf_exposure": etf_exposure, "semantics": {"13f": "quarterly disclosed positions, not real-time flow", "etf_exposure": "latest holdings snapshot, not ETF fund flow", "insider_transactions": "reported transactions, not institutional flow"}, "warnings": d.institutional.get("warnings", [])})
 
     def _fund_flow(self, d: StockResearchDataset) -> dict:
+        from v2.research.moneyflow import build_flow_analysis
         prices = d.prices
         if len(prices) < 20:
-            return self._module(d.ticker, "fund_flow", "FAILED", "OHLCV 数据不足，无法计算资金流。", error=d.errors.get("prices"))
+            return self._module(d.ticker, "fund_flow", "FAILED", "OHLCV 数据不足，无法计算资金流。", error=d.errors.get("prices"), details={"flow_analysis": build_flow_analysis(d.ticker, prices)})
         volumes = [_finite(p.volume) or 0 for p in prices]
         closes = [_finite(p.close) or 0 for p in prices]
         cmf = _cmf([p.high for p in prices], [p.low for p in prices], closes, volumes, 20)
@@ -602,7 +603,7 @@ class ResearchEngine:
             ad += (0 if spread <= 0 else ((p.close - p.low) - (p.high - p.close)) / spread) * p.volume
         score = _weighted([(_ratio_score(cmf, -.25, .25), .65), (_ratio_score(rvol, .5, 2), .35)])
         state = "净流入" if cmf is not None and cmf > .05 else "净流出" if cmf is not None and cmf < -.05 else "中性"
-        return self._module(d.ticker, "fund_flow", "COMPLETED", f"CMF20 显示{state}；相对成交量 {_finite(rvol) or 0:.2f}×。", score=score, metrics={"volume": volumes[-1], "relative_volume": rvol, "cmf20": cmf, "obv": obv, "accumulation_distribution": ad, "institutional_flow": None, "etf_flow": None, "insider_flow": self._institutional(d)["metrics"]}, sources=["yf_prices"] + (["fd_insiders"] if d.insiders else []), confidence=.82)
+        return self._module(d.ticker, "fund_flow", "COMPLETED", f"CMF20 显示{state}；相对成交量 {_finite(rvol) or 0:.2f}×。", score=score, metrics={"volume": volumes[-1], "relative_volume": rvol, "cmf20": cmf, "obv": obv, "accumulation_distribution": ad, "institutional_flow": None, "etf_flow": None, "insider_flow": self._institutional(d)["metrics"]}, sources=["yf_prices"] + (["fd_insiders"] if d.insiders else []), confidence=.82, details={"flow_analysis": build_flow_analysis(d.ticker, prices)})
 
     def _technical(self, d: StockResearchDataset) -> dict:
         prices = d.prices
