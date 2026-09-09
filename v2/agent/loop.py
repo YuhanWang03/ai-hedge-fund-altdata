@@ -39,7 +39,7 @@ modified: the loop is an alternative front-end onto the same responders.
 from __future__ import annotations
 
 import time
-from concurrent.futures import ThreadPoolExecutor
+from v2.usage_context import ContextExecutor as ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
 

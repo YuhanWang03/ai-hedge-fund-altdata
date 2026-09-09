@@ -160,6 +160,7 @@ class OpenAICompatLLM:
         attempts = self.max_retries
         attempt = 0
         while attempt < attempts:
+            accounted = False
             try:
                 request = urllib.request.Request(
                     f"{self.base_url}/chat/completions",
@@ -167,8 +168,13 @@ class OpenAICompatLLM:
                 )
                 with urllib.request.urlopen(request, timeout=self.timeout) as response:
                     data = json.loads(response.read().decode("utf-8"))
+                from urllib.parse import urlparse
+                from v2.data.usage_ledger import record_llm
+                record_llm(data, self.model, 'DeepSeek' if urlparse(self.base_url).hostname == 'api.deepseek.com' else 'Other LLM', 'agent.chat')
+                accounted = True
                 return self._to_response(data, int((time.time() - started) * 1000))
             except urllib.error.HTTPError as exc:
+                self._record_unknown_attempt()
                 detail = exc.read().decode("utf-8", "replace")[:400]
                 last_error = LLMError(f"HTTP {exc.code} from {self.base_url}: {detail}")
                 # 4xx other than rate-limit will not fix themselves on retry.
@@ -180,6 +186,8 @@ class OpenAICompatLLM:
                     # sweep into 27 `error` flakes and a 63% agent score.
                     attempts = max(attempts, RATE_LIMIT_ATTEMPTS)
             except Exception as exc:  # noqa: BLE001 — network flakiness
+                if not accounted:
+                    self._record_unknown_attempt()
                 # Never let the credential into a message that ends up in an
                 # eval report or a chat log.
                 last_error = LLMError(_redact(str(exc), self.api_key))
@@ -188,6 +196,12 @@ class OpenAICompatLLM:
                 time.sleep(backoff_seconds(attempt, rate_limited=attempts > self.max_retries))
 
         raise LLMError(f"LLM call failed after {attempts} attempts: {last_error}")
+
+    def _record_unknown_attempt(self):
+        from urllib.parse import urlparse
+        from v2.data.usage_ledger import record
+        record('llm', 'DeepSeek' if urlparse(self.base_url).hostname == 'api.deepseek.com' else 'Other LLM',
+               self.model, {}, source='agent.chat', state='failed', usage_basis='unknown')
 
     @staticmethod
     def _to_response(data: dict[str, Any], latency_ms: int) -> LLMResponse:

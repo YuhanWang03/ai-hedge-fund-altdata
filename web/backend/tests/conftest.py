@@ -24,6 +24,8 @@ def _isolated_lab_stores(tmp_path, monkeypatch):
     """Every test gets fresh lab.db / personas.db instead of the repo's data/."""
     monkeypatch.setenv("WEB_LAB_DB", str(tmp_path / "lab.db"))
     monkeypatch.setenv("WEB_PERSONAS_DB", str(tmp_path / "personas.db"))
+    from v2.data import cost_ledger
+    monkeypatch.setattr(cost_ledger, '_DB_PATH', tmp_path / 'costs.db')
     from app.routers import committee, workspace
 
     monkeypatch.setattr(workspace, "_LAB_STORE", None)

@@ -24,6 +24,13 @@ from app.routers import agent_v2, chat, committee, dashboard, health, portfolio,
 
 app = FastAPI(title="AI Hedge Fund · Web", version="0.1.0")
 
+
+@app.middleware('http')
+async def billing_channel(request, call_next):
+    from v2.usage_context import usage_channel
+    with usage_channel('web'):
+        return await call_next(request)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=list(SETTINGS.cors_origins),

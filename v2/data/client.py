@@ -266,7 +266,7 @@ class FDClient:
 
             # Accounting must never turn a successful data response into an error.
             try:
-                from v2.data.cost_ledger import record_fd_request
+                from v2.data.usage_ledger import record_fd as record_fd_request
                 record_fd_request(path, kwargs.get("params"))
             except Exception:
                 logger.exception("unable to record Financial Datasets request cost")

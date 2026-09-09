@@ -11,6 +11,7 @@ import asyncio
 from contextlib import contextmanager
 import sqlite3
 import threading
+from v2.usage_context import ContextThread
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Literal
@@ -142,9 +143,24 @@ async def activity(
 @router.get("/costs")
 async def query_costs(limit: int = Query(100, ge=1, le=500)) -> dict:
     """Estimated spend for successful, uncached paid data requests."""
-    from v2.data.cost_ledger import cost_report
+    from v2.data.usage_ledger import report as cost_report
 
     return await run_in_threadpool(cost_report, limit)
+
+
+@router.post('/costs/prices')
+async def add_cost_price(payload: dict) -> dict:
+    from v2.data.usage_ledger import add_price
+    try:
+        return await run_in_threadpool(add_price, payload)
+    except (ValueError, KeyError, TypeError, OverflowError):
+        raise HTTPException(400, '价格配置无效：请检查模型、USD 单价、生效时间、复核期限及来源说明')
+
+
+@router.get('/costs/deepseek-balance')
+async def cost_balance() -> dict:
+    from v2.data.provider_balance import deepseek_balance
+    return await run_in_threadpool(deepseek_balance)
 
 
 @router.get("/monitoring/universe")
@@ -811,7 +827,7 @@ def _start_job(kind: str, body, total: int, fn) -> dict:
                 _JOBS.pop(old, None)
         _JOBS[job_id] = {"job_id": job_id, "kind": f"{kind}_job", "status": "running", "done": 0, "total": total,
                          "universe": body.universe, "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
-    threading.Thread(target=_run_job, args=(job_id, kind, body, fn), name=f"{kind}-{job_id}", daemon=True).start()
+    ContextThread(target=_run_job, args=(job_id, kind, body, fn), name=f"{kind}-{job_id}", daemon=True).start()
     return _job_view(job_id)
 
 

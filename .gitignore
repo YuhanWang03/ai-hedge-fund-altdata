@@ -39,6 +39,10 @@ logs/
 v2/data/*
 !v2/data/price_source.py
 !v2/data/test_price_source.py
+!v2/data/usage_ledger.py
+!v2/data/metered.py
+!v2/data/provider_balance.py
+!v2/data/news_provider.py
 
 # IDE
 .idea/

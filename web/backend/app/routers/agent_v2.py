@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import threading
+from v2.usage_context import ContextThread
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -140,7 +141,7 @@ def _start_job(body: AgentV2Input) -> dict[str, Any]:
             "session_id": body.session_id,
             "policy": _policy(body),
         }
-    threading.Thread(
+    ContextThread(
         target=_run_job,
         args=(job_id, body),
         name=f"agent-v2-{job_id}",

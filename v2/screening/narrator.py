@@ -11,7 +11,7 @@ import json
 import logging
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_deepseek import ChatDeepSeek
+from v2.data.metered import ChatDeepSeek
 
 from v2.screening.models import ScreenCandidate
 

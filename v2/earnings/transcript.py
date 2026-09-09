@@ -66,7 +66,7 @@ def find_transcript(
     try:
         # Local import — keeps this module importable in environments that
         # haven't installed the tavily SDK (and lets tests stub it cleanly).
-        from tavily import TavilyClient
+        from v2.data.metered import TavilyClient
         client = TavilyClient(api_key=api_key)
         response = client.search(
             query=query,

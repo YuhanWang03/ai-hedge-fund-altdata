@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import time
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, Future, wait
+from v2.usage_context import ContextExecutor as ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
 

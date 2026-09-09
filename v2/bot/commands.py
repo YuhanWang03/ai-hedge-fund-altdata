@@ -61,7 +61,9 @@ def authorized_only(handler):
                     text="❌ Not authorized — this bot is single-user.",
                 )
             return
-        return await handler(update, context)
+        from v2.usage_context import usage_channel
+        with usage_channel('telegram'):
+            return await handler(update, context)
     return wrapper
 
 
@@ -208,7 +210,8 @@ async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 async def _run_blocking(func, *args):
     """Run a synchronous responder in the default thread executor so we don't
     block the bot's event loop while FD / Tavily / DeepSeek calls are in flight."""
-    return await asyncio.get_running_loop().run_in_executor(None, func, *args)
+    from contextvars import copy_context
+    return await asyncio.get_running_loop().run_in_executor(None, copy_context().run, func, *args)
 
 
 @authorized_only

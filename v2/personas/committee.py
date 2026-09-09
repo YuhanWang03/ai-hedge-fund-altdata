@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor
+from v2.usage_context import ContextExecutor as ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Callable, Iterable

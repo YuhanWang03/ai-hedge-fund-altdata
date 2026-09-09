@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from concurrent.futures import ThreadPoolExecutor
+from v2.usage_context import ContextExecutor as ThreadPoolExecutor
 from dataclasses import replace
 from typing import Any, Callable
 

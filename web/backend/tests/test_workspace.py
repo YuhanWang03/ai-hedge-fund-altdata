@@ -200,6 +200,44 @@ def test_position_price_history_returns_consistent_contract(client: TestClient, 
     assert response.json() == payload
 
 
+@pytest.mark.parametrize(('symbol', 'yahoo_symbol'), [
+    ('BRK.B', 'BRK-B'), ('BF.B', 'BF-B'), ('AAPL', 'AAPL'), ('BRK-B', 'BRK-B'),
+])
+@pytest.mark.parametrize('range_key', ['1M', '3M'])
+def test_price_history_maps_yahoo_symbol_only(client, monkeypatch, symbol, yahoo_symbol, range_key):
+    import pandas as pd
+    import yfinance as yf
+    from datetime import timedelta
+
+    requested, histories = [], []
+    yesterday = datetime.now(portfolio._ET).replace(hour=10, minute=0, second=0, microsecond=0) - timedelta(days=1)
+    frame = pd.DataFrame(
+        {'Open': [500., 501.], 'High': [504., 505.], 'Low': [499., 500.],
+         'Close': [502., 503.], 'Adj Close': [502., 503.], 'Volume': [1000, 1200]},
+        index=pd.DatetimeIndex([yesterday - timedelta(days=1), yesterday]),
+    )
+
+    def factory(value):
+        requested.append(value)
+        assert value == yahoo_symbol
+        def history(**kwargs):
+            histories.append(kwargs)
+            return frame.copy()
+        return SimpleNamespace(history=history)
+
+    monkeypatch.setattr(yf, 'Ticker', factory)
+    response = client.get(f'/api/price-history/{symbol}?range={range_key}')
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data['symbol'] == data['quote']['symbol'] == symbol
+    assert data['bars'] and all(bar['symbol'] == symbol for bar in data['bars'])
+    assert requested == [yahoo_symbol]
+    assert len(histories) == 3  # Chart, minute quote and completed daily closes.
+    assert (symbol, range_key, False) in portfolio._PRICE_CACHE
+    assert client.get(f'/api/price-history/{symbol}?range={range_key}').status_code == 200
+    assert requested == [yahoo_symbol]  # Cached requests retain the public symbol.
+
+
 def test_position_price_history_rejects_invalid_ticker(client: TestClient):
     response = client.get("/api/price-history/not%20a%20ticker")
     assert response.status_code == 400

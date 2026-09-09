@@ -167,6 +167,8 @@ class FinancialDatasetsClient:
                 self.calls += 1
                 with urllib.request.urlopen(request, timeout=self.timeout) as response:
                     payload = json.loads(response.read().decode("utf-8") or "{}")
+                from v2.data.usage_ledger import record_fd
+                record_fd(path, params)
                 self._cache[key] = payload
                 return payload
             except urllib.error.HTTPError as exc:

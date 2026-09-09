@@ -304,13 +304,16 @@ def _fetch_price_history(ticker: str, range_key: str, include_extended: bool = F
             return copy.deepcopy(cached[1])
 
     import yfinance as yf
+    from v2.data.price_source import YFinancePriceSource
 
     config = _PRICE_RANGES[normalized_range]
     timeframe = config["timeframe"]
     now_et = datetime.now(_ET)
     visible_start = now_et.date() - timedelta(days=config["days"])
     fetch_start = visible_start - timedelta(days=config["warmup_days"])
-    ticker_obj = yf.Ticker(symbol)
+    # Keep the public symbol/cache key unchanged; Yahoo spells share classes
+    # with a dash (BRK-B), while broker/FD symbols use a dot (BRK.B).
+    ticker_obj = yf.Ticker(YFinancePriceSource.yfinance_symbol(symbol))
     frame = ticker_obj.history(
         start=fetch_start.isoformat(),
         end=(now_et.date() + timedelta(days=1)).isoformat(),

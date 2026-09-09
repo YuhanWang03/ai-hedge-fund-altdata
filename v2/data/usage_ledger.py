@@ -1,0 +1,189 @@
+"""Versioned usage estimates. No keys, prompts or search content are stored."""
+from __future__ import annotations
+
+import json
+import logging
+import math
+import uuid
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+
+from v2.data.cost_ledger import _conn, _prices, _PATH_TO_ENDPOINT
+from v2.usage_context import current_channel
+
+logger = logging.getLogger(__name__)
+ET = ZoneInfo('America/New_York')
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS usage_prices (
+ id TEXT PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL,
+ effective_at TEXT NOT NULL, review_after TEXT NOT NULL, created_at TEXT NOT NULL,
+ payload TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS usage_events (
+ id TEXT PRIMARY KEY, occurred_at TEXT NOT NULL, category TEXT NOT NULL,
+ provider TEXT NOT NULL, model TEXT NOT NULL, cost_usd REAL,
+ status TEXT NOT NULL, payload TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS usage_time ON usage_events(occurred_at);
+"""
+
+
+def now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def init(conn):
+    conn.executescript(SCHEMA)
+
+
+def timestamp(value):
+    parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    if parsed.tzinfo is None:
+        raise ValueError('时间必须包含时区')
+    return parsed.astimezone(timezone.utc).isoformat()
+
+
+def add_price(data):
+    provider = data.get('provider')
+    if provider not in ('DeepSeek', 'Tavily', 'Financial Datasets', 'Other LLM'):
+        raise ValueError('不支持的供应商')
+    model = str(data.get('model', '')).strip()
+    if not model or len(model) > 120:
+        raise ValueError('请填写模型名或端点名')
+    effective = timestamp(data['effective_at'])
+    review = timestamp(data['review_after'])
+    if review <= effective:
+        raise ValueError('价格复核期限必须晚于生效时间')
+    rates = {}
+    required = ('input', 'cached_input', 'output') if provider in ('DeepSeek', 'Other LLM') else ('unit',)
+    for key in required:
+        value = float(data['rates'][key])
+        if not math.isfinite(value) or value < 0 or value > 100000:
+            raise ValueError('单价必须为有限非负数')
+        rates[key] = value
+    source = str(data.get('source', '')).strip()
+    if not source or len(source) > 500:
+        raise ValueError('请填写价格来源／套餐说明')
+    record = dict(id=uuid.uuid4().hex, provider=provider, model=model,
+                  effective_at=effective, review_after=review, created_at=now_iso(),
+                  rates=rates, source=source, currency='USD')
+    with _conn() as conn:
+        init(conn)
+        conn.execute('INSERT INTO usage_prices VALUES (?,?,?,?,?,?,?)',
+                     (record['id'], provider, model, effective, review, record['created_at'], json.dumps(record)))
+    return record
+
+
+def prices():
+    with _conn() as conn:
+        init(conn)
+        return [json.loads(r[0]) for r in conn.execute('SELECT payload FROM usage_prices ORDER BY effective_at DESC, created_at DESC')]
+
+
+def record(category, provider, model, usage, *, endpoint='', ticker=None,
+           source='', usage_basis='reported', state='success', occurred_at=None):
+    """Best effort: accounting must not break a provider response or retry it."""
+    try:
+        at = timestamp(occurred_at) if occurred_at else now_iso()
+        usage = dict(usage)
+        for key in ('input_tokens', 'output_tokens', 'cached_tokens', 'units'):
+            if key in usage and usage[key] is not None:
+                value = float(usage[key])
+                usage[key] = value if math.isfinite(value) and value >= 0 else None
+        with _conn() as conn:
+            init(conn)
+            row = conn.execute('SELECT payload FROM usage_prices WHERE provider=? AND model=? AND effective_at<=? ORDER BY effective_at DESC, created_at DESC LIMIT 1', (provider, model, at)).fetchone()
+            price = json.loads(row[0]) if row else None
+            # Preserve the existing configurable FD estimate until an explicit
+            # version is supplied. Store its rates on each event, not at read time.
+            if not price and category == 'data':
+                price = dict(id='fd-config-snapshot', rates={'unit': _prices().get(endpoint, .02)},
+                             source='FD_PRICES / existing default', currency='USD')
+            cost = None
+            reason = '缺少价格版本'
+            if state != 'success':
+                reason = '请求失败，用量及计费待核对'
+            elif price and price.get('review_after', at) < at:
+                reason = '价格已到复核期限'
+            elif price:
+                rates = price['rates']
+                if category == 'llm':
+                    inp, out, cached = (usage.get(k) for k in ('input_tokens', 'output_tokens', 'cached_tokens'))
+                    if inp is not None and out is not None and (cached is not None or rates['input'] == rates['cached_input']):
+                        cached = cached or 0
+                        if 0 <= cached <= inp and out >= 0:
+                            cost = ((inp-cached)*rates['input'] + cached*rates['cached_input'] + out*rates['output']) / 1_000_000
+                    reason = '缺少完整 Token 用量（含缓存分类）'
+                elif usage.get('units') is not None:
+                    cost = usage['units'] * rates['unit']
+                else:
+                    reason = '未返回 credits 用量'
+            status = 'estimated' if cost is not None else 'pending'
+            event = dict(id=uuid.uuid4().hex, occurred_at=at, category=category, provider=provider,
+                         model=model, endpoint=endpoint, ticker=ticker, source=source, usage=usage, channel=current_channel(),
+                         usage_basis=usage_basis, state=state, cost_usd=cost, status=status,
+                         reason='' if cost is not None else reason, price=price)
+            conn.execute('INSERT INTO usage_events VALUES (?,?,?,?,?,?,?,?)',
+                         (event['id'], at, category, provider, model, cost, status, json.dumps(event)))
+    except Exception:
+        logger.warning('Usage accounting failed; provider response retained', exc_info=False)
+
+
+def record_fd(path, params=None):
+    endpoint = _PATH_TO_ENDPOINT.get(path, path.strip('/').replace('/', '_') or 'unknown')
+    record('data', 'Financial Datasets', endpoint, {'units': 1}, endpoint=endpoint,
+           ticker=str((params or {}).get('ticker') or '').upper() or None, source='FD HTTP response')
+
+
+def record_llm(data, model, provider='DeepSeek', source=''):
+    if not isinstance(data, dict):
+        data = {}
+    usage = data.get('usage') or {}
+    if not isinstance(usage, dict):
+        usage = {}
+    cached = usage.get('prompt_cache_hit_tokens')
+    if cached is None:
+        details = usage.get('prompt_tokens_details') or {}
+        cached = details.get('cached_tokens') if isinstance(details, dict) else None
+    record('llm', provider, data.get('model') or model,
+           dict(input_tokens=usage.get('prompt_tokens'), output_tokens=usage.get('completion_tokens'), cached_tokens=cached),
+           source=source, endpoint='chat', usage_basis='reported' if usage else 'unknown')
+
+
+def report(limit=100):
+    # Old FD entries remain immutable and are included once. New entries live
+    # in usage_events, allowing unknown cost to be NULL, never fictitious zero.
+    with _conn() as conn:
+        init(conn)
+        events = [json.loads(r[0]) for r in conn.execute('SELECT payload FROM usage_events')]
+        for row in conn.execute('SELECT * FROM query_costs'):
+            events.append({**dict(row), 'category': 'data', 'model': row['endpoint'], 'status': 'estimated',
+                           'usage': {'units': 1}, 'usage_basis': 'legacy', 'state': 'success',
+                           'source': '旧 FD 账本', 'price': None, 'reason': ''})
+    today = datetime.now(ET).date().isoformat()
+    totals = dict(today_cost_usd=0., month_cost_usd=0., total_cost_usd=0., total_requests=len(events), pending_requests=0)
+    groups = {}
+    for event in events:
+        event.setdefault('channel', 'unknown')  # Never infer the source of old records.
+        day = datetime.fromisoformat(event['occurred_at']).astimezone(ET).date().isoformat()
+        group = groups.setdefault((event['category'], event['provider']), dict(category=event['category'], provider=event['provider'], cost_usd=0., requests=0, pending=0, input_tokens=0, output_tokens=0, credits=0))
+        group['requests'] += 1
+        u = event['usage']
+        group['input_tokens'] += u.get('input_tokens') or 0
+        group['output_tokens'] += u.get('output_tokens') or 0
+        if event['category'] == 'search':
+            group['credits'] += u.get('units') or 0
+        if event['cost_usd'] is None:
+            totals['pending_requests'] += 1
+            group['pending'] += 1
+            continue
+        cost = event['cost_usd']
+        group['cost_usd'] += cost
+        totals['total_cost_usd'] += cost
+        if day == today:
+            totals['today_cost_usd'] += cost
+        if day[:7] == today[:7]:
+            totals['month_cost_usd'] += cost
+    return {**totals, 'currency': 'USD', 'timezone': 'America/New_York', 'basis': 'usage_estimates',
+            'by_provider': list(groups.values()), 'prices': prices(),
+            'recent': sorted(events, key=lambda e: e['occurred_at'], reverse=True)[:max(1, min(limit, 500))]}

@@ -124,7 +124,7 @@ def _default_llm_invoke(system_prompt: str, user_text: str) -> str:
     installed in the sandbox.
     """
     from langchain_core.messages import HumanMessage, SystemMessage
-    from langchain_deepseek import ChatDeepSeek
+    from v2.data.metered import ChatDeepSeek
 
     llm = ChatDeepSeek(model="deepseek-chat", temperature=0.0)
     response = llm.invoke([

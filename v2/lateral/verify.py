@@ -68,7 +68,7 @@ def verify_relation(neighbor: Neighbor) -> int:
 
     neighbor.relation_checked = True
     try:
-        from tavily import TavilyClient
+        from v2.data.metered import TavilyClient
     except ImportError:
         logger.warning("Tavily relation verification unavailable: tavily package not installed")
         return 0

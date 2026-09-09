@@ -19,7 +19,7 @@ import logging
 from typing import Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_deepseek import ChatDeepSeek
+from v2.data.metered import ChatDeepSeek
 
 logger = logging.getLogger(__name__)
 

@@ -1,5 +1,5 @@
 """Resolve SEC filing index URLs to verified primary documents and TOC anchors."""
-from concurrent.futures import ThreadPoolExecutor
+from v2.usage_context import ContextExecutor as ThreadPoolExecutor
 import json
 from pathlib import Path
 import re

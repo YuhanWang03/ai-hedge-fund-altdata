@@ -413,7 +413,7 @@ def _pct(value: float | None) -> str:
 def _default_news(query: str, day: str) -> list[dict[str, Any]]:
     import os
 
-    from tavily import TavilyClient
+    from v2.data.metered import TavilyClient
 
     client = TavilyClient(api_key=os.environ["TAVILY_API_KEY"])
     recent = (date.today() - date.fromisoformat(day)).days <= 7

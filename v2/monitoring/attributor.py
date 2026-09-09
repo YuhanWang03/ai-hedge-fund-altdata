@@ -15,8 +15,8 @@ import logging
 import os
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_deepseek import ChatDeepSeek
-from tavily import TavilyClient
+from v2.data.metered import ChatDeepSeek
+from v2.data.metered import TavilyClient
 
 from v2.data.client import FDClient
 from v2.monitoring.models import Anomaly, NewsSource, ScoredReason

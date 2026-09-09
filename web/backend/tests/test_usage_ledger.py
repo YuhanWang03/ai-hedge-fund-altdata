@@ -1,0 +1,149 @@
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+
+import pytest
+from v2.data import usage_ledger as ledger
+from v2.data.metered import LLMProxy, SearchProxy
+
+
+def price(provider='DeepSeek', model='m', **overrides):
+    return ledger.add_price(dict(provider=provider, model=model,
+        effective_at='2026-01-01T00:00:00+00:00', review_after='2099-01-01T00:00:00+00:00',
+        source='test verified rate', rates={'input': 1, 'cached_input': .1, 'output': 2} if provider == 'DeepSeek' else {'unit': .008}, **overrides))
+
+
+def test_version_snapshot_and_cache_tokens():
+    old = price()
+    ledger.record_llm({'usage': {'prompt_tokens': 1000, 'completion_tokens': 100, 'prompt_cache_hit_tokens': 500}}, 'm')
+    event = ledger.report()['recent'][0]
+    assert event['cost_usd'] == pytest.approx(.00075)
+    assert event['price']['id'] == old['id']
+    ledger.add_price({**old, 'effective_at': '2026-02-01T00:00:00+00:00', 'rates': {'input': 9, 'cached_input': 9, 'output': 9}})
+    assert ledger.report()['recent'][0]['cost_usd'] == event['cost_usd']
+
+
+def test_pending_does_not_become_zero():
+    ledger.record_llm({'usage': {'prompt_tokens': 100, 'completion_tokens': 20}}, 'missing')
+    price()
+    ledger.record_llm({'usage': {'prompt_tokens': 100, 'completion_tokens': 20}}, 'm')
+    report = ledger.report()
+    assert report['pending_requests'] == 2
+    assert all(e['cost_usd'] is None for e in report['recent'])
+
+
+def test_expired_and_future_prices():
+    p = price()
+    ledger.add_price({**p, 'effective_at': '2026-02-01T00:00:00+00:00', 'review_after': '2026-03-01T00:00:00+00:00'})
+    ledger.record('llm', 'DeepSeek', 'm', {'input_tokens': 10, 'output_tokens': 2, 'cached_tokens': 0}, occurred_at='2026-04-01T00:00:00+00:00')
+    assert ledger.report()['recent'][0]['reason'] == '价格已到复核期限'
+    ledger.record('llm', 'DeepSeek', 'm', {}, occurred_at='2025-01-01T00:00:00+00:00')
+    assert ledger.report()['pending_requests'] == 2
+
+
+def test_legacy_preserved_and_fd_not_duplicated(monkeypatch):
+    from v2.data.cost_ledger import record_fd_request
+    monkeypatch.setenv('FD_PRICES', '{"news":0.03}')
+    record_fd_request('/news/', {'ticker': 'MU'})
+    ledger.record_fd('/news/', {'ticker': 'MU'})
+    report = ledger.report()
+    assert report['total_requests'] == 2
+    assert report['total_cost_usd'] == pytest.approx(.06)
+    monkeypatch.setenv('FD_PRICES', '{"news":99}')
+    assert ledger.report()['total_cost_usd'] == pytest.approx(.06)
+
+
+def test_search_actual_usage_and_failure():
+    price('Tavily', 'search')
+    def search(**kwargs):
+        assert kwargs['include_usage'] is True
+        return {'usage': {'credits': 2}, 'auto_parameters': {'search_depth': 'advanced'}}
+    SearchProxy(SimpleNamespace(search=search), 'test').search(query='private query', auto_parameters=True)
+    event = ledger.report()['recent'][0]
+    assert event['cost_usd'] == .016 and event['usage']['units'] == 2
+    assert 'private query' not in str(event)
+    def fail(**kwargs):
+        raise RuntimeError('secret key')
+    with pytest.raises(RuntimeError):
+        SearchProxy(SimpleNamespace(search=fail), 'test').search(query='x')
+    assert ledger.report()['pending_requests'] == 1
+    assert 'secret key' not in str(ledger.report())
+
+
+def test_llm_records_before_business_parser_and_without_trace():
+    price()
+    response = SimpleNamespace(content='not JSON', usage_metadata={'input_tokens': 100, 'output_tokens': 10, 'input_token_details': {'cache_read': 0}}, response_metadata={'model_name': 'm'})
+    proxy = LLMProxy(SimpleNamespace(invoke=lambda *a, **kw: response), 'm', 'test')
+    assert proxy.invoke('private prompt') is response
+    report = ledger.report()
+    assert report['total_requests'] == 1 and report['pending_requests'] == 0
+    assert 'private prompt' not in str(report)
+
+
+@pytest.mark.parametrize('value', [-1, float('inf'), float('nan')])
+def test_invalid_price_rejected(value):
+    p = price()
+    with pytest.raises(ValueError):
+        ledger.add_price({**p, 'rates': {'input': value, 'cached_input': 0, 'output': 1}})
+
+
+def test_balance_redacts_and_caches(monkeypatch):
+    from v2.data import provider_balance as balance
+    monkeypatch.setattr(balance, '_cache', None)
+    monkeypatch.setenv('DEEPSEEK_API_KEY', 'secret')
+    calls = []
+    def get(url, **kwargs):
+        calls.append(url)
+        return SimpleNamespace(raise_for_status=lambda: None, json=lambda: {'balance_infos': [{'currency': 'USD', 'total_balance': '3.05', 'granted_balance': '0', 'topped_up_balance': '3.05'}]})
+    monkeypatch.setattr(balance.requests, 'get', get)
+    assert balance.deepseek_balance()['balances'][0]['total_balance'] == '3.05'
+    assert 'secret' not in str(balance.deepseek_balance())
+    assert len(calls) == 1
+    assert ledger.report()['total_requests'] == 0
+
+
+def test_cost_api_routes_and_validation():
+    from fastapi.testclient import TestClient
+    from app.main import app
+    client = TestClient(app)
+    assert client.get('/api/costs').status_code == 200
+    assert client.post('/api/costs/prices', json={}).status_code == 400
+
+
+def test_report_uses_eastern_calendar(monkeypatch):
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 9, 9, 16, tzinfo=timezone.utc).astimezone(tz)
+    monkeypatch.setattr(ledger, 'datetime', Clock)
+    for at in ('2026-09-09T02:00:00+00:00', '2026-09-09T06:00:00+00:00'):
+        ledger.record('data', 'Financial Datasets', 'news', {'units': 1}, endpoint='news', occurred_at=at)
+    assert ledger.report()['total_cost_usd'] == pytest.approx(.04)
+    assert ledger.report()['today_cost_usd'] == pytest.approx(.02)
+
+
+def test_agent_paid_response_with_invalid_choices_still_counted(monkeypatch):
+    import json
+    from v2.agent.llm import OpenAICompatLLM, LLMError
+    price()
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def read(self): return json.dumps({'usage': {'prompt_tokens': 100, 'completion_tokens': 20, 'prompt_cache_hit_tokens': 0}, 'choices': []}).encode()
+    monkeypatch.setattr('urllib.request.urlopen', lambda *args, **kwargs: Response())
+    with pytest.raises(LLMError):
+        OpenAICompatLLM(model='m', api_key='test', max_retries=1).complete([])
+    report = ledger.report()
+    assert report['total_requests'] == 1
+    assert report['pending_requests'] == 0
+
+
+def test_cost_endpoints_require_owner_when_configured(monkeypatch):
+    from fastapi.testclient import TestClient
+    from app.main import app
+    from app import auth
+    monkeypatch.setattr(auth, 'SETTINGS', SimpleNamespace(owner_token='owner-test'))
+    client = TestClient(app)
+    assert client.get('/api/costs').status_code == 401
+    assert client.get('/api/costs/deepseek-balance').status_code == 401
+    assert client.post('/api/costs/prices', json={}).status_code == 401
+    assert client.get('/api/costs', headers={'X-Owner-Token': 'owner-test'}).status_code == 200

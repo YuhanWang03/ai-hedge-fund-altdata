@@ -45,7 +45,7 @@ _DOVISH_RE = re.compile(r"\bdovish\b", re.IGNORECASE)
 # ---------------------------------------------------------------------------
 
 def _default_tavily_search(query: str, *, max_results: int = 5) -> list[dict]:
-    from tavily import TavilyClient
+    from v2.data.metered import TavilyClient
     import os
 
     api_key = os.environ.get("TAVILY_API_KEY", "").strip()

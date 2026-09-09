@@ -116,7 +116,7 @@ def _invoke_llm(payload: dict[str, Any]) -> tuple[dict[str, str], int]:
     # Local import — keeps module importable even where langchain isn't
     # installed (e.g. lightweight cron environments / smoke tests).
     from langchain_core.messages import HumanMessage, SystemMessage
-    from langchain_deepseek import ChatDeepSeek
+    from v2.data.metered import ChatDeepSeek
 
     user_prompt = (
         f"刚发布的 {payload['ticker']} 财报数据：\n\n"

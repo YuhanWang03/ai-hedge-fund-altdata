@@ -10,7 +10,8 @@ from __future__ import annotations
 import math
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import as_completed
+from v2.usage_context import ContextExecutor as ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from statistics import median
