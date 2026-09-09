@@ -14,6 +14,11 @@ def test_exact_form_and_existing_anchors():
     assert links.archive_url('javascript:alert(1)') is None
 
 
+def test_table_of_contents_separate_label_and_page_link():
+    html = '<table><tr><td><a href="#r">Item 1A.</a></td><td>Risk Factors</td><td><a href="#r">34</a></td></tr></table><div id="r">Risk Factors</div>'
+    assert links.section_anchors(html) == {'RISK': 'r'}
+
+
 def test_cached_snapshot_links_resolve_once(tmp_path, monkeypatch):
     monkeypatch.setattr(links, 'DB_PATH', tmp_path / 'links.db')
     calls = []

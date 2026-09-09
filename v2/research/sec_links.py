@@ -45,10 +45,15 @@ def section_anchors(html):
         if not href.startswith('#') or unquote(href[1:]) not in ids:
             continue
         text = ' '.join(link.stripped_strings)
+        row = link.find_parent('tr')
+        if row is not None:
+            row_text = ' '.join(row.stripped_strings)
+            if len(row_text) < 350:
+                text = row_text
         # Match explicit TOC labels only; never guess an anchor from a heading.
         category = ('RISK' if re.search(r'\brisk\s+factors\b', text, re.I) else
                     'MD&A' if re.search(r"management.{0,12}discussion", text, re.I) else
-                    'BUSINESS' if re.fullmatch(r'(?:Item\s+1[.\s]*)?Business', text.strip(), re.I) else None)
+                    'BUSINESS' if re.fullmatch(r'(?:Item\s+1[.\s]*)?Business(?:\s+\d+)?', text.strip(), re.I) else None)
         if category and category not in anchors:
             anchors[category] = quote(unquote(href[1:]), safe='-_.:')
         item = re.match(r'Item\s+(\d+\.\d+)', text, re.I)
@@ -67,7 +72,7 @@ def _download(url):
 def resolve_document(index_url, form):
     url = archive_url(index_url)
     if not url: return {}
-    key = f'v1:{url}:{form}'
+    key = f'v2:{url}:{form}'
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(DB_PATH, timeout=10) as conn:
         conn.execute('CREATE TABLE IF NOT EXISTS links (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
