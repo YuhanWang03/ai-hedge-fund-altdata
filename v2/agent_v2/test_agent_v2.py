@@ -990,6 +990,32 @@ def test_market_drawdown_locates_the_worst_days_and_the_peak_to_trough():
     assert rise_span.claim.startswith("同期行业基准 SMH 从 2026-01-05 到 2026-05-19 回报 +") and rise_span.claim.endswith("与基准基本同步。")
     assert "上涨 +" in rise.metadata["narrative"] and "涨幅最大的交易日" in rise.metadata["narrative"]
     assert verify_answer(rise.metadata["narrative"], rise.evidence, answer_mode=AnswerMode.TOOL_GROUNDED, results=[rise]).ok
+    # A big day in an earlier rise that fell back to the low is not one of this run-up's best days.
+    class TwoRises:
+        def get_prices(self, ticker, start, end):
+            rows, close = [], 100.0
+            for index in range(200):
+                day = date(2026, 1, 5) + timedelta(days=index)
+                if day.weekday() >= 5 or day.isoformat() > str(end):
+                    continue
+                if day == date(2026, 1, 20):
+                    close *= 1.06  # the biggest single day, before the low
+                elif day < date(2026, 2, 10):
+                    close *= 1.001
+                elif day < date(2026, 3, 20):
+                    close *= 0.985  # down to the low
+                elif day == date(2026, 4, 2):
+                    close *= 1.04
+                else:
+                    close *= 1.003
+                rows.append(SimpleNamespace(time=day.isoformat(), close=round(close, 2), volume=1))
+            return rows
+
+    register_market_capabilities(registry, price_source_factory=TwoRises, move_provider=lambda ticker: None, now_factory=lambda: datetime(2026, 5, 15, 18, 0, tzinfo=ZoneInfo("America/New_York")), sector_for=lambda ticker: "")
+    two = registry.execute(PlanTask("u", "market.runup", {"ticker": "ARM", "window": "1y", "top": 3}), _context())
+    assert two.metrics["trough"]["date"] == "2026-03-19" and two.metrics["peak"]["date"] == "2026-05-15"
+    assert "2026-01-20" not in two.metadata["best_dates"] and "2026-04-02" in two.metadata["best_dates"]
+    assert all("2026-03-19" < day <= "2026-05-15" for day in two.metadata["best_dates"])
     # No sector known: the block is simply absent, nothing fails.
     register_market_capabilities(registry, price_source_factory=Prices, move_provider=lambda ticker: None, now_factory=lambda: now, sector_for=lambda ticker: "")
     assert "benchmark_span" not in registry.execute(PlanTask("d", "market.drawdown", {"ticker": "ARM"}), _context()).metrics
@@ -1026,7 +1052,9 @@ def test_history_capabilities_wrap_edgar_filings_and_the_anomaly_memory():
         return list(foreign) if form == "6-K" and ticker == "TSM" else []
 
     recalls = SimpleNamespace(date="2026-08-05", flags="gap_down,volume_spike", doc="ARM  gapped down after earnings;   guidance missed.")
-    register_history_capabilities(registry, filings_fetch=fetch, anomaly_recall=lambda ticker, query, days: [recalls], today_factory=lambda: date(2026, 9, 9))
+    # A record with neither flags nor content (the monitor wrote only the ticker) is dropped.
+    blank = SimpleNamespace(date="2026-09-03", flags="", doc="ARM")
+    register_history_capabilities(registry, filings_fetch=fetch, anomaly_recall=lambda ticker, query, days: [blank, recalls], today_factory=lambda: date(2026, 9, 9))
     filings = registry.execute(PlanTask("f", "filings.recent", {"ticker": "ARM", "forms": ["8-K", "10-Q"]}), _context())
     assert filings.ok and calls[0] == ("ARM", "8-K", "2025-09-09", "2026-09-09")
     assert [item.metadata["date"] for item in filings.evidence] == ["2026-08-20", "2026-08-05"]
@@ -1043,7 +1071,7 @@ def test_history_capabilities_wrap_edgar_filings_and_the_anomaly_memory():
     none = registry.execute(PlanTask("f", "filings.recent", {"ticker": "XYZ"}), _context())
     assert [call[1] for call in calls] == ["8-K", "6-K"] and "未查到 8-K、6-K 申报" in none.evidence[0].claim
     anomalies = registry.execute(PlanTask("a", "market.anomaly_history", {"ticker": "ARM", "lookback_days": 365}), _context())
-    assert anomalies.ok and anomalies.evidence[0].claim == "ARM 2026-08-05 盯盘记录：gap_down,volume_spike；ARM gapped down after earnings; guidance missed."
+    assert anomalies.ok and [item.claim for item in anomalies.evidence] == ["ARM 2026-08-05 盯盘记录：gap_down,volume_spike；ARM gapped down after earnings; guidance missed."]
     register_history_capabilities(registry, filings_fetch=fetch, anomaly_recall=lambda *args: (_ for _ in ()).throw(RuntimeError("chroma down")))
     broken = registry.execute(PlanTask("a", "market.anomaly_history", {"ticker": "ARM"}), _context())
     assert not broken.ok and "anomaly memory unavailable" in broken.errors[0]
@@ -2198,6 +2226,13 @@ def test_complete_citations_adds_the_one_item_that_carries_a_misattributed_figur
     uncited, uncited_notes = complete_citations("近 5 日 +12.52%，近 3 月 -18.66%。", evidence, results)
     assert uncited == "近 5 日 +12.52%，近 3 月 -18.66%[W-ARM]。" and uncited_notes == ["12.52 → [W-ARM]", "-18.66 → [W-ARM]"]
     assert complete_citations("近 5 日 +12.52%，成交 9755737183 股。", evidence, results)[0] == "近 5 日 +12.52%，成交 9755737183 股。"
+    # Two carriers that describe the same stock on the same day are as good as one; two on different days are not.
+    best = EvidenceItem("U-0827", "NVDA", "NVDA 2026-08-27 单日 +8.74%，收盘 181.60 美元。", metadata={"date": "2026-08-27"})
+    same_day = EvidenceItem("AT-0827-price", "NVDA", "NVDA 在 2026-08-27 收于 181.60 美元，较前一交易日 +8.74%。", as_of="2026-08-27")
+    other_day = EvidenceItem("U-0310", "NVDA", "NVDA 2026-03-10 单日 +8.74%，收盘 120.00 美元。", metadata={"date": "2026-03-10"})
+    agreeing = ToolEnvelope("market.runup", ResultStatus.COMPLETED, evidence=[best, same_day], metadata={"require_cited_numbers": True})
+    assert complete_citations("涨幅最大的一天是 +8.74%[W-ARM]。", [best, same_day, evidence[2]], [agreeing]) == ("涨幅最大的一天是 +8.74%[W-ARM][U-0827]。", ["8.74 → [U-0827]"])
+    assert complete_citations("涨幅最大的一天是 +8.74%[W-ARM]。", [best, other_day, evidence[2]], [agreeing])[1] == []
     assert complete_citations("", evidence, results) == ("", [])
 
 
@@ -2213,3 +2248,39 @@ def test_llm_synthesizer_completes_citations_before_verifying_a_draft():
     diagnostics = synthesizer.diagnostics()
     assert diagnostics["outcome"] == "clean" and diagnostics["citation_completions"] == ["439.46 → [D-peak]", "-48.8 → [D-peak]", "12.52 → [W-ARM]"]
     assert verify_answer(answer, evidence, answer_mode=plan.answer_mode, results=results).ok
+
+
+def test_move_attributor_reads_a_filing_dated_just_before_the_day_without_being_asked():
+    from v2.agent_v2.agents.filing_reader import FilingRef
+    from v2.agent_v2.agents.move_attributor import MoveAttributor
+
+    listed: list[tuple[str, str, str]] = []
+
+    class Source:
+        def list_filings(self, ticker, since, until):
+            listed.append((ticker, since, until))
+            return [FilingRef(ticker, "8-K", "2026-07-28", "0001-26-000001", "https://www.sec.gov/x/1/")]
+
+    class Reader:
+        source = Source()
+        calls = 0
+
+        def run(self, ticker, context, *, around, today):
+            Reader.calls += 1
+            return ToolEnvelope("filings.read_events", ResultStatus.COMPLETED, subject=ticker, evidence=[EvidenceItem("E-ARM-0728", "ARM", "ARM 2026-07-28：季度营收低于指引区间（8-K 2026-07-28 s1：“Revenue was below the guidance range”）。", metadata={"evidence_scope": "filing_event", "date": "2026-07-28", "quote": "Revenue was below the guidance range", "text": "Revenue was below the guidance range for the quarter."})])
+
+    # The model finishes at once, quoting the filing it was handed; it never asked for filing_events.
+    llm = ScriptedLLM([LLMResponse(text=json.dumps({"action": "finish", "reasons": [{"text": "申报显示营收低于指引区间", "confidence": "中", "source": {"kind": "filing", "id": "E-ARM-0728"}, "quote": "Revenue was below the guidance range"}], "next_steps": [], "note": ""}, ensure_ascii=False))])
+    attributor = MoveAttributor(llm, price_source_factory=lambda: SimpleNamespace(get_prices=_attributor_prices), news=None, filing_reader=Reader(), memory_recall=None, memory_remember=None, sector_for=lambda ticker: "SMH")
+    result = attributor.run("ARM", ExecutionContext("run", NormalizedRequest("q", "q"), BudgetClass.PORTFOLIO), day="2026-07-29", today=date(2026, 9, 9))
+    assert listed == [("ARM", "2026-07-26", "2026-07-29")] and Reader.calls == 1 and result.metrics["reader_calls"] == 1
+    # The filing result was in front of the model before its first action.
+    first_call = llm.calls[0]
+    assert first_call[-1]["role"] == "user" and first_call[-1]["content"].startswith("当日或前 3 天内有申报，已先读取。申报阅读者的结果：")
+    assert [item.metadata["driver_text"] for item in result.evidence if item.metadata.get("claim_role") == "candidate_driver"] == ["申报显示营收低于指引区间"]
+    # No filing in the three days before: nothing is read up front.
+    Source.list_filings = lambda self, ticker, since, until: []
+    Reader.calls = 0
+    quiet = ScriptedLLM([LLMResponse(text='{"action":"finish","reasons":[],"next_steps":[],"note":""}')])
+    MoveAttributor(quiet, price_source_factory=lambda: SimpleNamespace(get_prices=_attributor_prices), news=None, filing_reader=Reader(), memory_recall=None, memory_remember=None, sector_for=lambda ticker: "SMH").run("ARM", ExecutionContext("run", NormalizedRequest("q", "q"), BudgetClass.PORTFOLIO), day="2026-07-29", today=date(2026, 9, 9))
+    assert Reader.calls == 0 and len(quiet.calls[0]) == 2

@@ -90,6 +90,14 @@ def _significant_digits(token: str) -> int:
     return len("".join(digits).lstrip("0"))
 
 
+def _agree(items: list[EvidenceItem]) -> bool:
+    """Several carriers of one figure are as good as one when they describe the same thing on the same day."""
+
+    entities = {(item.entity or "").upper() for item in items}
+    days = {str(item.metadata.get("date") or item.as_of or "")[:10] for item in items}
+    return len(entities) == 1 and "" not in entities and len(days) == 1 and "" not in days
+
+
 def complete_citations(answer: str, evidence: list[EvidenceItem], results: list[ToolEnvelope] | None = None) -> tuple[str, list[str]]:
     """Add the one citation a sentence is missing when the evidence leaves no doubt.
 
@@ -128,7 +136,7 @@ def complete_citations(answer: str, evidence: list[EvidenceItem], results: list[
         unplaced = False
         for token in dict.fromkeys(local.ungrounded):
             carriers = [] if _significant_digits(token) < 3 else [item for item in candidates if item not in cited and not grounding.check(token, _observations([item])).ungrounded]
-            if len(carriers) != 1:
+            if not carriers or (len(carriers) > 1 and not _agree(carriers)):
                 unplaced = True
                 continue
             placed.append((token, carriers[0].id))

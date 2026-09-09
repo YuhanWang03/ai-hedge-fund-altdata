@@ -267,7 +267,16 @@ class MoveAttributor:
         if facts.sector_return_1d is not None:
             task += f"行业基准 {facts.sector_etf} 当日 {_pct(facts.sector_return_1d)}，相对回报 {_pct(facts.relative_1d)}\n"
         task += f"可用动作：{'news、' if allow_news else ''}{'filing_events、' if self.filing_reader is not None else ''}{'memory、' if self.memory_recall is not None else ''}finish"
-        outcome = loop.run(_SYSTEM, task, finish_prompt=_FINISH_NOW)
+        # A filing in the three days up to the move is read before the model
+        # chooses anything: an earnings 8-K the evening before is the
+        # catalyst more often than not, and it must not depend on the model
+        # deciding to look.
+        preamble: list[dict[str, str]] = []
+        if self.filing_reader is not None and self._filing_just_before(ticker, facts.date):
+            loop.handle({"action": "filing_events"}, preamble)
+            if preamble:
+                preamble[-1]["content"] = "当日或前 3 天内有申报，已先读取。" + preamble[-1]["content"]
+        outcome = loop.run(_SYSTEM, task, finish_prompt=_FINISH_NOW, preamble=preamble)
         raw = [row for row in (outcome.final.get("reasons") or []) if isinstance(row, dict)] if outcome.finished else []
         reasons, dropped = _verify_reasons(raw, loop.gathered)
         note = str(outcome.final.get("note") or "") if outcome.finished else outcome.note
@@ -281,6 +290,19 @@ class MoveAttributor:
             except Exception:  # noqa: BLE001 — memory is optional infrastructure
                 remembered = ""
         return self._envelope(facts, reasons, loop.gathered, note=note, next_steps=next_steps, metrics={"rounds": outcome.rounds, "llm_calls": outcome.calls, "elapsed_ms": outcome.elapsed_ms, "stop_reason": outcome.stop_reason, "seconds_allowed": round(outcome.seconds_allowed, 1), "news_calls": loop.gathered.news_calls, "reader_calls": loop.gathered.reader_calls, "memory_calls": loop.gathered.memory_calls, "remembered_as": remembered}, allow_news=allow_news)
+
+    def _filing_just_before(self, ticker: str, day: str) -> bool:
+        """Whether EDGAR lists a filing dated within the three days up to ``day``."""
+
+        source = getattr(self.filing_reader, "source", None)
+        if source is None:
+            return False
+        anchor = date.fromisoformat(day[:10])
+        try:
+            refs = list(source.list_filings(ticker, (anchor - timedelta(days=3)).isoformat(), anchor.isoformat()) or [])
+        except (OSError, ValueError, RuntimeError):  # EDGAR down or a bad row: the loop can still ask later
+            return False
+        return bool(refs)
 
     def _envelope(self, facts: DayFacts, reasons: list[dict[str, Any]], gathered: Gathered, *, note: str, next_steps: list[str], metrics: dict[str, Any], allow_news: bool) -> ToolEnvelope:
         ticker, day = facts.ticker, facts.date

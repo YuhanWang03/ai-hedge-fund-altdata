@@ -530,16 +530,23 @@ def _drawdown_envelope(ticker: str, context: ExecutionContext, price_source, *, 
     for previous, bar in zip(span, span[1:]):
         if float(previous.close) > 0:
             daily.append((str(bar.time)[:10], float(bar.close) / float(previous.close) - 1, float(bar.close)))
-    if up:
-        worst = sorted((row for row in daily if row[1] > 0), key=lambda row: -row[1])[: max(1, min(int(top or 3), 5))]
+    # The extreme days are the ones inside the stretch itself: a big day in an
+    # earlier rise that fell back to the low is not part of this run-up.
+    peak_index, trough_index, drawdown = _extreme_stretch(span, up=up)
+    if drawdown is not None:
+        first, last = sorted((str(span[peak_index].time)[:10], str(span[trough_index].time)[:10]))
+        inside = [row for row in daily if first < row[0] <= last]
     else:
-        worst = sorted((row for row in daily if row[1] < 0), key=lambda row: row[1])[: max(1, min(int(top or 3), 5))]
+        inside = daily
+    if up:
+        worst = sorted((row for row in inside if row[1] > 0), key=lambda row: -row[1])[: max(1, min(int(top or 3), 5))]
+    else:
+        worst = sorted((row for row in inside if row[1] < 0), key=lambda row: row[1])[: max(1, min(int(top or 3), 5))]
     worst.sort(key=lambda row: row[0])
     day_scope, days_key = ("best_day", "best_days") if up else ("worst_day", "worst_days")
     for day, change, close in worst:
         evidence.append(_item(day_scope, ticker, day, f"{ticker} {day} 单日 {change:+.2%}，收盘 {close:.2f} 美元。", context, metric="daily_return", value=change, metadata={"date": day, "close": close}))
     metrics[days_key] = [{"date": day, "return": change, "close": close} for day, change, close in worst]
-    peak_index, trough_index, drawdown = _extreme_stretch(span, up=up)
     peak, trough = span[peak_index], span[trough_index]
     if drawdown is not None:
         peak_day, trough_day = str(peak.time)[:10], str(trough.time)[:10]

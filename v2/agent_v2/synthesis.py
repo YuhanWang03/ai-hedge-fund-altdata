@@ -289,7 +289,7 @@ _FORM = re.compile(r"提交了\s*([0-9A-Z-]+[A-Z])")
 _PERCENT = re.compile(r"[+-]\d+(?:\.\d+)?%")
 
 
-def filing_line(result: ToolEnvelope, since: str = "", until: str = "") -> str:
+def filing_line(result: ToolEnvelope, since: str = "", until: str = "", *, up: bool = False) -> str:
     """The filings inside the decline on one line; their contents were read per worst day."""
 
     dated = []
@@ -304,7 +304,7 @@ def filing_line(result: ToolEnvelope, since: str = "", until: str = "") -> str:
         dated.append(f"{day} {form}[{item.id}]")
     if not dated:
         return ""
-    return f"{result.subject} 这段下跌期间 {len(dated)} 份申报：" + "；".join(dated) + "。"
+    return f"{result.subject} 这段{'上涨' if up else '下跌'}期间 {len(dated)} 份申报：" + "；".join(dated) + "。"
 
 
 def anomaly_lines(result: ToolEnvelope, since: str = "", until: str = "", covered: frozenset[str] = frozenset()) -> str:
@@ -455,6 +455,7 @@ class EvidenceSummarySynthesizer:
                 trough_date = stretch[-1] if stretch else ""
                 filings_until = _days_after(trough_date, 3) if trough_date else ""
                 has_span = drawdown is not None and any(item.metadata.get("evidence_scope") == "benchmark_span" for item in drawdown.evidence)
+                rising = drawdown is not None and (drawdown.capability == "market.runup" or drawdown.metadata.get("direction") == "up")
                 attributed = frozenset(str(result.metadata.get("date") or "")[:10] for result in results if result.capability == "market.attribute_move" and result.ok)
                 blocks = [opening]
                 # A fixed reading order, not the order the tasks finished in:
@@ -470,7 +471,7 @@ class EvidenceSummarySynthesizer:
                         blocks.append(drawdown_lines(result))
                     elif result.capability == "filings.recent" and result.ok and attributed:
                         # The attribution blocks below read the filings; here they are only listed.
-                        blocks.append(filing_line(result, decline_start, filings_until))
+                        blocks.append(filing_line(result, decline_start, filings_until, up=rising))
                     elif result.capability == "market.anomaly_history" and result.ok and attributed:
                         blocks.append(anomaly_lines(result, decline_start, trough_date, attributed))
                     elif result.capability in {"research.stock", "research.compare", "filings.recent", "filings.read_events", "market.anomaly_history"}:

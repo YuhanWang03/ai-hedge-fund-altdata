@@ -108,10 +108,14 @@ def anomaly_history_envelope(ticker: str, context: ExecutionContext, recall: Cal
         return ToolEnvelope("market.anomaly_history", ResultStatus.FAILED, subject=ticker, errors=[f"anomaly memory unavailable: {type(exc).__name__}: {str(exc)[:120]}"])
     rows.sort(key=lambda row: str(getattr(row, "date", "")), reverse=True)
     evidence: list[EvidenceItem] = []
-    for row in rows[:6]:
+    for row in rows:
+        if len(evidence) >= 6:
+            break
         day = str(getattr(row, "date", "") or "")[:10]
         flags = str(getattr(row, "flags", "") or "")
         doc = " ".join(str(getattr(row, "doc", "") or "").split())[:240]
+        if not flags and doc.strip("。 .").upper() in {"", ticker.upper()}:
+            continue  # a record with neither flags nor content says nothing
         evidence.append(
             EvidenceItem(
                 id=_evidence_id("anomaly", ticker, f"{day}:{flags}"),

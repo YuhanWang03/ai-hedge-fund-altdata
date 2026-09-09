@@ -101,7 +101,9 @@ class BoundedLoop:
     def handle(self, action: dict[str, Any], messages: list[dict[str, str]]) -> bool:  # pragma: no cover - abstract
         raise NotImplementedError
 
-    def run(self, system: str, task: str, *, finish_prompt: str) -> LoopOutcome:
+    def run(self, system: str, task: str, *, finish_prompt: str, preamble: list[dict[str, str]] | None = None) -> LoopOutcome:
+        """Drive the loop; ``preamble`` messages (tool results gathered before the first round) follow the task."""
+
         outcome = LoopOutcome(seconds_allowed=self.limits.seconds)
         started = time.monotonic()
         if self.llm is None:
@@ -110,7 +112,7 @@ class BoundedLoop:
         if self.limits.seconds < MINIMUM_LOOP_SECONDS:
             outcome.stop_reason = "no_budget"
             return outcome
-        messages: list[dict[str, str]] = [{"role": "system", "content": system}, {"role": "user", "content": task}]
+        messages: list[dict[str, str]] = [{"role": "system", "content": system}, {"role": "user", "content": task}, *(preamble or [])]
         stop = "rounds"
         for _ in range(self.limits.max_rounds):
             if time.monotonic() - started > self.limits.seconds:
