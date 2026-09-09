@@ -21,14 +21,15 @@ test('empty research does not invent companies', () => {
   assert.match(html, /本次未返回可绘制/);
   assert.doesNotMatch(html, /NVDA|MSFT|TSM/);
 });
-test('uses actual ticker, relationship categories and evidence states', () => {
+test('nodes show actual candidate descriptions instead of evidence states', () => {
   const html = render('ACME', [
-    { target_company: 'SUP', relationship_type: 'SUPPLIER', evidence_status: 'NO_EVIDENCE' },
-    { target_company: 'CLIENT', relationship_type: 'customer', evidence_status: 'CO_MENTION' },
-    { target_company: 'PEER', relationship_type: 'COMPETITOR', evidence_status: 'EVIDENCE_FOUND' },
+    { target_company: 'SUP', relationship_type: 'SUPPLIER', evidence_status: 'NO_EVIDENCE', description: '先进制程代工' },
+    { target_company: 'CLIENT', relationship_type: 'customer', evidence_status: 'CO_MENTION', description: '训练集群采购' },
+    { target_company: 'PEER', relationship_type: 'COMPETITOR', evidence_status: 'EVIDENCE_FOUND', description: '定制加速器' },
     { target_company: 'ALLY', relationship_type: 'partner' },
   ]);
-  for (const value of ['ACME', 'SUP', 'CLIENT', 'PEER', 'ALLY', '未找到关系证据', '仅搜索共同提及', '发现关系证据', '其他关系']) assert.ok(html.includes(value));
+  for (const value of ['ACME', 'SUP', 'CLIENT', 'PEER', 'ALLY', '先进制程代工', '训练集群采购', '定制加速器', '暂无候选说明', '其他关系']) assert.ok(html.includes(value));
+  assert.doesNotMatch(html, /未找到关系证据|仅搜索共同提及|发现关系证据/);
   assert.equal((html.match(/class="relation-map-node(?:\s|")/g) || []).length, 4);
   assert.doesNotMatch(html, /NVDA/);
 });

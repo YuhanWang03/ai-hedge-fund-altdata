@@ -283,8 +283,7 @@
 .relation-map-nodes { display: grid; grid-template-columns: repeat(auto-fit,minmax(100px,1fr)); gap: 8px; }
 .relation-map-node { min-width: 0; border: 1px solid #e1e8f2; border-radius: 7px; background: #fff; color: #27364c; text-align: left; padding: 9px; cursor: pointer; }
 .relation-map-node strong { display: block; font-size: 12px; overflow-wrap: anywhere; }
-.relation-map-node small { display: block; margin-top: 5px; color: #946000; font-size: 10px; line-height: 1.5; }
-.relation-map-node.has-evidence small { color: #3769b0; }
+.relation-map-node small { display: block; margin-top: 5px; color: #657286; font-size: 10px; line-height: 1.6; overflow-wrap: anywhere; }
 .relation-map-node:hover, .relation-map-node[aria-pressed="true"] { border-color: #6497e7; background: #f1f6ff; }
 .relation-map-node:focus-visible { outline: 2px solid #91b4ee; outline-offset: 2px; }
 .relation-map-center { grid-area: center; z-index: 1; border: 1px solid #b8cdf3; border-radius: 12px; background: #eaf2ff; padding: 20px 8px; text-align: center; color: #326bcb; }
