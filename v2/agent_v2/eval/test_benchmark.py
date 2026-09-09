@@ -72,3 +72,62 @@ def test_llm_mode_counts_calls_and_reports_the_verifier_outcome():
     stubborn = ScriptedLLM([LLMResponse(text=f"NVDA 今日上涨 9.99%。[{evidence_id}]"), LLMResponse(text=f"NVDA 今日上涨 8.88%。[{evidence_id}]")])
     score = run_v2(case, mode="v2_llm", llm_factory=lambda: stubborn)
     assert score.verify_outcome == "fallback" and score.grounded and "3.85%" in score.answer
+
+
+def test_engine_fixtures_synthesize_production_shaped_envelopes_offline():
+    from v2.agent_v2.eval.engine_fixtures import PROFILES, synthesize_market_envelope, synthesize_research_envelope
+    from v2.agent_v2.models import AnswerMode
+    from v2.agent_v2.verification import verify_answer
+
+    research = synthesize_research_envelope("NVDA", "overview")
+    assert research.ok and research.run_id.startswith("synthetic-nvda")
+    assert any(item.metadata.get("citation_kind") == "metrics" for item in research.evidence)
+    assert any("55.3%" in item.claim for item in research.evidence)
+    assert synthesize_research_envelope("NVDA", "overview") == research  # deterministic
+    for ticker in ("NVDA", "SMCI"):
+        for capability in ("market.performance", "market.explain_move"):
+            envelope = synthesize_market_envelope(capability, ticker)
+            assert envelope.ok, (capability, ticker, envelope.errors)
+            assert verify_answer(envelope.metadata["narrative"], envelope.evidence, answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[envelope]).ok
+    performance = synthesize_market_envelope("market.performance", "ARM")
+    move = synthesize_market_envelope("market.explain_move", "ARM")
+    assert performance.metrics["close"] == move.metrics["price"]
+    assert len(PROFILES) >= 11
+
+
+def test_recorded_store_round_trips_envelopes_and_wins_over_synthesis(tmp_path):
+    from v2.agent_v2.eval.engine_fixtures import synthesize_research_envelope
+    from v2.agent_v2.eval.recorded import RecordedStore, envelope_from_dict, envelope_to_dict
+
+    envelope = synthesize_research_envelope("AMD", "filings")
+    assert envelope_from_dict(envelope_to_dict(envelope)).to_dict() == envelope.to_dict()
+    store = RecordedStore(tmp_path)
+    assert store.load("research.stock", "AMD:filings") is None
+    store.save("research.stock", "AMD:filings", envelope)
+    reloaded = RecordedStore(tmp_path)
+    assert reloaded.keys("research.stock") == ["AMD:filings"]
+    assert reloaded.load("research.stock", "AMD:filings").to_dict() == envelope.to_dict()
+    assert reloaded.summary() == {"research.stock": 1}
+
+
+def test_record_fixtures_cli_writes_synthetic_envelopes(tmp_path, capsys):
+    from v2.agent_v2.record_fixtures import main
+
+    assert main(["--synthetic", "--tickers", "NVDA", "--focuses", "overview,risk", "--dir", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "wrote 4 envelope(s)" in out
+    assert (tmp_path / "research.stock.json").is_file() and (tmp_path / "market.explain_move.json").is_file()
+
+
+def test_engine_fixture_mode_runs_the_real_adapters_and_scores_without_v1_fact_keys():
+    from v2.agent_v2.eval.benchmark import run_mode
+
+    cases = tuple(case for case in DEV_CASES if case.id in {"s01", "p01", "m02", "r04"})
+    report = run_mode("v2_rules", cases, fixtures="engine")
+    assert report.mode == "v2_rules@engine"
+    by_id = {score.case_id: score for score in report.scores}
+    assert not any(score.error for score in report.scores)
+    assert all(not score.keyed for score in report.scores)
+    assert by_id["p01"].passed  # two focuses on one ticker share engine evidence ids without conflict
+    assert by_id["m02"].called.count("research.stock") >= 2  # fan-out over holdings
+    assert by_id["s01"].grounded

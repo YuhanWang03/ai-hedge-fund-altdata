@@ -49,13 +49,15 @@ _PORTFOLIO_WORDS = re.compile(r"持仓|仓位|组合|账户|portfolio", re.I)
 _SELF = re.compile(r"我(?!们)")
 _WATCHLIST_SCOPE = re.compile(r"关注列表|关注了|自选|watchlist|关注的", re.I)
 _LIST_RANKING = re.compile(r"哪只|哪个|哪几只|哪些|每只|每个|那几只|那些|谁|最", re.I)
+#: A list question needs an evaluative word before "which one" means "look at each".
+_LIST_EVALUATE = re.compile(r"最|值得|表现|怎么样|如何|强|弱|好|差|狠|危险", re.I)
 _HELP = re.compile(r"你能帮我做什么|你能做什么|能做什么|有什么功能|会做什么|怎么用|如何使用", re.I)
 _BRIEFING = re.compile(r"值得注意|该知道|需要注意|有什么新情况|有什么动静|需要关注的", re.I)
 
 # -- account topics ----------------------------------------------------------
 _PERFORMANCE = re.compile(r"盈亏|赚|亏|收益|补回来|回报", re.I)
 _RISK = re.compile(r"风险|回撤|集中度|暴露|占多少|各占|占比|健康|分化|危险|减仓|加仓", re.I)
-_EARNINGS_SCHEDULE = re.compile(r"(?:快|即将|近期|接下来|未来|两周|下周|这周|本周|谁要|谁会|日历|离.{0,6}最近|哪些.{0,6}发财报).{0,12}财报|财报.{0,12}(?:日历|快到|临近|最近的|谁)|谁要发财报|要发财报", re.I)
+_EARNINGS_SCHEDULE = re.compile(r"(?:快|即将|近期|接下来|未来|两周|下周|这周|本周|谁要|谁会|日历|离.{0,6}最近|哪些.{0,6}发财报).{0,12}财报|财报.{0,12}(?:日历|快到|临近|最近的|最近|谁)|谁要发财报|要发财报|离.{0,4}财报.{0,4}(?:最近|最快)", re.I)
 _EARNINGS_EACH = re.compile(r"(?:下次|各自|每只|都是什么时候|分别).{0,12}财报|财报.{0,8}(?:都是什么时候|分别|各自)", re.I)
 _POSITIONING = re.compile(r"加仓|减仓|建仓|清仓", re.I)
 
@@ -335,7 +337,8 @@ class RulePlanner:
             per_ticker = explain or bool(focuses) or bool(_EARNINGS_EACH.search(text))
             if _EARNINGS_EACH.search(text) and "earnings" not in focuses:
                 focuses = [*focuses, "earnings"]
-            if not per_ticker and _LIST_RANKING.search(text) and not tasks:
+            only_scope = all(task.capability in {"account.portfolio", "state.read"} for task in tasks)
+            if not per_ticker and _LIST_RANKING.search(text) and _LIST_EVALUATE.search(text) and only_scope:
                 explain, per_ticker = True, True
             source = "state-watchlist" if watchlist_scope and not explicit_portfolio else "account-portfolio"
             if source == "account-portfolio" and (explicit_portfolio or per_ticker or not tasks):

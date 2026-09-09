@@ -1134,3 +1134,27 @@ def test_llm_planner_accepts_fan_out_tasks_and_adds_the_source_dependency():
     plan = StructuredLLMPlanner(llm, default_catalog()).plan(request, route(request))
     assert plan.tasks[1].fan_out == {"from": "t1", "field": "tickers", "argument": "ticker", "max": 6}
     assert plan.tasks[1].depends_on == ("t1",)
+
+
+def test_ledger_accepts_the_same_fact_from_another_run_but_rejects_a_different_claim():
+    from v2.agent_v2.evidence import EvidenceConflictError, EvidenceLedger
+
+    ledger = EvidenceLedger()
+    first = EvidenceItem("evidence-1", "NVDA", "Revenue growth is +55.3%.", metric="revenue_growth", value=0.553, producer_run_id="run-a", metadata={"snapshot": "a"})
+    ledger.add(first)
+    ledger.add(EvidenceItem("evidence-1", "NVDA", "Revenue growth is +55.3%.", metric="revenue_growth", value=0.553, producer_run_id="run-b", metadata={"snapshot": "b"}))
+    assert ledger.get("evidence-1").producer_run_id == "run-a"
+    with pytest.raises(EvidenceConflictError):
+        ledger.add(EvidenceItem("evidence-1", "NVDA", "Revenue growth is +12.0%.", metric="revenue_growth", value=0.12))
+
+
+def test_result_level_citation_caps_count_each_results_own_evidence():
+    first = [EvidenceItem("A1", "NVDA", "candidate a", metadata={"claim_role": "candidate_driver"})]
+    second = [EvidenceItem("B1", "AMD", "candidate b", metadata={"claim_role": "candidate_driver"})]
+    cap = {"max_cited": {"metadata": {"claim_role": "candidate_driver"}, "max": 1, "warning": "过多弱候选线索"}}
+    results = [
+        ToolEnvelope("market.explain_move", ResultStatus.COMPLETED, subject="NVDA", evidence=first, metadata={"answer_constraints": [cap]}),
+        ToolEnvelope("market.explain_move", ResultStatus.COMPLETED, subject="AMD", evidence=second, metadata={"answer_constraints": [cap]}),
+    ]
+    report = verify_answer("NVDA 可能与线索 a 相关。[A1] AMD 可能与线索 b 相关。[B1]", [*first, *second], answer_mode=AnswerMode.RESEARCH_GROUNDED, results=results)
+    assert report.ok, report.warnings

@@ -11,6 +11,26 @@ class EvidenceConflictError(ValueError):
     """One evidence identifier was reused for different evidence content."""
 
 
+def same_fact(left: EvidenceItem, right: EvidenceItem) -> bool:
+    """Two items state the same fact even if different runs produced them.
+
+    The Research Engine derives evidence ids from claim content, so two runs
+    for one ticker (two focuses in one plan, or a cached and a fresh run)
+    legitimately reuse an id.  Only a *different* claim under the same id is
+    a conflict.
+    """
+
+    return (
+        left.entity == right.entity
+        and left.claim == right.claim
+        and left.metric == right.metric
+        and left.value == right.value
+        and left.unit == right.unit
+        and left.period == right.period
+        and left.source_id == right.source_id
+    )
+
+
 class EvidenceLedger:
     def __init__(self) -> None:
         self._items: dict[str, EvidenceItem] = {}
@@ -19,7 +39,9 @@ class EvidenceLedger:
         if not item.id:
             raise ValueError("evidence id is required")
         current = self._items.get(item.id)
-        if current is not None and current != item:
+        if current is not None:
+            if current == item or same_fact(current, item):
+                return  # first producer wins; the fact is identical
             raise EvidenceConflictError(f"conflicting evidence id: {item.id}")
         self._items[item.id] = item
 

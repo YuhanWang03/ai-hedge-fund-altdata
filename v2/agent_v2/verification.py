@@ -16,8 +16,8 @@ evidence and results:
     ``require_cited_numbers``: every sentence with a figure needs a citation.
     ``answer_constraints``: list of ``{"forbid": regex, "warning": str}`` for
     the whole answer, or ``{"max_cited": {"metadata": {...}, "max": n,
-    "warning": str}}`` capping how many items with matching metadata may be
-    cited in total.
+    "warning": str}}`` capping how many of *this result's* items with matching
+    metadata may be cited.
 """
 
 from __future__ import annotations
@@ -156,6 +156,7 @@ def _answer_warnings(answer: str, evidence: list[EvidenceItem], results: list[To
     cited = [known[value] for value in _CITATION.findall(answer) if value in known]
     warnings: list[str] = []
     for result in results:
+        own = {item.id for item in result.evidence}
         for rule in result.metadata.get("answer_constraints") or []:
             if not isinstance(rule, dict):
                 continue
@@ -164,7 +165,8 @@ def _answer_warnings(answer: str, evidence: list[EvidenceItem], results: list[To
             cap = rule.get("max_cited")
             if isinstance(cap, dict):
                 wanted = dict(cap.get("metadata") or {})
-                matching = {item.id for item in cited if all(item.metadata.get(key) == value for key, value in wanted.items())}
+                # A cap is about this result's evidence: six tickers may each show one candidate.
+                matching = {item.id for item in cited if item.id in own and all(item.metadata.get(key) == value for key, value in wanted.items())}
                 if len(matching) > int(cap.get("max", 0)):
                     warnings.append(str(cap.get("warning") or f"{result.capability} 引用了过多同类证据"))
     return warnings

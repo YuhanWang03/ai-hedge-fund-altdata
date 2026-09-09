@@ -15,6 +15,13 @@ Three modes share one question set and one answer key:
 
 Every mode runs on recorded observations, so a score depends only on the code
 under test and, for ``v2_llm``, the model.
+
+Two fixture layers feed the V2 modes.  ``v1`` serves V1's cards, so V1's fact
+keys gate the pass.  ``engine`` serves engine-shaped research and market
+envelopes (live recordings when present, offline synthesis otherwise); V1's
+fact keys do not describe those numbers, so in that layer a case passes on
+tool recall, verification and error-freedom, and fact recall is reported
+without gating.
 """
 
 from __future__ import annotations
@@ -26,7 +33,7 @@ from typing import Any, Callable, Iterable
 
 from v2.agent.eval.scoring import fact_present, normalise
 from v2.agent_v2.eval.benchmark_cases import DEV_CASES, HOLDOUT_CASES, BenchmarkCase, by_category
-from v2.agent_v2.eval.benchmark_fixtures import RecordedCalls, build_benchmark_registry
+from v2.agent_v2.eval.benchmark_fixtures import FIXTURE_MODES, RecordedCalls, build_benchmark_registry
 from v2.agent_v2.llm import LLMEvidenceSynthesizer, StructuredLLMPlanner
 from v2.agent_v2.orchestrator import AgentV2, AgentV2Config
 from v2.agent_v2.synthesis import EvidenceSummarySynthesizer
@@ -74,10 +81,14 @@ class BenchmarkScore:
     error: str
     answer: str
     called: tuple[str, ...]
+    #: Whether the fixtures behind this run are the ones the fact keys describe.
+    keyed: bool = True
+    fixtures: str = "v1"
 
     @property
     def answer_correct(self) -> bool:
-        return self.tool_recall == 1.0 and self.fact_recall == 1.0 and not self.forbidden_hit and not self.error
+        facts_ok = self.fact_recall == 1.0 if self.keyed else True
+        return self.tool_recall == 1.0 and facts_ok and not self.forbidden_hit and not self.error
 
     @property
     def passed(self) -> bool:
@@ -92,7 +103,7 @@ class BenchmarkScore:
             return f"运行错误：{self.error[:80]}"
         if self.missing_tools:
             return "缺能力：" + ", ".join(self.missing_tools)
-        if self.missing_facts:
+        if self.missing_facts and self.keyed:
             return "缺事实：" + ", ".join(self.missing_facts[:3])
         if self.forbidden_hit:
             return "错误归属：" + ", ".join(self.forbidden_hit[:2])
@@ -147,7 +158,7 @@ class ModeReport:
         return out
 
 
-def _score(case: BenchmarkCase, *, mode: str, answer: str, called: Iterable[str], grounded: bool, verify_outcome: str = "", status: str = "", route: str = "", tool_calls: int = 0, llm_calls: int = 0, tokens: int = 0, elapsed_ms: int = 0, stop_reason: str = "", error: str = "") -> BenchmarkScore:
+def _score(case: BenchmarkCase, *, mode: str, answer: str, called: Iterable[str], grounded: bool, verify_outcome: str = "", status: str = "", route: str = "", tool_calls: int = 0, llm_calls: int = 0, tokens: int = 0, elapsed_ms: int = 0, stop_reason: str = "", error: str = "", fixtures: str = "v1") -> BenchmarkScore:
     called_set = set(called)
     if "research.compare" in called_set:
         called_set.add("research.stock")  # compare is V2's own way of researching several tickers
@@ -183,6 +194,8 @@ def _score(case: BenchmarkCase, *, mode: str, answer: str, called: Iterable[str]
         error=error,
         answer=answer,
         called=tuple(called),
+        keyed=fixtures == "v1",
+        fixtures=fixtures,
     )
 
 
@@ -210,8 +223,8 @@ def run_v1_baseline(case: BenchmarkCase) -> BenchmarkScore:
     return BenchmarkScore(**{**asdict(score), "tool_recall": v1_recall, "missing_tools": tuple(v1_missing), "unmapped_tools": ()})
 
 
-def _v2_agent(mode: str, llm_factory: Callable[[], Any] | None) -> tuple[AgentV2, RecordedCalls, CountingLLM | None, LLMEvidenceSynthesizer | None]:
-    registry, calls = build_benchmark_registry()
+def _v2_agent(mode: str, llm_factory: Callable[[], Any] | None, fixtures: str) -> tuple[AgentV2, RecordedCalls, CountingLLM | None, LLMEvidenceSynthesizer | None]:
+    registry, calls = build_benchmark_registry(fixtures=fixtures)
     if mode == "v2_rules":
         return AgentV2(catalog=registry.catalog, registry=registry, synthesizer=EvidenceSummarySynthesizer(), config=AgentV2Config(max_seconds=60)), calls, None, None
     if llm_factory is None:
@@ -224,13 +237,13 @@ def _v2_agent(mode: str, llm_factory: Callable[[], Any] | None) -> tuple[AgentV2
     return agent, calls, llm, synthesizer
 
 
-def run_v2(case: BenchmarkCase, *, mode: str, llm_factory: Callable[[], Any] | None = None) -> BenchmarkScore:
-    agent, calls, llm, synthesizer = _v2_agent(mode, llm_factory)
+def run_v2(case: BenchmarkCase, *, mode: str, llm_factory: Callable[[], Any] | None = None, fixtures: str = "v1") -> BenchmarkScore:
+    agent, calls, llm, synthesizer = _v2_agent(mode, llm_factory, fixtures)
     started = time.time()
     try:
         result = agent.run(case.query)
     except Exception as exc:  # noqa: BLE001 — a crash is a scored failure
-        return _score(case, mode=mode, answer="", called=calls.names(), grounded=False, error=f"{type(exc).__name__}: {exc}", elapsed_ms=int((time.time() - started) * 1000))
+        return _score(case, mode=mode, answer="", called=calls.names(), grounded=False, error=f"{type(exc).__name__}: {exc}", elapsed_ms=int((time.time() - started) * 1000), fixtures=fixtures)
     outcome = synthesizer.last_outcome if synthesizer is not None else "deterministic"
     return _score(
         case,
@@ -247,27 +260,31 @@ def run_v2(case: BenchmarkCase, *, mode: str, llm_factory: Callable[[], Any] | N
         elapsed_ms=result.elapsed_ms,
         stop_reason=result.stop_reason,
         error=result.error,
+        fixtures=fixtures,
     )
 
 
-def run_mode(mode: str, cases: tuple[BenchmarkCase, ...], *, repeat: int = 1, llm_factory: Callable[[], Any] | None = None, on_case: Callable[[BenchmarkScore], None] | None = None) -> ModeReport:
+def run_mode(mode: str, cases: tuple[BenchmarkCase, ...], *, repeat: int = 1, llm_factory: Callable[[], Any] | None = None, fixtures: str = "v1", on_case: Callable[[BenchmarkScore], None] | None = None) -> ModeReport:
     if mode not in MODES:
         raise ValueError(f"unknown mode: {mode}")
+    if fixtures not in FIXTURE_MODES:
+        raise ValueError(f"unknown fixture mode: {fixtures}")
     if mode != "v2_llm":
         repeat = 1  # deterministic modes cannot flake
-    report = ModeReport(mode=mode, repeat=repeat)
+    label = mode if fixtures == "v1" or mode == "v1_baseline" else f"{mode}@{fixtures}"
+    report = ModeReport(mode=label, repeat=repeat)
     for case in cases:
         for _ in range(repeat):
-            score = run_v1_baseline(case) if mode == "v1_baseline" else run_v2(case, mode=mode, llm_factory=llm_factory)
+            score = run_v1_baseline(case) if mode == "v1_baseline" else run_v2(case, mode=mode, llm_factory=llm_factory, fixtures=fixtures)
             report.scores.append(score)
             if on_case is not None:
                 on_case(score)
     return report
 
 
-def run_benchmark(modes: Iterable[str] = ("v1_baseline", "v2_rules"), *, holdout: bool = False, repeat: int = 1, llm_factory: Callable[[], Any] | None = None) -> list[ModeReport]:
+def run_benchmark(modes: Iterable[str] = ("v1_baseline", "v2_rules"), *, holdout: bool = False, repeat: int = 1, llm_factory: Callable[[], Any] | None = None, fixtures: str = "v1") -> list[ModeReport]:
     cases = HOLDOUT_CASES if holdout else DEV_CASES
-    return [run_mode(mode, cases, repeat=repeat, llm_factory=llm_factory) for mode in modes]
+    return [run_mode(mode, cases, repeat=repeat, llm_factory=llm_factory, fixtures=fixtures) for mode in modes]
 
 
 # -- rendering ----------------------------------------------------------------
@@ -281,7 +298,7 @@ def render_comparison(reports: list[ModeReport]) -> str:
     rows = [
         ("通过率", lambda r: _pct(r.pass_rate)),
         ("工具召回", lambda r: _pct(r.mean("tool_recall"))),
-        ("事实召回", lambda r: _pct(r.mean("fact_recall"))),
+        ("事实召回", lambda r: _pct(r.mean("fact_recall")) + ("" if all(s.keyed for s in r.scores) else "*")),
         ("错误归属命中", lambda r: str(sum(1 for s in r.scores if s.forbidden_hit))),
         ("校验通过率", lambda r: _pct(r.rate(lambda s: s.grounded))),
         ("校验结果", lambda r: ", ".join(f"{k}={v}" for k, v in sorted(r.verify_outcomes().items())) or "-"),
@@ -293,23 +310,27 @@ def render_comparison(reports: list[ModeReport]) -> str:
         ("耗时 ms / 例", lambda r: f"{r.mean('elapsed_ms'):.0f}"),
         ("稳定失败", lambda r: str(len(r.stable_failures()))),
     ]
-    header = f"{'':14}" + "".join(f"{r.mode:>14}" for r in reports)
+    width = max(14, *(len(r.mode) + 2 for r in reports))
+    header = f"{'':14}" + "".join(f"{r.mode:>{width}}" for r in reports)
     lines = [header, "─" * len(header)]
     for label, cell in rows:
-        lines.append(f"{label:14}" + "".join(f"{cell(r):>14}" for r in reports))
+        lines.append(f"{label:14}" + "".join(f"{cell(r):>{width}}" for r in reports))
+    if any(not s.keyed for r in reports for s in r.scores):
+        lines.append("* engine fixtures: V1 fact keys are informational, not gating")
     return "\n".join(lines)
 
 
 def render_categories(reports: list[ModeReport]) -> str:
     categories = list(dict.fromkeys(score.category for report in reports for score in report.scores))
-    header = f"{'类别':14}" + "".join(f"{r.mode:>14}" for r in reports)
+    width = max(14, *(len(r.mode) + 2 for r in reports))
+    header = f"{'类别':14}" + "".join(f"{r.mode:>{width}}" for r in reports)
     lines = [header, "─" * len(header)]
     for category in categories:
         cells = []
         for report in reports:
             passed, total = report.by_category().get(category, (0, 0))
             cells.append(f"{passed}/{total}")
-        lines.append(f"{category:14}" + "".join(f"{cell:>14}" for cell in cells))
+        lines.append(f"{category:14}" + "".join(f"{cell:>{width}}" for cell in cells))
     return "\n".join(lines)
 
 

@@ -104,9 +104,22 @@ def _research_envelope(ticker: str, focus: str) -> ToolEnvelope:
     )
 
 
-def build_benchmark_registry(calls: RecordedCalls | None = None) -> tuple[CapabilityRegistry, RecordedCalls]:
-    """A V2 registry whose every capability answers from V1's recorded cards."""
+FIXTURE_MODES = ("v1", "engine")
 
+
+def build_benchmark_registry(calls: RecordedCalls | None = None, *, fixtures: str = "v1") -> tuple[CapabilityRegistry, RecordedCalls]:
+    """A V2 registry that answers from recorded observations.
+
+    ``fixtures="v1"`` serves V1's cards for everything, so V1's answer keys
+    stay checkable.  ``fixtures="engine"`` serves research and market
+    capabilities from engine-shaped envelopes instead: a live recording under
+    ``eval/recorded/`` when one exists, else the offline synthesis in
+    ``engine_fixtures``.  Account, state, macro, ETF and 13F stay on V1 cards
+    in both modes because they wrap the same responders.
+    """
+
+    if fixtures not in FIXTURE_MODES:
+        raise ValueError(f"unknown fixture mode: {fixtures}")
     recorded = calls or RecordedCalls()
     registry = CapabilityRegistry(default_catalog())
 
@@ -131,8 +144,28 @@ def build_benchmark_registry(calls: RecordedCalls | None = None) -> tuple[Capabi
     register("etf.ark_activity", lambda a, c: _wrap("etf.ark_activity", str(a.get("symbol") or ""), _card("etf_view", str(a.get("symbol") or "").upper())))
     register("macro.overview", lambda a, c: _wrap("macro.overview", "macro", _card("macro_view", "_")))
     register("macro.release", lambda a, c: _wrap("macro.release", str(a.get("release_type") or ""), _card("release_check", str(a.get("release_type") or "").lower())))
-    register("market.explain_move", lambda a, c: _wrap("market.explain_move", str(a.get("ticker") or "").upper(), _card("explain_move", str(a.get("ticker") or "").upper())))
-    register("market.performance", lambda a, c: _wrap("market.performance", str(a.get("ticker") or "").upper(), _card("explain_move", str(a.get("ticker") or "").upper())))
+    if fixtures == "engine":
+        from v2.agent_v2.eval.engine_fixtures import synthesize_market_envelope, synthesize_research_envelope
+        from v2.agent_v2.eval.recorded import RecordedStore
+
+        store = RecordedStore()
+
+        def research_envelope(ticker: str, focus: str) -> ToolEnvelope:
+            return store.load("research.stock", f"{ticker}:{focus}") or synthesize_research_envelope(ticker, focus)
+
+        def market_handler(capability: str):
+            def handler(arguments: dict[str, Any], context: ExecutionContext) -> ToolEnvelope:
+                ticker = str(arguments.get("ticker") or "").upper()
+                return store.load(capability, ticker) or synthesize_market_envelope(capability, ticker)
+
+            return handler
+
+        register("market.explain_move", market_handler("market.explain_move"))
+        register("market.performance", market_handler("market.performance"))
+    else:
+        research_envelope = _research_envelope
+        register("market.explain_move", lambda a, c: _wrap("market.explain_move", str(a.get("ticker") or "").upper(), _card("explain_move", str(a.get("ticker") or "").upper())))
+        register("market.performance", lambda a, c: _wrap("market.performance", str(a.get("ticker") or "").upper(), _card("explain_move", str(a.get("ticker") or "").upper())))
 
     def state_read(arguments: dict[str, Any], context: ExecutionContext) -> ToolEnvelope:
         section = str(arguments.get("section") or "watchlist")
@@ -141,12 +174,12 @@ def build_benchmark_registry(calls: RecordedCalls | None = None) -> tuple[Capabi
 
     register("state.read", state_read)
     register("state.mutate", lambda a, c: _wrap("state.mutate", str(a.get("operation") or ""), f"已执行 {a.get('operation')}（fixture）。"))
-    register("research.stock", lambda a, c: _research_envelope(str(a.get("ticker") or "").upper(), str(a.get("focus") or "overview")))
+    register("research.stock", lambda a, c: research_envelope(str(a.get("ticker") or "").upper(), str(a.get("focus") or "overview")))
 
     def compare(arguments: dict[str, Any], context: ExecutionContext) -> ToolEnvelope:
         tickers = [str(value).upper() for value in arguments.get("tickers", [])][:4]
         dimensions = arguments.get("dimensions") or ["overview"]
-        parts = [_research_envelope(ticker, str(dimensions[0])) for ticker in tickers]
+        parts = [research_envelope(ticker, str(dimensions[0])) for ticker in tickers]
         return ToolEnvelope(
             "research.compare",
             ResultStatus.COMPLETED if all(part.ok for part in parts) else ResultStatus.PARTIAL_ERROR,

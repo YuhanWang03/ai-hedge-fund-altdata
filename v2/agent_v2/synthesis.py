@@ -57,6 +57,10 @@ class EvidenceSummarySynthesizer:
                     lines.append(f"- {item.claim} [{item.id}]")
                 elif item.claim:
                     lines[-1] += f" [{item.id}]"
-            lines.extend(f"数据限制：{item}" for item in result.limitations[:3])
+            # Limitations often carry figures; cite the adapter's limitation
+            # evidence when it exists so the line stays verifiable.
+            limitation_item = next((item for item in result.evidence if item.metadata.get("citation_kind") == "limitations"), None)
+            suffix = f" [{limitation_item.id}]" if limitation_item is not None else ""
+            lines.extend(f"数据限制：{item}{suffix}" for item in result.limitations[:3])
             blocks.append("\n".join(lines))
         return "\n\n".join(block for block in blocks if block)
