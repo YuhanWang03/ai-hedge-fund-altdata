@@ -728,7 +728,7 @@ def _framed_registry() -> CapabilityRegistry:
         window = EvidenceItem(f"D-{ticker}-window", ticker, f"{ticker} 近 3 月（2026-06-10 至 2026-09-08）区间回报 -21.40%。", metadata={"evidence_scope": "window_return"})
         worst = EvidenceItem(f"D-{ticker}-0805", ticker, f"{ticker} 2026-08-05 单日 -13.21%，收盘 275.10 美元。", metadata={"evidence_scope": "worst_day", "date": "2026-08-05"})
         narrative = f"{ticker} 近 3 月（2026-06-10 至 2026-09-08）区间回报 -21.40%[D-{ticker}-window]。\n{ticker} 近 3 月跌幅最大的交易日：2026-08-05 -13.21%[D-{ticker}-0805]。"
-        return ToolEnvelope("market.drawdown", ResultStatus.COMPLETED, subject=ticker, metrics={"window": "3m", "window_start": "2026-06-10", "worst_days": [{"date": "2026-08-05", "return": -0.1321}]}, evidence=[window, worst], metadata={"narrative": narrative, "require_cited_numbers": True, "queries": [f"why did {ticker} stock fall on 2026-08-05"]})
+        return ToolEnvelope("market.drawdown", ResultStatus.COMPLETED, subject=ticker, metrics={"window": "3m", "window_start": "2026-06-10", "worst_days": [{"date": "2026-08-05", "return": -0.1321}]}, evidence=[window, worst], metadata={"narrative": narrative, "require_cited_numbers": True, "worst_dates": ["2026-08-05"], "queries": [f"why did {ticker} stock fall on 2026-08-05"]})
 
     registry.register("market.drawdown", drawdown)
     registry.register(
@@ -741,6 +741,16 @@ def _framed_registry() -> CapabilityRegistry:
                 EvidenceItem(f"F-{a['ticker']}-0805", a["ticker"], f"{a['ticker']} 于 2026-08-05 向 SEC 提交了 8-K（0001-25-000001）。", metadata={"evidence_scope": "filing", "date": "2026-08-05"}),
                 EvidenceItem(f"F-{a['ticker']}-0301", a["ticker"], f"{a['ticker']} 于 2026-03-01 向 SEC 提交了 8-K（0001-25-000000）。", metadata={"evidence_scope": "filing", "date": "2026-03-01"}),
             ],
+        ),
+    )
+    registry.register(
+        "filings.read_events",
+        lambda a, c: ToolEnvelope(
+            "filings.read_events",
+            ResultStatus.COMPLETED,
+            subject=a["ticker"],
+            evidence=[EvidenceItem(f"E-{a['ticker']}-{a['around']}", a["ticker"], f"{a['ticker']} {a['around']}：财报指引低于预期（6-K {a['around']} s2：“guidance below expectations”）。", as_of=a["around"], metadata={"evidence_scope": "filing_event", "date": a["around"]})],
+            metadata={"narrative": f"{a['ticker']} 申报中读到的事件：{a['around']} 财报指引低于预期[E-{a['ticker']}-{a['around']}]。", "around": a["around"]},
         ),
     )
     registry.register("market.anomaly_history", lambda a, c: ToolEnvelope("market.anomaly_history", ResultStatus.COMPLETED, subject=a["ticker"], evidence=[EvidenceItem(f"A-{a['ticker']}-0805", a["ticker"], f"{a['ticker']} 2026-08-05 盯盘记录：volume_spike,gap_down；财报后跳空低开。", metadata={"evidence_scope": "anomaly", "date": "2026-08-05"})]))
@@ -770,8 +780,12 @@ def test_a_why_follow_up_after_a_loss_ranking_explains_the_loss_since_purchase_n
     assert resolution.frame["ticker"] == "ARM" and resolution.frame["field"] == "pl_pct" and resolution.frame["value"] == -32.22
     second = agent.run("什么原因跌这么多?", session_id="chat-3")
     assert second.request.text == "ARM 什么原因跌这么多?"
-    assert [task.capability for task in second.plan.tasks] == ["account.portfolio", "market.performance", "market.drawdown", "filings.recent", "market.anomaly_history"]
+    assert [task.capability for task in second.plan.tasks] == ["account.portfolio", "market.performance", "market.drawdown", "filings.recent", "market.anomaly_history", "filings.read_events"]
     assert second.plan.tasks[2].arguments == {"ticker": "ARM", "loss_pct": -32.22, "top": 3}
+    reader = second.plan.tasks[5]
+    assert reader.fan_out == {"from": "market-drawdown", "field": "worst_dates", "argument": "around", "max": 2} and not reader.required
+    assert [result.subject for result in second.results if result.capability == "filings.read_events"] == ["ARM"]
+    assert "- ARM 2026-08-05：财报指引低于预期（6-K 2026-08-05 s2：“guidance below expectations”）。 [E-ARM-2026-08-05]" in second.answer
     assert second.plan.assumptions[0].startswith("context_frame: 用户追问的是 ARM 买入以来的浮动盈亏 -32.22%（成本价 $389.52）")
     lines = second.answer.split("\n")
     assert lines[0].startswith("你问的是 ARM 买入以来的浮动盈亏：-32.22%，成本价 $389.52[legacy-")
@@ -802,7 +816,89 @@ def test_a_why_follow_up_after_a_loss_ranking_explains_the_loss_since_purchase_n
     # The LLM planner leaves the framed plan to the rules.
     llm = ScriptedLLM([LLMResponse(text="{}")])
     framed = normalize_request("ARM 什么原因跌这么多?", metadata={"context_frame": resolution.frame})
-    assert len(StructuredLLMPlanner(llm, default_catalog()).plan(framed, route(framed)).tasks) == 5 and llm.calls == []
+    assert len(StructuredLLMPlanner(llm, default_catalog()).plan(framed, route(framed)).tasks) == 6 and llm.calls == []
+
+
+_FILING_TEXT = """UNITED STATES SECURITIES AND EXCHANGE COMMISSION
+FORM 8-K
+Item 2.02 Results of Operations and Financial Condition
+On July 29, 2026, Arm Holdings plc announced results for the quarter. Revenue of $1.05 billion was below the guidance range; the company now expects fiscal-year revenue growth in the low twenties.
+Item 5.02 Departure of Directors or Certain Officers
+On July 28, 2026, the Chief Financial Officer notified the board of his intention to resign effective September 1, 2026.
+Item 9.01 Financial Statements and Exhibits
+Exhibit 99.1 Press release dated July 29, 2026.
+"""
+
+
+class _FakeFilingSource:
+    def __init__(self, refs):
+        self.refs = refs
+        self.reads: list[tuple[str, str]] = []
+
+    def list_filings(self, ticker, since, until):
+        return [ref for ref in self.refs if since <= ref.filing_date <= until]
+
+    def outline(self, ref):
+        from v2.agent_v2.agents.filing_reader import Section, sections_of
+
+        return [Section(section_id, title, len(body)) for section_id, title, body in sections_of(_FILING_TEXT, ref.form)]
+
+    def read(self, ref, section_id):
+        from v2.agent_v2.agents.filing_reader import sections_of
+
+        self.reads.append((ref.accession, section_id))
+        return next((body for candidate, _, body in sections_of(_FILING_TEXT, ref.form) if candidate == section_id), "")
+
+
+def test_filing_reader_reads_the_sections_it_chooses_and_keeps_only_quoted_events():
+    from v2.agent_v2.agents.filing_reader import FilingReader, FilingRef, sections_of
+
+    parts = sections_of(_FILING_TEXT, "8-K")
+    assert [part[0] for part in parts] == ["s1", "s2", "s3"] and parts[0][1].startswith("Item 2.02")
+    assert [part[0] for part in sections_of("x" * 8000, "6-K")] == ["part-1", "part-2", "part-3"]
+    refs = [FilingRef("ARM", "8-K", "2026-07-29", "0001-26-000777", "https://www.sec.gov/x/777/"), FilingRef("ARM", "8-K", "2026-05-02", "0001-26-000500", "https://www.sec.gov/x/500/")]
+    source = _FakeFilingSource(refs)
+    llm = ScriptedLLM(
+        [
+            LLMResponse(text='{"action":"read","filing":1,"section":"s1"}'),
+            LLMResponse(text='```json\n{"action":"read","filing":1,"section":"s2"}\n```'),
+            LLMResponse(
+                text=json.dumps(
+                    {
+                        "action": "finish",
+                        "events": [
+                            {"date": "2026-07-29", "summary": "季度营收 10.5 亿美元低于指引区间", "quote": "Revenue of $1.05 billion was below the guidance range", "filing": 1, "section": "s1"},
+                            {"date": "2026-07-28", "summary": "CFO 提出辞职", "quote": "the Chief Financial Officer notified the board of his intention to resign", "filing": 1, "section": "s2"},
+                            {"date": "2026-07-29", "summary": "编造的事件", "quote": "the company was acquired", "filing": 1, "section": "s1"},
+                        ],
+                        "note": "两节都读完了",
+                    },
+                    ensure_ascii=False,
+                )
+            ),
+        ]
+    )
+    reader = FilingReader(llm, source, max_rounds=4)
+    result = reader.run("ARM", _context(), around="2026-07-29", today=date(2026, 9, 9))
+    assert result.ok and result.status == ResultStatus.COMPLETED
+    assert source.reads == [("0001-26-000777", "s1"), ("0001-26-000777", "s2")]  # the May filing is outside the ±14-day window
+    events = [item for item in result.evidence if item.metadata.get("evidence_scope") == "filing_event"]
+    assert [item.metadata["date"] for item in events] == ["2026-07-29", "2026-07-28"]
+    assert events[0].source_url == "https://www.sec.gov/x/777/" and "Revenue of $1.05 billion" in events[0].claim
+    assert result.metrics == {"filings": 1, "sections_read": 2, "events": 2, "rounds": 3, "llm_calls": 3}
+    assert "1 条事件的引文与已读文本不符，已丢弃" in result.limitations[0]
+    assert result.metadata["narrative"].startswith("ARM 申报中读到的事件：2026-07-29 季度营收 10.5 亿美元低于指引区间[evidence-filing-event-")
+    assert verify_answer(result.metadata["narrative"], result.evidence, answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result]).ok
+    # A reader that never finishes stops at the round cap with nothing but a limitation.
+    endless = FilingReader(ScriptedLLM([LLMResponse(text='{"action":"read","filing":1,"section":"s1"}')] * 6), _FakeFilingSource(refs), max_rounds=2)
+    capped = endless.run("ARM", _context(), around="2026-07-29", today=date(2026, 9, 9))
+    assert capped.status == ResultStatus.PARTIAL_DATA and capped.metrics["rounds"] == 2 and "达到轮次上限" in capped.limitations[0]
+    assert capped.evidence[0].metadata["citation_kind"] == "limitations" and "未读到与2026-07-29 附近下跌相关的事件" in capped.evidence[0].claim
+    # Without a model the capability still lists the filings and says it did not read them.
+    listed = FilingReader(None, _FakeFilingSource(refs)).run("ARM", _context(), around="2026-07-29", today=date(2026, 9, 9))
+    assert listed.status == ResultStatus.PARTIAL_DATA and listed.metadata["filings"][0]["accession"] == "0001-26-000777" and "未配置模型" in listed.limitations[0]
+    nothing = FilingReader(llm, _FakeFilingSource([])).run("ARM", _context(), around="2026-07-29", today=date(2026, 9, 9))
+    assert nothing.ok and "未查到申报" in nothing.evidence[0].claim
 
 
 def test_market_drawdown_locates_the_worst_days_and_the_peak_to_trough():

@@ -131,6 +131,14 @@ def default_catalog() -> CapabilityCatalog:
             answer_guidance="filings：只陈述申报的日期、表格类型和链接；申报内容未读取时不得推测其影响。",
         ),
         CapabilitySpec(
+            "filings.read_events",
+            "research",
+            "Read the SEC filings around a date and report dated events quoted from their text: earnings figures, guidance, executive changes, offerings, litigation. A bounded sub-agent; slower than listing filings. Use when the question is what the company disclosed around a specific date.",
+            _object({"ticker": _TICKER, "since": {"type": "string"}, "until": {"type": "string"}, "around": {"type": "string"}, "max_filings": {"type": "integer", "minimum": 1, "maximum": 3}}, ["ticker"]),
+            long_running=True,
+            answer_guidance="filing_events：每个事件说明日期、表格和引文出处；引文之外的内容不得补充；读不到相关章节时如实说明。",
+        ),
+        CapabilitySpec(
             "market.anomaly_history",
             "research",
             "Past intraday anomalies the monitor recorded for one stock (date, flags, attribution notes) within a lookback window.",

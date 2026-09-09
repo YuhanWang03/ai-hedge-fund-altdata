@@ -288,7 +288,7 @@ class RulePlanner:
         note = (
             f"context_frame: 用户追问的是 {ticker} {frame.get('label') or '买入以来的浮动盈亏'} {value_text}{entry_text}，不是今日涨跌。"
             "先回答这段跌幅落在哪个区间（对照 5 日、1 月、3 月、1 年回报窗口）和区间高点到低点的回撤，再按日期列出跌幅最大的交易日，"
-            "把日期相同或相邻的 SEC 申报、盯盘记录和新闻与这些下跌日对应起来；"
+            "把日期相同或相邻的 SEC 申报（含申报阅读者从原文摘出的事件）、盯盘记录和新闻与这些下跌日对应起来；"
             "今日涨跌只用区间回报里的单日数字作一句旁注，并点明它与买入以来的跌幅是不同区间；某个下跌日找不到对应事件就明说，不得用当日归因冒充。"
         )
         loss = frame.get("value")
@@ -303,6 +303,15 @@ class RulePlanner:
             PlanTask("market-drawdown", "market.drawdown", {"ticker": ticker, **({"loss_pct": float(loss)} if isinstance(loss, (int, float)) else {}), "top": 3}, purpose="peak-to-trough and the worst trading days in the window"),
             PlanTask("filings-recent", "filings.recent", {"ticker": ticker}, purpose="dated SEC filings (8-K, or 6-K for a foreign issuer) over the past year", required=False),
             PlanTask("anomaly-history", "market.anomaly_history", {"ticker": ticker, "lookback_days": 365}, purpose="what the monitor recorded on the worst days", required=False),
+            PlanTask(
+                "filing-events",
+                "filings.read_events",
+                {"ticker": ticker, "max_filings": 2},
+                purpose="read what the company filed around the worst days",
+                depends_on=("market-drawdown",),
+                required=False,
+                fan_out={"from": "market-drawdown", "field": "worst_dates", "argument": "around", "max": 2},
+            ),
         ]
         if request.allow_web:
             tasks.append(

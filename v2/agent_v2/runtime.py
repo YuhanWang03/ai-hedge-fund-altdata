@@ -14,6 +14,7 @@ from v2.agent_v2.adapters import (
     TavilyWebSearchPort,
     WorkspaceLabPort,
 )
+from v2.agent_v2.agents.filing_reader import register_filing_reader
 from v2.agent_v2.catalog import CapabilityCatalog, default_catalog
 from v2.agent_v2.execution import CapabilityRegistry
 from v2.agent_v2.llm import LLMEvidenceSynthesizer, StructuredLLMPlanner
@@ -26,13 +27,19 @@ def build_live_registry(
     *,
     lab=None,
     web_search=None,
+    llm=None,
 ) -> CapabilityRegistry:
-    """Register live capabilities; Lab and Web remain explicit injections."""
+    """Register live capabilities; Lab and Web remain explicit injections.
+
+    ``llm`` powers the sub-agent capabilities; without it they still
+    register and answer with a "no model configured" limitation.
+    """
     registry = CapabilityRegistry(catalog or default_catalog())
     register_research_capabilities(registry)
     register_legacy_capabilities(registry)
     register_market_capabilities(registry)
     register_history_capabilities(registry)
+    register_filing_reader(registry, llm)
     if lab is not None:
         register_lab_capabilities(registry, lab)
     if web_search is not None:
@@ -63,7 +70,7 @@ def build_llm_agent(*, config: AgentV2Config | None = None, llm=None, lab=None, 
 
         llm = build_llm()
     catalog = default_catalog()
-    registry = build_live_registry(catalog, lab=lab, web_search=web_search)
+    registry = build_live_registry(catalog, lab=lab, web_search=web_search, llm=llm)
     return AgentV2(
         catalog=catalog,
         registry=registry,

@@ -305,7 +305,7 @@ class EvidenceSummarySynthesizer:
                 for result in results:
                     if result is source:
                         continue
-                    if result.capability in {"research.stock", "research.compare", "filings.recent", "market.anomaly_history", "web.research"}:
+                    if result.capability in {"research.stock", "research.compare", "filings.recent", "filings.read_events", "market.anomaly_history", "web.research"}:
                         blocks.append(catalyst_lines(result, since))
                     elif result.capability == "market.performance" and result.ok:
                         blocks.append(benchmark_line(result))
