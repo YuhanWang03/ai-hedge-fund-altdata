@@ -892,6 +892,13 @@ def test_filing_reader_reads_the_sections_it_chooses_and_keeps_only_quoted_event
     assert [part[0] for part in parts] == ["s0", "s1", "s2", "s3"] and parts[1][1].startswith("Item 2.02")
     assert parts[0][1] == "UNITED STATES SECURITIES AND EXCHANGE COMMISSION"  # the cover page stays readable
     assert [part[0] for part in sections_of("x" * 8000, "6-K")] == ["part-1", "part-2", "part-3"]
+    # A long exhibit whose table headers all look like headings collapses to at most twenty sections.
+    noisy = "\n".join(f"REVENUE BY SEGMENT TABLE {index}\n" + ("row of figures " * 20) for index in range(150))
+    merged = sections_of(noisy, "6-K")
+    assert 15 <= len(merged) <= 20 and merged[0][1].startswith("REVENUE BY SEGMENT TABLE 0 …（含后续")
+    assert sum(len(body) for _, _, body in merged) >= len(noisy) - 150 * 2  # nothing is dropped, only joined
+    paged = sections_of("y" * 100_000, "6-K")
+    assert len(paged) == 20 and sum(len(body) for _, _, body in paged) == 100_000
     refs = [FilingRef("ARM", "8-K", "2026-07-29", "0001-26-000777", "https://www.sec.gov/x/777/"), FilingRef("ARM", "8-K", "2026-05-02", "0001-26-000500", "https://www.sec.gov/x/500/")]
     source = _FakeFilingSource(refs)
     llm = ScriptedLLM(

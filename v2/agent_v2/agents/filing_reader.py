@@ -47,16 +47,19 @@ class FilingSource(Protocol):
 
 
 _ITEM_HEADER = re.compile(r"(?im)^\s*item\s+(\d{1,2}\.\d{2})\b[^\n]{0,90}")
-_HEADING = re.compile(r"(?mi)^\s*(?:exhibit\s+\d+(?:\.\d+)?[^\n]{0,80}|[A-Z][A-Z &,'()/-]{6,70})\s*$")
+_HEADING = re.compile(r"(?m)^\s*(?:[Ee][Xx][Hh][Ii][Bb][Ii][Tt]\s+\d+(?:\.\d+)?[^\n]{0,80}|[A-Z][A-Z0-9 &,'()/.-]{6,70})\s*$")
 _WS = re.compile(r"\s+")
 
 
-def sections_of(text: str, form: str, *, chunk: int = 3500) -> list[tuple[str, str, str]]:
+def sections_of(text: str, form: str, *, chunk: int = 3500, max_sections: int = 20) -> list[tuple[str, str, str]]:
     """Split a filing's text into (id, title, body) sections.
 
     8-K bodies are cut at their ``Item X.YY`` headers; other forms at
     upper-case heading lines; anything else into fixed-size parts so the
-    reader can still page through it.
+    reader can still page through it.  A long exhibit whose every table
+    header looks like a heading is merged back into at most
+    ``max_sections`` runs, so the reader chooses among twenty entries,
+    not two hundred.
     """
 
     text = text or ""
@@ -78,8 +81,38 @@ def sections_of(text: str, form: str, *, chunk: int = 3500) -> list[tuple[str, s
             if body:
                 parts.append((f"s{index + 1}", title, body))
         if parts:
-            return parts
-    return [(f"part-{index + 1}", f"第 {index + 1} 段", text[start:start + chunk]) for index, start in enumerate(range(0, len(text), chunk))][:12]
+            return _merge_sections(parts, max_sections)
+    # No usable headings: page through the text in parts, sized so that the
+    # whole document still fits in max_sections parts.
+    size = max(chunk, -(-len(text) // max_sections))
+    return [(f"part-{index + 1}", f"第 {index + 1} 段", text[start:start + size]) for index, start in enumerate(range(0, len(text), size))]
+
+
+def _merge_sections(parts: list[tuple[str, str, str]], max_sections: int) -> list[tuple[str, str, str]]:
+    """Merge consecutive sections until there are at most ``max_sections``, each about the same size."""
+
+    if len(parts) <= max_sections:
+        return parts
+    total = sum(len(body) for _, _, body in parts)
+    target = max(1, total // max_sections)
+    merged: list[tuple[str, str, str]] = []
+    bucket: list[tuple[str, str, str]] = []
+    size = 0
+    for part in parts:
+        bucket.append(part)
+        size += len(part[2])
+        if size >= target and len(merged) < max_sections - 1:
+            merged.append(_join(bucket))
+            bucket, size = [], 0
+    if bucket:
+        merged.append(_join(bucket))
+    return merged
+
+
+def _join(bucket: list[tuple[str, str, str]]) -> tuple[str, str, str]:
+    first_id, first_title, _ = bucket[0]
+    title = first_title if len(bucket) == 1 else f"{first_title} …（含后续 {len(bucket) - 1} 节）"
+    return first_id, title[:90], "\n\n".join(body for _, _, body in bucket)
 
 
 class EdgarFilingSource:
@@ -220,7 +253,7 @@ _FINISH_NOW = "轮次已用完。现在只允许 finish：把已读章节里有�
 class FilingReader:
     """Read the filings around a date and report dated, quoted events."""
 
-    def __init__(self, llm: Any, source: FilingSource, *, max_rounds: int = 4, max_seconds: float = 60.0, max_filings: int = 2, max_chars: int = 6000) -> None:
+    def __init__(self, llm: Any, source: FilingSource, *, max_rounds: int = 6, max_seconds: float = 90.0, max_filings: int = 2, max_chars: int = 6000) -> None:
         self.llm = llm
         self.source = source
         self.max_rounds = max(1, max_rounds)

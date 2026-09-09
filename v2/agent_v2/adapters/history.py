@@ -94,7 +94,7 @@ def filings_envelope(ticker: str, context: ExecutionContext, fetch: Callable[[st
         summary=f"{ticker} {since} 至 {until} 共 {len(rows)} 份 {label} 申报。",
         metrics={"count": len(rows), "since": since, "until": until, "dates": [item.metadata["date"] for item in evidence if item.metadata.get("evidence_scope") == "filing"]},
         evidence=evidence,
-        limitations=["申报内容未读取，仅有日期和表格类型。"] if rows else [],
+        limitations=["此处只列日期和表格类型；申报内容由申报阅读者按下跌日读取。"] if rows else [],
         errors=errors,
         metadata={"narrative": narrative, "dates": [item.metadata["date"] for item in evidence if item.metadata.get("evidence_scope") == "filing"]},
     )
