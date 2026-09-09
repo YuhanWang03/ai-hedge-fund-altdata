@@ -17,10 +17,11 @@ from v2.research.provider_health import ProviderHealthService
 from v2.research.store import ResearchStore
 from v2.research.localization import localize_result
 from v2.research.sec_links import enrich_sec_links
+from v2.research.expectations import prepare_expectations
 
 
 def present_result(result):
-    return enrich_sec_links(localize_result(result))
+    return enrich_sec_links(localize_result(prepare_expectations(result)))
 
 router = APIRouter(prefix="/api/research", tags=["research"], dependencies=[Depends(require_owner)])
 _RUNNING_TASKS: set[asyncio.Task[None]] = set()

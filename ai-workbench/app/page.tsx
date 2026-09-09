@@ -776,8 +776,32 @@ function SecDepthPanel({ result }: { result: StockResearchResult }) {
 }
 
 function ExpectationsDepthPanel({ result }: { result: StockResearchResult }) {
-  const details = result.modules.expectations.details as Record<string,unknown>; const matrix = details.capability_matrix as Record<string,Record<string,unknown>> || {}; const guidance = (details.guidance || []) as Record<string,unknown>[];
-  return <section className="surface engine-card"><div className="surface-header"><div><h2>预期数据能力与管理层指引</h2><span>不可用的历史一致预期不会被推断或补造</span></div></div><div className="capability-grid">{Object.entries(matrix).map(([key,value]) => <div key={key}><strong>{translateResearchText(key.replaceAll('_',' '))}</strong><StatusPill value={String(value.status || 'UNAVAILABLE')}/><small>{translateResearchText(value.reason || '取决于数据源')}</small></div>)}</div>{guidance.length ? <div className="guidance-list">{guidance.map((row,index) => <article key={`${String(row.filing_date)}-${index}`}><em>{translateResearchText(row.guidance_type || '管理层评论')} · {statusLabel(String(row.status))}</em><strong>{translateResearchText(row.metric)}</strong><p>{String(row.evidence_text)}</p></article>)}</div> : <p className="insufficient-note">当前 SEC/财报材料中未提取到可靠管理层指引。</p>}</section>;
+  const details = result.modules.expectations.details as Record<string,unknown>;
+  const matrix = details.capability_matrix as Record<string,Record<string,unknown>> || {};
+  const guidance = (details.guidance || []) as Record<string,unknown>[];
+  const quality = details.guidance_quality as { filtered?: number; duplicates?: number } | undefined;
+  const labels: Record<string,string> = { current_consensus: '当前一致预期', earnings_surprise_history: '历史业绩对照', revision_30d: '30 日预期修正', revision_60d: '60 日预期修正', revision_90d: '90 日预期修正' };
+  const groups = [
+    { id: 'guidance', title: '业绩指引候选', description: '包含量化预期或明确指引措辞；数值、单位和期间以原文为准。', empty: '本次材料未提取到可靠业绩指引。这不表示公司没有发布指引。' },
+    { id: 'outlook', title: '经营展望', description: '管理层对需求、经营和业务发展的前瞻描述。', empty: '本次材料未提取到明确经营展望。' },
+    { id: 'risk', title: '经营风险与约束', description: '可能影响业绩的条件和风险，不作为公司承诺或业绩指引。', empty: '本次材料未提取到相关经营风险说明。' },
+  ];
+  return <section className="surface engine-card expectations-evidence">
+    <div className="surface-header"><div><h2>市场预期与管理层展望</h2><span>数据状态基于本次研究；公司表述与分析师一致预期分开展示</span></div></div>
+    <div className="expectations-section-heading"><h3>本次预期数据</h3><span>研究时间：{new Date(result.generated_at).toLocaleString()}</span></div>
+    <div className="capability-grid">{Object.entries(matrix).map(([key,value]) => <div key={key}><strong>{labels[key] || translateResearchText(key.replaceAll('_',' '))}</strong><StatusPill value={String(value.status || 'UNAVAILABLE')}/><small>{translateResearchText(value.reason || '本次尚无可用数据')}</small></div>)}</div>
+    <p className="expectations-method">以下内容为申报材料中的证据摘录，已过滤通用免责声明并合并重复表述。“公司明确上调／下调／维持”只在原文明示时使用，未独立核验前后两期指引数值。{quality && (Number(quality.filtered || 0) + Number(quality.duplicates || 0) > 0) && <span> 本次整理缓存候选：过滤 {quality.filtered || 0} 条，合并重复 {quality.duplicates || 0} 条。</span>}</p>
+    {groups.map(group => { const rows = guidance.filter(row => row.group === group.id); return <section className={`expectations-group group-${group.id}`} key={group.id}>
+      <div className="expectations-section-heading"><h3>{group.title} <span>{rows.length}</span></h3><p>{group.description}</p></div>
+      {rows.length ? <div className="guidance-list">{rows.map((row,index) => <article key={`${String(row.filing_date)}-${index}`}>
+        <div className="guidance-evidence-heading"><strong>{String(row.metric_label || translateResearchText(row.metric))}</strong><span className="engine-status">{String(row.status_label || '未确认指引变动')}</span></div>
+        <div className="guidance-evidence-period">适用期间：{String(row.period_label || '原文未明确期间')}</div>
+        <p>{String(row.evidence_text || '')}</p>
+        {Boolean(row.evidence_text_original) && <details className="guidance-original"><summary>查看英文证据</summary><p lang="en">{String(row.evidence_text_original)}</p></details>}
+        <SecSourceFooter row={row}/>
+      </article>)}</div> : <p className="insufficient-note">{group.empty}</p>}
+    </section> })}
+  </section>;
 }
 
 function StockResearchView({ tool, ticker, result, progress, busy, run }: { tool: ResearchTool; ticker: string; result: StockResearchResult | null; progress: Record<string,string>; busy: boolean; run: ResearchRun }) { if (busy) return <ResearchProgress progress={progress}/>; if (!result) return <EmptyResearch ticker={ticker}/>; const view = tool === 'stock' ? <><StockDashboard result={result}/><WhatChangedPanel result={result}/></> : tool === 'fundamentals' ? <FundamentalView result={result}/> : tool === 'valuation' ? <><ValuationView result={result}/><PeerManager result={result} run={run}/></> : tool === 'earnings' ? <><EarningsSecView result={result}/><SecDepthPanel result={result}/></> : tool === 'expectations' ? <><ExpectationsView result={result}/><ExpectationsDepthPanel result={result}/></> : tool === 'institutional' ? <InstitutionalView result={result}/> : tool === 'moneyflow' ? <FundFlowView result={result}/> : tool === 'macro' ? <MacroResearchView result={result}/> : tool === 'chain' ? <SupplyChainView result={result}/> : <RiskRadarView result={result}/>; return <>{view}<ResearchDiagnostics result={result} tool={tool} run={run}/></> }
