@@ -93,6 +93,20 @@ def _research_envelope(ticker: str, focus: str) -> ToolEnvelope:
         texts.append(text)
         evidence.append(_evidence("research.stock", ticker, text, module=tool))
     status = ResultStatus.PARTIAL_DATA if limitations else ResultStatus.COMPLETED
+    if limitations:
+        # Production's research adapter makes limitations citeable; a result
+        # with no source evidence would otherwise be impossible to write about.
+        joined = "；".join(limitations)
+        evidence.append(
+            EvidenceItem(
+                id=f"fixture-limitations-{hashlib.sha256(f'{ticker}:{joined}'.encode('utf-8')).hexdigest()[:16]}",
+                entity=ticker,
+                claim=f"{ticker} 研究数据限制：{joined}",
+                source_id="research_engine",
+                source_title="Research data limitations",
+                metadata={"citation_kind": "limitations", "limitations": list(limitations), "verified": True},
+            )
+        )
     return ToolEnvelope(
         "research.stock",
         status,

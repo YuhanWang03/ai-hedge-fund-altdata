@@ -84,7 +84,12 @@ class StructuredLLMPlanner:
         deterministic = self.fallback.plan(request, route)
         if deterministic.tasks and deterministic.tasks[0].capability in {"market.performance", "market.explain_move"}:
             return deterministic
-        if route.kind not in {RouteKind.RESEARCH, RouteKind.LAB, RouteKind.ASYNC}:
+        # Rules own market questions and non-thin lookups; the model gets
+        # research and lab routes, plus lookups the rules could not resolve
+        # beyond a scope read (the holdout wording the rules never saw).
+        thin = all(task.capability in {"account.portfolio", "state.read"} for task in deterministic.tasks)
+        thin_lookup = route.kind == RouteKind.FAST_LOOKUP and thin and not deterministic.direct_answer
+        if route.kind not in {RouteKind.RESEARCH, RouteKind.LAB, RouteKind.ASYNC} and not thin_lookup:
             return deterministic
         budget = _planner_budget(request, route)
         limit = min(self.max_tasks, task_limit(budget))
@@ -126,12 +131,17 @@ class StructuredLLMPlanner:
             if not tasks:
                 raise ValueError("planner returned no executable tasks")
             assumptions = [str(value) for value in raw.get("assumptions", []) if value]
+            if thin_lookup and deterministic.tasks:
+                # A thin rule plan is a floor, not a draft: keep its scope reads
+                # and let the model add what the wording implies on top.
+                tasks = _merge_tasks(deterministic.tasks, tasks)
             trimmed = _trim_to_budget(tasks, limit)
             if len(trimmed) < len(tasks):
                 dropped = ", ".join(task.capability for task in tasks if task not in trimmed)
                 assumptions.append(f"Planner trimmed {len(tasks) - len(trimmed)} task(s) to the {budget.value} budget of {limit}: {dropped}")
                 tasks = trimmed
-            answer_mode = AnswerMode.RESEARCH_GROUNDED if route.kind == RouteKind.RESEARCH else AnswerMode.TOOL_GROUNDED
+            grounded = route.kind == RouteKind.RESEARCH or any(task.capability.startswith(("research.", "market.")) for task in tasks)
+            answer_mode = AnswerMode.RESEARCH_GROUNDED if grounded else AnswerMode.TOOL_GROUNDED
             return ExecutionPlan(
                 objective=str(raw.get("objective") or request.text),
                 route=route.kind,
@@ -188,6 +198,26 @@ class StructuredLLMPlanner:
         return tuple(tasks)
 
 
+def _merge_tasks(base: tuple[PlanTask, ...], extra: tuple[PlanTask, ...]) -> tuple[PlanTask, ...]:
+    """Append model-proposed tasks that the rule plan does not already contain."""
+
+    merged = list(base)
+    seen = {(task.capability, json.dumps(task.arguments, sort_keys=True, default=str)) for task in base}
+    ids = {task.id for task in base}
+    for task in extra:
+        key = (task.capability, json.dumps(task.arguments, sort_keys=True, default=str))
+        if key in seen:
+            continue
+        seen.add(key)
+        task_id = task.id
+        while task_id in ids:
+            task_id = f"{task_id}-llm"
+        ids.add(task_id)
+        depends = tuple(dep if dep in ids else dep for dep in task.depends_on)
+        merged.append(replace(task, id=task_id, depends_on=depends))
+    return tuple(merged)
+
+
 def _trim_to_budget(tasks: tuple[PlanTask, ...], limit: int) -> tuple[PlanTask, ...]:
     """Drop optional tasks from the end first, then required ones, then dangling dependents."""
 
@@ -242,7 +272,7 @@ results 中的评分或限制如需引用，使用 evidence 中 citation_kind �
 不要把历史回测写成未来收益保证。不要输出未在证据中出现的数字。
 
 严格遵循输入中的 response_style：
-- brief：直接给判断，用 3—5 个短段落、约 300—500 个中文字完成回答。挑选最有决策价值的 3—5 条事实，只讲一个主要风险和最重要的数据缺口，最后指出接下来值得观察什么。不要使用标题、表格、分隔线、编号清单、“正面/负面/中性”标签、“必须说明”或单独的免责声明章节；不要重复同一事实。
+- brief：先用一句话直接回答用户问的那个量或对象（总额、盈亏、名单、日期、谁更强），这些被直接询问的数字和名字必须原样给出，不得因为篇幅省略；比较或排名问题必须点名每个候选并给出用来比较的数字。然后用 3—5 个短段落、约 300—500 个中文字完成回答，挑选最有决策价值的 3—5 条事实，只讲一个主要风险和最重要的数据缺口，最后指出接下来值得观察什么。不要使用标题、表格、分隔线、编号清单、“正面/负面/中性”标签、“必须说明”或单独的免责声明章节；不要重复同一事实。
 - detailed：用户明确要求详细、完整、全面、表格或逐项展开时，才允许使用小标题与列表，但仍应合并重复内容并保持自然。
 
 把 BULLISH、MEDIUM、forward_pe、revision_trend 等内部英文标签翻译或解释成自然中文；必要的通用缩写可以保留。不要逐项复述所有模块，也不要把工具输出改写成机械评分单。"""

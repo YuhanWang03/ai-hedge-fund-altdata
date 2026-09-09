@@ -336,11 +336,13 @@ def test_evidence_conflict_is_not_reported_as_a_valid_plan_or_verification():
 
     registry.register("research.stock", conflicting_research)
     result = AgentV2(catalog=catalog, registry=registry).run("分析 NVDA")
-    assert result.status == RunStatus.FAILED
-    assert "证据标识" in result.answer
-    assert "conflicting evidence id" in result.error
-    assert not result.verification.ok
-    assert result.verification.warnings == ("证据完整性检查失败",)
+    # A different claim under a reused id is reissued, disclosed, and kept citeable; the run completes.
+    assert result.status == RunStatus.COMPLETED, (result.status, result.error)
+    ids = {item.id for item in result.evidence}
+    assert "same-id" in ids and any(value.startswith("same-id~") for value in ids)
+    assert {item.claim for item in result.evidence} == {"First claim", "Second claim"}
+    assert any("重新编号" in value for value in result.results[0].limitations)
+    assert result.verification.ok
 
 
 def test_web_facade_returns_transport_neutral_dict():
@@ -1144,8 +1146,11 @@ def test_ledger_accepts_the_same_fact_from_another_run_but_rejects_a_different_c
     ledger.add(first)
     ledger.add(EvidenceItem("evidence-1", "NVDA", "Revenue growth is +55.3%.", metric="revenue_growth", value=0.553, producer_run_id="run-b", metadata={"snapshot": "b"}))
     assert ledger.get("evidence-1").producer_run_id == "run-a"
-    with pytest.raises(EvidenceConflictError):
-        ledger.add(EvidenceItem("evidence-1", "NVDA", "Revenue growth is +12.0%.", metric="revenue_growth", value=0.12))
+    reissued = ledger.add(EvidenceItem("evidence-1", "NVDA", "Revenue growth is +12.0%.", metric="revenue_growth", value=0.12, producer_run_id="run-c"))
+    assert reissued.id == "evidence-1~run-c" and reissued.metadata["original_evidence_id"] == "evidence-1"
+    assert ledger.get("evidence-1").claim == "Revenue growth is +55.3%." and ledger.get("evidence-1~run-c").claim == "Revenue growth is +12.0%."
+    assert ledger.reissued == [("evidence-1", "evidence-1~run-c")]
+    assert isinstance(EvidenceConflictError(), ValueError)
 
 
 def test_result_level_citation_caps_count_each_results_own_evidence():
@@ -1158,3 +1163,31 @@ def test_result_level_citation_caps_count_each_results_own_evidence():
     ]
     report = verify_answer("NVDA 可能与线索 a 相关。[A1] AMD 可能与线索 b 相关。[B1]", [*first, *second], answer_mode=AnswerMode.RESEARCH_GROUNDED, results=results)
     assert report.ok, report.warnings
+
+
+def test_llm_planner_extends_thin_fast_lookup_plans_without_dropping_the_scope_read():
+    response = LLMResponse(text='{"tasks":[{"id":"t1","capability":"account.performance","arguments":{"period":"month"}}]}')
+    catalog = default_catalog()
+    request = normalize_request("我这个月比上个月表现好还是差？")
+    llm = ScriptedLLM([response])
+    plan = StructuredLLMPlanner(llm, catalog).plan(request, route(request))
+    assert llm.calls and [task.capability for task in plan.tasks] == ["account.portfolio", "account.performance"]
+    request = normalize_request("我的持仓有哪些？")
+    llm = ScriptedLLM([LLMResponse(text=response.text)])
+    plan = StructuredLLMPlanner(llm, catalog).plan(request, route(request))
+    assert [task.capability for task in plan.tasks] == ["account.portfolio", "account.performance"]
+    request = normalize_request("AMD最近表现如何？")
+    llm = ScriptedLLM([LLMResponse(text=response.text)])
+    plan = StructuredLLMPlanner(llm, catalog).plan(request, route(request))
+    assert not llm.calls and plan.tasks[0].capability == "market.performance"
+
+
+def test_benchmark_fixture_makes_a_failed_card_citeable():
+    from v2.agent_v2.eval.benchmark_fixtures import build_benchmark_registry
+
+    registry, _ = build_benchmark_registry()
+    agent = AgentV2(catalog=registry.catalog, registry=registry)
+    result = agent.run("SMCI 最近有什么 8-K")
+    assert result.results[0].status == ResultStatus.PARTIAL_DATA and "timed out" in result.results[0].limitations[0]
+    assert any(item.metadata.get("citation_kind") == "limitations" for item in result.evidence)
+    assert result.verification.ok
