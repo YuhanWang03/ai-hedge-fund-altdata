@@ -68,6 +68,6 @@ def route(request: NormalizedRequest) -> RouteDecision:
     if _KNOWLEDGE.search(text) and not request.entities:
         return RouteDecision(RouteKind.GENERAL_KNOWLEDGE, (), "stable conceptual question")
     if _RESEARCH.search(text):
-        packs = ("research", "account") if re.search(r"持仓|组合|账户", text) else ("research",)
+        packs = ("research", "account") if re.search(r"持仓|仓位|仓库|组合|账户", text) else ("research",)
         return RouteDecision(RouteKind.RESEARCH, packs, "multi-source research or synthesis")
     return RouteDecision(RouteKind.FAST_LOOKUP, ("account", "research"), "single-purpose lookup")

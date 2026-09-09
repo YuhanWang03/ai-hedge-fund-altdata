@@ -45,7 +45,7 @@ _PRICE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:美元|美金|块|元|usd|\$)?", re.I
 _ALERT_ID = re.compile(r"(?:提醒|预警|alert)\s*(?:#|编号|id)?\s*(\d+)|(?:#|编号|id)\s*(\d+)", re.I)
 
 # -- scope -------------------------------------------------------------------
-_PORTFOLIO_WORDS = re.compile(r"持仓|仓位|组合|账户|portfolio", re.I)
+_PORTFOLIO_WORDS = re.compile(r"持仓|仓位|仓库|组合|账户|portfolio", re.I)
 _SELF = re.compile(r"我(?!们)")
 _WATCHLIST_SCOPE = re.compile(r"关注列表|关注了|自选|watchlist|关注的", re.I)
 _LIST_RANKING = re.compile(r"哪只|哪个|哪几只|哪些|每只|每个|那几只|那些|谁|最", re.I)

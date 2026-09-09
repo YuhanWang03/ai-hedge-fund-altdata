@@ -1071,6 +1071,8 @@ def _plan(query: str) -> ExecutionPlan:
         ("现在是加仓的好时候吗", {"macro.overview", "account.risk"}),
         ("帮我看看要不要减仓", {"macro.overview", "account.risk", "account.portfolio"}),
         ("CRWD 占仓多少，超没超过集中度阈值", {"account.risk", "state.read", "research.stock"}),
+        ("我的仓库里哪只跌的最多?", {"account.portfolio", "market.explain_move"}),
+        ("仓库里哪个亏最多", {"account.performance", "account.portfolio"}),
     ],
 )
 def test_rule_planner_covers_the_capabilities_the_v1_benchmark_needs(query, expected):
