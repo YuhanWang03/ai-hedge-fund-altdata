@@ -19,6 +19,7 @@ from v2.agent_v2.adapters.web import register_web_capability
 from v2.agent_v2.adapters.workspace_lab import LabBinding, WorkspaceLabPort
 from v2.agent_v2.catalog import default_catalog
 from v2.agent_v2.eval.runner import run_suite
+from v2.agent_v2.eval.scenario_cases import PORTFOLIO_CARD as _PORTFOLIO_CARD, build_drawdown_registry as _framed_registry
 from v2.agent_v2.execution import CapabilityRegistry, ExecutionContext, ExecutionEngine, PlanValidationError
 from v2.agent_v2.interfaces.telegram import TelegramFacade, TelegramMessage
 from v2.agent_v2.interfaces.web import WebFacade, WebRequest
@@ -688,74 +689,6 @@ def test_short_term_session_resolves_a_follow_up_before_routing():
     assert second.request.entities == ("NVDA",)
     assert second.request.metadata["rewritten"]
     assert second.to_dict()["request"]["metadata"]["antecedent"] == "NVDA"
-
-
-def _framed_registry() -> CapabilityRegistry:
-    from v2.agent_v2.adapters.legacy import _wrap
-
-    registry = CapabilityRegistry(default_catalog())
-    registry.register("account.portfolio", lambda a, c: _wrap("account.portfolio", "portfolio", _PORTFOLIO_CARD))
-
-    def performance(a, c):
-        from v2.agent_v2.adapters.market import _INTRADAY_PRICE_RULE
-
-        ticker = a["ticker"]
-        price = EvidenceItem(f"P-{ticker}", ticker, f"{ticker} 截至 2026-09-09 13:42 ET 的盘中价格为 264.00 美元，相对前一交易日收盘价 +0.94%。", metadata={"evidence_scope": "price", "is_intraday": True, "constraints": [_INTRADAY_PRICE_RULE]})
-        windows = EvidenceItem(f"W-{ticker}", ticker, f"{ticker} 截至查询时的区间回报（含当前盘中价格）：1d +0.94%，5d +12.32%，1m -1.53%，3m -21.40%，1y +89.85%。", metadata={"evidence_scope": "returns"})
-        benchmark = EvidenceItem(f"B-{ticker}", ticker, f"{ticker} 相对 SMH：1d +0.94%。", metadata={"evidence_scope": "benchmark"})
-        narrative = f"{ticker} 最近的股价表现分化。近 5 日回报 +12.32%，近 1 月回报 -1.53%[W-{ticker}]。\n相对 SMH，单日超额 +0.94%[B-{ticker}]。\n成交量尚未定型。"
-        return ToolEnvelope("market.performance", ResultStatus.COMPLETED, subject=ticker, summary=f"{ticker} 近 1 月 -1.53%", metrics={"returns": {"1d": 0.0094, "5d": 0.1232, "1m": -0.0153, "3m": -0.2140, "1y": 0.8985}, "is_intraday": True}, evidence=[price, windows, benchmark], metadata={"narrative": narrative, "require_cited_numbers": True})
-
-    registry.register("market.performance", performance)
-    registry.register("market.explain_move", lambda a, c: ToolEnvelope("market.explain_move", ResultStatus.COMPLETED, subject=a["ticker"], summary=f"{a['ticker']} 异动", metrics={"price_change_pct": 0.0094}, evidence=[EvidenceItem(f"M-{a['ticker']}", a["ticker"], f"{a['ticker']} 今日 +0.94%", metadata={"evidence_scope": "price"})]))
-    registry.register(
-        "research.stock",
-        lambda a, c: ToolEnvelope(
-            "research.stock",
-            ResultStatus.COMPLETED,
-            subject=a["ticker"],
-            summary=f"{a['ticker']}: the evidence currently balances growth against valuation risk.",
-            evidence=[
-                EvidenceItem(f"R-{a['ticker']}-{a['focus']}", a["ticker"], f"{a['ticker']} 2026-08-05 发布财报，指引低于预期。"),
-                EvidenceItem(f"R-{a['ticker']}-fundamental", a["ticker"], "Revenue growth is +22.8% on the latest available basis."),
-                EvidenceItem(f"R-{a['ticker']}-metrics", a["ticker"], "派生评分", metadata={"citation_kind": "metrics"}),
-            ],
-        ),
-    )
-
-    def drawdown(a, c):
-        ticker = a["ticker"]
-        window = EvidenceItem(f"D-{ticker}-window", ticker, f"{ticker} 近 3 月（2026-06-10 至 2026-09-08）区间回报 -21.40%。", metadata={"evidence_scope": "window_return"})
-        worst = EvidenceItem(f"D-{ticker}-0805", ticker, f"{ticker} 2026-08-05 单日 -13.21%，收盘 275.10 美元。", metadata={"evidence_scope": "worst_day", "date": "2026-08-05"})
-        narrative = f"{ticker} 近 3 月（2026-06-10 至 2026-09-08）区间回报 -21.40%[D-{ticker}-window]。\n{ticker} 近 3 月跌幅最大的交易日：2026-08-05 -13.21%[D-{ticker}-0805]。"
-        return ToolEnvelope("market.drawdown", ResultStatus.COMPLETED, subject=ticker, metrics={"window": "3m", "window_start": "2026-06-10", "worst_days": [{"date": "2026-08-05", "return": -0.1321}]}, evidence=[window, worst], metadata={"narrative": narrative, "require_cited_numbers": True, "worst_dates": ["2026-08-05"], "queries": [f"why did {ticker} stock fall on 2026-08-05"]})
-
-    registry.register("market.drawdown", drawdown)
-    registry.register(
-        "filings.recent",
-        lambda a, c: ToolEnvelope(
-            "filings.recent",
-            ResultStatus.COMPLETED,
-            subject=a["ticker"],
-            evidence=[
-                EvidenceItem(f"F-{a['ticker']}-0805", a["ticker"], f"{a['ticker']} 于 2026-08-05 向 SEC 提交了 8-K（0001-25-000001）。", metadata={"evidence_scope": "filing", "date": "2026-08-05"}),
-                EvidenceItem(f"F-{a['ticker']}-0301", a["ticker"], f"{a['ticker']} 于 2026-03-01 向 SEC 提交了 8-K（0001-25-000000）。", metadata={"evidence_scope": "filing", "date": "2026-03-01"}),
-            ],
-        ),
-    )
-    registry.register(
-        "filings.read_events",
-        lambda a, c: ToolEnvelope(
-            "filings.read_events",
-            ResultStatus.COMPLETED,
-            subject=a["ticker"],
-            evidence=[EvidenceItem(f"E-{a['ticker']}-{a['around']}", a["ticker"], f"{a['ticker']} {a['around']}：财报指引低于预期（6-K {a['around']} s2：“guidance below expectations”）。", as_of=a["around"], metadata={"evidence_scope": "filing_event", "date": a["around"]})],
-            metadata={"narrative": f"{a['ticker']} 申报中读到的事件：{a['around']} 财报指引低于预期[E-{a['ticker']}-{a['around']}]。", "around": a["around"]},
-        ),
-    )
-    registry.register("market.anomaly_history", lambda a, c: ToolEnvelope("market.anomaly_history", ResultStatus.COMPLETED, subject=a["ticker"], evidence=[EvidenceItem(f"A-{a['ticker']}-0805", a["ticker"], f"{a['ticker']} 2026-08-05 盯盘记录：volume_spike,gap_down；财报后跳空低开。", metadata={"evidence_scope": "anomaly", "date": "2026-08-05"})]))
-    registry.register("web.research", lambda a, c: ToolEnvelope("web.research", ResultStatus.COMPLETED, subject=a["ticker"], evidence=[EvidenceItem(f"WEB-{a['ticker']}", a["ticker"], f"{a['ticker']} shares slid after the 2026-08-05 report as guidance disappointed.", as_of="2026-08-06", source_title="Arm slides on soft guidance", source_url="https://example.com/arm", metadata={"evidence_type": "search_snippet"})]))
-    return registry
 
 
 def test_short_term_session_carries_the_stock_an_answer_named_into_a_subjectless_follow_up():
@@ -1611,19 +1544,6 @@ def test_benchmark_fixture_makes_a_failed_card_citeable():
     assert result.verification.ok
 
 
-_PORTFOLIO_CARD = """<b>💼 Alpaca 账户 · 📝 PAPER</b>
-━━━━━━━━━━━━━━━━━━━━
-组合价值 <code>$100,754</code>  ·  现金 <code>$18,877</code>
-
-<b>持仓（4）</b>
-  🟢 <b>IVV</b>  <code>70 sh</code>  @ <code>$755.41</code>
-     市值 <code>$53,951</code>  ·  P/L <code>$1,073</code> <b>+2.03%</b>
-  🔴 <b>BRK.B</b>  <code>10 sh</code>  @ <code>$505.87</code>
-     市值 <code>$5,050</code>  ·  P/L <code>$8</code> <b>-0.17%</b>
-  🔴 <b>ARM</b>  <code>5 sh</code>  @ <code>$389.52</code>
-     市值 <code>$1,320</code>  ·  P/L <code>$628</code> <b>-32.22%</b>
-  🔴 <b>MRVL</b>  <code>5 sh</code>  @ <code>$310.82</code>
-     市值 <code>$1,129</code>  ·  P/L <code>$425</code> <b>-27.33%</b>"""
 
 
 def test_legacy_wrap_strips_card_html_and_parses_positions():

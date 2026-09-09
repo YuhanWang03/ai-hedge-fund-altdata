@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from v2.agent_v2.eval.answer_cases import ANSWER_CASES, AnswerCase
 from v2.agent_v2.eval.cases import CASES, EvalCase
 from v2.agent_v2.eval.fixtures import build_eval_registry, EvalSynthesizer
+from v2.agent_v2.eval.scenario_cases import SCENARIO_CASES, ScenarioCase, ScenarioScore, score_scenario
 from v2.agent_v2.eval.scoring import AnswerScore, CaseScore, score_answer_case, score_case
 from v2.agent_v2.orchestrator import AgentV2
 
@@ -15,26 +16,28 @@ from v2.agent_v2.orchestrator import AgentV2
 class SuiteReport:
     scores: tuple[CaseScore, ...]
     answer_scores: tuple[AnswerScore, ...] = ()
+    scenario_scores: tuple[ScenarioScore, ...] = ()
 
     @property
     def passed(self) -> int:
-        return sum(score.passed for score in self.scores) + sum(score.passed for score in self.answer_scores)
+        return sum(score.passed for score in self.scores) + sum(score.passed for score in self.answer_scores) + sum(score.passed for score in self.scenario_scores)
 
     @property
     def total(self) -> int:
-        return len(self.scores) + len(self.answer_scores)
+        return len(self.scores) + len(self.answer_scores) + len(self.scenario_scores)
 
     @property
     def pass_rate(self) -> float:
         return self.passed / self.total if self.total else 0.0
 
 
-def run_suite(cases: tuple[EvalCase, ...] = CASES, answer_cases: tuple[AnswerCase, ...] = ANSWER_CASES) -> SuiteReport:
+def run_suite(cases: tuple[EvalCase, ...] = CASES, answer_cases: tuple[AnswerCase, ...] = ANSWER_CASES, scenario_cases: tuple[ScenarioCase, ...] = SCENARIO_CASES) -> SuiteReport:
     registry = build_eval_registry()
     agent = AgentV2(catalog=registry.catalog, registry=registry, synthesizer=EvalSynthesizer())
     scores = tuple(score_case(case, agent.run(case.query)) for case in cases)
     answer_scores = tuple(score_answer_case(case) for case in answer_cases)
-    return SuiteReport(scores, answer_scores)
+    scenario_scores = tuple(score_scenario(case) for case in scenario_cases)
+    return SuiteReport(scores, answer_scores, scenario_scores)
 
 
 def render(report: SuiteReport) -> str:
@@ -45,4 +48,7 @@ def render(report: SuiteReport) -> str:
     for score in report.answer_scores:
         mark = "PASS" if score.passed else "FAIL"
         lines.append(f"{mark} {score.case_id}: verdict={'ok' if score.verifier_ok else 'rejected'} expected={'ok' if score.expected_ok else 'rejected'} warnings={'; '.join(score.warnings) or '-'}")
+    for score in report.scenario_scores:
+        mark = "PASS" if score.passed else "FAIL"
+        lines.append(f"{mark} {score.case_id}: plan={score.capabilities_ok} discipline={score.discipline_ok} phrases={score.phrases_ok} rewritten={score.rewritten_ok} verified={score.verified_ok} called={','.join(score.called)}" + (f" missing={' | '.join(score.missing_phrases)}" if score.missing_phrases else ""))
     return "\n".join(lines)
