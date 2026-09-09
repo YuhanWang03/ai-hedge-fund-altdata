@@ -754,7 +754,7 @@ def _framed_registry() -> CapabilityRegistry:
         ),
     )
     registry.register("market.anomaly_history", lambda a, c: ToolEnvelope("market.anomaly_history", ResultStatus.COMPLETED, subject=a["ticker"], evidence=[EvidenceItem(f"A-{a['ticker']}-0805", a["ticker"], f"{a['ticker']} 2026-08-05 盯盘记录：volume_spike,gap_down；财报后跳空低开。", metadata={"evidence_scope": "anomaly", "date": "2026-08-05"})]))
-    registry.register("web.research", lambda a, c: ToolEnvelope("web.research", ResultStatus.COMPLETED, subject=a["ticker"], evidence=[EvidenceItem(f"WEB-{a['ticker']}", a["ticker"], f"{a['ticker']} shares slid after the 2026-08-05 report as guidance disappointed.", as_of="2026-08-06", source_url="https://example.com/arm", metadata={"evidence_type": "search_snippet"})]))
+    registry.register("web.research", lambda a, c: ToolEnvelope("web.research", ResultStatus.COMPLETED, subject=a["ticker"], evidence=[EvidenceItem(f"WEB-{a['ticker']}", a["ticker"], f"{a['ticker']} shares slid after the 2026-08-05 report as guidance disappointed.", as_of="2026-08-06", source_title="Arm slides on soft guidance", source_url="https://example.com/arm", metadata={"evidence_type": "search_snippet"})]))
     return registry
 
 
@@ -805,7 +805,7 @@ def test_a_why_follow_up_after_a_loss_ranking_explains_the_loss_since_purchase_n
     with_web = consenting.run("为什么跌这么多?", session_id="chat-4", allow_web=True)
     assert [task.capability for task in with_web.plan.tasks][-1] == "web.research" and with_web.plan.tasks[-1].fan_out["from"] == "market-drawdown"
     assert [result.subject for result in with_web.results if result.capability == "web.research"] == ["ARM"]
-    assert "- ARM shares slid after the 2026-08-05 report as guidance disappointed. [WEB-ARM]" in with_web.answer
+    assert "- Arm slides on soft guidance（2026-08-06）：ARM shares slid after the 2026-08-05 report as guidance disappointed. [WEB-ARM]" in with_web.answer
     assert with_web.verification.ok
     assert second.verification.ok, second.verification
     assert second.status == RunStatus.COMPLETED
@@ -912,6 +912,7 @@ def test_filing_reader_reads_the_sections_it_chooses_and_keeps_only_quoted_event
                         "events": [
                             {"date": "2026-07-29", "summary": "季度营收 10.5 亿美元低于指引区间", "quote": "Revenue of $1.05 billion was below the guidance range", "filing": 1, "section": "s1"},
                             {"date": "2026-07-28", "summary": "CFO 提出辞职", "quote": "the Chief Financial Officer notified the board of his intention to resign", "filing": 1, "section": "s2"},
+                            {"date": "2026-07-29", "summary": "指引下调（模型改写了标点和数字）", "quote": "the company now expects fiscal year revenue growth in the low-twenties", "filing": 1, "section": "s1"},
                             {"date": "2026-07-29", "summary": "编造的事件", "quote": "the company was acquired", "filing": 1, "section": "s1"},
                         ],
                         "note": "两节都读完了",
@@ -926,9 +927,11 @@ def test_filing_reader_reads_the_sections_it_chooses_and_keeps_only_quoted_event
     assert result.ok and result.status == ResultStatus.COMPLETED
     assert source.reads == [("0001-26-000777", "s1"), ("0001-26-000777", "s2")]  # the May filing is outside the ±14-day window
     events = [item for item in result.evidence if item.metadata.get("evidence_scope") == "filing_event"]
-    assert [item.metadata["date"] for item in events] == ["2026-07-29", "2026-07-28"]
+    assert [item.metadata["date"] for item in events] == ["2026-07-29", "2026-07-28", "2026-07-29"]
     assert events[0].source_url == "https://www.sec.gov/x/777/" and "Revenue of $1.05 billion" in events[0].claim
-    assert result.metrics == {"filings": 1, "sections_read": 2, "events": 2, "rounds": 3, "llm_calls": 3}
+    # A quote the model reworded is replaced by the filing's own words around the matching run.
+    assert events[2].metadata["quote"] == "the company now expects fiscal-year revenue growth in the low twenties."
+    assert result.metrics == {"filings": 1, "sections_read": 2, "events": 3, "rounds": 3, "llm_calls": 3}
     assert "1 条事件的引文与已读文本不符，已丢弃" in result.limitations[0]
     assert result.metadata["narrative"].startswith("ARM 申报中读到的事件：2026-07-29 季度营收 10.5 亿美元低于指引区间[evidence-filing-event-")
     assert verify_answer(result.metadata["narrative"], result.evidence, answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result]).ok
@@ -1049,6 +1052,37 @@ def test_decline_timing_reads_the_return_windows():
     assert decline_timing(5.0, {"1m": -0.02}, result) == [] and decline_timing(-32.0, {}, result) == []
     undated = ToolEnvelope("research.stock", ResultStatus.COMPLETED, subject="ARM", evidence=[EvidenceItem("F", "ARM", "TTM P/E is 377.2x.")], limitations=["expectations: 34/100"])
     assert catalyst_lines(undated) == "ARM 期间未查到可核对的催化剂（财报、公告或新闻）。\n数据限制：expectations: 34/100"
+
+
+def test_locate_quote_tolerates_punctuation_and_rejects_invention():
+    from v2.agent_v2.agents.filing_reader import locate_quote
+
+    text = "Revenue of $1,050 million was below the guidance range; the company now expects fiscal-year revenue growth in the “low twenties”. Nothing else."
+    assert locate_quote("Revenue of $1,050 million was below the guidance range", text) == "Revenue of $1,050 million was below the guidance range"
+    assert locate_quote('the company now expects fiscal-year revenue growth in the “low twenties”', text) == 'the company now expects fiscal-year revenue growth in the "low twenties"'
+    assert locate_quote("the company now expects fiscal year revenue growth in the low-twenties", text) == 'the company now expects fiscal-year revenue growth in the "low twenties".'
+    assert locate_quote("the company was acquired by a competitor last week", text) is None
+    assert locate_quote("", text) is None and locate_quote("anything", "") is None
+
+
+def test_framed_answer_renders_web_results_by_headline_and_date_and_coverage_as_one_line():
+    from v2.agent_v2.synthesis import web_lines
+
+    result = ToolEnvelope(
+        "web.research",
+        ResultStatus.COMPLETED,
+        subject="ARM",
+        evidence=[
+            EvidenceItem("W1", "ARM", "Arm shares slid 8% after guidance came in below expectations.", as_of="2026-07-30T12:00:00", source_title="Arm falls on soft outlook", source_url="https://example.com/a", metadata={"evidence_type": "search_snippet"}),
+            EvidenceItem("W2", "ARM", "An older story.", as_of="2026-03-01", source_title="Arm rallies", source_url="https://example.com/b", metadata={"evidence_type": "search_snippet"}),
+            EvidenceItem("W3", "ARM", "Undated aggregator page " * 20, source_title="Stock page", source_url="https://example.com/c", metadata={"evidence_type": "search_snippet"}),
+        ],
+        limitations=["Evidence contains search-result snippets; source pages were not fetched in this adapter."],
+    )
+    lines = web_lines(result, "2026-06-10").split("\n")
+    assert lines[0] == "- Arm falls on soft outlook（2026-07-30）：Arm shares slid 8% after guidance came in below expectations. [W1]"
+    assert "[W2]" not in "\n".join(lines) and lines[1].startswith("- Stock page（日期未知）：") and lines[1].endswith("… [W3]")
+    assert web_lines(ToolEnvelope("web.research", ResultStatus.COMPLETED, subject="ARM"), "2026-06-10") == "ARM 网页搜索未返回落在区间内的报道。"
 
 
 def test_frame_lead_drops_a_sentence_its_own_verifier_rejects():

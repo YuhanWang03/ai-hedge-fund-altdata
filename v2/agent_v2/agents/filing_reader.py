@@ -244,7 +244,7 @@ _SYSTEM = """你是申报阅读者，只输出 JSON，不回答用户问题。
 每一轮只能做一件事：
 - 读章节（一次最多 3 节）：{"action":"read","reads":[{"filing":<申报序号>,"section":"<章节 id>"}]}
 - 结束：{"action":"finish","events":[{"date":"YYYY-MM-DD","summary":"一句中文概括","quote":"从已读章节里原样复制的一段原文（不超过 300 字符）","filing":<申报序号>,"section":"<章节 id>"}],"note":"一句话说明还缺什么或为什么结束"}
-优先读 EXHIBIT 99.1、Item 2.02（业绩）、Item 5.02（高管变动）、Item 8.01（其他事项）这类章节；封面页和 Item 9.01 通常没有内容。
+优先读 EXHIBIT 99.1、Outlook / Guidance（指引）、Item 2.02（业绩）、Item 5.02（高管变动）、Item 8.01（其他事项）这类章节；封面页和 Item 9.01 通常没有内容。股价在业绩日下跌时，指引和展望往往比业绩本身更关键。
 规则：quote 必须逐字来自你已经读过的章节文本，不能改写、不能翻译；没有相关事件就返回空的 events 并在 note 里说明；不要编造日期。轮次有限，读到足够内容就尽早结束。"""
 
 _FINISH_NOW = "轮次已用完。现在只允许 finish：把已读章节里有明确日期、且能逐字引用的事件整理出来；没有就返回空的 events 并说明。"
@@ -398,9 +398,13 @@ class FilingReader:
 
 
 def _verify_events(events: list[dict[str, Any]], read: dict[tuple[int, str], str]) -> tuple[list[dict[str, Any]], int]:
-    """Keep only events whose quote appears verbatim in a section the loop actually read."""
+    """Keep only events whose quote can be located in a section the loop actually read.
 
-    normalized = {key: _WS.sub(" ", text).strip().lower() for key, text in read.items()}
+    The quote is replaced by the section's own text at that spot, so what
+    the answer cites is the filing's wording even when the model changed
+    a comma or a number format.
+    """
+
     kept: list[dict[str, Any]] = []
     dropped = 0
     for row in events:
@@ -412,11 +416,51 @@ def _verify_events(events: list[dict[str, Any]], read: dict[tuple[int, str], str
         except (TypeError, ValueError):
             dropped += 1
             continue
-        if not quote or not row.get("summary") or key not in normalized or quote.lower() not in normalized[key]:
+        located = locate_quote(quote, read.get(key, "")) if quote and row.get("summary") else None
+        if located is None:
             dropped += 1
             continue
-        kept.append({**row, "date": day, "quote": quote})
+        kept.append({**row, "date": day, "quote": located})
     return kept, dropped
+
+
+_PUNCT = str.maketrans({"“": '"', "”": '"', "‘": "'", "’": "'", "\u00a0": " ", "–": "-", "—": "-"})
+
+
+def locate_quote(quote: str, text: str, *, minimum: int = 40, share: float = 0.6) -> str | None:
+    """The passage of ``text`` the quote points at, or None when it is not there.
+
+    An exact match wins.  Otherwise the longest common run between the two
+    must cover at least ``share`` of the quote (and ``minimum`` characters);
+    the returned passage is the text's own characters around that run.
+    """
+
+    from difflib import SequenceMatcher
+
+    haystack = _WS.sub(" ", (text or "").translate(_PUNCT)).strip()
+    needle = _WS.sub(" ", (quote or "").translate(_PUNCT)).strip()
+    if not needle or not haystack:
+        return None
+    position = haystack.lower().find(needle.lower())
+    if position >= 0:
+        return haystack[position : position + len(needle)]
+    # Small edits (a hyphen, a number format) break an exact match; the
+    # matching runs together must still cover most of the quote and sit
+    # within one passage of the text.
+    blocks = [block for block in SequenceMatcher(None, haystack.lower(), needle.lower(), autojunk=False).get_matching_blocks() if block.size >= 3]
+    covered = sum(block.size for block in blocks)
+    if not blocks or covered < max(minimum, int(len(needle) * share)):
+        return None
+    first, last = blocks[0].a, blocks[-1].a + blocks[-1].size
+    if last - first > 2 * len(needle) + 40:
+        return None
+    # Widen the passage to the sentence-ish boundaries around it in the text.
+    start, end = first, last
+    while start > 0 and haystack[start - 1] not in ".;。；\n" and first - start < 80:
+        start -= 1
+    while end < len(haystack) and haystack[end - 1] not in ".;。；" and end - last < 80:
+        end += 1
+    return haystack[start:end].strip()
 
 
 def _strip_fence(text: str) -> str:

@@ -162,6 +162,37 @@ def benchmark_line(result: ToolEnvelope) -> str:
     return ""
 
 
+def web_lines(result: ToolEnvelope, since: str = "") -> str:
+    """Web search results in a framed answer: headline, published date and excerpt.
+
+    A news snippet rarely carries its date in the text; the published date
+    is metadata, so the window filter uses that and keeps undated items,
+    marked as such.
+    """
+
+    lines: list[str] = []
+    for item in result.evidence:
+        if not item.metadata.get("citable", True) or item.metadata.get("citation_kind") in {"metrics", "limitations"}:
+            continue
+        day = str(item.as_of or item.metadata.get("published_at") or "")[:10]
+        if since and day and day < since:
+            continue
+        excerpt = _WS_RUN.sub(" ", plain_text(item.claim)).strip()
+        title = _WS_RUN.sub(" ", plain_text(item.source_title)).strip() or "（无标题）"
+        lines.append(f"- {title}（{day or '日期未知'}）：{excerpt[:180]}{'…' if len(excerpt) > 180 else ''} [{item.id}]")
+        if len(lines) >= 4:
+            break
+    if not lines:
+        lines.append(f"{result.subject} 网页搜索未返回落在区间内的报道。")
+    if not result.ok:
+        detail = result.errors[0] if result.errors else "未知错误"
+        lines.append(f"{result.capability} 未完成：{detail}")
+    return "\n".join(lines)
+
+
+_WS_RUN = re.compile(r"\s+")
+
+
 def catalyst_lines(result: ToolEnvelope, since: str = "") -> str:
     """A research or history result in a framed answer: its dated, citable findings, not a thesis.
 
@@ -305,7 +336,11 @@ class EvidenceSummarySynthesizer:
                 for result in results:
                     if result is source:
                         continue
-                    if result.capability in {"research.stock", "research.compare", "filings.recent", "filings.read_events", "market.anomaly_history", "web.research"}:
+                    if isinstance(result.metadata.get("fan_out_coverage"), dict):
+                        blocks.append(self._render(result))  # just the coverage line
+                    elif result.capability == "web.research":
+                        blocks.append(web_lines(result, since))
+                    elif result.capability in {"research.stock", "research.compare", "filings.recent", "filings.read_events", "market.anomaly_history"}:
                         blocks.append(catalyst_lines(result, since))
                     elif result.capability == "market.performance" and result.ok:
                         blocks.append(benchmark_line(result))

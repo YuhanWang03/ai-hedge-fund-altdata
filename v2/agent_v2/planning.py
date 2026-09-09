@@ -322,7 +322,7 @@ class RulePlanner:
                     purpose="news for the worst trading days",
                     depends_on=("market-drawdown",),
                     required=False,
-                    fan_out={"from": "market-drawdown", "field": "queries", "argument": "query", "max": 2},
+                    fan_out={"from": "market-drawdown", "field": "queries", "argument": "query", "max": 3},
                 )
             )
         return ExecutionPlan(
