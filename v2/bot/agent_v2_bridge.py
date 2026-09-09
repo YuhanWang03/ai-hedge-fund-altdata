@@ -1,4 +1,4 @@
-"""Production Telegram transport for the explicit ``/ask_v2`` command."""
+"""Production Telegram transport for Agent V2: plain messages and ``/ask_v2``."""
 
 from __future__ import annotations
 
@@ -7,10 +7,10 @@ import os
 import threading
 import time
 from typing import Any
-from urllib.parse import urlparse
 
 from v2.agent import bot_bridge as delivery
 from v2.agent import presentation
+from v2.agent_v2.interfaces import telegram_format
 from v2.agent_v2.interfaces.telegram import TelegramFacade, TelegramMessage
 from v2.agent_v2.orchestrator import AgentV2Config
 from v2.agent_v2.runtime import build_workspace_agent
@@ -27,6 +27,36 @@ def _web_enabled() -> bool:
         "yes",
         "on",
     }
+
+
+def web_default() -> bool:
+    """Whether a plain message may use the web unless it says ``--noweb``.
+
+    The bot answers one authorised owner, so the consent the web page asks
+    for with a checkbox is given once here, by configuration.  The server
+    flag ``AGENT_V2_WEB_ENABLED`` stays the master switch.
+    """
+
+    return os.environ.get("TELEGRAM_WEB_DEFAULT", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def split_web_consent(text: str) -> tuple[str, bool]:
+    """Take ``--web`` / ``--noweb`` out of a message; what is left is the question.
+
+    ``--web`` always allows the web for this message and ``--noweb`` always
+    forbids it; without either, :func:`web_default` decides.
+    """
+
+    tokens = text.split()
+    lowered = [token.lower() for token in tokens]
+    if "--noweb" in lowered:
+        allow_web = False
+    elif "--web" in lowered:
+        allow_web = True
+    else:
+        allow_web = web_default()
+    question = " ".join(token for token in tokens if token.lower() not in {"--web", "--noweb"}).strip()
+    return question, allow_web
 
 
 def _get_agent():
@@ -77,24 +107,36 @@ class TelegramBotTransport:
             pass
 
     async def deliver(self, chat_id: int, result) -> None:
-        web_state = "已启用" if self.web_requested and _web_enabled() else "未启用"
-        header = f"<b>Agent V2 · {html.escape(result.status.value)}</b>\n" f"<i>路径：{html.escape(result.route.kind.value)} · " f"回答：{html.escape(result.answer_mode.value)} · 网页：{web_state}</i>\n\n"
-        answer = presentation.to_telegram_html(result.answer)
+        header = self._header(result)
+        numbered = telegram_format.number_citations(
+            telegram_format.compact_attributions(result.answer, result),
+            result.evidence,
+        )
+        answer = presentation.to_telegram_html(numbered.text)
         sources = []
-        seen = set()
-        for item in result.evidence:
-            if not item.source_url or item.source_url in seen:
-                continue
-            if urlparse(item.source_url).scheme not in {"http", "https"}:
-                continue
-            seen.add(item.source_url)
-            label = html.escape(item.source_title or item.source_id or item.source_url)
-            url = html.escape(item.source_url, quote=True)
-            sources.append(f'• <a href="{url}">{label}</a>')
-            if len(sources) >= 5:
-                break
+        for entry in telegram_format.source_entries(numbered.ids, result.evidence):
+            label = html.escape(entry.label)
+            if entry.url:
+                label = f'<a href="{html.escape(entry.url, quote=True)}">{label}</a>'
+            sources.append(f"{entry.number}. {label}")
+        if len(numbered.ids) > len(sources):
+            sources.append(f"（另有 {len(numbered.ids) - len(sources)} 条引用略）")
         suffix = "\n\n<b>来源</b>\n" + "\n".join(sources) if sources else ""
         await delivery._deliver(self.placeholder, header + answer + suffix)
+
+    def _header(self, result) -> str:
+        fields = [
+            f"路径：{html.escape(result.route.kind.value)}",
+            f"回答：{html.escape(result.answer_mode.value)}",
+        ]
+        synthesis = telegram_format.synthesis_label(result)
+        if synthesis:
+            fields.append(f"合成：{html.escape(synthesis)}")
+        fields.append(f"校验：{html.escape(telegram_format.verification_label(result))}")
+        fields.append(
+            "网页：" + html.escape(telegram_format.web_label(requested=self.web_requested, enabled=_web_enabled()))
+        )
+        return f"<b>Agent V2 · {html.escape(result.status.value)}</b>\n<i>{' · '.join(fields)}</i>\n\n"
 
 
 async def handle_agent_v2(

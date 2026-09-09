@@ -329,6 +329,7 @@ class MoveAttributor:
         if high == 0:
             answer_constraints.append({"max_cited": {"metadata": {"claim_role": "candidate_driver"}, "max": 1, "warning": "未确认直接驱动时展示了过多弱候选线索"}})
         narrative = self._narrative(facts, evidence[0], volume, benchmark, reason_items, assessment)
+        compact = self._compact_narrative(facts, evidence[0], benchmark, reason_items, assessment)
         return ToolEnvelope(
             "market.attribute_move",
             ResultStatus.COMPLETED if reasons else ResultStatus.PARTIAL_DATA,
@@ -339,7 +340,7 @@ class MoveAttributor:
             findings=[{"claim": reason["text"], "causal_confidence": reason["confidence"], "confirmed": reason["confidence"] == "高", "evidence_ids": [reason_item.id]} for reason, reason_item in zip(reasons, reason_items)],
             evidence=evidence,
             limitations=limitations,
-            metadata={"next_steps": next_steps, "require_cited_numbers": True, "answer_constraints": answer_constraints, "narrative": narrative, "date": day},
+            metadata={"next_steps": next_steps, "require_cited_numbers": True, "answer_constraints": answer_constraints, "narrative": narrative, "narrative_compact": compact, "date": day},
         )
 
     @staticmethod
@@ -365,6 +366,31 @@ class MoveAttributor:
         else:
             third = ""
         return "\n\n".join(part for part in (first, second, third) if part)
+
+    @staticmethod
+    def _compact_narrative(facts: DayFacts, price: EvidenceItem, benchmark: EvidenceItem | None, reasons: list[EvidenceItem], assessment: EvidenceItem) -> str:
+        """The same day in one short paragraph, for a phone screen.
+
+        Date and move, how it compared with the sector, and the single best
+        lead; the full narrative keeps the volume figure and the second lead.
+        """
+
+        sentence = f"{facts.date} {facts.ticker} {_pct(facts.change)}[{price.id}]"
+        if benchmark is not None and facts.relative_1d is not None:
+            relation = "跑赢" if facts.relative_1d > 0 else "跑输"
+            sentence += f"，{relation} {facts.sector_etf} 约 {abs(facts.relative_1d):.2%}[{benchmark.id}]"
+        sentence += "。"
+        confirmed = [item for item in reasons if item.metadata.get("claim_role") == "confirmed_driver"]
+        candidates = [item for item in reasons if item.metadata.get("claim_role") == "candidate_driver"]
+        if confirmed:
+            best = confirmed[0]
+            sentence += f"驱动：{best.metadata['driver_text']}[{best.id}]。"
+        elif candidates:
+            best = max(candidates, key=lambda item: float(item.confidence or 0))
+            sentence += f"催化剂未确认；最相关线索：{best.metadata['driver_text']}[{best.id}]。"
+        else:
+            sentence += f"暂未找到可核实的同日催化剂[{assessment.id}]。"
+        return sentence
 
 
 def _pct(value: float | None) -> str:

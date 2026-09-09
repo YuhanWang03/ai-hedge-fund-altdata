@@ -1142,6 +1142,10 @@ def test_move_attributor_explains_a_past_day_from_sources_it_fetched_and_remembe
     narrative = result.metadata["narrative"]
     assert narrative.startswith("ARM 在 2026-07-29 收于") and "能直接支持的高置信度驱动：营收指引低于华尔街预期[" in narrative and "跑输行业基准 SMH" in narrative
     assert verify_answer(narrative, result.evidence, answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result]).ok
+    compact = result.metadata["narrative_compact"]
+    assert compact.startswith("2026-07-29 ARM ") and "驱动：营收指引低于华尔街预期[" in compact and "跑输 SMH" in compact
+    assert "\n" not in compact and len(compact) < len(narrative)
+    assert verify_answer(compact, result.evidence, answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result]).ok
     # Without web consent the news action is refused and the loop is told so.
     refused = ScriptedLLM([LLMResponse(text='{"action":"news","query":"x"}'), LLMResponse(text='{"action":"finish","reasons":[],"note":"无新闻"}')])
     quiet = MoveAttributor(refused, price_source_factory=lambda: SimpleNamespace(get_prices=_attributor_prices), news=news, filing_reader=Reader(), memory_recall=None, memory_remember=None, sector_for=None)
@@ -1254,9 +1258,13 @@ def test_telegram_plain_messages_go_to_agent_v2_and_ask_keeps_v1(monkeypatch):
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "7")
     monkeypatch.delenv("TELEGRAM_FREE_TEXT_AGENT", raising=False)
     monkeypatch.setattr(agent_v2_bridge, "handle_agent_v2", handle)
-    update = update_for("为什么跌这么狠 --web")
+    monkeypatch.delenv("TELEGRAM_WEB_DEFAULT", raising=False)
+    update = update_for("为什么跌这么狠")
     asyncio.run(commands.cmd_nl(update, object()))
     assert called == [{"text": "为什么跌这么狠", "allow_web": True}] and update.message.replies == []
+    asyncio.run(commands.cmd_nl(update_for("为什么跌这么狠 --noweb"), object()))
+    assert called[-1] == {"text": "为什么跌这么狠", "allow_web": False}
+    handled = len(called)
     # A rollback switch hands plain messages back to the V1 chain.
     monkeypatch.setenv("TELEGRAM_FREE_TEXT_AGENT", "v1")
     monkeypatch.setattr(commands, "agent_bridge", None)
@@ -1271,7 +1279,7 @@ def test_telegram_plain_messages_go_to_agent_v2_and_ask_keeps_v1(monkeypatch):
         asyncio.run(commands.cmd_nl(rolled_back, object()))
     except Exception:  # noqa: BLE001 — the V1 chain needs more scaffolding than this test provides
         pass
-    assert len(called) == 1 and rolled_back.message.replies[:1] == ["🤔 理解中..."]
+    assert len(called) == handled and rolled_back.message.replies[:1] == ["🤔 理解中..."]
 
 
 def test_telegram_ask_v2_command_is_explicit_and_parses_web_consent(monkeypatch):
@@ -1295,12 +1303,79 @@ def test_telegram_ask_v2_command_is_explicit_and_parses_web_consent(monkeypatch)
         effective_chat = Chat()
 
     class Context:
-        args = ["--web", "比较", "NVDA", "和", "AMD"]
+        args = ["--noweb", "比较", "NVDA", "和", "AMD"]
 
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "7")
     monkeypatch.setattr(agent_v2_bridge, "handle_agent_v2", handle)
     asyncio.run(commands.cmd_agent_v2(Update(), Context()))
-    assert called == {"text": "比较 NVDA 和 AMD", "allow_web": True}
+    assert called == {"text": "比较 NVDA 和 AMD", "allow_web": False}
+
+
+def test_telegram_web_consent_defaults_on_with_an_opt_out(monkeypatch):
+    from v2.bot.agent_v2_bridge import split_web_consent
+
+    monkeypatch.delenv("TELEGRAM_WEB_DEFAULT", raising=False)
+    assert split_web_consent("为什么跌这么狠") == ("为什么跌这么狠", True)
+    assert split_web_consent("为什么跌这么狠 --noweb") == ("为什么跌这么狠", False)
+    assert split_web_consent("--WEB 为什么跌这么狠 --noweb") == ("为什么跌这么狠", False)
+    monkeypatch.setenv("TELEGRAM_WEB_DEFAULT", "0")
+    assert split_web_consent("为什么跌这么狠") == ("为什么跌这么狠", False)
+    assert split_web_consent("--web 为什么跌这么狠") == ("为什么跌这么狠", True)
+
+
+def _telegram_result(answer: str, *, outcome: str = "fallback", warnings: tuple[str, ...] = ()):
+    from v2.agent_v2.models import AgentResult, AnswerMode, ExecutionPlan, NormalizedRequest, ResultStatus, RouteDecision, RouteKind, RunStatus, ToolEnvelope, VerificationReport
+
+    price = EvidenceItem("evidence-market-price-42f5c41951e36ef1", "ARM", "ARM 在 2026-07-29 收于 149.35，当日 -13.21%。", source_id="market_data")
+    news = EvidenceItem("evidence-news-1", "ARM", "Arm Holdings slides after guidance disappoints; the stock fell 13%.", source_id="web_news", source_title="Arm slides on soft guidance", source_url="https://example.com/arm")
+    full = "ARM 在 2026-07-29 收于 149.35，当日 -13.21%[evidence-market-price-42f5c41951e36ef1]。当日成交量为 30 日均量的 4 倍。\n\n能直接支持的高置信度驱动：营收指引低于预期[evidence-news-1]。\n\n从盘面看，当天跑输行业基准 SMH 约 10.00%。"
+    compact = "2026-07-29 ARM -13.21%[evidence-market-price-42f5c41951e36ef1]，跑输 SMH 约 10.00%。驱动：营收指引低于预期[evidence-news-1]。"
+    envelope = ToolEnvelope("market.attribute_move", ResultStatus.COMPLETED, subject="ARM", evidence=[price, news], metadata={"narrative": full, "narrative_compact": compact})
+    request = NormalizedRequest("为什么跌这么狠", "为什么跌这么狠")
+    return AgentResult(
+        "run", request, RouteDecision(RouteKind.RESEARCH, ("research",), "why"), ExecutionPlan(objective="q", route=RouteKind.RESEARCH),
+        RunStatus.COMPLETED, answer.replace("{full}", full), AnswerMode.RESEARCH_GROUNDED, results=[envelope], evidence=[price, news],
+        verification=VerificationReport(ok=not warnings, warnings=warnings), synthesis={"outcome": outcome},
+    )
+
+
+def test_telegram_delivery_numbers_citations_and_compacts_worst_days(monkeypatch):
+    from v2.agent_v2.interfaces import telegram_format
+    from v2.bot.agent_v2_bridge import TelegramBotTransport
+
+    result = _telegram_result("ARM 自买入以来浮亏 20%[evidence-market-price-42f5c41951e36ef1]。\n\n{full}", warnings=("未确认直接驱动时展示了过多弱候选线索",))
+    numbered = telegram_format.number_citations(telegram_format.compact_attributions(result.answer, result), result.evidence)
+    assert numbered.ids == ("evidence-market-price-42f5c41951e36ef1", "evidence-news-1")
+    assert numbered.text == "ARM 自买入以来浮亏 20%[1]。\n\n2026-07-29 ARM -13.21%[1]，跑输 SMH 约 10.00%。驱动：营收指引低于预期[2]。"
+    # Brackets that are not evidence ids are left alone.
+    assert telegram_format.number_citations("ARM [2026-07-29] 跌 [evidence-news-1]", result.evidence).text == "ARM [2026-07-29] 跌 [1]"
+    entries = telegram_format.source_entries(numbered.ids, result.evidence)
+    assert [(entry.number, entry.url) for entry in entries] == [(1, ""), (2, "https://example.com/arm")]
+    assert entries[1].label.startswith("Arm slides on soft guidance · Arm Holdings slides")
+
+    class Placeholder:
+        sent: list[str] = []
+
+        async def edit_text(self, text, **kwargs):
+            self.sent.append(text)
+
+    monkeypatch.setenv("AGENT_V2_WEB_ENABLED", "1")
+    placeholder = Placeholder()
+    transport = TelegramBotTransport(object(), placeholder, web_requested=False)
+    asyncio.run(transport.deliver(7, result))
+    (message,) = placeholder.sent
+    header, _, body = message.partition("\n\n")
+    assert "合成：兜底摘要" in header and "校验：有警告（1）" in header and "网页：已关闭（去掉 --noweb 可用新闻归因）" in header
+    assert "[evidence-" not in body and "[1]。" in body and "跑输 SMH" in body and "当日成交量" not in body
+    assert body.endswith('<b>来源</b>\n1. market_data · ARM 在 2026-07-29 收于 149.35，当日 -13.21%。\n2. <a href="https://example.com/arm">Arm slides on soft guidance · Arm Holdings slides after guidance disappoints; the stock fell 13%.</a>')
+    # A model-written answer never contains the narrative verbatim and is delivered as written.
+    clean = _telegram_result("模型自己的话[evidence-news-1]。", outcome="clean")
+    transport = TelegramBotTransport(object(), placeholder, web_requested=True)
+    asyncio.run(transport.deliver(7, clean))
+    assert "合成：模型回答 · 校验：通过 · 网页：已启用" in placeholder.sent[-1] and "模型自己的话[1]。" in placeholder.sent[-1]
+    monkeypatch.setenv("AGENT_V2_WEB_ENABLED", "0")
+    asyncio.run(transport.deliver(7, clean))
+    assert "网页：未启用（服务端 AGENT_V2_WEB_ENABLED 未开）" in placeholder.sent[-1]
 
 
 def test_workspace_lab_port_reuses_an_injected_runner_and_builds_evidence():

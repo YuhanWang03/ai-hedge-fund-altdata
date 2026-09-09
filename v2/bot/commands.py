@@ -106,9 +106,9 @@ _HELP_TEXT = (
     "<b>自然语言</b>\n"
     "  直接发问即走 Agent V2：规划、调工具、带证据引用回答，追问接上文\n"
     "  例：「我的持仓中哪只跌的最狠」「为什么跌这么狠」「ARM 从高点为什么跌了这么多」\n"
-    "  问题里加 --web — 允许网页证据（服务端也须启用）\n"
+    "  网页证据默认允许（服务端须开 AGENT_V2_WEB_ENABLED）；问题里加 --noweb 则本条不用网页\n"
     "  /ask 问题         — 旧版 V1 单跳路由（保留作对照）\n"
-    "  /ask_v2 [--web] 问题 — 与直接发问相同\n"
+    "  /ask_v2 [--web|--noweb] 问题 — 与直接发问相同\n"
     "\n"
     "<i>本 bot 受单用户授权——只响应所有者的消息。</i>"
 )
@@ -650,19 +650,15 @@ async def cmd_insiders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def cmd_agent_v2(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Explicit opt-in to Agent V2; ``--web`` is a second network consent."""
 
-    args = list(context.args or [])
-    allow_web = any(value.lower() == "--web" for value in args)
-    text = " ".join(
-        value for value in args if value.lower() != "--web"
-    ).strip()
+    from v2.bot.agent_v2_bridge import handle_agent_v2, split_web_consent
+
+    text, allow_web = split_web_consent(" ".join(context.args or []))
     if not text:
         await update.message.reply_html(
-            "用法：<code>/ask_v2 [--web] 问题</code>\n"
+            "用法：<code>/ask_v2 [--web|--noweb] 问题</code>\n"
             "例：<code>/ask_v2 比较 NVDA 和 AMD 的风险</code>"
         )
         return
-
-    from v2.bot.agent_v2_bridge import handle_agent_v2
 
     await handle_agent_v2(update, context, text, allow_web=allow_web)
 
@@ -702,14 +698,6 @@ def _free_text_agent() -> str:
     return os.environ.get("TELEGRAM_FREE_TEXT_AGENT", "v2").strip().lower() or "v2"
 
 
-def _split_web_consent(text: str) -> tuple[str, bool]:
-    """Take a ``--web`` token out of a plain message; its presence is the user's web consent."""
-
-    tokens = text.split()
-    allow_web = any(token.lower() == "--web" for token in tokens)
-    return " ".join(token for token in tokens if token.lower() != "--web").strip(), allow_web
-
-
 @authorized_only
 async def cmd_nl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """A plain message goes to Agent V2; ``/ask`` keeps the V1 single-hop router as a control."""
@@ -718,10 +706,10 @@ async def cmd_nl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     if not text.lower().startswith("/ask") and _free_text_agent() == "v2":
-        question, allow_web = _split_web_consent(text)
-        if question:
-            from v2.bot.agent_v2_bridge import handle_agent_v2
+        from v2.bot.agent_v2_bridge import handle_agent_v2, split_web_consent
 
+        question, allow_web = split_web_consent(text)
+        if question:
             await handle_agent_v2(update, context, question, allow_web=allow_web)
             return
 
