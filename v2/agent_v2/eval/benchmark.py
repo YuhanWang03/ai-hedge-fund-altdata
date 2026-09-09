@@ -84,6 +84,9 @@ class BenchmarkScore:
     #: Whether the fixtures behind this run are the ones the fact keys describe.
     keyed: bool = True
     fixtures: str = "v1"
+    #: v2_llm only: did the *first draft* satisfy the answer key?  None when no draft exists.
+    draft_keys_ok: bool | None = None
+    draft: str = ""
 
     @property
     def answer_correct(self) -> bool:
@@ -98,6 +101,23 @@ class BenchmarkScore:
     def capability_gap(self) -> bool:
         return bool(self.unmapped_tools)
 
+    @property
+    def checker_false_positive(self) -> bool:
+        """The verifier rejected an answer whose every keyed assertion passes.
+
+        V1's lesson: a case's own facts and forbidden lists already decide
+        whether the answer is right, so a rejection on top of a fully keyed
+        pass is a rejection of a correct answer.  Only meaningful with keys.
+        """
+
+        return self.keyed and self.answer_correct and not self.grounded
+
+    @property
+    def repair_regressed(self) -> bool:
+        """The draft satisfied the key and the shipped answer does not."""
+
+        return self.keyed and self.draft_keys_ok is True and self.fact_recall < 1.0
+
     def failure_reason(self) -> str:
         if self.error:
             return f"运行错误：{self.error[:80]}"
@@ -108,7 +128,7 @@ class BenchmarkScore:
         if self.forbidden_hit:
             return "错误归属：" + ", ".join(self.forbidden_hit[:2])
         if not self.grounded:
-            return f"校验未通过（{self.verify_outcome}）"
+            return f"校验未通过（{self.verify_outcome}）" + ("；答案键全部通过，疑似校验器误报" if self.checker_false_positive else "")
         return ""
 
 
@@ -150,6 +170,15 @@ class ModeReport:
     def stable_failures(self) -> list[str]:
         return sorted(case_id for case_id, (passed, _) in self.stability().items() if passed == 0)
 
+    def flaky(self) -> list[str]:
+        return sorted(case_id for case_id, (passed, total) in self.stability().items() if 0 < passed < total)
+
+    def checker_false_positives(self) -> list[BenchmarkScore]:
+        return [score for score in self.scores if score.checker_false_positive]
+
+    def repair_regressions(self) -> list[BenchmarkScore]:
+        return [score for score in self.scores if score.repair_regressed]
+
     def by_category(self) -> dict[str, tuple[int, int]]:
         out: dict[str, tuple[int, int]] = {}
         for score in self.scores:
@@ -158,7 +187,13 @@ class ModeReport:
         return out
 
 
-def _score(case: BenchmarkCase, *, mode: str, answer: str, called: Iterable[str], grounded: bool, verify_outcome: str = "", status: str = "", route: str = "", tool_calls: int = 0, llm_calls: int = 0, tokens: int = 0, elapsed_ms: int = 0, stop_reason: str = "", error: str = "", fixtures: str = "v1") -> BenchmarkScore:
+def _keys_ok(case: BenchmarkCase, text: str) -> bool:
+    required = tuple(case.facts) + tuple(case.behaviors)
+    haystack = normalise(text)
+    return all(fact_present(forms, text) for forms in required) and not any(normalise(value) in haystack for value in case.forbidden)
+
+
+def _score(case: BenchmarkCase, *, mode: str, answer: str, called: Iterable[str], grounded: bool, verify_outcome: str = "", status: str = "", route: str = "", tool_calls: int = 0, llm_calls: int = 0, tokens: int = 0, elapsed_ms: int = 0, stop_reason: str = "", error: str = "", fixtures: str = "v1", draft: str = "") -> BenchmarkScore:
     called_set = set(called)
     if "research.compare" in called_set:
         called_set.add("research.stock")  # compare is V2's own way of researching several tickers
@@ -196,6 +231,8 @@ def _score(case: BenchmarkCase, *, mode: str, answer: str, called: Iterable[str]
         called=tuple(called),
         keyed=fixtures == "v1",
         fixtures=fixtures,
+        draft_keys_ok=_keys_ok(case, draft) if draft else None,
+        draft=draft,
     )
 
 
@@ -245,6 +282,7 @@ def run_v2(case: BenchmarkCase, *, mode: str, llm_factory: Callable[[], Any] | N
     except Exception as exc:  # noqa: BLE001 — a crash is a scored failure
         return _score(case, mode=mode, answer="", called=calls.names(), grounded=False, error=f"{type(exc).__name__}: {exc}", elapsed_ms=int((time.time() - started) * 1000), fixtures=fixtures)
     outcome = synthesizer.last_outcome if synthesizer is not None else "deterministic"
+    draft = synthesizer.last_draft if synthesizer is not None and synthesizer.last_draft != result.answer else ""
     return _score(
         case,
         mode=mode,
@@ -261,6 +299,7 @@ def run_v2(case: BenchmarkCase, *, mode: str, llm_factory: Callable[[], Any] | N
         stop_reason=result.stop_reason,
         error=result.error,
         fixtures=fixtures,
+        draft=draft,
     )
 
 
@@ -301,7 +340,6 @@ def render_comparison(reports: list[ModeReport]) -> str:
         ("事实召回", lambda r: _pct(r.mean("fact_recall")) + ("" if all(s.keyed for s in r.scores) else "*")),
         ("错误归属命中", lambda r: str(sum(1 for s in r.scores if s.forbidden_hit))),
         ("校验通过率", lambda r: _pct(r.rate(lambda s: s.grounded))),
-        ("校验结果", lambda r: ", ".join(f"{k}={v}" for k, v in sorted(r.verify_outcomes().items())) or "-"),
         ("能力缺口用例", lambda r: str(sum(1 for s in r.scores if s.capability_gap))),
         ("超预算", lambda r: str(sum(1 for s in r.scores if s.stop_reason == "deadline"))),
         ("工具调用 / 例", lambda r: f"{r.mean('tool_calls'):.1f}"),
@@ -309,12 +347,19 @@ def render_comparison(reports: list[ModeReport]) -> str:
         ("token / 例", lambda r: f"{r.mean('tokens'):.0f}"),
         ("耗时 ms / 例", lambda r: f"{r.mean('elapsed_ms'):.0f}"),
         ("稳定失败", lambda r: str(len(r.stable_failures()))),
+        ("不稳定用例", lambda r: str(len(r.flaky())) if r.repeat > 1 else "-"),
+        ("校验器疑似误报", lambda r: str(len(r.checker_false_positives())) if all(s.keyed for s in r.scores) else "-"),
+        ("重写丢事实", lambda r: str(len(r.repair_regressions())) if any(s.draft for s in r.scores) else "-"),
     ]
     width = max(14, *(len(r.mode) + 2 for r in reports))
     header = f"{'':14}" + "".join(f"{r.mode:>{width}}" for r in reports)
     lines = [header, "─" * len(header)]
     for label, cell in rows:
         lines.append(f"{label:14}" + "".join(f"{cell(r):>{width}}" for r in reports))
+    for report in reports:
+        outcomes = report.verify_outcomes()
+        if outcomes and set(outcomes) != {"deterministic"}:
+            lines.append(f"校验结果 [{report.mode}]: " + ", ".join(f"{k}={v}" for k, v in sorted(outcomes.items())))
     if any(not s.keyed for r in reports for s in r.scores):
         lines.append("* engine fixtures: V1 fact keys are informational, not gating")
     return "\n".join(lines)
@@ -348,11 +393,86 @@ def render_failures(report: ModeReport, limit: int = 30) -> str:
     return "\n".join(lines)
 
 
+def render_stability(report: ModeReport) -> str:
+    if report.repeat <= 1:
+        return ""
+    stability = report.stability()
+    lines = [f"[{report.mode}] 稳定性（每例 {report.repeat} 次）：稳定通过 {sum(1 for p, n in stability.values() if p == n)} · 不稳定 {len(report.flaky())} · 稳定失败 {len(report.stable_failures())}"]
+    for case_id in report.flaky()[:20]:
+        passed, total = stability[case_id]
+        lines.append(f"  {case_id:5} {passed}/{total}")
+    return "\n".join(lines)
+
+
+def render_checker(report: ModeReport) -> str:
+    rows = report.checker_false_positives()
+    regressions = report.repair_regressions()
+    if not rows and not regressions:
+        return ""
+    lines = [f"[{report.mode}] 校验器轴：疑似误报 {len(rows)} · 重写丢事实 {len(regressions)}"]
+    seen: set[str] = set()
+    for score in rows[:10]:
+        if score.case_id in seen:
+            continue
+        seen.add(score.case_id)
+        lines.append(f"  误报? {score.case_id:5} outcome={score.verify_outcome} answer={score.answer[:60]!r}")
+    for score in regressions[:10]:
+        lines.append(f"  丢事实 {score.case_id:5} 缺：{', '.join(score.missing_facts[:3])}")
+    return "\n".join(lines)
+
+
 def render(reports: list[ModeReport], *, failures: bool = True) -> str:
     parts = [render_comparison(reports), "", render_categories(reports)]
+    for report in reports:
+        for block in (render_stability(report), render_checker(report)):
+            if block:
+                parts.extend(["", block])
     if failures:
         parts.extend(["", *(render_failures(report) for report in reports)])
     return "\n".join(parts)
+
+
+def to_markdown(reports: list[ModeReport], *, title: str, note: str = "") -> str:
+    """The comparison in the layout of v2/agent/README.md's result tables."""
+
+    def cell(value: str) -> str:
+        return value.replace("|", "\\|")
+
+    lines = [f"## {title}", ""]
+    if note:
+        lines.extend([note, ""])
+    lines.append("| | " + " | ".join(cell(r.mode) for r in reports) + " |")
+    lines.append("|---|" + "---|" * len(reports))
+    rows = [
+        ("通过率", lambda r: _pct(r.pass_rate)),
+        ("工具召回", lambda r: _pct(r.mean("tool_recall"))),
+        ("事实召回", lambda r: _pct(r.mean("fact_recall")) + ("" if all(s.keyed for s in r.scores) else "*")),
+        ("校验通过率", lambda r: _pct(r.rate(lambda s: s.grounded))),
+        ("校验结果", lambda r: ", ".join(f"{k}={v}" for k, v in sorted(r.verify_outcomes().items())) or "-"),
+        ("错误归属命中", lambda r: str(sum(1 for s in r.scores if s.forbidden_hit))),
+        ("校验器疑似误报", lambda r: str(len(r.checker_false_positives())) if all(s.keyed for s in r.scores) else "-"),
+        ("重写丢事实", lambda r: str(len(r.repair_regressions())) if any(s.draft for s in r.scores) else "-"),
+        ("超预算", lambda r: str(sum(1 for s in r.scores if s.stop_reason == "deadline"))),
+        ("工具调用 / 例", lambda r: f"{r.mean('tool_calls'):.1f}"),
+        ("LLM 调用 / 例", lambda r: f"{r.mean('llm_calls'):.1f}"),
+        ("token / 例", lambda r: f"{r.mean('tokens'):.0f}"),
+        ("每通过 token", lambda r: f"{(sum(s.tokens for s in r.scores) / r.passed):.0f}" if r.passed and any(s.tokens for s in r.scores) else "-"),
+        ("稳定失败", lambda r: str(len(r.stable_failures()))),
+        ("不稳定用例", lambda r: str(len(r.flaky())) if r.repeat > 1 else "-"),
+    ]
+    for label, fn in rows:
+        lines.append(f"| **{label}** | " + " | ".join(cell(fn(r)) for r in reports) + " |")
+    lines.extend(["", "| 类别 | " + " | ".join(cell(r.mode) for r in reports) + " |", "|---|" + "---|" * len(reports)])
+    categories = list(dict.fromkeys(score.category for report in reports for score in report.scores))
+    for category in categories:
+        cells = []
+        for report in reports:
+            passed, total = report.by_category().get(category, (0, 0))
+            cells.append(f"{passed}/{total}")
+        lines.append(f"| {category} | " + " | ".join(cells) + " |")
+    if any(not s.keyed for r in reports for s in r.scores):
+        lines.extend(["", "\\* engine fixtures：V1 事实答案键仅供参考，不作门槛。"])
+    return "\n".join(lines) + "\n"
 
 
 def to_json(reports: list[ModeReport]) -> dict[str, Any]:
@@ -379,4 +499,4 @@ def gap_summary(cases: tuple[BenchmarkCase, ...] = DEV_CASES) -> dict[str, list[
     return gaps
 
 
-__all__ = ["MODES", "BenchmarkScore", "ModeReport", "run_benchmark", "run_mode", "render", "to_json", "gap_summary", "by_category"]
+__all__ = ["MODES", "BenchmarkScore", "ModeReport", "run_benchmark", "run_mode", "render", "to_json", "to_markdown", "gap_summary", "by_category"]

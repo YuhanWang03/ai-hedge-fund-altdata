@@ -131,3 +131,46 @@ def test_engine_fixture_mode_runs_the_real_adapters_and_scores_without_v1_fact_k
     assert by_id["p01"].passed  # two focuses on one ticker share engine evidence ids without conflict
     assert by_id["m02"].called.count("research.stock") >= 2  # fan-out over holdings
     assert by_id["s01"].grounded
+
+
+def test_simulated_model_exercises_planner_synthesis_repair_and_fallback():
+    from v2.agent_v2.eval.benchmark import run_mode, to_markdown
+    from v2.agent_v2.eval.simulated_llm import SimulatedLLMFactory
+
+    cases = tuple(case for case in DEV_CASES if case.id in {"s01", "s02", "m02", "r04", "p01", "d02"})
+    report = run_mode("v2_llm", cases, repeat=4, llm_factory=SimulatedLLMFactory(noise=0.6, seed=7), fixtures="engine")
+    outcomes = report.verify_outcomes()
+    assert {"clean", "repaired", "fallback"} <= set(outcomes), outcomes
+    assert all(score.llm_calls >= 1 for score in report.scores)
+    assert all(score.grounded for score in report.scores if score.verify_outcome == "fallback")
+    assert any(score.draft for score in report.scores if score.verify_outcome != "clean")
+    assert report.repeat == 4 and len(report.scores) == 24
+    markdown = to_markdown([report], title="dry run", note="simulated")
+    assert "| **通过率** |" in markdown and "v2_llm@engine" in markdown
+    assert not report.checker_false_positives()  # engine layer is unkeyed
+
+
+def test_checker_false_positive_and_repair_regression_axes_are_computed_from_keys():
+    from v2.agent_v2.eval.benchmark import BenchmarkScore, _score
+
+    case = next(case for case in DEV_CASES if case.id == "s01")
+    rejected = _score(case, mode="v2_llm", answer="NVDA 今日上涨 3.85%，相对 SMH 强势。", called=["market.explain_move"], grounded=False, verify_outcome="fallback")
+    assert rejected.checker_false_positive and not rejected.passed
+    assert "误报" in rejected.failure_reason()
+    regressed = _score(case, mode="v2_llm", answer="NVDA 今日上涨。", called=["market.explain_move"], grounded=True, draft="NVDA 今日上涨 3.85%，相对 SMH 强势。")
+    assert regressed.draft_keys_ok is True and regressed.repair_regressed
+    assert isinstance(regressed, BenchmarkScore)
+
+
+def test_llm_payload_selects_evidence_round_robin_across_results():
+    from v2.agent_v2.llm import _select_evidence
+    from v2.agent_v2.models import EvidenceItem, ResultStatus, ToolEnvelope
+
+    results = []
+    for ticker in ("AAA", "BBB", "CCC"):
+        items = [EvidenceItem(f"{ticker}-{index}", ticker, f"{ticker} claim {index}") for index in range(10)]
+        results.append(ToolEnvelope("research.stock", ResultStatus.COMPLETED, subject=ticker, evidence=items))
+    evidence = [item for result in results for item in result.evidence]
+    chosen = _select_evidence(results, evidence, 9)
+    assert [item.entity for item in chosen] == ["AAA", "BBB", "CCC"] * 3
+    assert _select_evidence(results, evidence[:5], 40) == evidence[:5]

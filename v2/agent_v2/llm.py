@@ -224,6 +224,9 @@ class LLMEvidenceSynthesizer:
         #: (``clean``, ``repaired``, ``fallback`` or ``knowledge``).  Written
         #: per call without locking; evaluation reads it, production ignores it.
         self.last_outcome = ""
+        #: Diagnostic only: the first draft of the most recent answer, so an
+        #: evaluation can tell "the repair lost a fact" from "the draft was wrong".
+        self.last_draft = ""
 
     def synthesize(self, request, plan, results, evidence) -> str:
         if plan.answer_mode == AnswerMode.GENERAL_KNOWLEDGE:
@@ -253,8 +256,10 @@ results 中的评分或限制如需引用，使用 evidence 中 citation_kind �
             {"role": "user", "content": payload},
         ]
         self.last_outcome = "fallback"
+        self.last_draft = ""
         try:
             answer = self._draft(messages, results, evidence)
+            self.last_draft = answer
             if plan.answer_mode == AnswerMode.GENERAL_KNOWLEDGE:
                 self.last_outcome = "knowledge"
                 return answer
@@ -325,7 +330,7 @@ results 中的评分或限制如需引用，使用 evidence 中 citation_kind �
                 }
                 for result in results
             ],
-            "evidence": [item.to_dict() for item in evidence[:40]],
+            "evidence": [item.to_dict() for item in _select_evidence(results, evidence, 40)],
         }
         encoded = json.dumps(data, ensure_ascii=False, default=str)
         if len(encoded) <= self.max_context_chars:
@@ -382,6 +387,36 @@ results 中的评分或限制如需引用，使用 evidence 中 citation_kind �
             }
             encoded = json.dumps(data, ensure_ascii=False, default=str)
         return encoded
+
+
+def _select_evidence(results: list[ToolEnvelope], evidence: list[EvidenceItem], cap: int) -> list[EvidenceItem]:
+    """Round-robin across results so a fan-out's later holdings still reach the model.
+
+    Taking the first ``cap`` items in ledger order starves everything after
+    the first few results; six holdings' research would show the model one
+    or two of them.
+    """
+
+    if len(evidence) <= cap:
+        return list(evidence)
+    by_id = {item.id: item for item in evidence}
+    queues = [[item.id for item in result.evidence if item.id in by_id] for result in results]
+    orphans = [item.id for item in evidence if not any(item.id in queue for queue in queues)]
+    if orphans:
+        queues.append(orphans)
+    chosen: list[str] = []
+    seen: set[str] = set()
+    while len(chosen) < cap and any(queues):
+        for queue in queues:
+            while queue:
+                candidate = queue.pop(0)
+                if candidate not in seen:
+                    seen.add(candidate)
+                    chosen.append(candidate)
+                    break
+            if len(chosen) >= cap:
+                break
+    return [by_id[value] for value in chosen]
 
 
 def repair_instruction(report: VerificationReport) -> str:

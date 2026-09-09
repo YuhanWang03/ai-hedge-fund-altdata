@@ -2,7 +2,9 @@
 
     python -m v2.agent_v2.run_benchmark                 # v1_baseline + v2_rules, dev set
     python -m v2.agent_v2.run_benchmark --holdout       # the 15 held-out questions
-    python -m v2.agent_v2.run_benchmark --modes v2_llm --repeat 3   # needs a model key
+    python -m v2.agent_v2.run_benchmark --modes v2_llm --repeat 3   # needs AGENT_LLM_API_KEY (+ AGENT_LLM_BASE_URL/MODEL)
+    python -m v2.agent_v2.run_benchmark --modes v2_llm --simulate 0.2 --repeat 3   # harness dry run, no key
+    python -m v2.agent_v2.run_benchmark --markdown report.md   # V1-README-style tables
     python -m v2.agent_v2.run_benchmark --fixtures engine   # engine-shaped research/market envelopes
     python -m v2.agent_v2.run_benchmark --json out.json
 """
@@ -11,9 +13,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
-from v2.agent_v2.eval.benchmark import MODES, gap_summary, render, run_benchmark, to_json
+from v2.agent_v2.eval.benchmark import MODES, gap_summary, render, run_benchmark, to_json, to_markdown
 from v2.agent_v2.eval.benchmark_fixtures import FIXTURE_MODES
 from v2.agent_v2.eval.benchmark_cases import DEV_CASES, HOLDOUT_CASES
 
@@ -26,6 +29,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", dest="json_path", default="", help="write per-case scores to this file")
     parser.add_argument("--fixtures", default="v1", choices=FIXTURE_MODES, help="v1: V1 cards with V1 fact keys; engine: engine-shaped research/market envelopes")
     parser.add_argument("--no-failures", action="store_true", help="omit the per-mode failure list")
+    parser.add_argument("--simulate", type=float, default=None, metavar="NOISE", help="run v2_llm with the simulated model (noise = share of drafts with an invented figure); a harness dry run, not a model score")
+    parser.add_argument("--seed", type=int, default=0, help="seed for the simulated model")
+    parser.add_argument("--markdown", default="", help="append a Markdown report to this file")
     args = parser.parse_args(argv)
 
     modes = tuple(mode.strip() for mode in args.modes.split(",") if mode.strip())
@@ -44,8 +50,23 @@ def main(argv: list[str] | None = None) -> int:
     if gaps:
         print("capability gaps: " + "; ".join(f"{tool} → {len(ids)} case(s)" for tool, ids in gaps.items()))
     print()
-    reports = run_benchmark(modes, holdout=args.holdout, repeat=args.repeat, fixtures=args.fixtures)
+    llm_factory = None
+    if args.simulate is not None:
+        from v2.agent_v2.eval.simulated_llm import SimulatedLLMFactory
+
+        llm_factory = SimulatedLLMFactory(noise=args.simulate, seed=args.seed)
+        print(f"v2_llm uses the SIMULATED model (noise={args.simulate}); numbers validate the harness, not a model")
+    elif "v2_llm" in modes and not any(os.environ.get(name) for name in ("AGENT_LLM_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY")):
+        print("v2_llm needs AGENT_LLM_API_KEY (or DEEPSEEK_API_KEY / OPENAI_API_KEY); use --simulate for a harness dry run", file=sys.stderr)
+        return 2
+    reports = run_benchmark(modes, holdout=args.holdout, repeat=args.repeat, fixtures=args.fixtures, llm_factory=llm_factory)
     print(render(reports, failures=not args.no_failures))
+    if args.markdown:
+        label = f"{'留出集' if args.holdout else '开发集'} · {len(cases)} 例 · fixtures={args.fixtures}" + (f" · 重复 {args.repeat}" if args.repeat > 1 else "")
+        note = "v2_llm 由模拟模型驱动，仅验证评测框架。" if args.simulate is not None else ""
+        with open(args.markdown, "a", encoding="utf-8") as handle:
+            handle.write(to_markdown(reports, title=label, note=note))
+        print(f"appended Markdown to {args.markdown}")
     if args.json_path:
         with open(args.json_path, "w", encoding="utf-8") as handle:
             json.dump(to_json(reports), handle, ensure_ascii=False, indent=2)
