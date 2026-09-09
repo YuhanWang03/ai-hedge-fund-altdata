@@ -211,6 +211,10 @@ class LLMEvidenceSynthesizer:
         self.catalog = catalog or default_catalog()
         self.fallback = fallback or EvidenceSummarySynthesizer()
         self.max_context_chars = max(4_000, max_context_chars)
+        #: Diagnostic only: how the most recent answer was produced
+        #: (``clean``, ``repaired``, ``fallback`` or ``knowledge``).  Written
+        #: per call without locking; evaluation reads it, production ignores it.
+        self.last_outcome = ""
 
     def synthesize(self, request, plan, results, evidence) -> str:
         if plan.answer_mode == AnswerMode.GENERAL_KNOWLEDGE:
@@ -239,14 +243,17 @@ results 中的评分或限制如需引用，使用 evidence 中 citation_kind �
             {"role": "system", "content": system},
             {"role": "user", "content": payload},
         ]
+        self.last_outcome = "fallback"
         try:
             answer = self._draft(messages, results, evidence)
             if plan.answer_mode == AnswerMode.GENERAL_KNOWLEDGE:
+                self.last_outcome = "knowledge"
                 return answer
             from v2.agent_v2.verification import verify_answer
 
             report = verify_answer(answer, evidence, answer_mode=plan.answer_mode, results=results)
             if report.ok:
+                self.last_outcome = "clean"
                 return answer
             # One repair round: the verifier names what failed and what must
             # stay; a second failure falls back to deterministic prose rather
@@ -261,6 +268,7 @@ results 中的评分或限制如需引用，使用 evidence 中 citation_kind �
                 evidence,
             )
             if verify_answer(repair, evidence, answer_mode=plan.answer_mode, results=results).ok:
+                self.last_outcome = "repaired"
                 return repair
         except (LLMError, ValueError, TypeError):
             pass
