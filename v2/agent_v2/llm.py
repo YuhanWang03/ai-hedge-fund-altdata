@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import threading
 from dataclasses import replace
@@ -27,6 +28,8 @@ from v2.agent_v2.models import (
 from v2.agent_v2.planning import RulePlanner, portfolio_ranking
 from v2.agent_v2.synthesis import EvidenceSummarySynthesizer
 from v2.agent_v2.verification import locate_number
+
+logger = logging.getLogger(__name__)
 
 _RESULT_CITATION = re.compile(r"\[results\.(metrics|limitations)([^\]]*)\]")
 _DETAILED_ANSWER = re.compile(r"详细|完整|全面|深度|报告|逐项|表格|清单|所有|展开")
@@ -302,6 +305,7 @@ class LLMEvidenceSynthesizer:
         self._diagnostics.draft = ""
         self._diagnostics.attempts = []
         self._diagnostics.completions = []
+        self._diagnostics.drafts = []
 
     @property
     def last_outcome(self) -> str:
@@ -332,6 +336,12 @@ class LLMEvidenceSynthesizer:
             "attempts": [dict(attempt) for attempt in getattr(self._diagnostics, "attempts", [])],
             "citation_completions": list(getattr(self._diagnostics, "completions", [])),
         }
+
+    def _keep_draft(self, text: str) -> None:
+        drafts = getattr(self._diagnostics, "drafts", None)
+        if drafts is None:
+            drafts = self._diagnostics.drafts = []
+        drafts.append(text or "")
 
     def _complete(self, answer: str, evidence, results) -> str:
         """Deterministic citation completion before the verifier sees a draft."""
@@ -402,6 +412,7 @@ results 中的评分或限制如需引用，使用 evidence 中 citation_kind �
             from v2.agent_v2.verification import verify_answer
 
             answer = self._complete(answer, evidence, results)
+            self._keep_draft(answer)
             report = verify_answer(answer, evidence, answer_mode=plan.answer_mode, results=results)
             self._record_report("draft", report)
             if report.ok:
@@ -420,6 +431,7 @@ results 中的评分或限制如需引用，使用 evidence 中 citation_kind �
                 evidence,
             )
             repair = self._complete(repair, evidence, results)
+            self._keep_draft(repair)
             repair_report = verify_answer(repair, evidence, answer_mode=plan.answer_mode, results=results)
             self._record_report("repair", repair_report)
             if repair_report.ok:
@@ -427,7 +439,25 @@ results 中的评分或限制如需引用，使用 evidence 中 citation_kind �
                 return repair
         except (LLMError, ValueError, TypeError) as exc:
             self._record_attempt("error", ok=False, warnings=(f"{type(exc).__name__}: {str(exc)[:200]}",))
+        self._log_fallback(request)
         return self.fallback.synthesize(request, plan, results, evidence)
+
+    def _log_fallback(self, request) -> None:
+        """Every rejected draft, with what the verifier said, so a fallback can be diagnosed from the server log."""
+
+        attempts = getattr(self._diagnostics, "attempts", []) or []
+        drafts = getattr(self._diagnostics, "drafts", []) or []
+        for index, attempt in enumerate(attempts):
+            text = drafts[index] if index < len(drafts) else ""
+            logger.warning(
+                "agent_v2 synthesis fell back (%s) stage=%s warnings=%s unknown=%s ungrounded=%s draft=%r",
+                (request.text or "")[:80],
+                attempt.get("stage"),
+                attempt.get("warnings"),
+                attempt.get("unknown_citations"),
+                attempt.get("ungrounded_numbers"),
+                text[:3000],
+            )
 
     def _guidance(self, plan: ExecutionPlan, results: list[ToolEnvelope]) -> str:
         """Collect the adapters' own answer rules for the capabilities in play."""
@@ -560,7 +590,7 @@ def _select_evidence(results: list[ToolEnvelope], evidence: list[EvidenceItem], 
     return [by_id[value] for value in chosen]
 
 
-_NEARBY_UNGROUNDED = re.compile(r"^引用未支持邻近数字：(.+)$")
+_NEARBY_UNGROUNDED = re.compile(r"^引用未支持邻近数字：([^（]+)")
 
 
 def repair_instruction(report: VerificationReport, evidence: list[EvidenceItem] | None = None) -> str:

@@ -1671,11 +1671,17 @@ def test_llm_synthesizer_repairs_an_ungrounded_draft_once():
     assert "完整回答" in repair[3]["content"]
 
 
-def test_llm_synthesizer_falls_back_to_deterministic_prose_when_repair_still_fails():
+def test_llm_synthesizer_falls_back_to_deterministic_prose_when_repair_still_fails(caplog):
+    import logging
+
     llm = ScriptedLLM([LLMResponse(text="NVDA 收入增长 20%。[E1]"), LLMResponse(text="NVDA 收入增长 25%。[E1]")])
     request, plan, results, evidence = _research_fixture()
-    answer = LLMEvidenceSynthesizer(llm).synthesize(request, plan, results, evidence)
+    with caplog.at_level(logging.WARNING, logger="v2.agent_v2.llm"):
+        answer = LLMEvidenceSynthesizer(llm).synthesize(request, plan, results, evidence)
     assert "20%" not in answer and "25%" not in answer
+    # Both rejected drafts are in the server log with what the verifier said, so a fallback can be diagnosed later.
+    logged = [record.getMessage() for record in caplog.records if "synthesis fell back" in record.getMessage()]
+    assert len(logged) == 2 and "stage=draft" in logged[0] and "NVDA 收入增长 20%。[E1]" in logged[0] and "stage=repair" in logged[1] and "25%" in logged[1]
     assert "[E1]" in answer
     assert verify_answer(answer, evidence, answer_mode=plan.answer_mode, results=results).ok
 
@@ -2174,10 +2180,10 @@ def test_repair_instruction_points_at_the_evidence_that_carries_each_number():
     assert "以下数字在本轮证据中找不到：12.34。" in text and "439.46" not in text.split("找不到")[1]
     assert repair_instruction(report).count("找不到：439.46、224.89、12.34") == 1  # without evidence, the old wording
     # A sentence that cited the wrong item reports its figures as a warning; those get the same hint.
-    nearby = VerificationReport(ok=False, warnings=("引用未支持邻近数字：439.46, 224.89, -48.8", "行情事实缺少邻近引用"))
+    nearby = VerificationReport(ok=False, warnings=("引用未支持邻近数字：439.46, 224.89, -48.8（“ARM 从高点 439.46 美元跌到…”）", "行情事实缺少邻近引用：“近 5 日 +12.52%，近 3 月 -18.66%。”"))
     text = repair_instruction(nearby, [peak, price])
     assert "439.46 见 [D-peak]；224.89 见 [D-peak]、[AT-price]；-48.8 见 [D-peak]" in text
-    assert "其他问题：行情事实缺少邻近引用。" in text and "其他问题：引用未支持" not in text
+    assert "其他问题：行情事实缺少邻近引用：“近 5 日 +12.52%，近 3 月 -18.66%。”。" in text and "其他问题：引用未支持" not in text
 
 
 def test_attributor_lead_text_keeps_a_quoted_lead_in_one_sentence():
@@ -2215,7 +2221,7 @@ def test_complete_citations_adds_the_one_item_that_carries_a_misattributed_figur
     # A figure the model computed itself has no carrier and is left for the repair round.
     assert "三只合计 -1,335 美元[AT-price]。" in completed and notes == ["439.46 → [D-peak]", "-48.8 → [D-peak]", "12.52 → [W-ARM]"]
     report = verify_answer(completed, evidence, answer_mode=AnswerMode.RESEARCH_GROUNDED, results=results)
-    assert report.warnings == ("引用未支持邻近数字：-1,335",)
+    assert report.warnings == ("引用未支持邻近数字：-1,335（“三只合计 -1,335 美元。”）",)
     # Vague figures and figures several items carry are not completed.
     untouched = "ARM 跌了 3 天，2026 年表现[B-SMH]。 收于 224.89 美元[B-SMH]。"
     assert complete_citations(untouched, evidence, results) == (untouched, [])

@@ -210,6 +210,13 @@ def _matches(pattern: Any, text: str) -> bool:
     return bool(pattern) and re.search(str(pattern), text) is not None
 
 
+def _excerpt(sentence: str, limit: int = 30) -> str:
+    """The start of a sentence, enough to find it in the draft."""
+
+    flat = " ".join(sentence.split())
+    return flat if len(flat) <= limit else flat[:limit].rstrip() + "…"
+
+
 def _sentence_warnings(answer: str, evidence: list[EvidenceItem], results: list[ToolEnvelope], grounding) -> list[str]:
     """Require nearby citations to support nearby figures and honour evidence-level rules."""
 
@@ -224,11 +231,11 @@ def _sentence_warnings(answer: str, evidence: list[EvidenceItem], results: list[
         plain = _CITATION.sub("", sentence)
         if not cited_items:
             if require_cited_numbers and grounding.check(plain, "").total:
-                warnings.append("行情事实缺少邻近引用")
+                warnings.append(f"行情事实缺少邻近引用：“{_excerpt(plain)}”")
             continue
         local = grounding.check(plain, _observations(cited_items))
         if local.ungrounded:
-            warnings.append("引用未支持邻近数字：" + ", ".join(local.ungrounded[:4]))
+            warnings.append("引用未支持邻近数字：" + ", ".join(local.ungrounded[:4]) + f"（“{_excerpt(plain)}”）")
         for item in cited_items:
             if not item.metadata.get("citable", True):
                 warnings.append(str(item.metadata.get("uncitable_warning") or f"引用了不可展示的证据：{item.id}"))
