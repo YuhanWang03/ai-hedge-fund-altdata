@@ -21,7 +21,6 @@ class RunStatus(str, Enum):
     ROUTED = "routed"
     PLANNED = "planned"
     WAITING_CONFIRMATION = "waiting_confirmation"
-    QUEUED = "queued"
     EXECUTING = "executing"
     SYNTHESIZING = "synthesizing"
     VERIFYING = "verifying"
@@ -106,7 +105,6 @@ class ExecutionPlan:
     requires_confirmation: bool = False
     web_fallback_allowed: bool = False
     assumptions: tuple[str, ...] = ()
-    stop_conditions: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -199,6 +197,15 @@ class ProgressEvent:
 
 
 @dataclass(frozen=True)
+class PendingMutation:
+    """A confirmed-in-principle write the user still has to approve verbatim."""
+
+    operation: str
+    payload: dict[str, Any]
+    description: str
+
+
+@dataclass(frozen=True)
 class VerificationReport:
     ok: bool = True
     unknown_citations: tuple[str, ...] = ()
@@ -221,6 +228,8 @@ class AgentResult:
     verification: VerificationReport = field(default_factory=VerificationReport)
     elapsed_ms: int = 0
     error: str = ""
+    stop_reason: str = ""
+    pending_mutation: PendingMutation | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -270,4 +279,14 @@ class AgentResult:
             },
             "elapsed_ms": self.elapsed_ms,
             "error": self.error,
+            "stop_reason": self.stop_reason,
+            "pending_mutation": (
+                {
+                    "operation": self.pending_mutation.operation,
+                    "payload": dict(self.pending_mutation.payload),
+                    "description": self.pending_mutation.description,
+                }
+                if self.pending_mutation
+                else None
+            ),
         }

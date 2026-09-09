@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import re
 from datetime import date, datetime, time, timedelta
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
@@ -43,6 +44,34 @@ def _observation_state(as_of: str, now: datetime | None = None) -> dict[str, Any
         "observed_at": current.isoformat(timespec="minutes"),
         "observed_at_label": current.strftime("%Y-%m-%d %H:%M ET"),
     }
+
+
+# Wording rules the verifier enforces on sentences that cite market evidence.
+# They live here, next to the data that makes them necessary, and reach the
+# verifier only through the generic ``constraints`` / ``citable`` metadata.
+_INTRADAY_MARKER = r"盘中|截至查询时|截至.{0,30}(?:ET|美东)"
+_FINAL_VOLUME_CONCLUSION = r"缩量|放量|量能不足|成交量.{0,12}(?:未|没有).{0,6}(?:放大|跟上)|持续性存疑"
+_INTRADAY_CAUTION = r"不能|无法|不应|不得|尚不能|待收盘|未收盘|尚未定型|不宜"
+_DIRECT_CAUSE = r"主要原因|直接原因|直接驱动|由.{0,20}推动|因为|催化剂是|归因于"
+_HEDGED_CAUSE = r"可能|或许|候选|低置信|中置信|尚未确认|无法确认|不能确认"
+_REJECTED_CANDIDATE_NOTE = re.compile(r"无直接证据|未提及|关联弱|不匹配|Tier 3|长期预测", re.I)
+_COUNT_LEAK = r"0\s*个.{0,12}(?:驱动|催化|原因)"
+
+_INTRADAY_PRICE_RULE = {"require": _INTRADAY_MARKER, "warning": "盘中价格被表述为完整收盘口径"}
+_INTRADAY_VOLUME_RULE = {"forbid": _FINAL_VOLUME_CONCLUSION, "unless": _INTRADAY_CAUTION, "warning": "未收盘成交量被用于判定放量、缩量或持续性"}
+_CANDIDATE_RULE = {"forbid": _DIRECT_CAUSE, "unless": _HEDGED_CAUSE, "warning": "候选归因被表述为已确认原因"}
+
+
+def _pct(value: float | None) -> str:
+    return "数据不足" if value is None else f"{float(value):+.2%}"
+
+
+def _cite(item: EvidenceItem | None) -> str:
+    return f"[{item.id}]" if item is not None else ""
+
+
+def _scoped(evidence: list[EvidenceItem], scope: str) -> list[EvidenceItem]:
+    return [item for item in evidence if item.metadata.get("evidence_scope") == scope]
 
 
 def _default_price_source():
@@ -142,7 +171,8 @@ def _performance_envelope(ticker: str, context: ExecutionContext, price_source, 
         price_claim = f"{ticker} 截至 {observation['observed_at_label']} 的盘中价格为 {close:.2f} 美元，相对前一交易日收盘价 {day_return:+.2%}。"
     else:
         price_claim = f"{ticker} 截至 {as_of} 收盘价为 {close:.2f} 美元，单日涨跌幅为 {day_return:+.2%}。" if day_return is not None else f"{ticker} 截至 {as_of} 收盘价为 {close:.2f} 美元。"
-    evidence.append(_item("price", ticker, as_of, price_claim, context, metric="close", value=close, metadata={"day_return": day_return, **observation_metadata}))
+    intraday_rules = {"constraints": [_INTRADAY_PRICE_RULE]} if observation["is_intraday"] else {}
+    evidence.append(_item("price", ticker, as_of, price_claim, context, metric="close", value=close, metadata={"day_return": day_return, **observation_metadata, **intraday_rules}))
     available_windows = {key: value for key, value in windows.items() if value is not None}
     window_prefix = f"{ticker} 截至查询时的区间回报（含当前盘中价格）：" if observation["is_intraday"] else f"{ticker} 区间回报："
     window_claim = window_prefix + "，".join(f"{key} {value:+.2%}" for key, value in available_windows.items()) + "。"
@@ -152,7 +182,8 @@ def _performance_envelope(ticker: str, context: ExecutionContext, price_source, 
             volume_claim = f"{ticker} 截至 {observation['observed_at_label']} 的盘中累计成交量为 {int(latest.volume)} 股，相当于 30 日完整交易日平均成交量 {avg_volume_30d:.0f} 股的 {volume_ratio:.2f} 倍；当日未收盘，不能据此判定是否放量或缩量。"
         else:
             volume_claim = f"{ticker} {as_of} 成交量为 {int(latest.volume)} 股，30 日平均成交量为 {avg_volume_30d:.0f} 股，量比为 {volume_ratio:.2f} 倍。"
-        evidence.append(_item("volume", ticker, as_of, volume_claim, context, metric="volume_ratio", value=volume_ratio, metadata={"volume": int(latest.volume), "average_volume_30d": avg_volume_30d, **observation_metadata}))
+        volume_rules = {"constraints": [_INTRADAY_VOLUME_RULE]} if observation["is_intraday"] else {}
+        evidence.append(_item("volume", ticker, as_of, volume_claim, context, metric="volume_ratio", value=volume_ratio, metadata={"volume": int(latest.volume), "average_volume_30d": avg_volume_30d, **observation_metadata, **volume_rules}))
     if volatility_21d is not None:
         volatility_claim = f"{ticker} 基于截至查询时价格估算的近 21 个交易日年化实现波动率为 {volatility_21d:.2%}。" if observation["is_intraday"] else f"{ticker} 近 21 个交易日的实现波动率折算年化后为 {volatility_21d:.2%}。"
         evidence.append(_item("volatility", ticker, as_of, volatility_claim, context, metric="annualized_volatility_21d", value=volatility_21d, metadata=observation_metadata))
@@ -187,7 +218,9 @@ def _performance_envelope(ticker: str, context: ExecutionContext, price_source, 
     }
     summary = price_claim + " " + window_claim
     status = ResultStatus.COMPLETED if "1m" in available_windows and relative else ResultStatus.PARTIAL_DATA
-    return ToolEnvelope("market.performance", status, subject=ticker, as_of=as_of, summary=summary, metrics=metrics, evidence=evidence, limitations=limitations)
+    envelope = ToolEnvelope("market.performance", status, subject=ticker, as_of=as_of, summary=summary, metrics=metrics, evidence=evidence, limitations=limitations, metadata={"require_cited_numbers": True})
+    envelope.metadata["narrative"] = _performance_narrative(envelope)
+    return envelope
 
 
 def _move_envelope(ticker: str, context: ExecutionContext, anomaly, *, now: datetime | None = None) -> ToolEnvelope:
@@ -203,8 +236,10 @@ def _move_envelope(ticker: str, context: ExecutionContext, anomaly, *, now: date
     else:
         price_claim = f"{ticker} 在 {as_of} 收于 {float(anomaly.price):.2f} 美元，较前一交易日 {float(anomaly.price_change_pct):+.2%}。"
         volume_claim = f"{ticker} 当日成交量为 {int(anomaly.volume_today)} 股，30 日均量为 {float(anomaly.volume_avg_30d):.0f} 股，量比 {float(anomaly.volume_ratio):.2f} 倍。"
-    evidence.append(_item("price", ticker, as_of, price_claim, context, metric="price_change_pct", value=float(anomaly.price_change_pct), metadata={"close": float(anomaly.price), **observation_metadata}))
-    evidence.append(_item("volume", ticker, as_of, volume_claim, context, metric="volume_ratio", value=float(anomaly.volume_ratio), metadata=observation_metadata))
+    price_rules = {"constraints": [_INTRADAY_PRICE_RULE]} if observation["is_intraday"] else {}
+    volume_rules = {"constraints": [_INTRADAY_VOLUME_RULE]} if observation["is_intraday"] else {}
+    evidence.append(_item("price", ticker, as_of, price_claim, context, metric="price_change_pct", value=float(anomaly.price_change_pct), metadata={"close": float(anomaly.price), **observation_metadata, **price_rules}))
+    evidence.append(_item("volume", ticker, as_of, volume_claim, context, metric="volume_ratio", value=float(anomaly.volume_ratio), metadata={**observation_metadata, **volume_rules}))
     if anomaly.sector_etf and anomaly.sector_return_1d is not None:
         benchmark_prefix = "截至同一查询时点的盘中" if observation["is_intraday"] else "同期"
         benchmark_claim = f"{benchmark_prefix}行业基准 {anomaly.sector_etf} 单日回报为 {float(anomaly.sector_return_1d):+.2%}，{ticker} 相对回报为 {float(anomaly.relative_1d_pp or 0):+.2%}。"
@@ -225,7 +260,16 @@ def _move_envelope(ticker: str, context: ExecutionContext, anomaly, *, now: date
         # Attribution currently returns a shared source set, not a reason-to-source
         # mapping. Only expose a direct URL when the relationship is unambiguous.
         source = source_rows[0] if len(source_rows) == 1 else {}
-        item = _item(role, ticker, as_of, claim, context, confidence=confidence_value.get(level, 0.3), source_url=str(source.get("url") or ""), metadata={"claim_role": "confirmed_driver" if confirmed else "candidate_driver", "causal_confidence": level, "driver_text": reason.text, "note": reason.note, "supporting_sources": source_rows})
+        confidence = confidence_value.get(level, 0.3)
+        note_text = str(reason.note or "")
+        citable = confirmed or (confidence >= 0.5 and not _REJECTED_CANDIDATE_NOTE.search(note_text))
+        metadata = {"claim_role": "confirmed_driver" if confirmed else "candidate_driver", "causal_confidence": level, "driver_text": reason.text, "note": reason.note, "supporting_sources": source_rows}
+        if not confirmed:
+            metadata["constraints"] = [_CANDIDATE_RULE]
+        if not citable:
+            metadata["citable"] = False
+            metadata["uncitable_warning"] = "展示了缺乏直接支持的过弱异动线索"
+        item = _item(role, ticker, as_of, claim, context, confidence=confidence, source_url=str(source.get("url") or ""), metadata=metadata)
         evidence.append(item)
         findings.append({"claim": reason.text, "causal_confidence": level, "confirmed": confirmed, "evidence_ids": [item.id]})
 
@@ -266,7 +310,10 @@ def _move_envelope(ticker: str, context: ExecutionContext, anomaly, *, now: date
             },
         )
     )
-    return ToolEnvelope(
+    answer_constraints: list[dict[str, Any]] = [{"forbid": _COUNT_LEAK, "warning": "将内部归因计数直接暴露给用户"}]
+    if high_confidence == 0:
+        answer_constraints.append({"max_cited": {"metadata": {"claim_role": "candidate_driver"}, "max": 1, "warning": "未确认直接驱动时展示了过多弱候选线索"}})
+    envelope = ToolEnvelope(
         "market.explain_move",
         ResultStatus.COMPLETED if evidence else ResultStatus.PARTIAL_DATA,
         subject=ticker,
@@ -276,8 +323,105 @@ def _move_envelope(ticker: str, context: ExecutionContext, anomaly, *, now: date
         findings=findings,
         evidence=evidence,
         limitations=limitations,
-        metadata={"next_steps": list(anomaly.next_steps), "filtered_news_count": int(anomaly.filtered_count), "source_count": len(source_rows)},
+        metadata={
+            "next_steps": list(anomaly.next_steps),
+            "filtered_news_count": int(anomaly.filtered_count),
+            "source_count": len(source_rows),
+            "require_cited_numbers": True,
+            "answer_constraints": answer_constraints,
+        },
     )
+    envelope.metadata["narrative"] = _move_narrative(envelope)
+    return envelope
+
+
+def _driver_text(item: EvidenceItem) -> str:
+    text = str(item.metadata.get("driver_text") or "").strip()
+    if text:
+        return text.rstrip("。")
+    text = item.claim.split("：", 1)[-1].split("；校验备注", 1)[0]
+    return text.rstrip("。")
+
+
+def _performance_narrative(market: ToolEnvelope) -> str:
+    """Deterministic prose for a performance envelope; the generic synthesizer's fallback."""
+
+    evidence = market.evidence
+    ticker = market.subject
+    price = next(iter(_scoped(evidence, "price")), None)
+    volume = next(iter(_scoped(evidence, "volume")), None)
+    benchmarks = _scoped(evidence, "benchmark")
+    returns_item = next(iter(_scoped(evidence, "returns")), None)
+    volatility = next(iter(_scoped(evidence, "volatility")), None)
+    returns = market.metrics.get("returns") or {}
+    close = market.metrics.get("close")
+    day = returns.get("1d")
+    direction = "上涨" if day is not None and day > 0 else "下跌" if day is not None and day < 0 else "基本持平"
+    trend = "偏强" if (returns.get("5d") or 0) > 0 and (returns.get("1m") or 0) > 0 else "偏弱" if (returns.get("5d") or 0) < 0 and (returns.get("1m") or 0) < 0 else "分化"
+    if market.metrics.get("is_intraday") and price is not None:
+        first = f"{ticker} 最近的股价表现{trend}。{price.claim.rstrip('。')}；近 5 日回报 {_pct(returns.get('5d'))}，近 1 月回报 {_pct(returns.get('1m'))}{_cite(price)}{_cite(returns_item)}。"
+    else:
+        day_text = f"最新交易日{direction} {abs(float(day)):.2%}；" if day is not None else ""
+        first = (
+            f"{ticker} 最近的股价表现{trend}。截至 {market.as_of}，收盘价为 {float(close):.2f} 美元，"
+            f"{day_text}近 5 日回报 {_pct(returns.get('5d'))}，近 1 月回报 {_pct(returns.get('1m'))}"
+            f"{_cite(price)}{_cite(returns_item)}。"
+        )
+    relative = market.metrics.get("relative_returns") or {}
+    relative_parts: list[str] = []
+    for item in benchmarks:
+        benchmark = str(item.metadata.get("benchmark") or "基准")
+        values = relative.get(benchmark) or {}
+        relative_parts.append(f"相对 {benchmark}，单日超额 {_pct(values.get('1d'))}，近 5 日 {_pct(values.get('5d'))}，近 1 月 {_pct(values.get('1m'))}{_cite(item)}")
+    second = "；".join(relative_parts) + "。" if relative_parts else "行业与大盘基准数据暂时不足。"
+    volume_ratio = market.metrics.get("volume_ratio")
+    if market.metrics.get("is_intraday") and volume is not None:
+        volume_text = f"{volume.claim.rstrip('。')}{_cite(volume)}。"
+    elif volume is not None and volume_ratio is not None:
+        volume_text = f"当日成交量约 {int(market.metrics.get('volume') or 0) / 10_000:.0f} 万股，是 30 日平均水平的 {float(volume_ratio):.2f} 倍{_cite(volume)}。"
+    else:
+        volume_text = "成交量对比数据暂时不足。"
+    volatility_value = market.metrics.get("annualized_volatility_21d")
+    risk_text = f"近 21 个交易日年化波动率约为 {float(volatility_value):.2%}{_cite(volatility)}，说明短线波动仍然较大。" if volatility is not None and volatility_value is not None else ""
+    next_step = "待收盘后再判断量能，并观察相对行业的超额表现能否延续。" if market.metrics.get("is_intraday") else "接下来重点观察成交量能否跟上，以及相对行业的超额表现能否延续。"
+    return "\n\n".join((first, second, f"{volume_text}{risk_text}{next_step}"))
+
+
+def _move_narrative(market: ToolEnvelope) -> str:
+    """Deterministic prose for a move-explanation envelope."""
+
+    evidence = market.evidence
+    ticker = market.subject
+    price = next(iter(_scoped(evidence, "price")), None)
+    volume = next(iter(_scoped(evidence, "volume")), None)
+    benchmarks = _scoped(evidence, "benchmark")
+    change = market.metrics.get("price_change_pct")
+    close = market.metrics.get("price")
+    direction = "上涨" if change is not None and change > 0 else "下跌" if change is not None and change < 0 else "基本持平"
+    certainty = "确实" if change else ""
+    first_parts = [f"{price.claim.rstrip('。')}{_cite(price)}。"] if price is not None else [f"{ticker} 在 {market.as_of}{certainty}{direction} {abs(float(change)):.2%}，价格为 {float(close):.2f} 美元。"]
+    if volume is not None:
+        first_parts.append(f"{volume.claim.rstrip('。')}{_cite(volume)}。")
+    if benchmarks:
+        first_parts.append(f"{benchmarks[0].claim.rstrip('。')}{_cite(benchmarks[0])}。")
+    assessment = next(iter(_scoped(evidence, "attribution")), None)
+    confirmed = _scoped(evidence, "driver")
+    candidates = [item for item in _scoped(evidence, "candidate") if item.metadata.get("citable", True)]
+    if confirmed:
+        reason_text = "；".join(f"{_driver_text(item)}{_cite(item)}" for item in confirmed[:2])
+        second = f"目前能直接支持的高置信度驱动是：{reason_text}。"
+    else:
+        second = f"但“为什么{direction}”目前还不能下定论：暂未找到可核实的同日催化剂，具体触发原因尚未确认{_cite(assessment)}。"
+    if candidates:
+        candidate = max(candidates, key=lambda item: float(item.confidence or 0))
+        note = str(candidate.metadata.get("note") or "").strip().rstrip("。")
+        note_text = f"；但{note}" if note else ""
+        second += f"目前最相关的一条候选线索是“{_driver_text(candidate)}”{note_text}，因此它仍只能作为排查方向{_cite(candidate)}。"
+    if market.metrics.get("is_intraday"):
+        third = f"从盘面看，股价明显跑赢行业基准{_cite(benchmarks[0] if benchmarks else None)}。但当前成交量仍是盘中累计值{_cite(volume)}，不能用它推断放量、缩量或上涨持续性；应待收盘后再判断量能，并等待公司公告或可核验的同日新闻确认催化剂。"
+    else:
+        third = f"从盘面看，股价明显跑赢行业基准{_cite(benchmarks[0] if benchmarks else None)}，但成交量未同比例放大{_cite(volume)}，因此不宜单凭涨幅追认某个原因。接下来应观察放量延续性，并等待公司公告或可核验的同日新闻确认催化剂。"
+    return "\n\n".join(("".join(first_parts), second, third))
 
 
 def register_market_capabilities(

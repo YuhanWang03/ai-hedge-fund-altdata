@@ -31,5 +31,12 @@ CASES = (
     EvalCase("l01", "回测 NVDA 动量策略", RouteKind.LAB, ("lab.backtest",), category="lab"),
     EvalCase("l02", "对 AAPL 和 MSFT 做财报事件研究", RouteKind.LAB, ("lab.event_study",), category="lab"),
     EvalCase("c01", "把 NVDA 加入关注列表", RouteKind.COMMAND, expected_statuses=(RunStatus.WAITING_CONFIRMATION,), category="command"),
-    EvalCase("a01", "对标普全部股票做十年参数扫描", RouteKind.ASYNC, expected_statuses=(RunStatus.QUEUED,), category="async"),
+    EvalCase("a01", "对标普全部股票做十年参数扫描", RouteKind.ASYNC, ("lab.sweep",), category="async"),
+    EvalCase("m01", "AMD最近表现如何？", RouteKind.FAST_LOOKUP, ("market.performance",), forbidden_capabilities=("research.stock",), category="market"),
+    EvalCase("m02", "AMD今天为什么涨？", RouteKind.RESEARCH, ("market.explain_move",), forbidden_capabilities=("research.stock",), category="market"),
+    EvalCase("m03", "AMD经营表现如何？", RouteKind.FAST_LOOKUP, ("research.stock",), forbidden_capabilities=("market.performance",), category="market"),
+    EvalCase("m04", "AMD最近的收益质量如何？", RouteKind.FAST_LOOKUP, ("research.stock",), forbidden_capabilities=("market.performance",), category="market"),
+    EvalCase("e01", "分析 nvda 的估值", RouteKind.RESEARCH, ("research.stock",), category="entities"),
+    EvalCase("e02", "比较阿里巴巴和拼多多", RouteKind.RESEARCH, ("research.compare",), category="entities"),
+    EvalCase("c02", "AVGO 的 total addressable market 有多大", RouteKind.FAST_LOOKUP, ("research.stock",), category="command"),
 )

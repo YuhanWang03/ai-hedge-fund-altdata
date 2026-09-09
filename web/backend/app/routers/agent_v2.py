@@ -43,7 +43,7 @@ def _get_agent():
         with _AGENT_LOCK:
             if _AGENT is None or _AGENT_WEB_ENABLED != web_enabled:
                 _AGENT = build_workspace_agent(
-                    config=AgentV2Config(execute_async_inline=True),
+                    config=AgentV2Config(),
                     enable_web=web_enabled,
                 )
                 _AGENT_WEB_ENABLED = web_enabled

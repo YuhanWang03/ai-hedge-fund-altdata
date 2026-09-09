@@ -222,29 +222,3 @@ class WorkspaceLabPort:
             if callable(remember):
                 remember(binding.history_kind, dict(payload), body.model_dump())
         return lab_envelope(capability, payload, context.run_id)
-
-    def get_result(self, run_id: str, context: ExecutionContext) -> ToolEnvelope:
-        if not run_id:
-            return ToolEnvelope("lab.result", ResultStatus.FAILED, errors=["run_id is required"])
-        if self._workspace is None:
-            _ = self.bindings
-        job = self._workspace._job_view(run_id) if self._workspace is not None else {}
-        if not job:
-            return ToolEnvelope("lab.result", ResultStatus.FAILED, run_id=run_id, errors=["Lab job not found"])
-        status = str(job.get("status") or "")
-        if status == "failed":
-            return ToolEnvelope("lab.result", ResultStatus.FAILED, run_id=run_id, errors=[str(job.get("error") or "Lab job failed")])
-        if status != "completed":
-            return ToolEnvelope(
-                "lab.result",
-                ResultStatus.PARTIAL_DATA,
-                summary="Lab job is still running.",
-                metrics={"completed": job.get("done", 0), "total": job.get("total", 0)},
-                limitations=["The result is not final."],
-                run_id=run_id,
-                metadata={"job": dict(job)},
-            )
-        payload = job.get("result")
-        if not isinstance(payload, Mapping):
-            return ToolEnvelope("lab.result", ResultStatus.FAILED, run_id=run_id, errors=["Lab job completed without a result"])
-        return lab_envelope("lab.result", payload, run_id)

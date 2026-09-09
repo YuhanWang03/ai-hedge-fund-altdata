@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Any, Callable, Protocol
 
-from v2.agent_v2.catalog import CapabilitySpec
 from v2.agent_v2.models import (
     AgentResult,
     EvidenceItem,
@@ -65,7 +64,11 @@ class SessionPort(Protocol):
     def record(self, result: AgentResult) -> None:
         ...
 
-    def get_result(self, run_id: str, context: Any) -> ToolEnvelope:
+    def set_pending(self, session_id: str, plan: ExecutionPlan) -> None:
+        """Hold a write plan until the user confirms or moves on."""
+        ...
+
+    def pop_pending(self, session_id: str) -> ExecutionPlan | None:
         ...
 
 

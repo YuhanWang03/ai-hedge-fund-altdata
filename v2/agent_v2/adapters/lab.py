@@ -21,8 +21,3 @@ def register_lab_capabilities(registry: CapabilityRegistry, lab: LabPort) -> Non
             return lab.run(capability, arguments, context)
 
         registry.register(name, handler)
-
-    def result(arguments, context: ExecutionContext):
-        return lab.get_result(str(arguments.get("run_id") or ""), context)
-
-    registry.register("lab.result", result)

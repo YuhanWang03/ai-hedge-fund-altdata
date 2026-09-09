@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from v2.agent_v2.eval.answer_cases import AnswerCase
 from v2.agent_v2.eval.cases import EvalCase
 from v2.agent_v2.models import AgentResult
+from v2.agent_v2.verification import verify_answer
 
 
 @dataclass(frozen=True)
@@ -33,3 +35,23 @@ def score_case(case: EvalCase, result: AgentResult) -> CaseScore:
     evidence_ok = result.verification.ok and (not called or bool(result.evidence) or result.status in {status for status in case.expected_statuses if status.value in {"queued", "waiting_confirmation"}})
     passed = route_ok and recall == 1.0 and discipline_ok and status_ok and answer_mode_ok and evidence_ok
     return CaseScore(case.id, passed, route_ok, recall, discipline_ok, status_ok, answer_mode_ok, evidence_ok, called)
+
+
+@dataclass(frozen=True)
+class AnswerScore:
+    case_id: str
+    passed: bool
+    verifier_ok: bool
+    expected_ok: bool
+    warnings: tuple[str, ...]
+
+
+def score_answer_case(case: AnswerCase) -> AnswerScore:
+    envelope = case.envelope()
+    answer = case.answer(envelope)
+    report = verify_answer(answer, envelope.evidence, answer_mode=case.answer_mode, results=[envelope])
+    warnings = tuple(report.warnings) + tuple(f"ungrounded: {value}" for value in report.ungrounded_numbers) + tuple(f"unknown citation: {value}" for value in report.unknown_citations)
+    passed = report.ok == case.expect_ok
+    if passed and not case.expect_ok and case.expected_warning:
+        passed = any(case.expected_warning in warning for warning in warnings)
+    return AnswerScore(case.id, passed, report.ok, case.expect_ok, warnings)

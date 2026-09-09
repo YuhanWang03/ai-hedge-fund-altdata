@@ -20,6 +20,13 @@ _RECENT_PERFORMANCE = re.compile(
     r"|(?:股价|价格).{0,8}(?:走势|表现|涨跌|回报|收益率)|(?:走势|涨跌|跑赢|跑输)|(?:股票|股价|价格)?表现(?:如何|怎么样|怎样|好吗|好不好)|成交量|量比|波动率|放量|缩量",
     re.I,
 )
+_WATCHLIST = re.compile(r"关注列表|关注|自选|watchlist", re.I)
+_ALERT = re.compile(r"提醒|预警|alert", re.I)
+_REMOVE = re.compile(r"移除|删除|取消|remove|delete|cancel", re.I)
+_ABOVE = re.compile(r"涨到|涨过|涨破|突破|高于|超过|以上|above|over", re.I)
+_BELOW = re.compile(r"跌到|跌过|跌破|低于|跌至|以下|below|under", re.I)
+_PRICE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:美元|美金|块|元|usd|\$)?", re.I)
+_ALERT_ID = re.compile(r"(?:提醒|预警|alert)\s*(?:#|编号|id)?\s*(\d+)|(?:#|编号|id)\s*(\d+)", re.I)
 _NON_PRICE_PERFORMANCE = re.compile(r"经营|业务|基本面|财务|财报|业绩|盈利|营收|利润|毛利|现金流|估值|投资逻辑|值不值得|技术面|技术指标|均线|RSI|CMF", re.I)
 
 
@@ -38,6 +45,33 @@ def _focus(text: str) -> str:
     return next((focus for pattern, focus in checks if re.search(pattern, text, re.I)), "overview")
 
 
+def parse_mutation(text: str, entities: tuple[str, ...]) -> tuple[PlanTask | None, str]:
+    """Map a command sentence to one ``state.mutate`` task, or explain what is missing."""
+
+    ticker = entities[0] if entities else ""
+    if _ALERT.search(text):
+        if _REMOVE.search(text):
+            match = _ALERT_ID.search(text)
+            alert_id = next((group for group in match.groups() if group), "") if match else ""
+            if not alert_id:
+                return None, "取消提醒需要提醒编号（可先查看提醒列表）。"
+            return PlanTask("mutation", "state.mutate", {"operation": "alert.remove", "payload": {"alert_id": int(alert_id)}}, purpose=f"取消提醒 #{alert_id}"), ""
+        if not ticker:
+            return None, "设置提醒需要股票代码。"
+        direction = "above" if _ABOVE.search(text) else "below" if _BELOW.search(text) else ""
+        prices = [float(value) for value in _PRICE.findall(text) if value and float(value) > 0]
+        if not direction or not prices:
+            return None, f"为 {ticker} 设置提醒需要方向（涨到/跌到）和目标价。"
+        payload = {"ticker": ticker, "direction": direction, "target_price": prices[-1]}
+        label = "涨到" if direction == "above" else "跌到"
+        return PlanTask("mutation", "state.mutate", {"operation": "alert.add", "payload": payload}, purpose=f"当 {ticker} {label} {prices[-1]:g} 美元时提醒"), ""
+    if not ticker:
+        return None, "关注列表操作需要股票代码。"
+    if _REMOVE.search(text):
+        return PlanTask("mutation", "state.mutate", {"operation": "watchlist.remove", "payload": {"ticker": ticker}}, purpose=f"将 {ticker} 移出关注列表"), ""
+    return PlanTask("mutation", "state.mutate", {"operation": "watchlist.add", "payload": {"ticker": ticker}}, purpose=f"将 {ticker} 加入关注列表"), ""
+
+
 class RulePlanner:
     """Produces conservative plans that work without an LLM or API key."""
 
@@ -51,13 +85,15 @@ class RulePlanner:
                 budget=BudgetClass.DIRECT,
             )
         if route.kind == RouteKind.COMMAND:
+            task, problem = parse_mutation(text, entities)
             return ExecutionPlan(
                 objective=text,
                 route=route.kind,
+                tasks=(task,) if task else (),
                 answer_mode=AnswerMode.TOOL_GROUNDED,
                 budget=BudgetClass.DIRECT,
-                requires_confirmation=True,
-                assumptions=("No mutation is executed until the user confirms an exact operation.",),
+                requires_confirmation=task is not None,
+                assumptions=(problem,) if problem else ("No mutation is executed until the user confirms the exact operation.",),
             )
         if route.kind in {RouteKind.LAB, RouteKind.ASYNC}:
             capability = "lab.screen"
@@ -90,7 +126,6 @@ class RulePlanner:
                 answer_mode=AnswerMode.RESEARCH_GROUNDED,
                 budget=BudgetClass.FOCUSED,
                 web_fallback_allowed=request.allow_web,
-                stop_conditions=("price move and benchmark acquired", "causal evidence exhausted"),
             )
         if len(entities) == 1 and _RECENT_PERFORMANCE.search(text) and not _NON_PRICE_PERFORMANCE.search(text):
             return ExecutionPlan(
@@ -99,7 +134,6 @@ class RulePlanner:
                 tasks=(PlanTask("market-performance", "market.performance", {"ticker": entities[0]}, purpose="measure recent returns, volume and benchmark-relative performance"),),
                 answer_mode=AnswerMode.TOOL_GROUNDED,
                 budget=BudgetClass.FOCUSED,
-                stop_conditions=("recent price and benchmark windows acquired",),
             )
 
         tasks: list[PlanTask] = []
@@ -128,7 +162,6 @@ class RulePlanner:
                 answer_mode=AnswerMode.RESEARCH_GROUNDED,
                 budget=budget,
                 web_fallback_allowed=request.allow_web,
-                stop_conditions=("required evidence acquired", "budget exhausted", "providers unavailable"),
             )
 
         # Fast lookup mapping. An empty plan is intentional: the synthesizer can

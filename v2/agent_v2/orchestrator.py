@@ -2,17 +2,27 @@
 
 from __future__ import annotations
 
+import re
 import time
 import uuid
 from dataclasses import dataclass, replace
 
 from v2.agent_v2.catalog import CapabilityCatalog, default_catalog
 from v2.agent_v2.evidence import EvidenceConflictError
-from v2.agent_v2.execution import CapabilityRegistry, ExecutionContext, ExecutionEngine, PlanValidationError
+from v2.agent_v2.execution import (
+    CapabilityRegistry,
+    ExecutionContext,
+    ExecutionEngine,
+    ExecutionOutcome,
+    PlanValidationError,
+    time_limit,
+)
 from v2.agent_v2.models import (
     AgentResult,
     AnswerMode,
     ExecutionPlan,
+    NormalizedRequest,
+    PendingMutation,
     PlanTask,
     ProgressEvent,
     RouteDecision,
@@ -26,13 +36,18 @@ from v2.agent_v2.routing import normalize_request, route
 from v2.agent_v2.synthesis import EvidenceSummarySynthesizer
 from v2.agent_v2.verification import verify_answer
 
+_CONFIRM = re.compile(r"^\s*(?:确认|确定|是的?|好的?|执行|yes|y|ok|confirm)\s*[。！!.]?\s*$", re.I)
+_CANCEL = re.compile(r"^\s*(?:取消|不用了?|不要|算了|否|no|n|cancel)\s*[。！!.]?\s*$", re.I)
+
 
 @dataclass(frozen=True)
 class AgentV2Config:
     max_parallel: int = 4
     enable_web_fallback: bool = False
-    execute_async_inline: bool = False
+    #: Bypass the confirmation step; only for tests and trusted automation.
     allow_mutations: bool = False
+    #: Override the per-budget wall-clock allowance (seconds) for every run.
+    max_seconds: float | None = None
 
 
 class AgentV2:
@@ -56,8 +71,12 @@ class AgentV2:
 
     @staticmethod
     def _emit(sink: ProgressSink | None, run_id: str, status: RunStatus, message: str) -> None:
-        if sink:
+        if not sink:
+            return
+        try:
             sink(ProgressEvent(run_id, status, message))
+        except Exception:  # noqa: BLE001 — progress reporting never breaks a run
+            pass
 
     def run(
         self,
@@ -69,6 +88,18 @@ class AgentV2:
     ) -> AgentResult:
         started = time.time()
         run_id = f"agent-v2-{uuid.uuid4().hex[:12]}"
+
+        # A pending write is resolved before anything else: "确认" executes it,
+        # "取消" drops it, and any other message drops it and proceeds normally.
+        pending = self.session.pop_pending(session_id) if self.session is not None and session_id else None
+        if pending is not None:
+            if _CONFIRM.match(text or ""):
+                return self._execute_confirmed(run_id, pending, session_id, on_progress, started)
+            if _CANCEL.match(text or ""):
+                request = normalize_request(text, session_id=session_id)
+                decision = RouteDecision(RouteKind.COMMAND, ("command",), "pending mutation cancelled")
+                return self._result(run_id, request, decision, pending, RunStatus.CANCELLED, "已取消，未执行任何修改。", AnswerMode.TOOL_GROUNDED, started)
+
         resolved_text = text
         resolution_metadata = {}
         if self.session is not None and session_id:
@@ -91,40 +122,61 @@ class AgentV2:
         plan = self.planner.plan(request, decision)
         self._emit(on_progress, run_id, RunStatus.PLANNED, f"planned {len(plan.tasks)} task(s)")
 
-        if plan.requires_confirmation:
-            return self._result(
-                run_id,
-                request,
-                decision,
-                plan,
-                RunStatus.WAITING_CONFIRMATION,
-                "这是一个写操作。请确认准确的操作对象和参数；当前没有执行任何修改。",
-                AnswerMode.TOOL_GROUNDED,
-                started,
-            )
-        if decision.asynchronous and not self.config.execute_async_inline:
-            return self._result(
-                run_id,
-                request,
-                decision,
-                plan,
-                RunStatus.QUEUED,
-                "该请求属于长时间任务，已生成执行计划；需要由 Web/Telegram 的任务队列接口提交。",
-                plan.answer_mode,
-                started,
-            )
+        if plan.requires_confirmation and not self.config.allow_mutations:
+            return self._await_confirmation(run_id, request, decision, plan, started)
 
-        context = ExecutionContext(
+        context = self._context(run_id, request, plan, on_progress, started)
+        return self._execute(run_id, request, decision, plan, context, on_progress, started)
+
+    # -- confirmation ---------------------------------------------------------
+
+    @staticmethod
+    def _pending_mutation(plan: ExecutionPlan) -> PendingMutation | None:
+        task = next((task for task in plan.tasks if task.capability == "state.mutate"), None)
+        if task is None:
+            return None
+        return PendingMutation(
+            operation=str(task.arguments.get("operation") or ""),
+            payload=dict(task.arguments.get("payload") or {}),
+            description=task.purpose or task.capability,
+        )
+
+    def _await_confirmation(self, run_id, request, decision, plan, started) -> AgentResult:
+        mutation = self._pending_mutation(plan)
+        if mutation is None:
+            return self._result(run_id, request, decision, plan, RunStatus.PARTIAL, self.synthesizer.synthesize(request, plan, [], []), AnswerMode.INSUFFICIENT_EVIDENCE, started)
+        if self.session is not None and request.session_id:
+            self.session.set_pending(request.session_id, plan)
+            answer = f"将执行写操作：{mutation.description}。回复「确认」执行，回复「取消」放弃；当前没有执行任何修改。"
+        else:
+            answer = f"将执行写操作：{mutation.description}。该渠道没有会话，无法接收确认；当前没有执行任何修改。"
+        return self._result(run_id, request, decision, plan, RunStatus.WAITING_CONFIRMATION, answer, AnswerMode.TOOL_GROUNDED, started, pending_mutation=mutation)
+
+    def _execute_confirmed(self, run_id, plan: ExecutionPlan, session_id: str, on_progress, started) -> AgentResult:
+        request = normalize_request(plan.objective, session_id=session_id, metadata={"confirmed_mutation": True})
+        decision = RouteDecision(RouteKind.COMMAND, ("command",), "user confirmed a pending mutation")
+        context = self._context(run_id, request, plan, on_progress, started, allow_mutations=True)
+        return self._execute(run_id, request, decision, plan, context, on_progress, started)
+
+    # -- execution ------------------------------------------------------------
+
+    def _context(self, run_id, request, plan, on_progress, started, *, allow_mutations: bool | None = None) -> ExecutionContext:
+        limit = self.config.max_seconds if self.config.max_seconds is not None else time_limit(plan.budget)
+        elapsed = time.time() - started
+        return ExecutionContext(
             run_id=run_id,
             request=request,
             budget=plan.budget,
-            allow_mutations=self.config.allow_mutations,
+            allow_mutations=self.config.allow_mutations if allow_mutations is None else allow_mutations,
             allow_web=request.allow_web,
             on_progress=on_progress,
+            deadline=time.monotonic() + max(0.0, limit - elapsed),
         )
+
+    def _execute(self, run_id, request, decision, plan, context: ExecutionContext, on_progress, started) -> AgentResult:
         self._emit(on_progress, run_id, RunStatus.EXECUTING, "executing capability plan")
         try:
-            results, ledger = self.executor.run(plan, context)
+            outcome = self.executor.run(plan, context)
         except Exception as exc:
             if isinstance(exc, EvidenceConflictError):
                 answer = "研究结果包含冲突的证据标识，任务已安全停止。"
@@ -148,10 +200,11 @@ class AgentV2:
                 verification=VerificationReport(ok=False, warnings=(warning,)),
             )
 
-        plan, results = self._web_fallback(request, decision, plan, results, ledger, context)
+        plan, outcome = self._web_fallback(request, decision, plan, outcome, context)
+        results = outcome.results
 
         self._emit(on_progress, run_id, RunStatus.SYNTHESIZING, "synthesizing evidence")
-        evidence = ledger.items()
+        evidence = outcome.ledger.items()
         answer = self.synthesizer.synthesize(request, plan, results, evidence)
         answer_mode = plan.answer_mode
         if not plan.tasks and decision.kind != RouteKind.GENERAL_KNOWLEDGE:
@@ -160,7 +213,7 @@ class AgentV2:
         verification = verify_answer(answer, evidence, answer_mode=answer_mode, results=results)
         failures = [result for result in results if not result.ok]
         knowledge_unavailable = not results and decision.kind == RouteKind.GENERAL_KNOWLEDGE and not bool(getattr(self.synthesizer, "supports_general_knowledge", False))
-        if failures or not verification.ok or knowledge_unavailable or (not results and decision.kind != RouteKind.GENERAL_KNOWLEDGE):
+        if failures or not verification.ok or knowledge_unavailable or outcome.stop_reason != "completed" or (not results and decision.kind != RouteKind.GENERAL_KNOWLEDGE):
             status = RunStatus.PARTIAL
         else:
             status = RunStatus.COMPLETED
@@ -176,16 +229,17 @@ class AgentV2:
             results=results,
             evidence=evidence,
             verification=verification,
+            stop_reason=outcome.stop_reason,
         )
 
-    def _web_fallback(self, request, decision, plan, results, ledger, context):
+    def _web_fallback(self, request, decision, plan, outcome: ExecutionOutcome, context: ExecutionContext):
         """Make one bounded web attempt only after internal evidence is absent or failed."""
 
         eligible = plan.web_fallback_allowed and request.allow_web and decision.kind in {RouteKind.FAST_LOOKUP, RouteKind.RESEARCH} and self.registry.registered("web.research")
-        existing_evidence = ledger.items()
-        internal_failed = any(not result.ok for result in results)
-        if not eligible or (existing_evidence and not internal_failed):
-            return plan, results
+        existing_evidence = outcome.ledger.items()
+        internal_failed = any(not result.ok for result in outcome.results)
+        if not eligible or (existing_evidence and not internal_failed) or context.remaining_seconds() <= 0:
+            return plan, outcome
         topic = "company_event" if request.entities else "financial_research"
         task = PlanTask(
             id="web-fallback",
@@ -201,8 +255,8 @@ class AgentV2:
         )
         context.emit(task.purpose, task_id=task.id, capability=task.capability)
         result = self.registry.execute(task, context)
-        results = [*results, result]
-        ledger.ingest(result)
+        outcome.results.append(result)
+        outcome.ledger.ingest(result)
         mode = AnswerMode.MIXED if existing_evidence else AnswerMode.WEB_GROUNDED
         plan = replace(
             plan,
@@ -210,12 +264,12 @@ class AgentV2:
             answer_mode=mode,
             assumptions=(*plan.assumptions, "Web fallback ran because internal evidence was missing or failed."),
         )
-        return plan, results
+        return plan, outcome
 
     def _result(
         self,
         run_id,
-        request,
+        request: NormalizedRequest,
         decision: RouteDecision,
         plan: ExecutionPlan,
         status: RunStatus,
@@ -227,6 +281,8 @@ class AgentV2:
         evidence=None,
         verification=None,
         error: str = "",
+        stop_reason: str = "",
+        pending_mutation: PendingMutation | None = None,
     ) -> AgentResult:
         result = AgentResult(
             run_id=run_id,
@@ -241,6 +297,8 @@ class AgentV2:
             verification=verification or VerificationReport(),
             elapsed_ms=int((time.time() - started) * 1000),
             error=error,
+            stop_reason=stop_reason,
+            pending_mutation=pending_mutation,
         )
         if self.session is not None:
             self.session.record(result)

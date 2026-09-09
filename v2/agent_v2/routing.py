@@ -11,7 +11,7 @@ from v2.agent_v2.models import NormalizedRequest, RouteDecision, RouteKind
 # such as ``add`` used to match inside ``addressable`` and ``padded``.
 _COMMAND = re.compile(
     r"添加|移除|删除|加入.{0,12}(?:关注|自选|提醒|列表)"
-    r"|设置.{0,8}提醒|取消.{0,8}提醒"
+    r"|设置.{0,8}提醒|取消.{0,8}提醒|提醒我|(?:涨到|跌到|涨破|跌破|高于|低于|突破).{0,12}(?:提醒|通知)"
     r"|\b(?:add|remove|delete)\b.{0,40}\b(?:watchlist|alerts?)\b"
     r"|\b(?:watchlist|alerts?)\b.{0,40}\b(?:add|remove|delete)\b"
     r"|\b(?:set|create|cancel)\s+(?:an?\s+|the\s+)?alerts?\b",

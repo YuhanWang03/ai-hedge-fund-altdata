@@ -1,20 +1,35 @@
-"""Citation-integrity verification for Agent V2 answers."""
+"""Citation-integrity verification for Agent V2 answers.
+
+The verifier is domain-neutral.  Beyond the universal checks (every citation
+must exist, every figure must trace to evidence, a citation must support the
+figures next to it) it enforces rules that adapters attach to their own
+evidence and results:
+
+``EvidenceItem.metadata``
+    ``constraints``: list of ``{"require": regex, "warning": str}`` or
+    ``{"forbid": regex, "unless": regex | None, "warning": str}``; each applies
+    to the sentence that cites the item.
+    ``citable``: ``False`` marks evidence the answer must not cite; the warning
+    text comes from ``uncitable_warning``.
+
+``ToolEnvelope.metadata``
+    ``require_cited_numbers``: every sentence with a figure needs a citation.
+    ``answer_constraints``: list of ``{"forbid": regex, "warning": str}`` for
+    the whole answer, or ``{"max_cited": {"metadata": {...}, "max": n,
+    "warning": str}}`` capping how many items with matching metadata may be
+    cited in total.
+"""
 
 from __future__ import annotations
 
 import json
 import re
+from typing import Any
 
 from v2.agent_v2.models import AnswerMode, EvidenceItem, ToolEnvelope, VerificationReport
 
 _CITATION = re.compile(r"\[([A-Za-z0-9_.:-]+)\]")
 _SENTENCE = re.compile(r"[^。！？!?\n]+(?:[。！？!?]+|$)(?:\s*\[[A-Za-z0-9_.:-]+\])*")
-_DIRECT_CAUSE = re.compile(r"主要原因|直接原因|直接驱动|由.{0,20}推动|因为|催化剂是|归因于")
-_HEDGED_CAUSE = re.compile(r"可能|或许|候选|低置信|中置信|尚未确认|无法确认|不能确认")
-_INTRADAY_MARKER = re.compile(r"盘中|截至查询时|截至.{0,30}(?:ET|美东)")
-_FINAL_VOLUME_CONCLUSION = re.compile(r"缩量|放量|量能不足|成交量.{0,12}(?:未|没有).{0,6}(?:放大|跟上)|持续性存疑")
-_INTRADAY_CAUTION = re.compile(r"不能|无法|不应|不得|尚不能|待收盘|未收盘|尚未定型|不宜")
-_REJECTED_CANDIDATE_NOTE = re.compile(r"无直接证据|未提及|关联弱|不匹配|Tier 3|长期预测", re.I)
 
 
 def verify_answer(
@@ -39,19 +54,7 @@ def verify_answer(
             from v2.agent import grounding
 
             answer_without_citations = _CITATION.sub("", answer or "")
-            evidence_observations = "\n".join(
-                " ".join(
-                    value
-                    for value in (
-                        item.claim,
-                        str(item.value) if item.value is not None else "",
-                        json.dumps(item.metadata, ensure_ascii=False, default=str),
-                    )
-                    if value
-                )
-                for item in evidence
-            )
-            result_observations = json.dumps(
+            observations = _observations(evidence) + "\n" + json.dumps(
                 [
                     {
                         "summary": result.summary,
@@ -64,17 +67,32 @@ def verify_answer(
                 ensure_ascii=False,
                 default=str,
             )
-            observations = f"{evidence_observations}\n{result_observations}"
             report = grounding.check(answer_without_citations, observations)
             ungrounded = tuple(report.ungrounded)
             traced = tuple(dict.fromkeys(report.traced))
-            warnings.extend(_citation_integrity_warnings(answer or "", evidence, results or [], grounding))
+            warnings.extend(_sentence_warnings(answer or "", evidence, results or [], grounding))
+            warnings.extend(_answer_warnings(answer or "", evidence, results or []))
     return VerificationReport(
         ok=not unknown and not warnings and not ungrounded,
         unknown_citations=unknown,
         ungrounded_numbers=ungrounded,
         traced_numbers=traced,
-        warnings=tuple(warnings),
+        warnings=tuple(dict.fromkeys(warnings)),
+    )
+
+
+def _observations(items: list[EvidenceItem]) -> str:
+    return "\n".join(
+        " ".join(
+            value
+            for value in (
+                item.claim,
+                str(item.value) if item.value is not None else "",
+                json.dumps(item.metadata, ensure_ascii=False, default=str),
+            )
+            if value
+        )
+        for item in items
     )
 
 
@@ -94,63 +112,59 @@ def _without_identifiers(value):
     return value
 
 
-def _citation_integrity_warnings(answer: str, evidence: list[EvidenceItem], results: list[ToolEnvelope], grounding) -> list[str]:
-    """Require nearby citations to support nearby figures and causal certainty."""
+def _matches(pattern: Any, text: str) -> bool:
+    return bool(pattern) and re.search(str(pattern), text) is not None
+
+
+def _sentence_warnings(answer: str, evidence: list[EvidenceItem], results: list[ToolEnvelope], grounding) -> list[str]:
+    """Require nearby citations to support nearby figures and honour evidence-level rules."""
 
     known = {item.id: item for item in evidence}
+    require_cited_numbers = any(result.metadata.get("require_cited_numbers") for result in results)
     warnings: list[str] = []
-    market_answer = any(result.capability.startswith("market.") for result in results)
     for raw_sentence in _SENTENCE.findall(answer):
         sentence = raw_sentence.strip()
         if not sentence:
             continue
-        cited_ids = [value for value in _CITATION.findall(sentence) if value in known]
+        cited_items = [known[value] for value in _CITATION.findall(sentence) if value in known]
         plain = _CITATION.sub("", sentence)
-        if cited_ids:
-            cited_items = [known[value] for value in cited_ids]
-            cited_observations = "\n".join(
-                " ".join(
-                    value
-                    for value in (
-                        item.claim,
-                        str(item.value) if item.value is not None else "",
-                        json.dumps(item.metadata, ensure_ascii=False, default=str),
-                    )
-                    if value
-                )
-                for item in cited_items
-            )
-            local = grounding.check(plain, cited_observations)
-            if local.ungrounded:
-                warnings.append("引用未支持邻近数字：" + ", ".join(local.ungrounded[:4]))
-            if _DIRECT_CAUSE.search(plain) and not _HEDGED_CAUSE.search(plain):
-                weak = [item for item in cited_items if item.metadata.get("claim_role") == "candidate_driver"]
-                if weak:
-                    warnings.append("候选归因被表述为已确认原因：" + ", ".join(item.id for item in weak[:2]))
-            intraday_price = any(item.metadata.get("evidence_scope") == "price" and item.metadata.get("is_intraday") for item in cited_items)
-            if intraday_price and not _INTRADAY_MARKER.search(plain):
-                warnings.append("盘中价格被表述为完整收盘口径")
-            intraday_volume = any(item.metadata.get("evidence_scope") == "volume" and item.metadata.get("is_intraday") for item in cited_items)
-            if intraday_volume and _FINAL_VOLUME_CONCLUSION.search(plain) and not _INTRADAY_CAUTION.search(plain):
-                warnings.append("未收盘成交量被用于判定放量、缩量或持续性")
-        elif market_answer and grounding.check(plain, "").total:
-            warnings.append("行情事实缺少邻近引用")
-    move_result = next((result for result in results if result.capability == "market.explain_move"), None)
-    if move_result is not None and int(move_result.metrics.get("confirmed_driver_count") or 0) == 0:
-        cited_candidates = {
-            citation
-            for citation in _CITATION.findall(answer)
-            if citation in known and known[citation].metadata.get("claim_role") == "candidate_driver"
-        }
-        if len(cited_candidates) > 1:
-            warnings.append("未确认直接驱动时展示了过多弱候选线索")
-        rejected_candidates = [
-            known[citation]
-            for citation in cited_candidates
-            if float(known[citation].confidence or 0) < 0.5 or _REJECTED_CANDIDATE_NOTE.search(str(known[citation].metadata.get("note") or ""))
-        ]
-        if rejected_candidates:
-            warnings.append("展示了缺乏直接支持的过弱异动线索")
-        if re.search(r"0\s*个.{0,12}(?:驱动|催化|原因)", answer):
-            warnings.append("将内部归因计数直接暴露给用户")
-    return list(dict.fromkeys(warnings))
+        if not cited_items:
+            if require_cited_numbers and grounding.check(plain, "").total:
+                warnings.append("行情事实缺少邻近引用")
+            continue
+        local = grounding.check(plain, _observations(cited_items))
+        if local.ungrounded:
+            warnings.append("引用未支持邻近数字：" + ", ".join(local.ungrounded[:4]))
+        for item in cited_items:
+            if not item.metadata.get("citable", True):
+                warnings.append(str(item.metadata.get("uncitable_warning") or f"引用了不可展示的证据：{item.id}"))
+            for rule in item.metadata.get("constraints") or []:
+                if not isinstance(rule, dict):
+                    continue
+                warning = str(rule.get("warning") or f"证据 {item.id} 的表述规则未满足")
+                if rule.get("require") and not _matches(rule["require"], plain):
+                    warnings.append(warning)
+                if rule.get("forbid") and _matches(rule["forbid"], plain) and not _matches(rule.get("unless"), plain):
+                    warnings.append(warning)
+    return warnings
+
+
+def _answer_warnings(answer: str, evidence: list[EvidenceItem], results: list[ToolEnvelope]) -> list[str]:
+    """Apply result-level rules that look at the answer as a whole."""
+
+    known = {item.id: item for item in evidence}
+    cited = [known[value] for value in _CITATION.findall(answer) if value in known]
+    warnings: list[str] = []
+    for result in results:
+        for rule in result.metadata.get("answer_constraints") or []:
+            if not isinstance(rule, dict):
+                continue
+            if rule.get("forbid") and _matches(rule["forbid"], answer):
+                warnings.append(str(rule.get("warning") or f"{result.capability} 的回答规则未满足"))
+            cap = rule.get("max_cited")
+            if isinstance(cap, dict):
+                wanted = dict(cap.get("metadata") or {})
+                matching = {item.id for item in cited if all(item.metadata.get(key) == value for key, value in wanted.items())}
+                if len(matching) > int(cap.get("max", 0)):
+                    warnings.append(str(cap.get("warning") or f"{result.capability} 引用了过多同类证据"))
+    return warnings

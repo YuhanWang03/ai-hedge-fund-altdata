@@ -39,7 +39,7 @@ from v2.agent_v2.orchestrator import AgentV2, AgentV2Config
 from v2.agent_v2.planning import RulePlanner
 from v2.agent_v2.routing import normalize_request, route
 from v2.agent_v2.session import ShortTermSession
-from v2.agent_v2.synthesis import synthesize_market_answer
+from v2.agent_v2.synthesis import EvidenceSummarySynthesizer
 from v2.agent_v2.verification import verify_answer
 
 
@@ -134,8 +134,7 @@ def test_market_performance_adapter_returns_window_and_benchmark_evidence():
     assert result.metrics["relative_returns"]["SMH"]["5d"] is not None
     assert result.metrics["is_intraday"] is True
     assert {item.metadata["evidence_scope"] for item in result.evidence} >= {"price", "returns", "volume", "volatility", "benchmark"}
-    answer = synthesize_market_answer([result], result.evidence)
-    assert answer is not None
+    answer = result.metadata["narrative"]
     assert "近 5 日回报" in answer
     assert "相对 SMH" in answer
     assert "盘中价格" in answer
@@ -179,41 +178,42 @@ def test_market_move_adapter_splits_facts_and_causal_confidence():
     assert next(item for item in result.evidence if item.metadata.get("claim_role") == "attribution_assessment")
     assert result.metrics["is_intraday"] is True
     assert "盘中累计成交量" in next(item.claim for item in result.evidence if item.metadata.get("evidence_scope") == "volume")
-    answer = synthesize_market_answer([result], result.evidence)
-    assert answer is not None
+    answer = result.metadata["narrative"]
     assert verify_answer(answer, result.evidence, answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result]).ok
 
 
-def test_market_synthesis_falls_back_when_llm_uses_an_unsupported_market_number():
-    result = ToolEnvelope(
-        "market.performance",
-        ResultStatus.COMPLETED,
-        subject="AMD",
-        as_of="2026-09-08",
-        metrics={
-            "close": 100.0,
-            "returns": {"1d": 0.02, "5d": 0.03, "1m": 0.04},
-            "volume": 1_000_000,
-            "volume_ratio": 0.8,
-            "annualized_volatility_21d": 0.5,
-            "relative_returns": {},
-        },
-        evidence=[
-            EvidenceItem("P", "AMD", "AMD close 100.00 and daily return +2.00%.", metadata={"evidence_scope": "price"}),
-            EvidenceItem("R", "AMD", "Returns: 1d +2.00%, 5d +3.00%, 1m +4.00%.", metadata={"evidence_scope": "returns"}),
-            EvidenceItem("V", "AMD", "Volume 1000000 and volume ratio 0.80.", metadata={"evidence_scope": "volume"}),
-            EvidenceItem("VOL", "AMD", "21-day annualized volatility 50.00%.", metadata={"evidence_scope": "volatility"}),
-        ],
-    )
-    llm = ScriptedLLM([LLMResponse(text="AMD 波动率为 99%。[V]")])
-    answer = LLMEvidenceSynthesizer(llm).synthesize(
-        normalize_request("AMD最近表现如何？"),
-        ExecutionPlan("AMD最近表现如何？", RouteKind.FAST_LOOKUP, answer_mode=AnswerMode.TOOL_GROUNDED),
-        [result],
-        result.evidence,
-    )
-    assert "99%" not in answer
+def _performance_envelope():
+    class Prices:
+        def get_prices(self, ticker, start, end):
+            slope = 1.0 if ticker == "AMD" else 0.2
+            first = date(2026, 7, 1)
+            return [SimpleNamespace(time=(first + timedelta(days=index)).isoformat(), close=100.0 + slope * index, volume=1_000_000 + index * 10_000) for index in range(35)]
+
+    registry = CapabilityRegistry(default_catalog())
+    now = datetime(2026, 8, 4, 18, 0, tzinfo=ZoneInfo("America/New_York"))
+    register_market_capabilities(registry, price_source_factory=Prices, move_provider=lambda ticker: None, now_factory=lambda: now)
+    return registry.execute(PlanTask("performance", "market.performance", {"ticker": "AMD"}), _context())
+
+
+def test_market_synthesis_falls_back_to_the_adapter_narrative_when_repair_fails():
+    result = _performance_envelope()
+    volatility = next(item for item in result.evidence if item.metadata["evidence_scope"] == "volatility")
+    llm = ScriptedLLM([LLMResponse(text=f"AMD 波动率为 99%。[{volatility.id}]"), LLMResponse(text=f"AMD 波动率为 98%。[{volatility.id}]")])
+    request = normalize_request("AMD最近表现如何？")
+    plan = ExecutionPlan("AMD最近表现如何？", RouteKind.FAST_LOOKUP, tasks=(PlanTask("p", "market.performance", {"ticker": "AMD"}),), answer_mode=AnswerMode.TOOL_GROUNDED)
+    answer = LLMEvidenceSynthesizer(llm).synthesize(request, plan, [result], result.evidence)
+    assert "99%" not in answer and "98%" not in answer
     assert "近 5 日回报" in answer
+    assert answer == result.metadata["narrative"]
+    assert len(llm.calls) == 2
+
+
+def test_generic_synthesizer_prefers_adapter_narratives_and_skips_uncitable_evidence():
+    market = _performance_envelope()
+    other = ToolEnvelope("research.stock", ResultStatus.COMPLETED, subject="AMD", summary="AMD summary.", evidence=[EvidenceItem("E1", "AMD", "citable", metadata={}), EvidenceItem("E2", "AMD", "hidden", metadata={"citable": False})])
+    answer = EvidenceSummarySynthesizer().synthesize(normalize_request("AMD"), ExecutionPlan("AMD", RouteKind.FAST_LOOKUP), [market, other], [*market.evidence, *other.evidence])
+    assert answer.startswith(market.metadata["narrative"])
+    assert "[E1]" in answer and "[E2]" not in answer
 
 
 def test_executor_collects_structured_evidence():
@@ -226,7 +226,8 @@ def test_executor_collects_structured_evidence():
 
     registry.register("research.stock", research)
     plan = ExecutionPlan("research", RouteKind.RESEARCH, (PlanTask("one", "research.stock", {"ticker": "NVDA"}),), BudgetClass.STANDARD)
-    results, ledger = ExecutionEngine(registry).run(plan, _context())
+    outcome = ExecutionEngine(registry).run(plan, _context())
+    results, ledger = outcome.results, outcome.ledger
     assert results[0].ok
     assert ledger.get("E1").entity == "NVDA"
 
@@ -308,7 +309,8 @@ def test_research_adapter_disambiguates_conflicting_ids_from_cached_results():
     registry = CapabilityRegistry(catalog)
     register_research_capabilities(registry, engine_factory=CachedEngine)
     plan = ExecutionPlan("research", RouteKind.RESEARCH, (PlanTask("one", "research.stock", {"ticker": "NVDA"}),), BudgetClass.STANDARD)
-    results, ledger = ExecutionEngine(registry).run(plan, _context())
+    outcome = ExecutionEngine(registry).run(plan, _context())
+    results, ledger = outcome.results, outcome.ledger
     assert results[0].ok
     assert len(ledger.items()) == 2
     assert len(ledger.ids()) == 2
@@ -431,17 +433,21 @@ def test_llm_synthesizer_only_requests_detailed_style_when_user_asks_for_it():
 
 
 @pytest.mark.parametrize(
-    ("query", "intent"),
-    [("AMD最近表现如何", "recent_performance"), ("AMD今天是不是涨了，为什么？", "move_explanation")],
+    ("capability", "intent", "guidance"),
+    [("market.performance", "recent_performance", "recent_performance："), ("market.explain_move", "move_explanation", "move_explanation："), ("research.stock", "stock_research", "stock_research：")],
 )
-def test_llm_synthesizer_sets_market_response_intent(query, intent):
+def test_llm_synthesizer_derives_intent_and_guidance_from_the_capabilities_used(capability, intent, guidance):
     llm = ScriptedLLM([LLMResponse(text="有证据的回答。[E1]")])
     synthesizer = LLMEvidenceSynthesizer(llm)
-    request = normalize_request(query)
+    request = normalize_request("AMD 怎么样")
     evidence = [EvidenceItem("E1", "AMD", "支持结论")]
-    synthesizer.synthesize(request, ExecutionPlan(query, RouteKind.RESEARCH), [], evidence)
+    plan = ExecutionPlan("AMD 怎么样", RouteKind.RESEARCH, tasks=(PlanTask("t", capability, {"ticker": "AMD"}),))
+    synthesizer.synthesize(request, plan, [], evidence)
     payload = json.loads(llm.calls[0][1]["content"])
     assert payload["response_intent"] == intent
+    system = llm.calls[0][0]["content"]
+    assert guidance in system
+    assert "盘中" not in system or capability.startswith("market.")
 
 
 def test_llm_synthesizer_normalizes_valid_result_paths_to_evidence_ids():
@@ -566,42 +572,49 @@ def test_verifier_requires_nearby_citation_to_support_nearby_number():
     assert any("邻近数字" in warning for warning in report.warnings)
 
 
-def test_verifier_rejects_candidate_driver_written_as_confirmed_cause():
-    evidence = [EvidenceItem("C1", "AMD", "低置信度候选解释：期权市场波动。", metadata={"claim_role": "candidate_driver"})]
-    report = verify_answer(
-        "AMD 上涨的主要原因是期权市场波动。[C1]",
-        evidence,
-        answer_mode=AnswerMode.RESEARCH_GROUNDED,
-    )
-    assert not report.ok
-    assert any("候选归因" in warning for warning in report.warnings)
+def test_verifier_enforces_evidence_declared_forbid_unless_rules():
+    rule = {"forbid": r"主要原因", "unless": r"可能", "warning": "候选归因被表述为已确认原因"}
+    evidence = [EvidenceItem("C1", "AMD", "低置信度候选解释：期权市场波动。", metadata={"constraints": [rule]})]
+    rejected = verify_answer("AMD 上涨的主要原因是期权市场波动。[C1]", evidence, answer_mode=AnswerMode.RESEARCH_GROUNDED)
+    assert not rejected.ok
+    assert any("候选归因" in warning for warning in rejected.warnings)
+    hedged = verify_answer("AMD 上涨的主要原因可能是期权市场波动。[C1]", evidence, answer_mode=AnswerMode.RESEARCH_GROUNDED)
+    assert hedged.ok
 
 
-def test_verifier_rejects_final_volume_conclusion_from_intraday_evidence():
-    evidence = [EvidenceItem("V1", "AMD", "Intraday cumulative volume.", metadata={"evidence_scope": "volume", "is_intraday": True})]
-    result = ToolEnvelope("market.performance", ResultStatus.COMPLETED, subject="AMD", metrics={"is_intraday": True}, evidence=evidence)
-    report = verify_answer("AMD属于缩量上涨。[V1]", evidence, answer_mode=AnswerMode.TOOL_GROUNDED, results=[result])
-    assert not report.ok
-    assert any("未收盘成交量" in warning for warning in report.warnings)
+def test_verifier_enforces_evidence_declared_require_rules():
+    rule = {"require": r"盘中|截至查询时", "warning": "盘中价格被表述为完整收盘口径"}
+    evidence = [EvidenceItem("P1", "AMD", "Intraday price.", metadata={"constraints": [rule]})]
+    assert not verify_answer("AMD 收盘价走强。[P1]", evidence, answer_mode=AnswerMode.TOOL_GROUNDED).ok
+    assert verify_answer("AMD 盘中价格走强。[P1]", evidence, answer_mode=AnswerMode.TOOL_GROUNDED).ok
 
 
-def test_verifier_limits_weak_candidates_when_no_direct_driver_is_confirmed():
+def test_verifier_enforces_result_level_caps_and_forbidden_phrases():
     evidence = [
         EvidenceItem("C1", "AMD", "Candidate one.", metadata={"claim_role": "candidate_driver"}),
         EvidenceItem("C2", "AMD", "Candidate two.", metadata={"claim_role": "candidate_driver"}),
     ]
-    result = ToolEnvelope("market.explain_move", ResultStatus.COMPLETED, subject="AMD", metrics={"confirmed_driver_count": 0}, evidence=evidence)
+    result = ToolEnvelope(
+        "market.explain_move",
+        ResultStatus.COMPLETED,
+        subject="AMD",
+        evidence=evidence,
+        metadata={"answer_constraints": [{"max_cited": {"metadata": {"claim_role": "candidate_driver"}, "max": 1, "warning": "未确认直接驱动时展示了过多弱候选线索"}}, {"forbid": r"0\s*个", "warning": "将内部归因计数直接暴露给用户"}]},
+    )
     report = verify_answer("可能与线索一相关。[C1] 也可能与线索二相关。[C2]", evidence, answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result])
-    assert not report.ok
     assert any("过多弱候选" in warning for warning in report.warnings)
+    report = verify_answer("有 0 个驱动。[C1]", evidence, answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result])
+    assert any("归因计数" in warning for warning in report.warnings)
+    assert verify_answer("可能与线索一相关。[C1]", evidence, answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result]).ok
 
 
-def test_verifier_hides_a_single_candidate_that_lacks_direct_support():
-    evidence = [EvidenceItem("C1", "AMD", "Candidate one.", confidence=0.3, metadata={"claim_role": "candidate_driver", "note": "无直接证据"})]
-    result = ToolEnvelope("market.explain_move", ResultStatus.COMPLETED, subject="AMD", metrics={"confirmed_driver_count": 0}, evidence=evidence)
+def test_verifier_rejects_citations_of_uncitable_evidence_and_uncited_market_figures():
+    evidence = [EvidenceItem("C1", "AMD", "Candidate one.", metadata={"citable": False, "uncitable_warning": "展示了缺乏直接支持的过弱异动线索"}), EvidenceItem("P1", "AMD", "AMD close 100.00.")]
+    result = ToolEnvelope("market.explain_move", ResultStatus.COMPLETED, subject="AMD", evidence=evidence, metadata={"require_cited_numbers": True})
     report = verify_answer("可能与该线索相关。[C1]", evidence, answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result])
-    assert not report.ok
     assert any("过弱异动线索" in warning for warning in report.warnings)
+    report = verify_answer("AMD 收于 100.00 美元。 详情见证据。[P1]", evidence, answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result])
+    assert any("邻近引用" in warning for warning in report.warnings)
 
 
 def test_verifier_does_not_treat_digits_in_opaque_ids_as_observations():
@@ -635,9 +648,6 @@ def test_web_and_lab_ports_can_be_injected_without_core_dependencies():
     class Lab:
         def run(self, capability, arguments, context):
             return ToolEnvelope(capability, ResultStatus.COMPLETED, summary="lab result")
-
-        def get_result(self, run_id, context):
-            return ToolEnvelope("lab.result", ResultStatus.COMPLETED, run_id=run_id)
 
     catalog = default_catalog()
     registry = CapabilityRegistry(catalog)
@@ -879,3 +889,156 @@ def test_llm_synthesizer_falls_back_to_deterministic_prose_when_repair_still_fai
     assert "20%" not in answer and "25%" not in answer
     assert "[E1]" in answer
     assert verify_answer(answer, evidence, answer_mode=plan.answer_mode, results=results).ok
+
+
+def _mutation_agent(applied: list):
+    catalog = default_catalog()
+    registry = CapabilityRegistry(catalog)
+
+    def mutate(arguments, context):
+        applied.append(arguments)
+        return ToolEnvelope("state.mutate", ResultStatus.COMPLETED, subject=arguments["operation"], summary="已将 NVDA 加入关注列表。", evidence=[EvidenceItem("M1", "NVDA", "已将 NVDA 加入关注列表。")])
+
+    registry.register("state.mutate", mutate)
+    return AgentV2(catalog=catalog, registry=registry, session=ShortTermSession())
+
+
+def test_command_is_parsed_held_for_confirmation_and_applied_only_after_confirm():
+    applied: list = []
+    agent = _mutation_agent(applied)
+    first = agent.run("把 NVDA 加入关注列表", session_id="chat-1")
+    assert first.status == RunStatus.WAITING_CONFIRMATION
+    assert first.pending_mutation is not None
+    assert first.pending_mutation.operation == "watchlist.add"
+    assert first.pending_mutation.payload == {"ticker": "NVDA"}
+    assert "确认" in first.answer
+    assert not applied
+    second = agent.run("确认", session_id="chat-1")
+    assert second.status == RunStatus.COMPLETED
+    assert applied == [{"operation": "watchlist.add", "payload": {"ticker": "NVDA"}}]
+    assert second.results[0].capability == "state.mutate"
+    assert second.verification.ok
+    third = agent.run("确认", session_id="chat-1")
+    assert third.status != RunStatus.COMPLETED or not third.results
+    assert len(applied) == 1
+
+
+def test_command_cancel_or_new_question_drops_the_pending_mutation():
+    applied: list = []
+    agent = _mutation_agent(applied)
+    agent.run("NVDA 涨到 200 美元提醒我", session_id="chat-2")
+    cancelled = agent.run("取消", session_id="chat-2")
+    assert cancelled.status == RunStatus.CANCELLED
+    assert agent.run("确认", session_id="chat-2").results == []
+    agent.run("把 AMD 加入关注列表", session_id="chat-3")
+    moved_on = agent.run("什么是自由现金流？", session_id="chat-3")
+    assert moved_on.route.kind == RouteKind.GENERAL_KNOWLEDGE
+    assert agent.run("确认", session_id="chat-3").results == []
+    assert not applied
+
+
+def test_command_without_a_session_or_with_missing_parameters_does_not_wait_forever():
+    applied: list = []
+    agent = _mutation_agent(applied)
+    no_session = agent.run("把 NVDA 加入关注列表")
+    assert no_session.status == RunStatus.WAITING_CONFIRMATION
+    assert "无法接收确认" in no_session.answer
+    incomplete = agent.run("取消 NVDA 的提醒", session_id="chat-4")
+    assert incomplete.status == RunStatus.PARTIAL
+    assert "提醒编号" in incomplete.answer
+    assert incomplete.pending_mutation is None
+    assert not applied
+
+
+def test_state_mutate_adapter_maps_operations_onto_bot_state(monkeypatch):
+    import sys
+    from types import ModuleType
+
+    from v2.agent_v2.adapters.legacy import register_legacy_capabilities
+
+    calls: list = []
+    fake = ModuleType("v2.bot.state")
+    fake.watchlist_add = lambda ticker, note="": calls.append(("add", ticker)) or True
+    fake.watchlist_remove = lambda ticker: calls.append(("remove", ticker)) or False
+    fake.alert_add = lambda ticker, direction, target: calls.append(("alert", ticker, direction, target)) or 7
+    fake.alert_remove = lambda alert_id: calls.append(("unalert", alert_id)) or True
+    monkeypatch.setitem(sys.modules, "v2.bot.state", fake)
+    registry = CapabilityRegistry(default_catalog())
+    register_legacy_capabilities(registry)
+    context = ExecutionContext("run", NormalizedRequest("q", "q"), BudgetClass.DIRECT, allow_mutations=True)
+    added = registry.execute(PlanTask("m", "state.mutate", {"operation": "watchlist.add", "payload": {"ticker": "nvda"}}), context)
+    assert added.ok and "加入关注列表" in added.summary and added.evidence
+    removed = registry.execute(PlanTask("m", "state.mutate", {"operation": "watchlist.remove", "payload": {"ticker": "AMD"}}), context)
+    assert "不在关注列表" in removed.summary
+    alert = registry.execute(PlanTask("m", "state.mutate", {"operation": "alert.add", "payload": {"ticker": "AAPL", "direction": "below", "target_price": 150}}), context)
+    assert "#7" in alert.summary and "跌到" in alert.summary
+    unalert = registry.execute(PlanTask("m", "state.mutate", {"operation": "alert.remove", "payload": {"alert_id": 7}}), context)
+    assert "已取消提醒 #7" in unalert.summary
+    assert calls == [("add", "NVDA"), ("remove", "AMD"), ("alert", "AAPL", "below", 150.0), ("unalert", 7)]
+    blocked = registry.execute(PlanTask("m", "state.mutate", {"operation": "watchlist.add", "payload": {"ticker": "NVDA"}}), _context())
+    assert not blocked.ok and "confirmation" in blocked.errors[0]
+
+
+def test_executor_enforces_the_wall_clock_budget():
+    import time as _time
+
+    catalog = default_catalog()
+    registry = CapabilityRegistry(catalog)
+
+    def slow(arguments, context):
+        _time.sleep(0.5)
+        return ToolEnvelope("research.stock", ResultStatus.COMPLETED, subject="NVDA", evidence=[EvidenceItem("S1", "NVDA", "slow")])
+
+    def fast(arguments, context):
+        return ToolEnvelope("account.portfolio", ResultStatus.COMPLETED, subject="portfolio", evidence=[EvidenceItem("F1", "portfolio", "fast")])
+
+    registry.register("research.stock", slow)
+    registry.register("account.portfolio", fast)
+    plan = ExecutionPlan(
+        "q",
+        RouteKind.RESEARCH,
+        tasks=(
+            PlanTask("slow", "research.stock", {"ticker": "NVDA"}),
+            PlanTask("fast", "account.portfolio"),
+            PlanTask("after", "account.risk", depends_on=("slow",)),
+        ),
+        budget=BudgetClass.PORTFOLIO,
+    )
+    context = ExecutionContext("run", NormalizedRequest("q", "q"), BudgetClass.PORTFOLIO, deadline=_time.monotonic() + 0.1)
+    outcome = ExecutionEngine(registry).run(plan, context)
+    by_capability = {result.capability: result for result in outcome.results}
+    assert outcome.stop_reason == "deadline"
+    assert by_capability["account.portfolio"].ok
+    assert by_capability["research.stock"].status == ResultStatus.FAILED and "timed out" in by_capability["research.stock"].errors[0]
+    assert by_capability["account.risk"].status == ResultStatus.SKIPPED
+    assert outcome.ledger.ids() == {"F1"}
+
+
+def test_orchestrator_surfaces_deadline_as_partial_with_a_stop_reason():
+    import time as _time
+
+    catalog = default_catalog()
+    registry = CapabilityRegistry(catalog)
+
+    def slow(arguments, context):
+        _time.sleep(0.3)
+        return ToolEnvelope("research.stock", ResultStatus.COMPLETED, subject="NVDA", evidence=[EvidenceItem("S1", "NVDA", "slow")])
+
+    registry.register("research.stock", slow)
+    agent = AgentV2(catalog=catalog, registry=registry, config=AgentV2Config(max_seconds=0.05))
+    result = agent.run("分析 NVDA 的风险")
+    assert result.status == RunStatus.PARTIAL
+    assert result.stop_reason == "deadline"
+    assert result.to_dict()["stop_reason"] == "deadline"
+    assert "timed out" in result.results[0].errors[0]
+
+
+def test_async_lab_requests_execute_inline_and_half_finished_lab_result_is_gone():
+    assert default_catalog().get("lab.result") is None
+    catalog = default_catalog()
+    registry = CapabilityRegistry(catalog)
+    registry.register("lab.sweep", lambda arguments, context: ToolEnvelope("lab.sweep", ResultStatus.COMPLETED, subject="sp500", summary="sweep done", evidence=[EvidenceItem("L1", "sp500", "sweep done")]))
+    result = AgentV2(catalog=catalog, registry=registry).run("对标普全部股票做十年参数扫描")
+    assert result.route.kind == RouteKind.ASYNC and result.route.asynchronous
+    assert result.status == RunStatus.COMPLETED
+    assert result.results[0].capability == "lab.sweep"

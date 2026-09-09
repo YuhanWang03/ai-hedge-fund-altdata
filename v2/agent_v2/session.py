@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import threading
+import time
+
 from v2.agent import session as legacy_session
-from v2.agent_v2.models import AgentResult, SessionResolution
+from v2.agent_v2.models import AgentResult, ExecutionPlan, SessionResolution
 
 
 class ShortTermSession:
@@ -19,6 +22,9 @@ class ShortTermSession:
             ttl_seconds=ttl_seconds,
             max_turns=max_turns,
         )
+        self.ttl_seconds = float(ttl_seconds)
+        self._pending: dict[str, tuple[float, ExecutionPlan]] = {}
+        self._lock = threading.Lock()
 
     def resolve(self, session_id: str, text: str) -> SessionResolution:
         result = self.store.resolve(session_id, text)
@@ -43,5 +49,21 @@ class ShortTermSession:
             ),
         )
 
+    def set_pending(self, session_id: str, plan: ExecutionPlan) -> None:
+        if not session_id:
+            return
+        with self._lock:
+            self._pending[session_id] = (time.monotonic() + self.ttl_seconds, plan)
+
+    def pop_pending(self, session_id: str) -> ExecutionPlan | None:
+        with self._lock:
+            entry = self._pending.pop(session_id, None)
+        if entry is None:
+            return None
+        expires_at, plan = entry
+        return plan if time.monotonic() < expires_at else None
+
     def clear(self, session_id: str) -> None:
         self.store.clear(session_id)
+        with self._lock:
+            self._pending.pop(session_id, None)

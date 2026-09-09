@@ -66,7 +66,7 @@ def build_llm_agent(*, config: AgentV2Config | None = None, llm=None, lab=None, 
         catalog=catalog,
         registry=registry,
         planner=StructuredLLMPlanner(llm, catalog),
-        synthesizer=LLMEvidenceSynthesizer(llm),
+        synthesizer=LLMEvidenceSynthesizer(llm, catalog=catalog),
         session=ShortTermSession(),
         config=config,
     )

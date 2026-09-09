@@ -71,3 +71,32 @@ def register_legacy_capabilities(registry: CapabilityRegistry) -> None:
         return _wrap("state.read", section, value)
 
     registry.register("state.read", state_read)
+
+    def state_mutate(arguments: dict[str, Any], context: ExecutionContext) -> ToolEnvelope:
+        operation = str(arguments.get("operation") or "")
+        payload = dict(arguments.get("payload") or {})
+        state = importlib.import_module("v2.bot.state")
+        if operation == "watchlist.add":
+            ticker = str(payload.get("ticker") or "").upper()
+            added = state.watchlist_add(ticker)
+            message = f"已将 {ticker} 加入关注列表。" if added else f"{ticker} 已在关注列表中，无需重复添加。"
+        elif operation == "watchlist.remove":
+            ticker = str(payload.get("ticker") or "").upper()
+            removed = state.watchlist_remove(ticker)
+            message = f"已将 {ticker} 移出关注列表。" if removed else f"{ticker} 不在关注列表中。"
+        elif operation == "alert.add":
+            ticker = str(payload.get("ticker") or "").upper()
+            direction = str(payload.get("direction") or "above")
+            target = float(payload.get("target_price") or 0)
+            alert_id = state.alert_add(ticker, direction, target)
+            label = "涨到" if direction == "above" else "跌到"
+            message = f"已设置提醒 #{alert_id}：{ticker} {label} {target:g} 美元时通知。"
+        elif operation == "alert.remove":
+            alert_id = int(payload.get("alert_id") or 0)
+            removed = state.alert_remove(alert_id)
+            message = f"已取消提醒 #{alert_id}。" if removed else f"提醒 #{alert_id} 不存在。"
+        else:
+            return ToolEnvelope("state.mutate", ResultStatus.FAILED, errors=[f"unsupported operation: {operation}"])
+        return _wrap("state.mutate", operation, message)
+
+    registry.register("state.mutate", state_mutate)
