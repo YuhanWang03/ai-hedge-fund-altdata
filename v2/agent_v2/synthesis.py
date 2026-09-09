@@ -93,7 +93,60 @@ def frame_lead(frame: dict[str, Any], results: list[ToolEnvelope]) -> str:
             price = next((item for item in result.evidence if item.metadata.get("evidence_scope") == "price"), None)
             direction = "上涨" if today > 0 else "下跌"
             lines.append(f"今日为{direction}（{float(today):+.2%}），与{frame.get('label') or '上述区间'}是不同区间{f'[{price.id}]' if price else ''}。")
+        timing = decline_timing(value, returns, result)
+        if timing:
+            lines.append(timing)
+        break
+    return "\n".join(lines)
+
+
+_WINDOW_LABELS = (("5d", "近 5 日"), ("1m", "近 1 月"), ("3m", "近 3 月"), ("1y", "近 1 年"))
+
+
+def decline_timing(total_pct: Any, returns: dict[str, Any], result: ToolEnvelope) -> str:
+    """Where in time a loss since purchase sits, read off the return windows.
+
+    Each window's return is compared with the loss: the first window that
+    accounts for at least half of it is where the decline mostly happened;
+    when none does, the decline predates the longest window.
+    """
+
+    if not isinstance(total_pct, (int, float)) or total_pct >= 0:
+        return ""
+    total = float(total_pct) / 100.0
+    windows = [(key, label, float(returns[key])) for key, label in _WINDOW_LABELS if isinstance(returns.get(key), (int, float))]
+    if not windows:
+        return ""
+    item = next((item for item in result.evidence if item.metadata.get("evidence_scope") == "returns"), None)
+    citation = f"[{item.id}]" if item is not None else ""
+    described = "、".join(f"{label} {value:+.2%}" for _, label, value in windows)
+    for _, label, value in windows:
+        if value < 0 and value / total >= 0.5:
+            return f"对照区间回报（{described}），这段跌幅大部分落在{label}内{citation}。"
+    _, longest_label, _ = windows[-1]
+    return f"对照区间回报（{described}），这段跌幅主要发生在{longest_label}以前{citation}。"
+
+
+def catalyst_lines(result: ToolEnvelope) -> str:
+    """A research result in a framed answer: its dated, citable findings, not the engine's thesis."""
+
+    lines: list[str] = []
+    for item in result.evidence:
+        if not item.metadata.get("citable", True) or item.metadata.get("citation_kind") in {"metrics", "limitations"}:
+            continue
+        claim = plain_text(item.claim)
+        if claim:
+            lines.append(f"- {claim} [{item.id}]")
+        if len(lines) >= 6:
             break
+    if not lines:
+        lines.append(f"{result.subject} 期间未查到可核对的催化剂。")
+    limitation_item = next((item for item in result.evidence if item.metadata.get("citation_kind") == "limitations"), None)
+    suffix = f" [{limitation_item.id}]" if limitation_item is not None else ""
+    lines.extend(f"数据限制：{item}{suffix}" for item in result.limitations[:2])
+    if not result.ok:
+        detail = result.errors[0] if result.errors else "未知错误"
+        lines.append(f"{result.capability} 未完成：{detail}")
     return "\n".join(lines)
 
 
@@ -202,7 +255,10 @@ class EvidenceSummarySynthesizer:
                 found = position_row(results, str(frame.get("ticker") or ""))
                 source = found[0] if found else None
                 blocks = [opening]
-                blocks.extend(self._render(result) for result in results if result is not source)
+                for result in results:
+                    if result is source:
+                        continue
+                    blocks.append(catalyst_lines(result) if result.capability.startswith("research.") else self._render(result))
                 return "\n\n".join(block for block in blocks if block)
         lead = ranking_lead(request.text, results)
         if lead:

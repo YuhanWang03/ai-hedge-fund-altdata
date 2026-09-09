@@ -699,12 +699,24 @@ def _framed_registry() -> CapabilityRegistry:
     def performance(a, c):
         ticker = a["ticker"]
         price = EvidenceItem(f"P-{ticker}", ticker, f"{ticker} 截至 2026-09-09 收盘价为 264.00 美元，单日涨跌幅为 +0.94%。", metadata={"evidence_scope": "price"})
-        windows = EvidenceItem(f"W-{ticker}", ticker, f"{ticker} 区间回报：1d +0.94%，5d +12.32%，1m -1.53%。", metadata={"evidence_scope": "returns"})
-        return ToolEnvelope("market.performance", ResultStatus.COMPLETED, subject=ticker, summary=f"{ticker} 近 1 月 -1.53%", metrics={"returns": {"1d": 0.0094, "5d": 0.1232, "1m": -0.0153}}, evidence=[price, windows], metadata={"narrative": f"{ticker} 近 5 日回报 +12.32%，近 1 月回报 -1.53%[W-{ticker}]。"})
+        windows = EvidenceItem(f"W-{ticker}", ticker, f"{ticker} 区间回报：1d +0.94%，5d +12.32%，1m -1.53%，3m -21.40%，1y -35.10%。", metadata={"evidence_scope": "returns"})
+        return ToolEnvelope("market.performance", ResultStatus.COMPLETED, subject=ticker, summary=f"{ticker} 近 1 月 -1.53%", metrics={"returns": {"1d": 0.0094, "5d": 0.1232, "1m": -0.0153, "3m": -0.2140, "1y": -0.3510}}, evidence=[price, windows], metadata={"narrative": f"{ticker} 近 5 日回报 +12.32%，近 1 月回报 -1.53%[W-{ticker}]。"})
 
     registry.register("market.performance", performance)
     registry.register("market.explain_move", lambda a, c: ToolEnvelope("market.explain_move", ResultStatus.COMPLETED, subject=a["ticker"], summary=f"{a['ticker']} 异动", metrics={"price_change_pct": 0.0094}, evidence=[EvidenceItem(f"M-{a['ticker']}", a["ticker"], f"{a['ticker']} 今日 +0.94%", metadata={"evidence_scope": "price"})]))
-    registry.register("research.stock", lambda a, c: ToolEnvelope("research.stock", ResultStatus.COMPLETED, subject=a["ticker"], summary=f"{a['ticker']} {a['focus']}", evidence=[EvidenceItem(f"R-{a['ticker']}-{a['focus']}", a["ticker"], "研究")]))
+    registry.register(
+        "research.stock",
+        lambda a, c: ToolEnvelope(
+            "research.stock",
+            ResultStatus.COMPLETED,
+            subject=a["ticker"],
+            summary=f"{a['ticker']}: the evidence currently balances growth against valuation risk.",
+            evidence=[
+                EvidenceItem(f"R-{a['ticker']}-{a['focus']}", a["ticker"], f"{a['ticker']} 2026-08-05 发布财报，指引低于预期。"),
+                EvidenceItem(f"R-{a['ticker']}-metrics", a["ticker"], "派生评分", metadata={"citation_kind": "metrics"}),
+            ],
+        ),
+    )
     return registry
 
 
@@ -734,13 +746,15 @@ def test_a_why_follow_up_after_a_loss_ranking_explains_the_loss_since_purchase_n
         ("account.portfolio", None),
         ("market.performance", None),
         ("research.stock", "catalysts"),
-        ("market.explain_move", None),
     ]
     assert second.plan.assumptions[0].startswith("context_frame: 用户追问的是 ARM 买入以来的浮动盈亏 -32.22%（成本价 $389.52）")
     lines = second.answer.split("\n")
     assert lines[0].startswith("你问的是 ARM 买入以来的浮动盈亏：-32.22%，成本价 $389.52[legacy-")
-    assert lines[1] == "今日为上涨（+0.94%），与买入以来的跌幅是不同区间[P-ARM]。" or lines[1].startswith("今日为上涨（+0.94%）")
+    assert lines[1].startswith("今日为上涨（+0.94%）") and "[P-ARM]" in lines[1]
+    assert lines[2] == "对照区间回报（近 5 日 +12.32%、近 1 月 -1.53%、近 3 月 -21.40%、近 1 年 -35.10%），这段跌幅大部分落在近 3 月内[W-ARM]。"
     assert "组合价值" not in second.answer and "近 1 月回报 -1.53%" in second.answer
+    assert "- ARM 2026-08-05 发布财报，指引低于预期。 [R-ARM-catalysts]" in second.answer
+    assert "the evidence currently balances" not in second.answer and "[R-ARM-metrics]" not in second.answer
     assert second.verification.ok, second.verification
     assert second.status == RunStatus.COMPLETED
     # The frame survives the framed turn, and a question about a rise is not a drawdown question.
@@ -750,7 +764,18 @@ def test_a_why_follow_up_after_a_loss_ranking_explains_the_loss_since_purchase_n
     # The LLM planner leaves the framed plan to the rules.
     llm = ScriptedLLM([LLMResponse(text="{}")])
     framed = normalize_request("ARM 什么原因跌这么多?", metadata={"context_frame": resolution.frame})
-    assert len(StructuredLLMPlanner(llm, default_catalog()).plan(framed, route(framed)).tasks) == 4 and llm.calls == []
+    assert len(StructuredLLMPlanner(llm, default_catalog()).plan(framed, route(framed)).tasks) == 3 and llm.calls == []
+
+
+def test_decline_timing_reads_the_return_windows():
+    from v2.agent_v2.synthesis import decline_timing
+
+    item = EvidenceItem("W", "ARM", "区间回报", metadata={"evidence_scope": "returns"})
+    result = ToolEnvelope("market.performance", ResultStatus.COMPLETED, subject="ARM", evidence=[item])
+    assert decline_timing(-32.0, {"5d": 0.12, "1m": -0.015, "3m": -0.214, "1y": -0.351}, result).endswith("这段跌幅大部分落在近 3 月内[W]。")
+    assert decline_timing(-32.0, {"5d": -0.20, "1m": -0.25}, result).endswith("这段跌幅大部分落在近 5 日内[W]。")
+    assert decline_timing(-32.0, {"5d": 0.01, "1m": -0.02, "3m": -0.05, "1y": -0.08}, result).endswith("这段跌幅主要发生在近 1 年以前[W]。")
+    assert decline_timing(5.0, {"1m": -0.02}, result) == "" and decline_timing(-32.0, {}, result) == ""
 
 
 def test_agent_v2_seed_eval_passes_offline():
