@@ -1200,6 +1200,19 @@ def test_agent_v2_seed_eval_passes_offline():
     assert report.passed == report.total
 
 
+def test_every_telegram_handler_keeps_its_owner_guard():
+    """A helper inserted between @authorized_only and its handler once stole the decorator; never again."""
+
+    import re
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parents[1].joinpath("bot", "commands.py").read_text(encoding="utf-8")
+    handlers = re.findall(r"^(@authorized_only\n)?async def (cmd_\w+)\(", source, re.M)
+    assert handlers, "no handlers found"
+    assert [name for decorator, name in handlers if not decorator] == []
+    assert re.search(r"^def _free_text_agent\(\) -> str:", source, re.M) and not re.search(r"@authorized_only\ndef _free_text_agent", source)
+
+
 def _require_telegram() -> None:
     """Skip when python-telegram-bot is absent or its native deps fail to load (a sandbox, not a bug)."""
 

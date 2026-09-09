@@ -696,7 +696,6 @@ _INTENT_DISPLAY = {
 }
 
 
-@authorized_only
 def _free_text_agent() -> str:
     """Which agent answers a plain message: ``v2`` (default) or ``v1`` to roll back."""
 
@@ -711,6 +710,7 @@ def _split_web_consent(text: str) -> tuple[str, bool]:
     return " ".join(token for token in tokens if token.lower() != "--web").strip(), allow_web
 
 
+@authorized_only
 async def cmd_nl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """A plain message goes to Agent V2; ``/ask`` keeps the V1 single-hop router as a control."""
     text = (update.message.text or "").strip()
