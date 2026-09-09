@@ -864,7 +864,7 @@ def test_filing_reader_reads_the_sections_it_chooses_and_keeps_only_quoted_event
     assert events[0].source_url == "https://www.sec.gov/x/777/" and "Revenue of $1.05 billion" in events[0].claim
     # A quote the model reworded is replaced by the filing's own words around the matching run.
     assert events[2].metadata["quote"] == "the company now expects fiscal-year revenue growth in the low twenties."
-    assert result.metrics == {"filings": 1, "sections_read": 2, "events": 3, "rounds": 3, "llm_calls": 3}
+    assert {key: result.metrics[key] for key in ("filings", "sections_read", "events", "rounds", "llm_calls", "stop_reason")} == {"filings": 1, "sections_read": 2, "events": 3, "rounds": 3, "llm_calls": 3, "stop_reason": "finished"}
     assert "1 条事件的引文与已读文本不符，已丢弃" in result.limitations[0]
     assert result.metadata["narrative"].startswith("ARM 申报中读到的事件：2026-07-29 季度营收 10.5 亿美元低于指引区间[evidence-filing-event-")
     assert verify_answer(result.metadata["narrative"], result.evidence, answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result]).ok
@@ -877,12 +877,12 @@ def test_filing_reader_reads_the_sections_it_chooses_and_keeps_only_quoted_event
         ]
     )
     rescued = FilingReader(forced, _FakeFilingSource(refs), max_rounds=2).run("ARM", _context(), around="2026-07-29", today=date(2026, 9, 9))
-    assert rescued.status == ResultStatus.COMPLETED and rescued.metrics == {"filings": 1, "sections_read": 2, "events": 1, "rounds": 2, "llm_calls": 3}
+    assert rescued.status == ResultStatus.COMPLETED and {key: rescued.metrics[key] for key in ("filings", "sections_read", "events", "rounds", "llm_calls")} == {"filings": 1, "sections_read": 2, "events": 1, "rounds": 2, "llm_calls": 3}
     assert forced.calls[-1][-1]["content"].startswith("轮次已用完")
     # If even the forced finish keeps reading, the cap holds and only a limitation comes back.
     endless = FilingReader(ScriptedLLM([LLMResponse(text='{"action":"read","filing":1,"section":"s1"}')] * 6), _FakeFilingSource(refs), max_rounds=2)
     capped = endless.run("ARM", _context(), around="2026-07-29", today=date(2026, 9, 9))
-    assert capped.status == ResultStatus.PARTIAL_DATA and capped.metrics == {"filings": 1, "sections_read": 1, "events": 0, "rounds": 2, "llm_calls": 3} and "达到轮次上限" in capped.limitations[0]
+    assert capped.status == ResultStatus.PARTIAL_DATA and {key: capped.metrics[key] for key in ("filings", "sections_read", "events", "rounds", "llm_calls", "stop_reason")} == {"filings": 1, "sections_read": 1, "events": 0, "rounds": 2, "llm_calls": 3, "stop_reason": "rounds"} and "达到轮次上限" in capped.limitations[0]
     assert capped.evidence[0].metadata["citation_kind"] == "limitations" and "未读到与2026-07-29 附近下跌相关的事件" in capped.evidence[0].claim
     # Without a model the capability still lists the filings and says it did not read them.
     listed = FilingReader(None, _FakeFilingSource(refs)).run("ARM", _context(), around="2026-07-29", today=date(2026, 9, 9))
@@ -985,6 +985,52 @@ def test_decline_timing_reads_the_return_windows():
     assert decline_timing(5.0, {"1m": -0.02}, result) == [] and decline_timing(-32.0, {}, result) == []
     undated = ToolEnvelope("research.stock", ResultStatus.COMPLETED, subject="ARM", evidence=[EvidenceItem("F", "ARM", "TTM P/E is 377.2x.")], limitations=["expectations: 34/100"])
     assert catalyst_lines(undated) == "ARM 期间未查到可核对的催化剂（财报、公告或新闻）。\n数据限制：expectations: 34/100"
+
+
+def test_sub_agent_loop_is_bounded_by_the_coordinators_remaining_time():
+    import time
+
+    from v2.agent_v2.agents.base import BoundedLoop, LoopLimits, limits_for
+    from v2.agent_v2.agents.filing_reader import FilingReader, FilingRef
+
+    # limits_for: the coordinator's remaining clock, minus a margin, caps the loop.
+    roomy = ExecutionContext("run", NormalizedRequest("q", "q"), BudgetClass.PORTFOLIO, deadline=time.monotonic() + 600)
+    assert limits_for(roomy, max_rounds=6, max_seconds=90).seconds == 90
+    tight = ExecutionContext("run", NormalizedRequest("q", "q"), BudgetClass.PORTFOLIO, deadline=time.monotonic() + 30)
+    assert 24 <= limits_for(tight, max_rounds=6, max_seconds=90).seconds <= 25
+    assert limits_for(None, max_rounds=6, max_seconds=90).seconds == 90
+
+    class Echo(BoundedLoop):
+        def handle(self, action, messages):
+            messages.append({"role": "user", "content": "ok"})
+            return True
+
+    # No budget left: the loop does not start and no model call is made.
+    llm = ScriptedLLM([LLMResponse(text='{"action":"finish","events":[]}')])
+    outcome = Echo(llm, LoopLimits(max_rounds=3, max_seconds=60, outer_seconds=4)).run("sys", "task", finish_prompt="finish")
+    assert outcome.stop_reason == "no_budget" and outcome.calls == 0 and llm.calls == []
+    assert Echo(None, LoopLimits()).run("sys", "task", finish_prompt="finish").stop_reason == "no_model"
+    # A normal finish records rounds, calls and the final action.
+    done = Echo(ScriptedLLM([LLMResponse(text='{"action":"read"}'), LLMResponse(text='{"action":"finish","x":1}')]), LoopLimits(max_rounds=3)).run("sys", "task", finish_prompt="finish")
+    assert done.finished and done.final == {"action": "finish", "x": 1} and (done.rounds, done.calls, done.stop_reason) == (2, 2, "finished")
+
+    # The engine hands the deadline to handlers: a reader called with almost no time left says so instead of reading.
+    refs = [FilingRef("ARM", "8-K", "2026-07-29", "0001-26-000777", "https://www.sec.gov/x/777/")]
+    reader = FilingReader(ScriptedLLM([LLMResponse(text='{"action":"finish","events":[]}')]), _FakeFilingSource(refs))
+    starved = ExecutionContext("run", NormalizedRequest("q", "q"), BudgetClass.PORTFOLIO, deadline=time.monotonic() + 3)
+    result = reader.run("ARM", starved, around="2026-07-29", today=date(2026, 9, 9))
+    assert result.metrics["stop_reason"] == "no_budget" and result.metrics["llm_calls"] == 0 and "协调者剩余时间不足" in result.limitations[0]
+    registry = CapabilityRegistry(default_catalog())
+    seen: dict[str, float] = {}
+
+    def probe(arguments, context):
+        seen["remaining"] = context.remaining_seconds()
+        return ToolEnvelope("account.portfolio", ResultStatus.COMPLETED, subject="portfolio", summary="x", evidence=[EvidenceItem("P", "portfolio", "x")])
+
+    registry.register("account.portfolio", probe)
+    context = ExecutionContext("run", NormalizedRequest("q", "q"), BudgetClass.DIRECT)  # DIRECT allows 30 s
+    ExecutionEngine(registry).run(ExecutionPlan("q", RouteKind.FAST_LOOKUP, tasks=(PlanTask("p", "account.portfolio"),), budget=BudgetClass.DIRECT), context)
+    assert 0 < seen["remaining"] <= 30 and context.deadline is not None
 
 
 def test_locate_quote_tolerates_punctuation_and_rejects_invention():

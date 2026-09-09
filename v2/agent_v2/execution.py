@@ -263,6 +263,12 @@ class ExecutionEngine:
         self.validate(plan)
         started = time.monotonic()
         deadline = context.deadline if context.deadline is not None else started + time_limit(context.budget)
+        # Handlers (sub-agents in particular) bound their own loops by the
+        # coordinator's remaining time, so the deadline must be visible to
+        # them.  The context is frozen for everything else; this one field is
+        # set once here, before any handler runs.
+        if context.deadline is None:
+            object.__setattr__(context, "deadline", deadline)
 
         pending = {task.id: task for task in plan.tasks}
         completed: dict[str, ToolEnvelope] = {}

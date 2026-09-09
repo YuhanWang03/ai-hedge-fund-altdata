@@ -10,13 +10,12 @@ never decides whether it should run; the planner does that.
 from __future__ import annotations
 
 import hashlib
-import json
 import re
-import time
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any, Callable, Protocol
 
+from v2.agent_v2.agents.base import BoundedLoop, LoopLimits, limits_for
 from v2.agent_v2.execution import CapabilityRegistry, ExecutionContext
 from v2.agent_v2.models import EvidenceItem, ResultStatus, ToolEnvelope
 
@@ -250,6 +249,38 @@ _SYSTEM = """你是申报阅读者，只输出 JSON，不回答用户问题。
 _FINISH_NOW = "轮次已用完。现在只允许 finish：把已读章节里有明确日期、且能逐字引用的事件整理出来；没有就返回空的 events 并说明。"
 
 
+class _ReadLoop(BoundedLoop):
+    """The filing reader's loop: the one non-finish action reads up to three sections."""
+
+    def __init__(self, llm: Any, limits: LoopLimits, source: FilingSource, chosen: list[FilingRef], max_chars: int) -> None:
+        super().__init__(llm, limits)
+        self.source = source
+        self.chosen = chosen
+        self.max_chars = max_chars
+        self.read: dict[tuple[int, str], str] = {}
+
+    def handle(self, action: dict[str, Any], messages: list[dict[str, str]]) -> bool:
+        requests = action.get("reads")
+        if not isinstance(requests, list):
+            requests = [action]
+        served = 0
+        for request in requests[:3]:
+            try:
+                index = int(request.get("filing"))
+                section_id = str(request.get("section") or "")
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if not 1 <= index <= len(self.chosen):
+                continue
+            text = self.source.read(self.chosen[index - 1], section_id)[: self.max_chars]
+            self.read[(index, section_id)] = text
+            messages.append({"role": "user", "content": f"申报 {index} 章节 {section_id} 的文本：\n{text or '（空）'}"})
+            served += 1
+        if not served:
+            messages.append({"role": "user", "content": "read 需要 reads 列表，每项含 filing 序号和 section id。"})
+        return bool(served)
+
+
 class FilingReader:
     """Read the filings around a date and report dated, quoted events."""
 
@@ -269,17 +300,17 @@ class FilingReader:
             until = until or min(current, anchor + timedelta(days=3)).isoformat()
         since = since or (current - timedelta(days=90)).isoformat()
         until = until or current.isoformat()
-        started = time.monotonic()
+        window = f"{since} 至 {until}"
+        limits = limits_for(context, max_rounds=self.max_rounds, max_seconds=self.max_seconds)
         refs = self.source.list_filings(ticker, since, until)
         limit = max(1, min(int(max_filings or self.max_filings), 3))
         if around:
             refs.sort(key=lambda ref: abs((date.fromisoformat(ref.filing_date) - date.fromisoformat(around[:10])).days) if ref.filing_date else 999)
         chosen = refs[:limit]
-        window = f"{since} 至 {until}"
         if not chosen:
-            return self._envelope(ticker, window, around, [], [], [], note=f"{window} 未查到申报", rounds=0, calls=0, status=ResultStatus.COMPLETED)
+            return self._envelope(ticker, window, around, [], [], [], note=f"{window} 未查到申报", metrics={"rounds": 0, "llm_calls": 0}, status=ResultStatus.COMPLETED)
         if self.llm is None:
-            return self._envelope(ticker, window, around, chosen, [], [], note="未配置模型，只列出申报，未读取内容", rounds=0, calls=0, status=ResultStatus.PARTIAL_DATA)
+            return self._envelope(ticker, window, around, chosen, [], [], note="未配置模型，只列出申报，未读取内容", metrics={"rounds": 0, "llm_calls": 0}, status=ResultStatus.PARTIAL_DATA)
 
         outlines = {index: self.source.outline(ref) for index, ref in enumerate(chosen, 1)}
         listing = "\n".join(
@@ -287,77 +318,18 @@ class FilingReader:
             for index, ref in enumerate(chosen, 1)
         )
         task = f"股票：{ticker}\n关注日期：{around or '无'}\n申报窗口：{window}\n{listing}"
-        messages: list[dict[str, str]] = [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": task}]
-        read: dict[tuple[int, str], str] = {}
-        events: list[dict[str, Any]] = []
-        finished = False
-        note = ""
-        rounds = calls = 0
-        for _ in range(self.max_rounds):
-            if time.monotonic() - started > self.max_seconds:
-                note = "达到时间上限"
-                break
-            rounds += 1
-            calls += 1
-            action = self._step(messages)
-            if action is None:
-                continue
-            if action.get("action") == "finish":
-                events = [row for row in (action.get("events") or []) if isinstance(row, dict)]
-                note = str(action.get("note") or "")
-                finished = True
-                break
-            requests = action.get("reads")
-            if not isinstance(requests, list):
-                requests = [action]
-            served = 0
-            for request in requests[:3]:
-                try:
-                    index = int(request.get("filing"))
-                    section_id = str(request.get("section") or "")
-                except (AttributeError, TypeError, ValueError):
-                    continue
-                if index not in outlines:
-                    continue
-                text = self.source.read(chosen[index - 1], section_id)[: self.max_chars]
-                read[(index, section_id)] = text
-                messages.append({"role": "user", "content": f"申报 {index} 章节 {section_id} 的文本：\n{text or '（空）'}"})
-                served += 1
-            if not served:
-                messages.append({"role": "user", "content": "read 需要 reads 列表，每项含 filing 序号和 section id。"})
-        if not finished and read and time.monotonic() - started <= self.max_seconds:
-            # The rounds went on reading; one last call may only finish, so
-            # what was read is not thrown away.
-            messages.append({"role": "user", "content": _FINISH_NOW})
-            calls += 1
-            action = self._step(messages)
-            if action is not None and action.get("action") == "finish":
-                events = [row for row in (action.get("events") or []) if isinstance(row, dict)]
-                note = str(action.get("note") or "")
-                finished = True
-        if not finished:
-            note = note or "达到轮次上限"
-        verified, dropped = _verify_events(events, read)
+        loop = _ReadLoop(self.llm, limits, self.source, chosen, self.max_chars)
+        outcome = loop.run(_SYSTEM, task, finish_prompt=_FINISH_NOW)
+        events = [row for row in (outcome.final.get("events") or []) if isinstance(row, dict)] if outcome.finished else []
+        note = str(outcome.final.get("note") or "") if outcome.finished else outcome.note
+        verified, dropped = _verify_events(events, loop.read)
         if dropped:
             note = (note + "；" if note else "") + f"{dropped} 条事件的引文与已读文本不符，已丢弃"
         status = ResultStatus.COMPLETED if verified else ResultStatus.PARTIAL_DATA
-        return self._envelope(ticker, window, around, chosen, verified, sorted(read), note=note, rounds=rounds, calls=calls, status=status)
+        metrics = {"rounds": outcome.rounds, "llm_calls": outcome.calls, "elapsed_ms": outcome.elapsed_ms, "stop_reason": outcome.stop_reason, "seconds_allowed": round(outcome.seconds_allowed, 1)}
+        return self._envelope(ticker, window, around, chosen, verified, sorted(loop.read), note=note, metrics=metrics, status=status)
 
-    def _step(self, messages: list[dict[str, str]]) -> dict[str, Any] | None:
-        """One model turn parsed as an action; a bad turn is answered and returns None."""
-
-        try:
-            response = self.llm.complete(messages, None)
-            action = json.loads(_strip_fence(response.text))
-            if not isinstance(action, dict):
-                raise ValueError("action must be an object")
-        except Exception as exc:  # noqa: BLE001 — a bad turn is data for the envelope
-            messages.append({"role": "user", "content": f"上一轮输出无法解析（{type(exc).__name__}），请只输出 JSON。"})
-            return None
-        messages.append({"role": "assistant", "content": json.dumps(action, ensure_ascii=False)})
-        return action
-
-    def _envelope(self, ticker: str, window: str, around: str, refs: list[FilingRef], events: list[dict[str, Any]], read: list[tuple[int, str]], *, note: str, rounds: int, calls: int, status: ResultStatus) -> ToolEnvelope:
+    def _envelope(self, ticker: str, window: str, around: str, refs: list[FilingRef], events: list[dict[str, Any]], read: list[tuple[int, str]], *, note: str, metrics: dict[str, Any], status: ResultStatus) -> ToolEnvelope:
         evidence: list[EvidenceItem] = []
         for row in events:
             ref = refs[int(row["filing"]) - 1]
@@ -390,7 +362,7 @@ class FilingReader:
             subject=ticker,
             as_of=window.split(" 至 ")[-1],
             summary=f"{ticker} {window}：读了 {len(read)} 节，{len(found)} 条有出处的事件。",
-            metrics={"filings": len(refs), "sections_read": len(read), "events": len(found), "rounds": rounds, "llm_calls": calls},
+            metrics={"filings": len(refs), "sections_read": len(read), "events": len(found), **metrics},
             evidence=evidence,
             limitations=limitations,
             metadata={"narrative": narrative, "dates": [item.metadata["date"] for item in found], "filings": [{"form": ref.form, "filing_date": ref.filing_date, "accession": ref.accession, "url": ref.url} for ref in refs], "reads": [f"{index}:{section}" for index, section in read], "around": around},
@@ -461,17 +433,6 @@ def locate_quote(quote: str, text: str, *, minimum: int = 40, share: float = 0.6
     while end < len(haystack) and haystack[end - 1] not in ".;。；" and end - last < 80:
         end += 1
     return haystack[start:end].strip()
-
-
-def _strip_fence(text: str) -> str:
-    value = (text or "").strip()
-    if value.startswith("```"):
-        lines = value.splitlines()[1:]
-        if lines and lines[-1].strip().startswith("```"):
-            lines.pop()
-        value = "\n".join(lines).strip()
-    start, end = value.find("{"), value.rfind("}")
-    return value[start : end + 1] if start >= 0 and end > start else value
 
 
 def register_filing_reader(registry: CapabilityRegistry, llm: Any, *, source: FilingSource | None = None, today_factory: Callable[[], date] = date.today, **limits: Any) -> None:
