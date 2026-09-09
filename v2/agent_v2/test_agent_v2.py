@@ -713,12 +713,12 @@ def test_a_why_follow_up_after_a_loss_ranking_explains_the_loss_since_purchase_n
     assert resolution.frame["ticker"] == "ARM" and resolution.frame["field"] == "pl_pct" and resolution.frame["value"] == -32.22
     second = agent.run("什么原因跌这么多?", session_id="chat-3")
     assert second.request.text == "ARM 什么原因跌这么多?"
-    assert [task.capability for task in second.plan.tasks] == ["account.portfolio", "market.performance", "market.drawdown", "filings.recent", "market.anomaly_history", "filings.read_events"]
+    assert [task.capability for task in second.plan.tasks] == ["account.portfolio", "market.performance", "market.drawdown", "filings.recent", "market.anomaly_history", "market.attribute_move"]
     assert second.plan.tasks[2].arguments == {"ticker": "ARM", "loss_pct": -32.22, "top": 3}
-    reader = second.plan.tasks[5]
-    assert reader.fan_out == {"from": "market-drawdown", "field": "worst_dates", "argument": "around", "max": 3} and not reader.required
-    assert [result.subject for result in second.results if result.capability == "filings.read_events"] == ["ARM"]
-    assert "- ARM 2026-08-05：财报指引低于预期（6-K 2026-08-05 s2：“guidance below expectations”）。 [E-ARM-2026-08-05]" in second.answer
+    attributor = second.plan.tasks[5]
+    assert attributor.fan_out == {"from": "market-drawdown", "field": "worst_dates", "argument": "date", "max": 3} and not attributor.required
+    assert [result.subject for result in second.results if result.capability == "market.attribute_move"] == ["ARM"]
+    assert "最相关的一条候选线索是“财报指引低于预期”，只能作为排查方向[AT-ARM-2026-08-05-filing]。" in second.answer
     assert second.plan.assumptions[0].startswith("context_frame: 用户追问的是 ARM 买入以来的浮动盈亏 -32.22%（成本价 $389.52）")
     lines = second.answer.split("\n")
     assert lines[0].startswith("你问的是 ARM 买入以来的浮动盈亏：-32.22%，成本价 $389.52[legacy-")
@@ -731,14 +731,13 @@ def test_a_why_follow_up_after_a_loss_ranking_explains_the_loss_since_purchase_n
     assert "- ARM 于 2026-08-05 向 SEC 提交了 8-K（0001-25-000001）。 [F-ARM-0805]" in second.answer
     assert "2026-03-01" not in second.answer  # a filing before the decline window is left out
     assert "- ARM 2026-08-05 盯盘记录：volume_spike,gap_down；财报后跳空低开。 [A-ARM-0805]" in second.answer
-    assert "WEB-ARM" not in second.answer  # no web consent, no web task
-    # With web consent the plan fans a news search out over the worst days.
+    assert "AT-ARM-2026-08-05-news" not in second.answer  # no web consent: the attributor had no news to cite
+    # With web consent the same plan lets the attributor use the news.
     consenting = AgentV2(catalog=default_catalog(), registry=_framed_registry(), session=memory, config=AgentV2Config(enable_web_fallback=True))
     consenting.run("我的仓库里哪只跌的最多?", session_id="chat-4")
     with_web = consenting.run("为什么跌这么多?", session_id="chat-4", allow_web=True)
-    assert [task.capability for task in with_web.plan.tasks][-1] == "web.research" and with_web.plan.tasks[-1].fan_out["from"] == "market-drawdown"
-    assert [result.subject for result in with_web.results if result.capability == "web.research"] == ["ARM"]
-    assert "- Arm slides on soft guidance（2026-08-06）：ARM shares slid after the 2026-08-05 report as guidance disappointed. [WEB-ARM]" in with_web.answer
+    assert [task.capability for task in with_web.plan.tasks][-1] == "market.attribute_move"
+    assert "能直接支持的高置信度驱动：财报后指引令市场失望，股价大跌[AT-ARM-2026-08-05-news]。" in with_web.answer
     assert with_web.verification.ok
     assert second.verification.ok, second.verification
     assert second.status == RunStatus.COMPLETED
@@ -1031,6 +1030,96 @@ def test_sub_agent_loop_is_bounded_by_the_coordinators_remaining_time():
     context = ExecutionContext("run", NormalizedRequest("q", "q"), BudgetClass.DIRECT)  # DIRECT allows 30 s
     ExecutionEngine(registry).run(ExecutionPlan("q", RouteKind.FAST_LOOKUP, tasks=(PlanTask("p", "account.portfolio"),), budget=BudgetClass.DIRECT), context)
     assert 0 < seen["remaining"] <= 30 and context.deadline is not None
+
+
+class _Bar:
+    def __init__(self, time, close, volume=1_000_000):
+        self.time, self.close, self.volume = time, close, volume
+
+
+def _attributor_prices(ticker, start, end):
+    first = date(2026, 1, 5)
+    rows = []
+    close = 300.0 if ticker == "ARM" else 100.0
+    for index in range(260):
+        day = first + timedelta(days=index)
+        if day.weekday() >= 5 or day.isoformat() > str(end):
+            continue
+        if day == date(2026, 7, 29):
+            close *= 0.92 if ticker == "ARM" else 0.99
+        else:
+            close *= 1.001
+        rows.append(_Bar(day.isoformat(), round(close, 2), 3_000_000 if day == date(2026, 7, 29) and ticker == "ARM" else 1_000_000))
+    return rows
+
+
+def test_move_attributor_explains_a_past_day_from_sources_it_fetched_and_remembers_it():
+    from v2.agent_v2.agents.move_attributor import MoveAttributor, day_facts
+
+    prices = _attributor_prices("ARM", "2025-07-01", "2026-09-09")
+    facts = day_facts("ARM", "2026-07-29", prices, "SMH", _attributor_prices("SMH", "2025-07-01", "2026-09-09"))
+    assert facts.date == "2026-07-29" and abs(facts.change + 0.08) < 0.001
+    assert facts.volume_ratio == 3.0 and facts.sector_return_1d is not None and facts.relative_1d < 0
+
+    news_calls: list[str] = []
+
+    def news(query, day):
+        news_calls.append(query)
+        return [
+            {"title": "Arm falls as guidance disappoints", "url": "https://example.com/arm-guidance", "content": "Arm Holdings shares slid 8% on Wednesday after the company's revenue guidance came in below Wall Street expectations.", "published_date": "2026-07-29"},
+            {"title": "Unrelated chip story", "url": "https://example.com/other", "content": "Nvidia rallied on strong demand.", "published_date": "2026-07-29"},
+        ]
+
+    class Reader:
+        def run(self, ticker, context, *, around, today):
+            return ToolEnvelope("filings.read_events", ResultStatus.COMPLETED, subject=ticker, evidence=[EvidenceItem("E-ARM-0729", "ARM", "ARM 2026-07-29：季度营收低于指引区间（6-K 2026-07-29 s1：“Revenue was below the guidance range”）。", as_of="2026-07-29", source_url="https://www.sec.gov/x/114/", metadata={"evidence_scope": "filing_event", "date": "2026-07-29", "quote": "Revenue was below the guidance range"})])
+
+    remembered: list[tuple] = []
+    memory = [SimpleNamespace(date="2026-07-29", flags="gap_down", doc="ARM gap_down 财报后跳空低开")]
+    llm = ScriptedLLM(
+        [
+            LLMResponse(text='{"action":"news","query":"Arm Holdings stock July 29 2026 falls"}'),
+            LLMResponse(text='{"action":"filing_events"}'),
+            LLMResponse(text='{"action":"memory","query":"ARM 下跌"}'),
+            LLMResponse(
+                text=json.dumps(
+                    {
+                        "action": "finish",
+                        "reasons": [
+                            {"text": "营收指引低于华尔街预期", "confidence": "高", "source": {"kind": "news", "url": "https://example.com/arm-guidance"}, "quote": "revenue guidance came in below Wall Street expectations"},
+                            {"text": "申报显示营收低于指引区间", "confidence": "中", "source": {"kind": "filing", "id": "E-ARM-0729"}, "quote": "Revenue was below the guidance range"},
+                            {"text": "盯盘记录显示财报后跳空低开", "confidence": "高", "source": {"kind": "memory", "date": "2026-07-29"}, "quote": "财报后跳空低开"},
+                            {"text": "编造：被收购传闻", "confidence": "高", "source": {"kind": "news", "url": "https://example.com/nowhere"}, "quote": "takeover rumours"},
+                        ],
+                        "next_steps": ["关注下季指引"],
+                        "note": "新闻与申报一致",
+                    },
+                    ensure_ascii=False,
+                )
+            ),
+        ]
+    )
+    attributor = MoveAttributor(llm, price_source_factory=lambda: SimpleNamespace(get_prices=_attributor_prices), news=news, filing_reader=Reader(), memory_recall=lambda ticker, query, days: memory, memory_remember=lambda facts, reasons: remembered.append((facts.date, [(r["text"], r["confidence"]) for r in reasons])) or "ARM_2026-07-29_retro", sector_for=lambda ticker: "SMH")
+    context = ExecutionContext("run", NormalizedRequest("q", "q"), BudgetClass.PORTFOLIO, allow_web=True)
+    result = attributor.run("ARM", context, day="2026-07-29", today=date(2026, 9, 9))
+    assert result.ok and result.status == ResultStatus.COMPLETED and news_calls == ["Arm Holdings stock July 29 2026 falls"]
+    drivers = [item for item in result.evidence if item.metadata.get("claim_role") == "confirmed_driver"]
+    candidates = [item for item in result.evidence if item.metadata.get("claim_role") == "candidate_driver"]
+    assert [item.metadata["driver_text"] for item in drivers] == ["营收指引低于华尔街预期"] and drivers[0].source_url == "https://example.com/arm-guidance"
+    assert [(item.metadata["driver_text"], item.metadata["causal_confidence"]) for item in candidates] == [("申报显示营收低于指引区间", "中"), ("盯盘记录显示财报后跳空低开", "中")]  # memory-only support is capped at 中
+    assert any(item.id == "E-ARM-0729" for item in result.evidence)  # the reader's event travels with the attribution
+    assert "1 条原因没有可核对的来源，已丢弃" in result.limitations[0]
+    assert result.metrics["confirmed_driver_count"] == 1 and result.metrics["news_calls"] == 1 and result.metrics["reader_calls"] == 1 and result.metrics["memory_calls"] == 1
+    assert result.metrics["remembered_as"] == "ARM_2026-07-29_retro" and remembered == [("2026-07-29", [("营收指引低于华尔街预期", "高"), ("申报显示营收低于指引区间", "中"), ("盯盘记录显示财报后跳空低开", "中")])]
+    narrative = result.metadata["narrative"]
+    assert narrative.startswith("ARM 在 2026-07-29 收于") and "能直接支持的高置信度驱动：营收指引低于华尔街预期[" in narrative and "跑输行业基准 SMH" in narrative
+    assert verify_answer(narrative, result.evidence, answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result]).ok
+    # Without web consent the news action is refused and the loop is told so.
+    refused = ScriptedLLM([LLMResponse(text='{"action":"news","query":"x"}'), LLMResponse(text='{"action":"finish","reasons":[],"note":"无新闻"}')])
+    quiet = MoveAttributor(refused, price_source_factory=lambda: SimpleNamespace(get_prices=_attributor_prices), news=news, filing_reader=Reader(), memory_recall=None, memory_remember=None, sector_for=None)
+    result = quiet.run("ARM", ExecutionContext("run", NormalizedRequest("q", "q"), BudgetClass.PORTFOLIO), day="2026-07-29", today=date(2026, 9, 9))
+    assert result.status == ResultStatus.PARTIAL_DATA and result.metrics["news_calls"] == 0 and len(news_calls) == 1
+    assert "用户未授权网页搜索" in refused.calls[1][-1]["content"] and "归因未使用新闻" in " ".join(result.limitations)
 
 
 def test_locate_quote_tolerates_punctuation_and_rejects_invention():

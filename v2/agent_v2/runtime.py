@@ -15,6 +15,7 @@ from v2.agent_v2.adapters import (
     WorkspaceLabPort,
 )
 from v2.agent_v2.agents.filing_reader import register_filing_reader
+from v2.agent_v2.agents.move_attributor import register_move_attributor
 from v2.agent_v2.catalog import CapabilityCatalog, default_catalog
 from v2.agent_v2.execution import CapabilityRegistry
 from v2.agent_v2.llm import LLMEvidenceSynthesizer, StructuredLLMPlanner
@@ -40,6 +41,7 @@ def build_live_registry(
     register_market_capabilities(registry)
     register_history_capabilities(registry)
     register_filing_reader(registry, llm)
+    register_move_attributor(registry, llm)
     if lab is not None:
         register_lab_capabilities(registry, lab)
     if web_search is not None:

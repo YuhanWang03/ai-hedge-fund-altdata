@@ -139,6 +139,17 @@ def default_catalog() -> CapabilityCatalog:
             answer_guidance="filing_events：每个事件说明日期、表格和引文出处；引文之外的内容不得补充；读不到相关章节时如实说明。",
         ),
         CapabilitySpec(
+            "market.attribute_move",
+            "research",
+            "Explain one day's move for one stock with verifiable sources: news (only with the user's web consent), the filings around that day read by the filing reader, and the monitor's anomaly memory. A bounded sub-agent; its conclusion is remembered for later questions. Use for a specific past day, not for today's move.",
+            _object({"ticker": _TICKER, "date": {"type": "string"}}, ["ticker"]),
+            long_running=True,
+            answer_guidance=(
+                "move_attribution：先说那天的涨跌幅、成交量和相对行业的表现，再分开说高置信度驱动和候选解释，每条带来源引文；"
+                "没有高置信度驱动时明确写“尚未确认”，候选只能作为排查方向；不得把内部计数直接告诉用户。"
+            ),
+        ),
+        CapabilitySpec(
             "market.anomaly_history",
             "research",
             "Past intraday anomalies the monitor recorded for one stock (date, flags, attribution notes) within a lookback window.",

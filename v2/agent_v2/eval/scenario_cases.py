@@ -97,6 +97,32 @@ def build_drawdown_registry() -> CapabilityRegistry:
             metadata={"narrative": f"{a['ticker']} 申报中读到的事件：{a['around']} 财报指引低于预期[E-{a['ticker']}-{a['around']}]。", "around": a["around"]},
         ),
     )
+    def attribute(a, c):
+        ticker, day = a["ticker"], a["date"]
+        price = EvidenceItem(f"AT-{ticker}-{day}-price", ticker, f"{ticker} 在 {day} 收于 275.10 美元，较前一交易日 -13.21%。", as_of=day, metadata={"evidence_scope": "price"})
+        filing_event = EvidenceItem(f"E-{ticker}-{day}", ticker, f"{ticker} {day}：财报指引低于预期（6-K {day} s2：“guidance below expectations”）。", as_of=day, metadata={"evidence_scope": "filing_event", "date": day})
+        reasons = [EvidenceItem(f"AT-{ticker}-{day}-filing", ticker, f"{ticker} {day} 中置信度候选解释：财报指引低于预期（申报：“guidance below expectations”）。", as_of=day, confidence=0.6, metadata={"evidence_scope": "candidate", "claim_role": "candidate_driver", "causal_confidence": "中", "driver_text": "财报指引低于预期", "source_kind": "filing"})]
+        if c.allow_web:
+            reasons.insert(0, EvidenceItem(f"AT-{ticker}-{day}-news", ticker, f"{ticker} {day} 高置信度归因：财报后指引令市场失望，股价大跌（新闻：“shares slid after the report as guidance disappointed”）。", as_of=day, confidence=0.9, source_url="https://example.com/arm", metadata={"evidence_scope": "driver", "claim_role": "confirmed_driver", "causal_confidence": "高", "driver_text": "财报后指引令市场失望，股价大跌", "source_kind": "news"}))
+        assessment = EvidenceItem(f"AT-{ticker}-{day}-assessment", ticker, f"{ticker} {day} 异动归因中有 {1 if c.allow_web else 0} 个高置信度直接驱动，1 个候选解释。", as_of=day, metadata={"evidence_scope": "attribution", "claim_role": "attribution_assessment", "verified": True})
+        first = f"{price.claim.rstrip('。')}[{price.id}]。"
+        if c.allow_web:
+            second = f"能直接支持的高置信度驱动：财报后指引令市场失望，股价大跌[{reasons[0].id}]。最相关的一条候选线索是“财报指引低于预期”，只能作为排查方向[{reasons[-1].id}]。"
+        else:
+            second = f"“为什么下跌”目前还不能下定论：暂未找到可核实的同日催化剂，具体触发原因尚未确认[{assessment.id}]。最相关的一条候选线索是“财报指引低于预期”，只能作为排查方向[{reasons[-1].id}]。"
+        return ToolEnvelope(
+            "market.attribute_move",
+            ResultStatus.COMPLETED,
+            subject=ticker,
+            as_of=day,
+            summary=price.claim,
+            metrics={"price_change_pct": -0.1321, "confirmed_driver_count": 1 if c.allow_web else 0},
+            evidence=[price, *reasons, filing_event, assessment],
+            limitations=[] if c.allow_web else ["用户未授权网页搜索，归因未使用新闻。"],
+            metadata={"narrative": first + "\n\n" + second, "require_cited_numbers": True, "date": day},
+        )
+
+    registry.register("market.attribute_move", attribute)
     registry.register("market.anomaly_history", lambda a, c: ToolEnvelope("market.anomaly_history", ResultStatus.COMPLETED, subject=a["ticker"], evidence=[EvidenceItem(f"A-{a['ticker']}-0805", a["ticker"], f"{a['ticker']} 2026-08-05 盯盘记录：volume_spike,gap_down；财报后跳空低开。", metadata={"evidence_scope": "anomaly", "date": "2026-08-05"})]))
     registry.register("web.research", lambda a, c: ToolEnvelope("web.research", ResultStatus.COMPLETED, subject=a["ticker"], evidence=[EvidenceItem(f"WEB-{a['ticker']}", a["ticker"], f"{a['ticker']} shares slid after the 2026-08-05 report as guidance disappointed.", as_of="2026-08-06", source_title="Arm slides on soft guidance", source_url="https://example.com/arm", metadata={"evidence_type": "search_snippet"})]))
     return registry
@@ -141,10 +167,11 @@ _DRAWDOWN_PHRASES = (
     "近 1 年 +89.85% 而该持仓仍在浮亏，说明买入点在这轮上涨之后的高位",
     "ARM 近 3 月跌幅最大的交易日：2026-08-05 -13.21%",
     "- ARM 于 2026-08-05 向 SEC 提交了 8-K（0001-25-000001）。",
-    "- ARM 2026-08-05：财报指引低于预期（6-K 2026-08-05 s2：“guidance below expectations”）。",
+    "ARM 在 2026-08-05 收于 275.10 美元，较前一交易日 -13.21%[AT-ARM-2026-08-05-price]。",
+    "最相关的一条候选线索是“财报指引低于预期”，只能作为排查方向[AT-ARM-2026-08-05-filing]。",
     "- ARM 2026-08-05 盯盘记录：volume_spike,gap_down；财报后跳空低开。",
 )
-_DRAWDOWN_TOOLS = frozenset({"account.portfolio", "market.performance", "market.drawdown", "filings.recent", "market.anomaly_history", "filings.read_events"})
+_DRAWDOWN_TOOLS = frozenset({"account.portfolio", "market.performance", "market.drawdown", "filings.recent", "market.anomaly_history", "market.attribute_move"})
 
 SCENARIO_CASES: tuple[ScenarioCase, ...] = (
     ScenarioCase(
@@ -152,19 +179,19 @@ SCENARIO_CASES: tuple[ScenarioCase, ...] = (
         "哪只跌得最多 → 为什么跌这么狠：追问带着买入以来的浮亏框架，走回撤归因计划",
         ("我的仓库里哪只跌的最多?", "为什么跌这么狠?"),
         _DRAWDOWN_TOOLS,
-        frozenset({"market.explain_move", "web.research"}),
-        _DRAWDOWN_PHRASES,
-        ("组合价值", "2026-03-01", "Revenue growth", "WEB-ARM"),
+        frozenset({"market.explain_move", "web.research", "filings.read_events"}),
+        _DRAWDOWN_PHRASES + ("“为什么下跌”目前还不能下定论：暂未找到可核实的同日催化剂",),
+        ("组合价值", "2026-03-01", "Revenue growth", "AT-ARM-2026-08-05-news"),
         expect_rewritten=True,
     ),
     ScenarioCase(
         "sc_drawdown_why_web",
-        "同上，用户授权网页搜索：新闻按最差交易日搜索，按标题和发布日期进入回答",
+        "同上，用户授权网页搜索：归因者可以用新闻，给出高置信度驱动",
         ("我的仓库里哪只跌的最多?", "为什么跌这么多?"),
-        _DRAWDOWN_TOOLS | {"web.research"},
-        frozenset({"market.explain_move"}),
-        _DRAWDOWN_PHRASES + ("- Arm slides on soft guidance（2026-08-06）：ARM shares slid after the 2026-08-05 report as guidance disappointed. [WEB-ARM]",),
-        ("组合价值",),
+        _DRAWDOWN_TOOLS,
+        frozenset({"market.explain_move", "web.research", "filings.read_events"}),
+        _DRAWDOWN_PHRASES + ("能直接支持的高置信度驱动：财报后指引令市场失望，股价大跌[AT-ARM-2026-08-05-news]。",),
+        ("组合价值", "尚未确认"),
         allow_web=True,
         expect_rewritten=True,
     ),

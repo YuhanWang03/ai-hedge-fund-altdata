@@ -62,10 +62,14 @@ class AnomalyMemory:
     # Write side
     # ------------------------------------------------------------------
 
-    def remember(self, anomaly: Anomaly) -> str:
-        """Index *anomaly* in the collection. Returns the deterministic id."""
+    def remember(self, anomaly: Anomaly, *, doc_id: str | None = None) -> str:
+        """Index *anomaly* in the collection. Returns the deterministic id.
+
+        ``doc_id`` lets a retrospective attribution (the agent explaining a
+        past day) sit beside the monitor's own record instead of replacing it.
+        """
         doc_text = self._build_document(anomaly)
-        doc_id = f"{anomaly.ticker}_{anomaly.date}"
+        doc_id = doc_id or f"{anomaly.ticker}_{anomaly.date}"
         # ChromaDB 1.x requires numeric values for $gte / $lte, so we store an
         # int representation alongside the human-readable date string.
         metadata = {
