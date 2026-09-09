@@ -687,6 +687,31 @@ def test_short_term_session_resolves_a_follow_up_before_routing():
     assert first.status == RunStatus.COMPLETED
     assert second.request.entities == ("NVDA",)
     assert second.request.metadata["rewritten"]
+    assert second.to_dict()["request"]["metadata"]["antecedent"] == "NVDA"
+
+
+def test_short_term_session_carries_the_stock_an_answer_named_into_a_subjectless_follow_up():
+    from v2.agent_v2.adapters.legacy import _wrap
+
+    catalog = default_catalog()
+    registry = CapabilityRegistry(catalog)
+    registry.register("account.portfolio", lambda a, c: _wrap("account.portfolio", "portfolio", _PORTFOLIO_CARD))
+    registry.register("market.explain_move", lambda a, c: ToolEnvelope("market.explain_move", ResultStatus.COMPLETED, subject=a["ticker"], summary=f"{a['ticker']} 异动", evidence=[EvidenceItem(f"M-{a['ticker']}", a["ticker"], f"{a['ticker']} 异动")]))
+    registry.register("research.stock", lambda a, c: ToolEnvelope("research.stock", ResultStatus.COMPLETED, subject=a["ticker"], summary=f"{a['ticker']} {a['focus']}", evidence=[EvidenceItem(f"R-{a['ticker']}-{a['focus']}", a["ticker"], "研究")]))
+    memory = ShortTermSession()
+    agent = AgentV2(catalog=catalog, registry=registry, session=memory)
+    first = agent.run("我的仓库里哪只跌的最多?", session_id="chat-2")
+    assert first.request.entities == () and first.answer.startswith("按买入以来的浮动盈亏排序，最低的是 ARM")
+    second = agent.run("什么原因跌这么多?", session_id="chat-2")
+    assert second.request.text == "ARM 什么原因跌这么多?"
+    assert second.request.metadata["antecedent"] == "ARM" and "按上文补全" in second.request.metadata["resolution_note"]
+    assert [(result.capability, result.subject) for result in second.results] == [("market.explain_move", "ARM")]
+    third = agent.run("它财报怎么样", session_id="chat-2")  # the pronoun path now finds the focus too
+    assert third.request.text == "ARM财报怎么样" and third.results[0].subject == "ARM"
+    # Questions that name their own scope or stock are left alone.
+    for query in ("宏观怎么样", "我的持仓风险怎么样", "NVDA 为什么跌", "把 HPE 加到关注列表"):
+        assert not memory.resolve("chat-2", query).rewritten, query
+    assert not memory.resolve("chat-fresh", "什么原因跌这么多?").rewritten  # nothing to refer back to
 
 
 def test_agent_v2_seed_eval_passes_offline():

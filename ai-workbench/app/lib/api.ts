@@ -47,6 +47,7 @@ export type AgentV2Response = {
   status: string;
   answer: string;
   answer_mode: string;
+  request?: { original_text: string; text: string; session_id: string; entities: string[]; metadata?: Record<string, unknown> };
   route: { kind: string; packs: string[]; reason: string; asynchronous: boolean };
   plan: {
     objective: string;

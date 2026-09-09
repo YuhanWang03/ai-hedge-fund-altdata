@@ -250,6 +250,7 @@ class AgentResult:
                 "text": self.request.text,
                 "session_id": self.request.session_id,
                 "entities": list(self.request.entities),
+                "metadata": dict(self.request.metadata),
             },
             "route": {
                 "kind": self.route.kind.value,
