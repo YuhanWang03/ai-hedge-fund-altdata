@@ -103,8 +103,10 @@ class StructuredLLMPlanner:
         system = """你是投研与量化实验任务规划器，只输出 JSON，不回答用户问题。
 把目标拆成最少数量的现有 capability。不要编造 capability，不要安排写操作。
 相同信息只获取一次；多股票比较优先 research.compare；账户问题先取账户事实。
+需要对持仓或关注列表里的每只股票分别执行某个 capability 时，先安排 account.portfolio 或 state.read，再安排一个带 fan_out 的任务：
+{"id":"t2","capability":"research.stock","arguments":{"focus":"filings"},"depends_on":["t1"],"fan_out":{"from":"t1","field":"tickers","argument":"ticker","max":6}}。
 量化实验必须从用户原话提取参数，不要虚构参数；未提供的参数交给工具默认值。
-输出格式：{"objective":"...","tasks":[{"id":"t1","capability":"...","arguments":{},"depends_on":[],"required":true,"purpose":"..."}],"assumptions":[]}。"""
+输出格式：{"objective":"...","tasks":[{"id":"t1","capability":"...","arguments":{},"depends_on":[],"required":true,"purpose":"...","fan_out":null}],"assumptions":[]}。"""
         payload = {
             "query": request.text,
             "entities": list(request.entities),
@@ -163,6 +165,12 @@ class StructuredLLMPlanner:
             dependencies = row.get("depends_on") or []
             if not isinstance(arguments, dict) or not isinstance(dependencies, list):
                 raise ValueError("invalid task arguments or dependencies")
+            fan_out = row.get("fan_out") or None
+            if fan_out is not None:
+                if not isinstance(fan_out, dict) or not fan_out.get("from") or not fan_out.get("argument"):
+                    raise ValueError("invalid fan_out")
+                fan_out = {"from": str(fan_out["from"]), "field": str(fan_out.get("field") or "tickers"), "argument": str(fan_out["argument"]), "max": int(fan_out.get("max") or 6)}
+                dependencies = list(dict.fromkeys([*dependencies, fan_out["from"]]))
             tasks.append(
                 PlanTask(
                     id=task_id,
@@ -171,6 +179,7 @@ class StructuredLLMPlanner:
                     depends_on=tuple(str(value) for value in dependencies),
                     required=bool(row.get("required", True)),
                     purpose=str(row.get("purpose") or ""),
+                    fan_out=fan_out,
                 )
             )
             seen.add(task_id)

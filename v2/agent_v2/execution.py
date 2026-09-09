@@ -20,6 +20,9 @@ from v2.agent_v2.models import (
 )
 from v2.agent_v2.ports import CapabilityHandler, ProgressSink
 
+#: Upper bound on children one fan-out task may spawn, whatever the source lists.
+FAN_OUT_MAX = 8
+
 _TASK_LIMITS = {
     BudgetClass.DIRECT: 1,
     BudgetClass.FOCUSED: 2,
@@ -162,6 +165,37 @@ class ExecutionEngine:
         known = set(ids)
         if any(set(task.depends_on) - known for task in plan.tasks):
             raise PlanValidationError("plan contains an unknown dependency")
+        for task in plan.tasks:
+            if task.fan_out is None:
+                continue
+            source = str(task.fan_out.get("from") or "")
+            if source not in known or source == task.id:
+                raise PlanValidationError(f"fan-out task {task.id} names an unknown source")
+            if not task.fan_out.get("argument"):
+                raise PlanValidationError(f"fan-out task {task.id} has no target argument")
+
+    @staticmethod
+    def _expand(task: PlanTask, completed: dict[str, ToolEnvelope]) -> list[PlanTask]:
+        """Replace a fan-out template with one child per source value."""
+
+        spec = task.fan_out or {}
+        source = completed.get(str(spec.get("from") or ""))
+        field_name = str(spec.get("field") or "tickers")
+        values = list((source.metadata.get(field_name) if source is not None else None) or [])
+        limit = max(1, min(int(spec.get("max") or FAN_OUT_MAX), FAN_OUT_MAX))
+        children: list[PlanTask] = []
+        for value in values[:limit]:
+            children.append(
+                PlanTask(
+                    id=f"{task.id}[{value}]",
+                    capability=task.capability,
+                    arguments={**task.arguments, str(spec["argument"]): value},
+                    depends_on=task.depends_on,
+                    required=task.required,
+                    purpose=task.purpose,
+                )
+            )
+        return children
 
     def run(self, plan: ExecutionPlan, context: ExecutionContext) -> ExecutionOutcome:
         self.validate(plan)
@@ -170,6 +204,8 @@ class ExecutionEngine:
 
         pending = {task.id: task for task in plan.tasks}
         completed: dict[str, ToolEnvelope] = {}
+        #: fan-out template id -> child ids, so dependants of a template wait for every child.
+        expanded: dict[str, list[str]] = {}
         outcome = ExecutionOutcome()
 
         def finish(task: PlanTask, result: ToolEnvelope) -> None:
@@ -178,18 +214,42 @@ class ExecutionEngine:
             pending.pop(task.id, None)
             outcome.ledger.ingest(result)
 
+        def satisfied(dependency: str) -> bool:
+            if dependency in expanded:
+                return all(child in completed for child in expanded[dependency])
+            return dependency in completed
+
+        def dependency_ok(dependency: str) -> bool:
+            if dependency in expanded:
+                return all(completed[child].ok for child in expanded[dependency])
+            return completed[dependency].ok
+
         while pending:
-            ready = [task for task in pending.values() if all(dependency in completed for dependency in task.depends_on)]
+            ready = [task for task in pending.values() if all(satisfied(dependency) for dependency in task.depends_on)]
             if not ready:
                 raise PlanValidationError("plan dependency cycle detected")
 
             runnable: list[PlanTask] = []
             for task in ready:
-                failed_dependency = any(not completed[dep].ok for dep in task.depends_on)
+                failed_dependency = any(not dependency_ok(dep) for dep in task.depends_on)
                 if failed_dependency and task.required:
                     finish(task, ToolEnvelope(task.capability, ResultStatus.SKIPPED, errors=["required dependency failed"]))
-                else:
-                    runnable.append(task)
+                    continue
+                if task.fan_out is not None:
+                    children = self._expand(task, completed)
+                    pending.pop(task.id, None)
+                    if not children:
+                        expanded[task.id] = []
+                        result = ToolEnvelope(task.capability, ResultStatus.SKIPPED, errors=["fan-out source listed no values"])
+                        completed[task.id] = result
+                        outcome.results.append(result)
+                        continue
+                    expanded[task.id] = [child.id for child in children]
+                    for child in children:
+                        pending[child.id] = child
+                    runnable.extend(children)
+                    continue
+                runnable.append(task)
             if not runnable:
                 continue
 

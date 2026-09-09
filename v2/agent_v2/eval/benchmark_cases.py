@@ -5,8 +5,8 @@ responder tools.  The questions, the answer keys (facts quotable from the
 recorded fixtures, behaviours, forbidden misattributions) and the categories
 carry over unchanged; only the tool names are translated, because V2 exposes
 capabilities rather than cards.  Several V1 cards collapse into one V2
-capability (``research.stock``), and one V1 tool has no V2 equivalent yet
-(``macro_view``); those gaps are recorded on the case, not hidden.
+capability (``research.stock``); a V1 tool with no V2 equivalent maps to
+``""`` and is recorded on the case as a gap rather than hidden.
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ TOOL_MAP: dict[str, str] = {
     "holders": "research.stock",
     "moneyflow_view": "research.stock",
     "chain": "research.stock",
-    "macro_view": "",
+    "macro_view": "macro.overview",
 }
 
 

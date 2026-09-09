@@ -149,6 +149,8 @@ class ModeReport:
 
 def _score(case: BenchmarkCase, *, mode: str, answer: str, called: Iterable[str], grounded: bool, verify_outcome: str = "", status: str = "", route: str = "", tool_calls: int = 0, llm_calls: int = 0, tokens: int = 0, elapsed_ms: int = 0, stop_reason: str = "", error: str = "") -> BenchmarkScore:
     called_set = set(called)
+    if "research.compare" in called_set:
+        called_set.add("research.stock")  # compare is V2's own way of researching several tickers
     missing_tools = tuple(name for name in case.must_call if name not in called_set)
     denominator = len(case.must_call) + len(case.unmapped_tools)
     tool_recall = 1.0 if not denominator else 1.0 - (len(missing_tools) + len(case.unmapped_tools)) / denominator

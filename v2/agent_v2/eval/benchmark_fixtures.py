@@ -16,6 +16,7 @@ from typing import Any, Callable
 from v2.agent.eval.fixtures import EVAL_FIXTURES
 from v2.agent.fixtures import SimulatedToolFailure
 from v2.agent_v2.catalog import default_catalog
+from v2.agent_v2.entities import extract_entities
 from v2.agent_v2.execution import CapabilityRegistry, ExecutionContext
 from v2.agent_v2.models import EvidenceItem, ResultStatus, ToolEnvelope
 
@@ -74,7 +75,8 @@ def _evidence(capability: str, subject: str, text: str, module: str = "") -> Evi
 
 
 def _wrap(capability: str, subject: str, text: str) -> ToolEnvelope:
-    return ToolEnvelope(capability, ResultStatus.COMPLETED, subject=subject, summary=text, evidence=[_evidence(capability, subject, text)])
+    metadata = {"tickers": list(extract_entities(text))} if capability in {"account.portfolio", "state.read"} else {}
+    return ToolEnvelope(capability, ResultStatus.COMPLETED, subject=subject, summary=text, evidence=[_evidence(capability, subject, text)], metadata=metadata)
 
 
 def _research_envelope(ticker: str, focus: str) -> ToolEnvelope:
@@ -127,6 +129,7 @@ def build_benchmark_registry(calls: RecordedCalls | None = None) -> tuple[Capabi
     register("account.performance", performance)
     register("institutional.manager_portfolio", lambda a, c: _wrap("institutional.manager_portfolio", str(a.get("manager") or ""), _card("institutional_13f", str(a.get("manager") or "").lower())))
     register("etf.ark_activity", lambda a, c: _wrap("etf.ark_activity", str(a.get("symbol") or ""), _card("etf_view", str(a.get("symbol") or "").upper())))
+    register("macro.overview", lambda a, c: _wrap("macro.overview", "macro", _card("macro_view", "_")))
     register("macro.release", lambda a, c: _wrap("macro.release", str(a.get("release_type") or ""), _card("release_check", str(a.get("release_type") or "").lower())))
     register("market.explain_move", lambda a, c: _wrap("market.explain_move", str(a.get("ticker") or "").upper(), _card("explain_move", str(a.get("ticker") or "").upper())))
     register("market.performance", lambda a, c: _wrap("market.performance", str(a.get("ticker") or "").upper(), _card("explain_move", str(a.get("ticker") or "").upper())))

@@ -7,8 +7,12 @@ import importlib
 import json
 from typing import Any, Callable
 
+from v2.agent_v2.entities import extract_entities
 from v2.agent_v2.execution import CapabilityRegistry, ExecutionContext
 from v2.agent_v2.models import EvidenceItem, ResultStatus, ToolEnvelope
+
+#: Capabilities whose card lists the user's own tickers; fan-out tasks read them.
+_LISTS_TICKERS = frozenset({"account.portfolio", "state.read"})
 
 
 def _resolve(path: str) -> Callable[..., Any]:
@@ -35,6 +39,7 @@ def _wrap(capability: str, subject: str, value: Any) -> ToolEnvelope:
         source_title="Existing deterministic responder",
         metadata={"legacy_formatted_output": True},
     )
+    metadata = {"tickers": list(extract_entities(content))} if capability in _LISTS_TICKERS else {}
     return ToolEnvelope(
         capability,
         ResultStatus.COMPLETED,
@@ -42,6 +47,7 @@ def _wrap(capability: str, subject: str, value: Any) -> ToolEnvelope:
         summary=content[:6000],
         evidence=[evidence],
         limitations=["Legacy formatted output; structured field-level evidence is not yet available."],
+        metadata=metadata,
     )
 
 
@@ -58,6 +64,7 @@ def register_legacy_capabilities(registry: CapabilityRegistry) -> None:
     call("v2.bot.responders.earnings_calendar", "account.earnings_schedule", lambda fn, args: fn({"days_horizon": args.get("days", 14)}), lambda args: "portfolio")
     call("v2.bot.responders.institutional_quick", "institutional.manager_portfolio", lambda fn, args: fn(args["manager"]), lambda args: str(args.get("manager", "")))
     call("v2.bot.responders.etf_view", "etf.ark_activity", lambda fn, args: fn(args["symbol"]), lambda args: str(args.get("symbol", "")))
+    call("v2.bot.responders.macro_view", "macro.overview", lambda fn, args: fn({}), lambda args: "macro")
     call("v2.bot.responders.release_check", "macro.release", lambda fn, args: fn({"release_type": args["release_type"]}), lambda args: str(args.get("release_type", "")))
 
     def state_read(arguments: dict[str, Any], context: ExecutionContext) -> ToolEnvelope:

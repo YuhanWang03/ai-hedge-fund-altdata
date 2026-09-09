@@ -19,7 +19,7 @@ from v2.agent_v2.adapters.web import register_web_capability
 from v2.agent_v2.adapters.workspace_lab import LabBinding, WorkspaceLabPort
 from v2.agent_v2.catalog import default_catalog
 from v2.agent_v2.eval.runner import run_suite
-from v2.agent_v2.execution import CapabilityRegistry, ExecutionContext, ExecutionEngine
+from v2.agent_v2.execution import CapabilityRegistry, ExecutionContext, ExecutionEngine, PlanValidationError
 from v2.agent_v2.interfaces.telegram import TelegramFacade, TelegramMessage
 from v2.agent_v2.interfaces.web import WebFacade, WebRequest
 from v2.agent_v2.llm import LLMEvidenceSynthesizer, StructuredLLMPlanner
@@ -1042,3 +1042,95 @@ def test_async_lab_requests_execute_inline_and_half_finished_lab_result_is_gone(
     assert result.route.kind == RouteKind.ASYNC and result.route.asynchronous
     assert result.status == RunStatus.COMPLETED
     assert result.results[0].capability == "lab.sweep"
+
+
+def _plan(query: str) -> ExecutionPlan:
+    request = normalize_request(query)
+    return RulePlanner().plan(request, route(request))
+
+
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("最近 CPI", {"macro.release"}),
+        ("宏观怎么样，还有最近 CPI", {"macro.overview", "macro.release"}),
+        ("巴菲特最新持仓", {"institutional.manager_portfolio"}),
+        ("巴菲特买了什么，ARKK 又买了什么", {"institutional.manager_portfolio", "etf.ark_activity"}),
+        ("推送阈值是多少", {"state.read"}),
+        ("我关注了哪些股票", {"state.read"}),
+        ("未来两周谁要发财报", {"account.earnings_schedule"}),
+        ("我这周亏的钱今天补回来了吗", {"account.performance"}),
+        ("我的当日盈亏和组合风险", {"account.performance", "account.risk", "account.portfolio"}),
+        ("TSLA 和 PLTR 哪个逆势更严重", {"market.explain_move"}),
+        ("NVDA 涨了吗？资金流呢？", {"market.explain_move", "research.stock"}),
+        ("NVDA 和 AMD 谁的财报更好", {"research.compare"}),
+        ("AAPL 财报怎么样，另外内部人有没有在卖", {"research.stock"}),
+        ("我的组合和 ARKK 有重叠吗", {"account.portfolio", "etf.ark_activity"}),
+        ("现在是加仓的好时候吗", {"macro.overview", "account.risk"}),
+    ],
+)
+def test_rule_planner_covers_the_capabilities_the_v1_benchmark_needs(query, expected):
+    plan = _plan(query)
+    assert {task.capability for task in plan.tasks} == expected, [task.capability for task in plan.tasks]
+
+
+def test_rule_planner_fans_per_ticker_topics_out_over_holdings_and_watchlist():
+    plan = _plan("我持仓里有没有内部人在卖")
+    assert plan.tasks[0].capability == "account.portfolio"
+    template = next(task for task in plan.tasks if task.fan_out)
+    assert template.capability == "research.stock" and template.arguments == {"focus": "ownership"}
+    assert template.fan_out["from"] == "account-portfolio" and template.depends_on == ("account-portfolio",)
+    assert plan.budget == BudgetClass.PORTFOLIO
+    watch = _plan("关注列表里那几只最近怎么样")
+    assert watch.tasks[0].capability == "state.read" and watch.tasks[0].arguments == {"section": "watchlist"}
+    assert watch.tasks[1].capability == "market.explain_move" and watch.tasks[1].fan_out["from"] == "state-watchlist"
+    assert _plan("TSLA 什么时候发财报").tasks[0].arguments == {"ticker": "TSLA", "focus": "earnings"}
+
+
+def test_rule_planner_answers_help_directly_and_asks_for_missing_command_details():
+    plan = _plan("你能帮我做什么")
+    assert not plan.tasks and "持仓" in plan.direct_answer
+    result = AgentV2().run("你能帮我做什么")
+    assert result.status == RunStatus.COMPLETED and result.answer == plan.direct_answer
+    clarification = AgentV2().run("取消 NVDA 的提醒")
+    assert clarification.status == RunStatus.PARTIAL and "提醒编号" in clarification.answer
+
+
+def test_executor_expands_fan_out_tasks_from_the_source_result():
+    catalog = default_catalog()
+    registry = CapabilityRegistry(catalog)
+    registry.register("account.portfolio", lambda a, c: ToolEnvelope("account.portfolio", ResultStatus.COMPLETED, subject="portfolio", evidence=[EvidenceItem("P", "portfolio", "holdings")], metadata={"tickers": ["NVDA", "AMD", "CRWD"]}))
+    registry.register("research.stock", lambda a, c: ToolEnvelope("research.stock", ResultStatus.COMPLETED, subject=a["ticker"], evidence=[EvidenceItem(f"R-{a['ticker']}", a["ticker"], f"{a['ticker']} {a['focus']}")]))
+    registry.register("account.risk", lambda a, c: ToolEnvelope("account.risk", ResultStatus.COMPLETED, subject="portfolio", evidence=[EvidenceItem("K", "portfolio", "risk")]))
+    plan = ExecutionPlan(
+        "q",
+        RouteKind.RESEARCH,
+        tasks=(
+            PlanTask("holdings", "account.portfolio"),
+            PlanTask("each", "research.stock", {"focus": "filings"}, depends_on=("holdings",), fan_out={"from": "holdings", "field": "tickers", "argument": "ticker", "max": 2}),
+            PlanTask("after", "account.risk", depends_on=("each",)),
+        ),
+        budget=BudgetClass.PORTFOLIO,
+    )
+    outcome = ExecutionEngine(registry).run(plan, ExecutionContext("run", NormalizedRequest("q", "q"), BudgetClass.PORTFOLIO))
+    subjects = [result.subject for result in outcome.results]
+    assert subjects == ["portfolio", "NVDA", "AMD", "portfolio"]
+    assert outcome.ledger.ids() == {"P", "R-NVDA", "R-AMD", "K"}
+    empty = ExecutionPlan("q", RouteKind.RESEARCH, tasks=(PlanTask("risk", "account.risk"), PlanTask("each", "research.stock", {"focus": "risk"}, depends_on=("risk",), fan_out={"from": "risk", "argument": "ticker"})), budget=BudgetClass.FOCUSED)
+    outcome = ExecutionEngine(registry).run(empty, ExecutionContext("run", NormalizedRequest("q", "q"), BudgetClass.FOCUSED))
+    assert outcome.results[1].status == ResultStatus.SKIPPED
+    bad = ExecutionPlan("q", RouteKind.RESEARCH, tasks=(PlanTask("each", "research.stock", {}, fan_out={"from": "missing", "argument": "ticker"}),))
+    with pytest.raises(PlanValidationError):
+        ExecutionEngine(registry).run(bad, ExecutionContext("run", NormalizedRequest("q", "q"), BudgetClass.DIRECT))
+
+
+def test_llm_planner_accepts_fan_out_tasks_and_adds_the_source_dependency():
+    rows = [
+        {"id": "t1", "capability": "account.portfolio", "arguments": {}},
+        {"id": "t2", "capability": "research.stock", "arguments": {"focus": "filings"}, "fan_out": {"from": "t1", "argument": "ticker"}},
+    ]
+    llm = ScriptedLLM([LLMResponse(text=json.dumps({"tasks": rows}))])
+    request = normalize_request("研究一下我持仓里每只的 SEC 申报")
+    plan = StructuredLLMPlanner(llm, default_catalog()).plan(request, route(request))
+    assert plan.tasks[1].fan_out == {"from": "t1", "field": "tickers", "argument": "ticker", "max": 6}
+    assert plan.tasks[1].depends_on == ("t1",)

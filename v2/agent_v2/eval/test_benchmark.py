@@ -22,7 +22,7 @@ def test_port_keeps_every_v1_case_and_maps_tools_into_the_catalog():
             assert catalog.get(name) is not None, (case.id, name)
         assert not set(case.must_call) & set(case.wasteful)
     assert all(target == "" or default_catalog().get(target) is not None for target in TOOL_MAP.values())
-    assert gap_summary(DEV_CASES) == {"macro_view": [case.id for case in DEV_CASES if "macro_view" in case.v1_must_call]}
+    assert gap_summary(DEV_CASES) == {}
 
 
 def test_benchmark_registry_serves_v1_cards_for_every_ported_capability():

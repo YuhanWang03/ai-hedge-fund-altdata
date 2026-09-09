@@ -31,7 +31,8 @@ def build_eval_registry() -> CapabilityRegistry:
             digest = hashlib.sha256(f"{capability}:{subject}".encode()).hexdigest()[:10]
             claim = f"{capability} returned evidence for {subject}."
             item = EvidenceItem(f"eval-{digest}", subject, claim, source_id="eval_fixture")
-            return ToolEnvelope(capability, ResultStatus.COMPLETED, subject=subject, summary=claim, evidence=[item])
+            metadata = {"tickers": ["NVDA", "AMD"]} if capability in {"account.portfolio", "state.read"} else {}
+            return ToolEnvelope(capability, ResultStatus.COMPLETED, subject=subject, summary=claim, evidence=[item], metadata=metadata)
 
         return handler
 

@@ -93,6 +93,11 @@ class PlanTask:
     depends_on: tuple[str, ...] = ()
     required: bool = True
     purpose: str = ""
+    #: Expand this task once per value a finished task produced, e.g.
+    #: ``{"from": "holdings", "field": "tickers", "argument": "ticker", "max": 6}``
+    #: runs the capability for each ticker the ``holdings`` result listed in
+    #: ``metadata["tickers"]``.  The plan stays static; the data decides the width.
+    fan_out: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -105,6 +110,9 @@ class ExecutionPlan:
     requires_confirmation: bool = False
     web_fallback_allowed: bool = False
     assumptions: tuple[str, ...] = ()
+    #: A complete answer the planner can give without running anything: a
+    #: capability overview, or the exact clarification a request needs.
+    direct_answer: str = ""
 
 
 @dataclass(frozen=True)
@@ -262,9 +270,11 @@ class AgentResult:
                         "depends_on": list(task.depends_on),
                         "required": task.required,
                         "purpose": task.purpose,
+                        "fan_out": dict(task.fan_out) if task.fan_out else None,
                     }
                     for task in self.plan.tasks
                 ],
+                "direct_answer": self.plan.direct_answer,
             },
             "status": self.status.value,
             "answer": self.answer,

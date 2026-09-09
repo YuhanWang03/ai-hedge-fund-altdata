@@ -129,6 +129,7 @@ def default_catalog() -> CapabilityCatalog:
         ),
         CapabilitySpec("institutional.manager_portfolio", "research", "Latest 13F portfolio for a named manager.", _object({"manager": {"type": "string"}}, ["manager"])),
         CapabilitySpec("etf.ark_activity", "research", "ARK ETF holdings and recent activity.", _object({"symbol": {"type": "string"}}, ["symbol"])),
+        CapabilitySpec("macro.overview", "research", "Macro dashboard: VIX, DXY, WTI, gold, treasury yields and the most recent economic releases.", _EMPTY),
         CapabilitySpec("macro.release", "research", "Latest value and date for a named macro release.", _object({"release_type": {"type": "string", "enum": ["cpi", "pce", "nfp", "gdp", "ppi", "claims", "fomc"]}}, ["release_type"])),
         CapabilitySpec(
             "lab.screen",

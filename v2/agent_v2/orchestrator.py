@@ -124,6 +124,10 @@ class AgentV2:
 
         if plan.requires_confirmation and not self.config.allow_mutations:
             return self._await_confirmation(run_id, request, decision, plan, started)
+        if plan.direct_answer and not plan.tasks:
+            # A capability overview is a complete answer; a clarification request is not.
+            complete = plan.answer_mode == AnswerMode.GENERAL_KNOWLEDGE
+            return self._result(run_id, request, decision, plan, RunStatus.COMPLETED if complete else RunStatus.PARTIAL, plan.direct_answer, AnswerMode.GENERAL_KNOWLEDGE if complete else AnswerMode.INSUFFICIENT_EVIDENCE, started)
 
         context = self._context(run_id, request, plan, on_progress, started)
         return self._execute(run_id, request, decision, plan, context, on_progress, started)

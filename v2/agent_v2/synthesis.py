@@ -28,12 +28,12 @@ class EvidenceSummarySynthesizer:
         evidence: list[EvidenceItem],
     ) -> str:
         if not results:
+            if plan.direct_answer:
+                return plan.direct_answer
             if plan.requires_confirmation:
                 return "这是一个写操作。请先确认具体操作内容；当前没有执行任何修改。"
             if plan.answer_mode.value == "general_knowledge":
                 return "该问题被识别为通用知识问题；尚未接入 Agent V2 的知识回答模型。"
-            if plan.assumptions and plan.route.value == "command":
-                return plan.assumptions[0]
             return "现有信息不足以确定需要调用的能力，请补充标的或希望查询的范围。"
 
         blocks: list[str] = []
