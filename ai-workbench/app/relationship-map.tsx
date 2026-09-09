@@ -52,8 +52,8 @@ export function RelationshipMap({ ticker, relations }: { ticker: string; relatio
     draw();
     return () => observer.disconnect();
   }, [rows]);
-  const node = (entry: typeof rows[number]) => <button type="button" key={entry.key} className={`relation-map-node ${entry.row.evidence_status === 'EVIDENCE_FOUND' ? 'has-evidence' : ''}`} aria-pressed={entry.key === selected?.key} onClick={() => setSelection(entry.key)}>
-    <strong>{String(entry.row.target_company)}</strong><small>{stateLabel(entry.row)}</small>
+  const node = (entry: typeof rows[number]) => <button type="button" key={entry.key} className="relation-map-node" aria-pressed={entry.key === selected?.key} onClick={() => setSelection(entry.key)}>
+    <strong>{String(entry.row.target_company)}</strong><small>{String(entry.row.description || '暂无候选说明')}</small>
   </button>;
   const extra = rows.filter(row => !GROUPS.some(group => group.id === row.group));
   const url = selected ? sourceUrl(selected.row.source) : null;
