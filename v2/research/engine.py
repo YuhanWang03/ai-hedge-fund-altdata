@@ -437,8 +437,8 @@ class ResearchEngine:
         required_count = len(metrics)
         completeness = 1.0 if not required_count else round((required_count - len(missing)) / required_count, 4)
         verified_source_count = len(result.get("sources", []))
-        if result.get("module") == "supply_chain" and metrics.get("relationships"):
-            completeness = round(float(metrics.get("verified_relationships", 0)) / float(metrics["relationships"]), 4)
+        if result.get("module") == "supply_chain":
+            completeness = round(float(metrics.get("verified_relationships", 0)) / float(metrics["relationships"]), 4) if metrics.get("relationships") else 0.0
             verified_source_count = int(metrics.get("verified_relationships", 0) or 0)
         if status == "COMPLETED" and missing:
             status = "PARTIAL_DATA"
@@ -695,8 +695,10 @@ class ResearchEngine:
                 item["status"] = saved["status"]
         verified = sum(item["verified"] for item in relationships)
         status = "COMPLETED" if relationships and verified == len(relationships) else "PARTIAL" if relationships else "FAILED"
+        if raw.get('candidate_errors'):
+            status = 'PARTIAL_ERROR'
         summary = f"识别 {len(relationships)} 条关系，其中 {verified} 条通过外部证据验证。" if relationships else "本次未获得可展示的产业关系。"
-        return self._module(d.ticker, "supply_chain", status, summary, metrics={"relationships": len(relationships), "verified_relationships": verified, "llm_tokens": raw.get("llm_tokens", 0), "api_calls": raw.get("api_calls", 0), "tavily_calls": raw.get("tavily_calls", 0)}, sources=["supply_chain"] if relationships else [], confidence=.75 if verified else .4 if relationships else .1, details={"relationships": relationships})
+        return self._module(d.ticker, "supply_chain", status, summary, metrics={"relationships": len(relationships), "verified_relationships": verified, "llm_tokens": raw.get("llm_tokens", 0), "api_calls": raw.get("api_calls", 0), "tavily_calls": raw.get("tavily_calls", 0)}, sources=["supply_chain"] if relationships else [], confidence=.75 if verified else .4 if relationships else .1, details={"relationships": relationships, "warnings": raw.get("warnings", []), "candidate_errors": raw.get("candidate_errors", []), "api_call_counts": raw.get("api_call_counts", {}), "call_count_note": "调用数为逻辑接口尝试次数（含失败），不等于底层 HTTP 重试或计费次数。"})
 
     def _risk(self, d: StockResearchDataset, modules: dict[str, dict]) -> dict:
         risks: list[dict] = []

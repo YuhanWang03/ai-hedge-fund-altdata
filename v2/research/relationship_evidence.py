@@ -65,9 +65,9 @@ def present_relationships(source, store):
         row['confidence'] = None
     module.setdefault('metrics', {})['verified_relationships'] = 0
     module['confidence'] = None
-    module['summary'] = '公司身份与产业关系分开核查；搜索证据不等于整条关系描述已被证实。'
-    if rows:
+    module['summary'] = '公司身份与产业关系分开核查；搜索证据不等于整条关系描述已被证实。' if rows else '本次未获得可展示关系；请展开数据质量查看候选生成、身份核查或筛选错误，不代表公司没有产业关系。'
+    module['verified_source_count'] = 0
+    module['completeness'] = 0
+    if rows and module.get('status') not in ('PARTIAL_ERROR', 'FAILED'):
         module['status'] = 'PARTIAL'
-        module['verified_source_count'] = 0
-        module['completeness'] = 0
     return result
