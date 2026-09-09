@@ -265,3 +265,79 @@
   line-height: 1.7;
   overflow-wrap: anywhere;
 }
+
+.research-module-overview { overflow: hidden; margin-bottom: 10px; }
+.relationship-map { container-type: inline-size; }
+.relation-map-layout { position: relative; margin: 18px; display: grid; grid-template-columns: minmax(0,1fr) 130px minmax(0,1fr); grid-template-areas: "supplier supplier supplier" "smaller_peer center beneficiary" "customer customer customer"; gap: 54px 70px; align-items: center; }
+.relation-map-wires { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.relation-map-wires path { fill: none; stroke: #bccbe0; stroke-width: 1.5; stroke-dasharray: 4 5; }
+.relation-map-wires .selected path { stroke: #3978d4; }
+.relation-map-wires text { font-size: 11px; fill: #63748d; paint-order: stroke; stroke: #fff; stroke-width: 7px; stroke-linejoin: round; }
+.relation-map-group { position: relative; z-index: 1; min-width: 0; padding: 12px; background: #f7f9fd; border: 1px solid #e1e8f2; border-radius: 10px; }
+.relation-map-group.group-supplier { grid-area: supplier; justify-self: center; width: min(100%,420px); }
+.relation-map-group.group-customer { grid-area: customer; justify-self: center; width: min(100%,520px); }
+.relation-map-group.group-smaller_peer { grid-area: smaller_peer; }
+.relation-map-group.group-beneficiary { grid-area: beneficiary; }
+.relation-map-group h3, .relation-map-extra h3 { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px; margin: 0 0 10px; color: #566b87; font-size: 12px; font-weight: 500; }
+.relation-map-group h3 small { font-weight: 400; font-size: 10px; }
+.relation-map-nodes { display: grid; grid-template-columns: repeat(auto-fit,minmax(100px,1fr)); gap: 8px; }
+.relation-map-node { min-width: 0; border: 1px solid #e1e8f2; border-radius: 7px; background: #fff; color: #27364c; text-align: left; padding: 9px; cursor: pointer; }
+.relation-map-node strong { display: block; font-size: 12px; overflow-wrap: anywhere; }
+.relation-map-node small { display: block; margin-top: 5px; color: #946000; font-size: 10px; line-height: 1.5; }
+.relation-map-node.has-evidence small { color: #3769b0; }
+.relation-map-node:hover, .relation-map-node[aria-pressed="true"] { border-color: #6497e7; background: #f1f6ff; }
+.relation-map-node:focus-visible { outline: 2px solid #91b4ee; outline-offset: 2px; }
+.relation-map-center { grid-area: center; z-index: 1; border: 1px solid #b8cdf3; border-radius: 12px; background: #eaf2ff; padding: 20px 8px; text-align: center; color: #326bcb; }
+.relation-map-center strong { display: block; font-size: 20px; overflow-wrap: anywhere; }
+.relation-map-center span { display: block; font-size: 11px; margin-top: 6px; }
+.relation-map-empty { color: #7b8799; font-size: 11px; }
+.relation-map-legend { margin: 0; padding: 10px 16px; color: #7b8799; font-size: 11px; line-height: 1.7; }
+.relation-map-extra { margin: 16px; padding-top: 12px; border-top: 1px solid #e8edf4; }
+.relation-map-detail { padding: 12px 16px; border-top: 1px solid #e8edf4; background: #f8faff; }
+.relation-map-detail-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font-size: 11px; }
+.relation-map-detail-heading span { color: #946000; }
+.relation-map-detail-heading a { margin-left: auto; color: #3978d4; }
+.relation-map-detail p { color: #657286; font-size: 11px; line-height: 1.7; margin: 8px 0; overflow-wrap: anywhere; }
+.relation-map-detail summary { font-size: 10px; color: #768398; cursor: pointer; }
+.relation-map-mobile-label { display: none; }
+@container (max-width: 676px) {
+  .relation-map-layout { grid-template-columns: minmax(0,1fr) minmax(0,1fr); grid-template-areas: "supplier supplier" "center center" "customer customer" "smaller_peer beneficiary"; column-gap: 12px; }
+  .relation-map-center { justify-self: center; width: 130px; }
+  .relation-map-mobile-label { display: block; font-size: 10px; color: #768398; margin-bottom: 8px; }
+  .relation-map-nodes { grid-template-columns: 1fr; }
+  .group-supplier .relation-map-nodes, .group-customer .relation-map-nodes { grid-template-columns: repeat(2,minmax(0,1fr)); }
+}
+.research-module-row { position: relative; border-top: 1px solid #edf1f5; }
+.research-module-row > details > summary {
+  display: grid;
+  grid-template-columns: 110px auto minmax(0, 1fr) 40px;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 12px 76px 12px 14px;
+  list-style: none;
+  cursor: pointer;
+  font-size: 11px;
+}
+.research-module-row summary::-webkit-details-marker { display: none; }
+.research-module-row summary:hover { background: #f8faff; }
+.research-module-name { color: var(--ink); font-weight: 500; }
+.research-module-badges { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
+.research-module-cache { color: #7c8899; font-size: 10px; overflow-wrap: anywhere; }
+.research-module-toggle { color: #768398; font-size: 10px; white-space: nowrap; }
+.research-module-toggle::after { content: ' ›'; display: inline-block; margin-left: 3px; }
+.research-module-row details[open] .research-module-toggle::after { transform: rotate(90deg); }
+.research-module-summary { grid-column: 2 / -1; color: #7c8899; font-size: 11px; line-height: 1.7; overflow-wrap: anywhere; }
+.research-module-diagnostics { padding: 8px 14px 12px; background: #f8faff; border-top: 1px dashed #e2e8f1; }
+.research-module-diagnostics p { margin: 5px 0; color: #657286; font-size: 11px; line-height: 1.7; overflow-wrap: anywhere; }
+.research-module-retry { position: absolute; top: 12px; right: 14px; border: 1px solid #dbe3ee; border-radius: 7px; background: #fff; color: #2865c7; padding: 4px 9px; cursor: pointer; font-size: 11px; }
+.research-module-row summary:focus-visible, .research-module-retry:focus-visible { outline: 2px solid #91b4ee; outline-offset: -2px; }
+@media (max-width: 1000px) {
+  .research-module-row > details > summary { grid-template-columns: 100px minmax(0, 1fr) 40px; }
+  .research-module-toggle { grid-column: 3; grid-row: 1; }
+  .research-module-cache, .research-module-summary { grid-column: 2 / -1; }
+}
+@media (max-width: 620px) {
+  .research-module-row > details > summary { grid-template-columns: minmax(0, 1fr) 40px; gap: 8px; padding-left: 12px; }
+  .research-module-toggle { grid-column: 2; }
+  .research-module-badges, .research-module-cache, .research-module-summary { grid-column: 1 / -1; }
+}
