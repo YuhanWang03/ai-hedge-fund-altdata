@@ -70,3 +70,6 @@ class LateralResult(BaseModel):
     llm_tokens: int = 0
     api_calls: int = 0          # FD + yfinance
     tavily_calls: int = 0       # relation verification (Step 3)
+    warnings: list[str] = Field(default_factory=list)
+    candidate_errors: list[dict[str, str]] = Field(default_factory=list)
+    api_call_counts: dict[str, int] = Field(default_factory=dict)

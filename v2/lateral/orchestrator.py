@@ -30,6 +30,25 @@ from v2.screening import (
 logger = logging.getLogger(__name__)
 
 
+class _CountedProvider:
+    """Count logical provider method attempts, including failed calls.
+
+    This is not a count of underlying HTTP retries or billable requests.
+    """
+    def __init__(self, provider, counts, name):
+        self.provider, self.counts, self.name = provider, counts, name
+
+    def __getattr__(self, name):
+        method = getattr(self.provider, name)
+        if not callable(method) or not name.startswith('get_'):
+            return method
+        def counted(*args, **kwargs):
+            key = self.name + '.' + name
+            self.counts[key] = self.counts.get(key, 0) + 1
+            return method(*args, **kwargs)
+        return counted
+
+
 def run_lateral_expansion(
     seeds: list[str],
     universe: set[str],
@@ -53,10 +72,22 @@ def run_lateral_expansion(
     today = date.today()
     today_str = today.isoformat()
     history_start = (today - timedelta(days=400)).isoformat()
+    counts, warnings, errors = {}, [], []
+    fd_client = _CountedProvider(fd_client, counts, 'Financial Datasets')
+    price_source = _CountedProvider(price_source, counts, 'Prices')
+
+    def record_failure(neighbor, stage, exc):
+        # SDK exception text can contain request metadata; never expose it.
+        kind = str(getattr(exc, 'error_type', type(exc).__name__))
+        errors.append({'ticker': neighbor.ticker, 'stage': stage, 'type': kind})
+        neighbor.failed_reason = f'{stage}失败（{kind}）'
+        warnings.append(f'{neighbor.ticker}：{stage}失败（{kind}）；其他候选继续处理。')
 
     # Step 1: LLM discovery
     logger.info("Discovering neighbors for %d seeds...", len(seeds))
     pairs, tokens = discover(seeds)
+    if not pairs:
+        warnings.append('候选生成未返回有效结果或生成失败；不表示该公司没有产业关系。')
 
     # Step 2: Aggregate by ticker — collect all (seed, category) labels
     by_ticker: dict[str, Neighbor] = {}
@@ -69,17 +100,22 @@ def run_lateral_expansion(
                 len(neighbors), len(pairs))
 
     # Step 3: Verify existence
-    api_calls = 0
     for n in neighbors:
-        api_calls += verify(n, fd_client, universe)
+        try:
+            verify(n, fd_client, universe)
+        except Exception as exc:
+            record_failure(n, '公司身份核查', exc)
 
     # Step 3.5 (Resume polish): Tavily-verify the seed-neighbor relationship.
-    # Only for tickers we confirmed exist and aren't already in our universe.
-    # Each unique neighbor costs ≤ 1 Tavily call.
+    # Check confirmed companies, including those already in our universe.
+    # Each relationship label may require its own search.
     tavily_calls = 0
     for n in neighbors:
         if n.exists:
-            tavily_calls += verify_relation(n)
+            try:
+                tavily_calls += verify_relation(n)
+            except Exception as exc:
+                record_failure(n, '关系搜索', exc)
     logger.info("Tavily relation checks: %d calls, %d verified",
                 tavily_calls,
                 sum(1 for n in neighbors if n.relation_verified))
@@ -88,24 +124,31 @@ def run_lateral_expansion(
     new_real = [n for n in neighbors if n.exists and not n.already_in_universe]
     logger.info("%d new real candidates to screen", len(new_real))
 
-    yf_client = YFinanceClient()  # used as fallback for foreign ADRs
+    yf_client = _CountedProvider(YFinanceClient(), counts, 'Yahoo fallback')
 
     for n in new_real:
         use_fallback = yf_client if n.ticker in KNOWN_ADRS else None
-        candidate = build_candidate(
-            n.ticker, fd_client, today_str, history_start,
-            fallback=use_fallback,
-            price_source=price_source,
-        )
-        api_calls += 2  # metrics + prices
+        try:
+            candidate = build_candidate(
+                n.ticker, fd_client, today_str, history_start,
+                fallback=use_fallback,
+                price_source=price_source,
+            )
+        except Exception as exc:
+            record_failure(n, '财务筛选', exc)
+            continue  # Keep exists, labels and search evidence already collected.
         if candidate is None:
             n.failed_reason = "数据不足"
+            warnings.append(f'{n.ticker}：财务筛选数据不足；已发现的关系保留。')
             continue
         n.candidate = candidate
-        if passes_filter(candidate, filter_config):
-            n.passed_filter = True
-        else:
-            n.failed_reason = _explain_failure(candidate, filter_config)
+        try:
+            if passes_filter(candidate, filter_config):
+                n.passed_filter = True
+            else:
+                n.failed_reason = _explain_failure(candidate, filter_config)
+        except Exception as exc:
+            record_failure(n, '财务筛选', exc)
 
     # Step 5: Narrate passers (reuse screening narrator)
     passers = [n for n in new_real if n.passed_filter and n.candidate is not None]
@@ -121,7 +164,11 @@ def run_lateral_expansion(
     )
     if passers:
         logger.info("Narrating %d passers with DeepSeek...", len(passers))
-        narrations, narr_tokens = narrate([n.candidate for n in passers])
+        try:
+            narrations, narr_tokens = narrate([n.candidate for n in passers])
+        except Exception:
+            narrations, narr_tokens = {}, 0
+            warnings.append('多空解读生成失败；已发现的关系保留。')
         tokens += narr_tokens
         for n in passers:
             note = narrations.get(n.ticker, {})
@@ -133,8 +180,11 @@ def run_lateral_expansion(
         seeds=seeds,
         neighbors=neighbors,
         llm_tokens=tokens,
-        api_calls=api_calls,
+        api_calls=sum(counts.values()),
         tavily_calls=tavily_calls,
+        warnings=warnings,
+        candidate_errors=errors,
+        api_call_counts=counts,
     )
 
 

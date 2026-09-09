@@ -51,7 +51,7 @@ def verify(neighbor: Neighbor, fd: FDClient, universe: set[str]) -> int:
 def verify_relation(neighbor: Neighbor) -> int:
     """Collect per-edge search evidence, without certifying LLM descriptions.
 
-    Returns successful Tavily calls. Explicit directional snippets are retained
+    Returns attempted Tavily searches, including failures. Directional snippets are retained
     for review; co-mention alone never sets relation_verified.
     """
     from v2.research.relationship_evidence import assess
@@ -80,6 +80,7 @@ def verify_relation(neighbor: Neighbor) -> int:
         keywords = _RELATION_KEYWORDS.get(label.category, "")
         query = f"{label.seed} {neighbor.ticker} {keywords}".strip()
 
+        calls += 1  # Logical search attempts, including failures.
         try:
             response = client.search(
                 query=query,
@@ -93,7 +94,6 @@ def verify_relation(neighbor: Neighbor) -> int:
             logger.warning("Tavily relation search failed for %s/%s", label.seed, neighbor.ticker)
             continue
 
-        calls += 1
         results = response.get("results", []) if response else []
 
         # Evaluate each edge separately; co-mention never verifies a relation.
