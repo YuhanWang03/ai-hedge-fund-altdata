@@ -104,9 +104,10 @@ repair 时去掉它，再按一半概率"顽固"重犯以触发回退。它验�
 ```
 ssh root@<vps>
 cd /root/hedge-fund && git fetch origin claude/agent-v2-design-review-jozhco
+: > logs/agent_v2_eval.nohup
 nohup bash <(git show origin/claude/agent-v2-design-review-jozhco:v2/agent_v2/eval/vps_run.sh) --push \
-    > /root/hedge-fund/logs/agent_v2_eval.nohup 2>&1 &
-tail -f /root/hedge-fund/logs/agent_v2_eval.nohup
+    >> logs/agent_v2_eval.nohup 2>&1 &
+tail -F logs/agent_v2_eval.nohup
 ```
 
 顺序：单测 → 真实录制引擎 envelope（FD key 缺失时容错，缺的合成）→ 四组 benchmark

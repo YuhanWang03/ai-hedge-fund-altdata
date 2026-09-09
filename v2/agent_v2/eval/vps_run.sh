@@ -3,9 +3,10 @@
 #
 #   ssh root@<vps>
 #   cd /root/hedge-fund && git fetch origin claude/agent-v2-design-review-jozhco
+#   : > logs/agent_v2_eval.nohup
 #   nohup bash <(git show origin/claude/agent-v2-design-review-jozhco:v2/agent_v2/eval/vps_run.sh) --push \
-#       > /root/hedge-fund/logs/agent_v2_eval.nohup 2>&1 &
-#   tail -f /root/hedge-fund/logs/agent_v2_eval.nohup
+#       >> logs/agent_v2_eval.nohup 2>&1 &
+#   tail -F logs/agent_v2_eval.nohup
 #
 # What it does, without touching the production working tree or any service:
 #   1. checks the branch out into a separate git worktree;
@@ -78,12 +79,19 @@ for path in "$REPO"/v2/data/*; do
   name=$(basename "$path")
   [ -e "$WORKTREE/v2/data/$name" ] || ln -s "$path" "$WORKTREE/v2/data/$name"
 done
+# Production SQLite stores live under <repo>/data, located from each module's
+# __file__, so the worktree needs the production data directory at its root.
+[ -e "$WORKTREE/data" ] || ln -s "$REPO/data" "$WORKTREE/data"
+[ -e "$WORKTREE/.env" ] || ln -s "$REPO/.env" "$WORKTREE/.env"
 # Keys come from the production .env; the model client accepts DEEPSEEK_API_KEY directly.
 set -a; . "$REPO/.env"; set +a
 export AGENT_LLM_MODEL=${AGENT_LLM_MODEL:-deepseek-chat}
 export PYTHONPATH=$WORKTREE
 export PYTHONUNBUFFERED=1
-cd "$REPO"   # relative data paths (research cache, state DBs) resolve to production data
+# `python -m` puts the current directory ahead of PYTHONPATH, so run from the
+# worktree: from $REPO the production v2 package (without this branch) wins.
+cd "$WORKTREE"
+"$PY" -c 'import v2, v2.agent_v2.run_benchmark; print("   v2 package:", v2.__path__[0])'
 "$PY" - <<'EOF'
 import os, sys
 import v2.data
