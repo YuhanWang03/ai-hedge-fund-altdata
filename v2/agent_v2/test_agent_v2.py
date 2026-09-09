@@ -1069,6 +1069,8 @@ def _plan(query: str) -> ExecutionPlan:
         ("AAPL 财报怎么样，另外内部人有没有在卖", {"research.stock"}),
         ("我的组合和 ARKK 有重叠吗", {"account.portfolio", "etf.ark_activity"}),
         ("现在是加仓的好时候吗", {"macro.overview", "account.risk"}),
+        ("帮我看看要不要减仓", {"macro.overview", "account.risk", "account.portfolio"}),
+        ("CRWD 占仓多少，超没超过集中度阈值", {"account.risk", "state.read", "research.stock"}),
     ],
 )
 def test_rule_planner_covers_the_capabilities_the_v1_benchmark_needs(query, expected):
@@ -1134,7 +1136,7 @@ def test_llm_planner_accepts_fan_out_tasks_and_adds_the_source_dependency():
     llm = ScriptedLLM([LLMResponse(text=json.dumps({"tasks": rows}))])
     request = normalize_request("研究一下我持仓里每只的 SEC 申报")
     plan = StructuredLLMPlanner(llm, default_catalog()).plan(request, route(request))
-    assert plan.tasks[1].fan_out == {"from": "t1", "field": "tickers", "argument": "ticker", "max": 6}
+    assert plan.tasks[1].fan_out == {"from": "t1", "field": "tickers", "argument": "ticker", "max": 8}
     assert plan.tasks[1].depends_on == ("t1",)
 
 

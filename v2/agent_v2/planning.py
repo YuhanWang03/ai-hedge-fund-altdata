@@ -57,6 +57,7 @@ _BRIEFING = re.compile(r"值得注意|该知道|需要注意|有什么新情况|
 # -- account topics ----------------------------------------------------------
 _PERFORMANCE = re.compile(r"盈亏|赚|亏|收益|补回来|回报", re.I)
 _RISK = re.compile(r"风险|回撤|集中度|暴露|占多少|各占|占比|健康|分化|危险|减仓|加仓", re.I)
+_POSITION_WEIGHT = re.compile(r"占仓|仓位占比|集中度|权重|占.{0,4}仓位", re.I)
 _EARNINGS_SCHEDULE = re.compile(r"(?:快|即将|近期|接下来|未来|两周|下周|这周|本周|谁要|谁会|日历|离.{0,6}最近|哪些.{0,6}发财报).{0,12}财报|财报.{0,12}(?:日历|快到|临近|最近的|最近|谁)|谁要发财报|要发财报|离.{0,4}财报.{0,4}(?:最近|最快)", re.I)
 _EARNINGS_EACH = re.compile(r"(?:下次|各自|每只|都是什么时候|分别).{0,12}财报|财报.{0,8}(?:都是什么时候|分别|各自)", re.I)
 _POSITIONING = re.compile(r"加仓|减仓|建仓|清仓", re.I)
@@ -283,6 +284,8 @@ class RulePlanner:
                 add(f"account-performance-{period}", "account.performance", {"period": period}, purpose=f"account P&L for the {period}")
         if _RISK.search(text) and (account_scope or not tickers) and not managers:
             add("account-risk", "account.risk", purpose="collect portfolio-level risk")
+        if _POSITION_WEIGHT.search(text) and not managers:
+            add("account-risk", "account.risk", purpose="position weights and concentration")
         if _EARNINGS_SCHEDULE.search(text) and not tickers:
             add("account-earnings", "account.earnings_schedule", {"days": 14}, purpose="upcoming earnings across holdings and watchlist")
         if _BRIEFING.search(text) and not tickers:
@@ -292,6 +295,8 @@ class RulePlanner:
         if _POSITIONING.search(text) and not tickers:
             add("macro-overview", "macro.overview", purpose="market backdrop before changing exposure")
             add("account-risk", "account.risk", purpose="collect portfolio-level risk")
+            if account_scope:
+                add("account-portfolio", "account.portfolio", purpose="identify positions and weights")
 
         # user state
         if _STATE_ALERTS.search(text) or (_ALERT.search(text) and not _STATE_SETTINGS.search(text)):
@@ -345,7 +350,7 @@ class RulePlanner:
                 add("account-portfolio", "account.portfolio", purpose="identify positions and weights")
             if per_ticker:
                 if explain:
-                    add("move-each", "market.explain_move", {}, purpose="explain each holding's recent move", depends_on=(source,), fan_out={"from": source, "field": "tickers", "argument": "ticker", "max": 6})
+                    add("move-each", "market.explain_move", {}, purpose="explain each holding's recent move", depends_on=(source,), fan_out={"from": source, "field": "tickers", "argument": "ticker", "max": 8})
                 for focus in focuses[:2]:
-                    add(f"research-each-{focus}", "research.stock", {"focus": focus}, purpose=f"{focus} research for each holding", depends_on=(source,), fan_out={"from": source, "field": "tickers", "argument": "ticker", "max": 6})
+                    add(f"research-each-{focus}", "research.stock", {"focus": focus}, purpose=f"{focus} research for each holding", depends_on=(source,), fan_out={"from": source, "field": "tickers", "argument": "ticker", "max": 8})
         return tasks[:7]
