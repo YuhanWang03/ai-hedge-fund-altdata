@@ -200,44 +200,8 @@ def _industry_evidence_from_text(text: str, filing_date: str, source_url: str | 
 
 
 def _guidance_from_text(text: str, filing_date: str, source_url: str | None) -> list[dict]:
-    if not text:
-        return []
-    sentences = [_text(part, 520) for part in _SENTENCE.split(_text(text, 12000))]
-    rows = []
-    for sentence in sentences:
-        lower = sentence.lower()
-        if not re.search(r"\b(expect|forecast|guidance|outlook|anticipate|project|believe|intend)\w*\b", lower):
-            continue
-        has_number = bool(re.search(r"(?:\$\s?\d|\d+(?:\.\d+)?\s?%|between\s+\$?\d|range\s+(?:of|from))", lower))
-        explicit_guidance = bool(re.search(r"\b(?:guidance|forecast|outlook)\b", lower))
-        forward_looking = bool(re.search(r"\b(?:expect|anticipate|project)\w*\b", lower))
-        if explicit_guidance and has_number:
-            guidance_type = "FORMAL_GUIDANCE"
-        elif forward_looking and has_number:
-            guidance_type = "QUANTITATIVE_OUTLOOK"
-        elif explicit_guidance or forward_looking:
-            guidance_type = "QUALITATIVE_OUTLOOK"
-        else:
-            guidance_type = "MANAGEMENT_COMMENTARY"
-        status = "REITERATED"
-        if re.search(r"\b(raise|increase|above|higher|improve)\w*\b", lower):
-            status = "RAISED"
-        elif re.search(r"\b(lower|reduce|below|decline|decrease)\w*\b", lower):
-            status = "LOWERED"
-        elif re.search(r"\b(withdraw|suspend|no longer provide)\w*\b", lower):
-            status = "WITHDRAWN"
-        metric = "management_outlook"
-        metric_match = re.search(r"\b(revenue|sales|gross margin|operating margin|earnings|eps|capital expenditure|capex|free cash flow)\b", lower)
-        if metric_match:
-            metric = metric_match.group(1).replace(" ", "_")
-        period_match = re.search(r"\b(?:fiscal\s+)?(?:q[1-4]|quarter|year|fy\s?\d{2,4}|20\d{2})\b", lower)
-        # Numeric values remain null until a dedicated parser can preserve units
-        # and ranges without ambiguity.  The evidence sentence is retained.
-        rows.append({"guidance_type": guidance_type, "metric": metric, "period": period_match.group(0) if period_match else None,
-                     "value": None, "range": None, "unit": None, "status": status, "direction": status,
-                     "evidence_text": sentence, "filing_date": filing_date, "source_url": source_url,
-                     "source": "SEC filing", "confidence": .78 if guidance_type == "FORMAL_GUIDANCE" else .7 if guidance_type == "QUANTITATIVE_OUTLOOK" else .58 if guidance_type == "QUALITATIVE_OUTLOOK" else .4})
-    return rows[:8]
+    from v2.research.expectations import extract_statements
+    return extract_statements(text, filing_date, source_url)
 
 
 def parse_sec_filings(ticker: str, filings_by_form: dict[str, list[Any]]) -> dict:
@@ -258,7 +222,7 @@ def parse_sec_filings(ticker: str, filings_by_form: dict[str, list[Any]]) -> dic
                 continue
             business = _item(obj, [(None, "Item 1"), ("Part I", "Item 1")]) if form == "10-K" else ""
             risk = _item(obj, [(None, "Item 1A"), ("Part II", "Item 1A")])
-            mda = _item(obj, [(None, "Item 7"), ("Part I", "Item 2")])
+            mda = _item(obj, [(None, "Item 7")]) if form == "10-K" else _item(obj, [("Part I", "Item 2")])
             full_text = ""
             for method_name in ("markdown", "text"):
                 try:
@@ -281,7 +245,7 @@ def parse_sec_filings(ticker: str, filings_by_form: dict[str, list[Any]]) -> dic
             for category, title, content in (("BUSINESS", "Business overview", business), ("RISK", "Risk factors", risk), ("MD&A", "Management discussion", mda)):
                 if content:
                     findings.append(SecFinding(form, meta["date"], meta["accession"], category, title, _text(content, 420), _text(content, 900), meta["url"], .82))
-            guidance.extend(_guidance_from_text(mda, meta["date"], meta["url"]))
+            guidance.extend({**row, "filing_type": form} for row in _guidance_from_text(mda, meta["date"], meta["url"]))
             industry_source = full_text if len(full_text) > max(5_000, len(mda) * 2) else mda
             industry_evidence.extend(_industry_evidence_from_text(industry_source, meta["date"], meta["url"]))
         if len(parsed) >= 2:

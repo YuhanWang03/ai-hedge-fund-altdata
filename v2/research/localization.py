@@ -27,6 +27,9 @@ LABELS = {
     'MANAGEMENT_COMMENTARY': '管理层评论', 'QUALITATIVE_OUTLOOK': '定性展望',
     'QUANTITATIVE_OUTLOOK': '定量展望', 'FORMAL_GUIDANCE': '正式指引',
     'REITERATED': '重申', 'RAISED': '上调', 'LOWERED': '下调', 'WITHDRAWN': '撤回',
+    'NOT_COMPARABLE': '未确认指引变动', 'RISK_CONTEXT': '风险情景',
+    'demand': '需求', 'deliveries': '交付', 'capacity': '产能', 'supply': '供应',
+    'financing': '融资', 'funding': '资金', 'infrastructure': '基础设施',
 }
 
 def label(text):

@@ -41,7 +41,8 @@ def test_sec_depth_and_risk_delta_are_structured():
     result = parse_sec_filings("AAPL", {"10-K": [Filing("10-K", "2026-01-01", "new", {"Item 1": "We sell devices and services and generate revenue from products.", "Item 1A": current, "Item 7": "We expect revenue to increase next year."}), Filing("10-K", "2025-01-01", "old", {"Item 1A": previous})], "10-Q": [], "8-K": []})
     assert result["findings"]
     assert result["company_profile"]["description"]
-    assert result["guidance"][0]["status"] == "RAISED"
+    assert result["guidance"][0]["status"] == "NOT_COMPARABLE"
+    assert result["guidance"][0]["group"] == "outlook"
     assert result["risk_factor_changes"][0]["change_type"] == "EXPANDED"
 
 
@@ -53,6 +54,14 @@ def test_catalyst_v2_deduplicates_and_classifies():
         {"title": "CEO speaks at conference", "event_date": "2026-09-06", "source_kind": "NEWS"},
     ])
     assert [row["item_type"] for row in rows] == ["CATALYST", "EVENT", "NEWS"]
+
+
+def test_annual_report_never_uses_properties_as_management_discussion():
+    result = parse_sec_filings('AAPL', {'10-K': [Filing('10-K', '2026-01-01', 'x', {
+        'Part I:Item 2': 'We expect capital expenditure of $5 billion for our facilities next year.'
+    })]})
+    assert result['guidance'] == []
+    assert not any(row['category'] == 'MD&A' for row in result['findings'])
 
 
 def test_peer_preferences_persist_and_invalidate_cache(tmp_path: Path):
