@@ -15,6 +15,7 @@ from v2.research.engine import MODULES, resolve_modules
 from v2.research.depth import sanitize_error
 from v2.research.provider_health import ProviderHealthService
 from v2.research.store import ResearchStore
+from v2.research.localization import localize_result
 
 router = APIRouter(prefix="/api/research", tags=["research"], dependencies=[Depends(require_owner)])
 _RUNNING_TASKS: set[asyncio.Task[None]] = set()
@@ -116,6 +117,8 @@ async def get_research_run(job_id: str) -> dict:
     job = await run_in_threadpool(_store().get_run, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="research run not found")
+    if job.get("result"):
+        job["result"] = await run_in_threadpool(localize_result, job["result"])
     return job
 
 
@@ -144,7 +147,7 @@ async def get_latest_research_result(ticker: str) -> dict:
     result = await run_in_threadpool(_store().latest, normalized)
     if result is None:
         raise HTTPException(status_code=404, detail="no research result")
-    return result
+    return await run_in_threadpool(localize_result, result)
 
 
 @router.get("/history/{ticker}")

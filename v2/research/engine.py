@@ -489,11 +489,6 @@ class ResearchEngine:
         if share_change is not None and share_change > .08 and growth and growth > .1:
             findings.append({"title": "稀释提示", "description": "利润或收入增长较强，但股份数量增长抵消了部分每股价值增长。", "confidence": .8, "source_ids": ["fd_earnings"]})
         profile = {"description": None, "business_model": None, "core_products": [], "primary_markets": [], "segments": [], **d.sec_depth.get("company_profile", {})}
-        company_name = getattr(d.company, "name", None) or d.ticker
-        company_sector = getattr(d.company, "sector", None) or "未分类"
-        company_industry = getattr(d.company, "industry", None) or "未分类"
-        company_exchange = getattr(d.company, "exchange", None)
-        profile["description"] = f"{company_name}（{d.ticker}）属于{company_sector}板块、{company_industry}行业" + (f"，股票在 {company_exchange} 交易" if company_exchange else "") + "。业务详情以公司最新公开披露文件为准。"
         capital_allocation = {
             "stock_based_compensation": newest.get("stock_based_compensation"),
             "buyback": newest.get("share_repurchases"),
