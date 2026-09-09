@@ -103,11 +103,12 @@ _HELP_TEXT = (
     "  /8k TICKER          — 最近 30 天 8-K 申报（含 5.02 LLM 抽取）\n"
     "  /insiders TICKER [DAYS] — 内部人交易摘要（默认 90 天）\n"
     "\n"
-    "<b>自然语言（Stage 3 即将上线）</b>\n"
-    "  直接发问，bot 会自动路由到对应工具\n"
-    "  例：「NVDA 为什么涨」「找一下 AMD 的产业链」\n"
-    "  /ask_v2 问题      — 显式使用新 Agent V2\n"
-    "  /ask_v2 --web 问题 — 允许网页证据兜底（服务端也须启用）\n"
+    "<b>自然语言</b>\n"
+    "  直接发问即走 Agent V2：规划、调工具、带证据引用回答，追问接上文\n"
+    "  例：「我的持仓中哪只跌的最狠」「为什么跌这么狠」「ARM 从高点为什么跌了这么多」\n"
+    "  问题里加 --web — 允许网页证据（服务端也须启用）\n"
+    "  /ask 问题         — 旧版 V1 单跳路由（保留作对照）\n"
+    "  /ask_v2 [--web] 问题 — 与直接发问相同\n"
     "\n"
     "<i>本 bot 受单用户授权——只响应所有者的消息。</i>"
 )
@@ -696,11 +697,33 @@ _INTENT_DISPLAY = {
 
 
 @authorized_only
+def _free_text_agent() -> str:
+    """Which agent answers a plain message: ``v2`` (default) or ``v1`` to roll back."""
+
+    return os.environ.get("TELEGRAM_FREE_TEXT_AGENT", "v2").strip().lower() or "v2"
+
+
+def _split_web_consent(text: str) -> tuple[str, bool]:
+    """Take a ``--web`` token out of a plain message; its presence is the user's web consent."""
+
+    tokens = text.split()
+    allow_web = any(token.lower() == "--web" for token in tokens)
+    return " ".join(token for token in tokens if token.lower() != "--web").strip(), allow_web
+
+
 async def cmd_nl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Stage 3: classify NL, route to the same responder as the equivalent slash command."""
+    """A plain message goes to Agent V2; ``/ask`` keeps the V1 single-hop router as a control."""
     text = (update.message.text or "").strip()
     if not text:
         return
+
+    if not text.lower().startswith("/ask") and _free_text_agent() == "v2":
+        question, allow_web = _split_web_consent(text)
+        if question:
+            from v2.bot.agent_v2_bridge import handle_agent_v2
+
+            await handle_agent_v2(update, context, question, allow_web=allow_web)
+            return
 
     placeholder = await update.message.reply_html("🤔 理解中...")
 
