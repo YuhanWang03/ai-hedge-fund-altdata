@@ -142,6 +142,9 @@ class TelegramBotTransport:
         reason = telegram_format.fallback_reason(result)
         if reason:
             lines.append(f"<i>兜底原因：{html.escape(reason)}</i>")
+        repaired = telegram_format.repair_reason(result)
+        if repaired:
+            lines.append(f"<i>修正原因：{html.escape(repaired)}</i>")
         return "\n".join(lines) + "\n\n"
 
 

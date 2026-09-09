@@ -186,12 +186,9 @@ def warning_line(result: AgentResult) -> str:
     return _one_line(problems[0], 120) if problems else ""
 
 
-def fallback_reason(result: AgentResult) -> str:
-    """Why the model's drafts were rejected, one clause per attempt, or empty when not a fallback."""
+def _attempt_clauses(synthesis: dict) -> list[str]:
+    """One clause per rejected draft: stage, then the verifier's first complaint."""
 
-    synthesis = result.synthesis or {}
-    if synthesis.get("outcome") != "fallback":
-        return ""
     stages = {"draft": "初稿", "repair": "修正稿", "error": "模型调用"}
     clauses: list[str] = []
     for attempt in synthesis.get("attempts") or []:
@@ -204,7 +201,27 @@ def fallback_reason(result: AgentResult) -> str:
             problems.append("未落地数字 " + "、".join(str(value) for value in attempt["ungrounded_numbers"][:2]))
         stage = stages.get(str(attempt.get("stage")), str(attempt.get("stage") or "草稿"))
         clauses.append(f"{stage}：{_one_line(problems[0], 70) if problems else '校验未通过'}")
+    return clauses
+
+
+def fallback_reason(result: AgentResult) -> str:
+    """Why the model's drafts were rejected, one clause per attempt, or empty when not a fallback."""
+
+    synthesis = result.synthesis or {}
+    if synthesis.get("outcome") != "fallback":
+        return ""
+    clauses = _attempt_clauses(synthesis)
     return "；".join(clauses[:2]) if clauses else "模型草稿未通过校验"
+
+
+def repair_reason(result: AgentResult) -> str:
+    """What the first draft failed on when the repaired draft was delivered, or empty."""
+
+    synthesis = result.synthesis or {}
+    if synthesis.get("outcome") != "repaired":
+        return ""
+    clauses = _attempt_clauses(synthesis)
+    return clauses[0] if clauses else ""
 
 
 def completion_note(result: AgentResult) -> str:

@@ -547,6 +547,10 @@ def _drawdown_envelope(ticker: str, context: ExecutionContext, price_source, *, 
             "queries": [f"why did {ticker} stock fall on {day}" for day, _, _ in worst],
         },
     )
+    span_item = next(iter(_scoped(evidence, "benchmark_span")), None)
+    if span_item is not None:
+        # "Sector or stock" is the one comparison a drawdown answer cannot skip.
+        envelope.metadata["answer_constraints"] = [{"require_cited": {"metadata": {"evidence_scope": "benchmark_span"}, "warning": f"回撤回答必须引用同期行业基准对比那条证据 [{span_item.id}]（同期 {span_item.metadata['benchmark']} 的回报和 {ticker} 多跌/少跌的百分点）"}}]
     envelope.metadata["narrative"] = _drawdown_narrative(envelope, label)
     return envelope
 

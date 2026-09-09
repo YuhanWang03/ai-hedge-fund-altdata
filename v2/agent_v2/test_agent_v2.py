@@ -953,6 +953,10 @@ def test_market_drawdown_locates_the_worst_days_and_the_peak_to_trough():
     span = next(item for item in result.evidence if item.metadata["evidence_scope"] == "benchmark_span")
     assert span.claim.startswith("同期行业基准 SMH 从 2026-05-19 到 ") and "ARM 比基准多跌 " in span.claim and result.metrics["benchmark_span"]["gap_pp"] > 5
     assert span.claim.rstrip("。") + f"[{span.id}]。" in result.metadata["narrative"]
+    # An answer that skips the sector comparison is sent back; the narrative itself passes.
+    skipped = verify_answer(f"ARM 从高点回撤 -37.40%[{result.evidence[1].id}]。", result.evidence, answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result])
+    assert any(w.startswith(f"回撤回答必须引用同期行业基准对比那条证据 [{span.id}]") for w in skipped.warnings), skipped
+    assert verify_answer(result.metadata["narrative"], result.evidence, answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result]).ok
     # No sector known: the block is simply absent, nothing fails.
     register_market_capabilities(registry, price_source_factory=Prices, move_provider=lambda ticker: None, now_factory=lambda: now, sector_for=lambda ticker: "")
     assert "benchmark_span" not in registry.execute(PlanTask("d", "market.drawdown", {"ticker": "ARM"}), _context()).metrics
@@ -1427,6 +1431,11 @@ def test_telegram_delivery_numbers_citations_and_compacts_worst_days(monkeypatch
     clean.synthesis["citation_completions"] = ["439.46 → [x]", "12.52 → [y]"]
     asyncio.run(transport.deliver(7, clean))
     assert "合成：模型回答，引用补全 2 处 · 校验：通过" in placeholder.sent[-1]
+    repaired = _telegram_result("模型自己的话[evidence-news-1]。", outcome="repaired")
+    repaired.synthesis["attempts"] = [{"stage": "draft", "ok": False, "warnings": ["回撤回答必须引用同期行业基准对比那条证据 [D-span]（…）"]}, {"stage": "repair", "ok": True}]
+    asyncio.run(transport.deliver(7, repaired))
+    assert "合成：模型回答（修正一轮）" in placeholder.sent[-1] and "<i>修正原因：初稿：回撤回答必须引用同期行业基准对比那条证据 [D-span]（…）</i>" in placeholder.sent[-1]
+    assert "兜底原因" not in placeholder.sent[-1]
     assert "⚠ 校验" not in placeholder.sent[-1] and "兜底原因" not in placeholder.sent[-1]
     monkeypatch.setenv("AGENT_V2_WEB_ENABLED", "0")
     asyncio.run(transport.deliver(7, clean))

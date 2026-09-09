@@ -15,9 +15,10 @@ evidence and results:
 ``ToolEnvelope.metadata``
     ``require_cited_numbers``: every sentence with a figure needs a citation.
     ``answer_constraints``: list of ``{"forbid": regex, "warning": str}`` for
-    the whole answer, or ``{"max_cited": {"metadata": {...}, "max": n,
+    the whole answer, ``{"max_cited": {"metadata": {...}, "max": n,
     "warning": str}}`` capping how many of *this result's* items with matching
-    metadata may be cited.
+    metadata may be cited, or ``{"require_cited": {"metadata": {...},
+    "warning": str}}`` demanding that at least one of them is.
 """
 
 from __future__ import annotations
@@ -252,4 +253,12 @@ def _answer_warnings(answer: str, evidence: list[EvidenceItem], results: list[To
                 matching = {item.id for item in cited if item.id in own and all(item.metadata.get(key) == value for key, value in wanted.items())}
                 if len(matching) > int(cap.get("max", 0)):
                     warnings.append(str(cap.get("warning") or f"{result.capability} 引用了过多同类证据"))
+            need = rule.get("require_cited")
+            if isinstance(need, dict):
+                # A floor: at least one of this result's items with the given
+                # metadata must be cited (the sector comparison of a drawdown).
+                wanted = dict(need.get("metadata") or {})
+                available = [item for item in result.evidence if all(item.metadata.get(key) == value for key, value in wanted.items())]
+                if available and not any(item.id in {value.id for value in cited} for item in available):
+                    warnings.append(str(need.get("warning") or f"{result.capability} 的关键证据未被引用：" + "、".join(f"[{item.id}]" for item in available[:3])))
     return warnings
