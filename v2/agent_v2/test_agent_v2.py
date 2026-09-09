@@ -727,10 +727,13 @@ def test_a_why_follow_up_after_a_loss_ranking_explains_the_loss_since_purchase_n
     assert lines[3] == "近 1 年 +89.85% 而该持仓仍在浮亏，说明买入点在这轮上涨之后的高位[W-ARM]。"
     assert "组合价值" not in second.answer and "近 1 月回报 -1.53%" not in second.answer  # the narrative's returns line is not repeated
     assert "相对 SMH，单日超额 +0.94%[B-ARM]。" in second.answer and "成交量尚未定型" not in second.answer
-    assert "ARM 近 3 月跌幅最大的交易日：2026-08-05 -13.21%[D-ARM-0805]。" in second.answer
-    assert "- ARM 于 2026-08-05 向 SEC 提交了 8-K（0001-25-000001）。 [F-ARM-0805]" in second.answer
+    assert "ARM 期间跌幅最大的交易日：2026-08-05 -13.21%[D-ARM-0805]。" in second.answer
+    # The window return was already in the lead; the stretch block does not repeat it.
+    assert "区间回报 -21.40%" not in second.answer.split("\n\n", 1)[1]
     assert "2026-03-01" not in second.answer  # a filing before the decline window is left out
-    assert "- ARM 2026-08-05 盯盘记录：volume_spike,gap_down；财报后跳空低开。 [A-ARM-0805]" in second.answer
+    # The 08-05 watch record is superseded by that day's attribution block; the
+    # filings are listed on one line because the attributor read them.
+    assert "盯盘记录" not in second.answer and "ARM 窗口内 1 份申报：2026-08-05 8-K[F-ARM-0805]。" in second.answer
     assert "AT-ARM-2026-08-05-news" not in second.answer  # no web consent: the attributor had no news to cite
     # With web consent the same plan lets the attributor use the news.
     consenting = AgentV2(catalog=default_catalog(), registry=_framed_registry(), session=memory, config=AgentV2Config(enable_web_fallback=True))
@@ -1335,7 +1338,8 @@ def _telegram_result(answer: str, *, outcome: str = "fallback", warnings: tuple[
     return AgentResult(
         "run", request, RouteDecision(RouteKind.RESEARCH, ("research",), "why"), ExecutionPlan(objective="q", route=RouteKind.RESEARCH),
         RunStatus.COMPLETED, answer.replace("{full}", full), AnswerMode.RESEARCH_GROUNDED, results=[envelope], evidence=[price, news],
-        verification=VerificationReport(ok=not warnings, warnings=warnings), synthesis={"outcome": outcome},
+        verification=VerificationReport(ok=not warnings, warnings=warnings),
+        synthesis={"outcome": outcome, "attempts": [{"stage": "draft", "ok": False, "warnings": ["行情事实缺少邻近引用"]}, {"stage": "repair", "ok": False, "unknown_citations": ["results.metrics"]}] if outcome == "fallback" else []},
     )
 
 
@@ -1350,8 +1354,15 @@ def test_telegram_delivery_numbers_citations_and_compacts_worst_days(monkeypatch
     # Brackets that are not evidence ids are left alone.
     assert telegram_format.number_citations("ARM [2026-07-29] 跌 [evidence-news-1]", result.evidence).text == "ARM [2026-07-29] 跌 [1]"
     entries = telegram_format.source_entries(numbered.ids, result.evidence)
-    assert [(entry.number, entry.url) for entry in entries] == [(1, ""), (2, "https://example.com/arm")]
-    assert entries[1].label.startswith("Arm slides on soft guidance · Arm Holdings slides")
+    assert [(entry.numbers, entry.label, entry.url) for entry in entries] == [
+        ("1", "日线行情", ""),
+        ("2", "Arm slides on soft guidance · Arm Holdings slides after guidance disappoints; the stock f…", "https://example.com/arm"),
+    ]
+    # Unlinked items are one line per origin, with their numbers as ranges.
+    many = [EvidenceItem(f"m{i}", "ARM", f"row {i}", source_id="market_data") for i in range(1, 8)]
+    many[3] = EvidenceItem("m4", "ARM", "card\n━━━\nrow", source_title="Existing deterministic responder")
+    grouped = telegram_format.source_entries(tuple(item.id for item in many), many)
+    assert [(entry.numbers, entry.label) for entry in grouped] == [("1–3、5–7", "日线行情"), ("4", "账户卡片")]
 
     class Placeholder:
         sent: list[str] = []
@@ -1366,13 +1377,15 @@ def test_telegram_delivery_numbers_citations_and_compacts_worst_days(monkeypatch
     (message,) = placeholder.sent
     header, _, body = message.partition("\n\n")
     assert "合成：兜底摘要" in header and "校验：有警告（1）" in header and "网页：已关闭（去掉 --noweb 可用新闻归因）" in header
+    assert "<i>⚠ 校验：未确认直接驱动时展示了过多弱候选线索</i>" in header and "<i>兜底原因：初稿：行情事实缺少邻近引用；修正稿：未知引用 results.metrics</i>" in header
     assert "[evidence-" not in body and "[1]。" in body and "跑输 SMH" in body and "当日成交量" not in body
-    assert body.endswith('<b>来源</b>\n1. market_data · ARM 在 2026-07-29 收于 149.35，当日 -13.21%。\n2. <a href="https://example.com/arm">Arm slides on soft guidance · Arm Holdings slides after guidance disappoints; the stock fell 13%.</a>')
+    assert body.endswith('<b>来源</b>\n1. 日线行情\n2. <a href="https://example.com/arm">Arm slides on soft guidance · Arm Holdings slides after guidance disappoints; the stock f…</a>')
     # A model-written answer never contains the narrative verbatim and is delivered as written.
     clean = _telegram_result("模型自己的话[evidence-news-1]。", outcome="clean")
     transport = TelegramBotTransport(object(), placeholder, web_requested=True)
     asyncio.run(transport.deliver(7, clean))
     assert "合成：模型回答 · 校验：通过 · 网页：已启用" in placeholder.sent[-1] and "模型自己的话[1]。" in placeholder.sent[-1]
+    assert "⚠ 校验" not in placeholder.sent[-1] and "兜底原因" not in placeholder.sent[-1]
     monkeypatch.setenv("AGENT_V2_WEB_ENABLED", "0")
     asyncio.run(transport.deliver(7, clean))
     assert "网页：未启用（服务端 AGENT_V2_WEB_ENABLED 未开）" in placeholder.sent[-1]
@@ -2029,3 +2042,15 @@ def test_yfinance_price_source_uses_the_dash_share_class_spelling():
     YFinancePriceSource(ticker_factory=factory).get_prices("BRK.B", "2026-01-01", "2026-01-10")
     assert requested == ["BRK-B"]
     assert YFinancePriceSource.yfinance_symbol("nvda") == "NVDA"
+
+
+def test_attributor_lead_text_keeps_a_quoted_lead_in_one_sentence():
+    from v2.agent_v2.agents.move_attributor import lead_text
+
+    lead = lead_text("当日 ARM 大跌主要受芯片股抛售拖累。其 2026 年已累计上涨 235%，市盈率 431 倍。 获利了结压力放大跌幅。")
+    assert lead == "当日 ARM 大跌主要受芯片股抛售拖累；其 2026 年已累计上涨 235%，市盈率 431 倍；获利了结压力放大跌幅"
+    # A figure-bearing lead quoted inside one cited sentence keeps its citation.
+    item = EvidenceItem("lead-1", "ARM", lead, metadata={"claim_role": "candidate_driver"})
+    sentence = f"最相关的一条候选线索是“{lead}”，只能作为排查方向[lead-1]。"
+    report = verify_answer(sentence, [item], answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[ToolEnvelope("market.attribute_move", ResultStatus.COMPLETED, evidence=[item], metadata={"require_cited_numbers": True})])
+    assert report.ok, report

@@ -252,6 +252,67 @@ def catalyst_lines(result: ToolEnvelope, since: str = "") -> str:
     return "\n".join(lines)
 
 
+def drawdown_lines(result: ToolEnvelope) -> str:
+    """The stretch itself: peak to trough and the worst days; the window return was in the lead."""
+
+    peak = next((item for item in result.evidence if item.metadata.get("evidence_scope") == "peak_trough"), None)
+    worst = [item for item in result.evidence if item.metadata.get("evidence_scope") == "worst_day"]
+    lines: list[str] = []
+    if peak is not None:
+        lines.append(f"{plain_text(peak.claim).rstrip('。')}[{peak.id}]。")
+    days = []
+    for item in worst:
+        move = f"{float(item.value):+.2%}" if isinstance(item.value, (int, float)) else (_PERCENT.search(plain_text(item.claim)) or [""])[0]
+        days.append(f"{item.metadata.get('date')} {move}[{item.id}]".replace("  ", " "))
+    if days:
+        lines.append(f"{result.subject} 期间跌幅最大的交易日：" + "；".join(days) + "。")
+    return "\n".join(lines) if lines else EvidenceSummarySynthesizer._render(result)
+
+
+_FORM = re.compile(r"提交了\s*([0-9A-Z-]+[A-Z])")
+_PERCENT = re.compile(r"[+-]\d+(?:\.\d+)?%")
+
+
+def filing_line(result: ToolEnvelope, since: str = "") -> str:
+    """The filings inside the window on one line; their contents were read per worst day."""
+
+    dated = []
+    for item in result.evidence:
+        if item.metadata.get("evidence_scope") != "filing":
+            continue
+        day = str(item.metadata.get("date") or item.as_of or "")[:10]
+        if since and day and day < since:
+            continue
+        match = _FORM.search(plain_text(item.claim))
+        form = str(item.metadata.get("form") or (match.group(1) if match else "申报"))
+        dated.append(f"{day} {form}[{item.id}]")
+    if not dated:
+        return ""
+    return f"{result.subject} 窗口内 {len(dated)} 份申报：" + "；".join(dated) + "。"
+
+
+def anomaly_lines(result: ToolEnvelope, since: str = "", covered: frozenset[str] = frozenset()) -> str:
+    """Watch records inside the window that no attribution block already explains.
+
+    A retro-attribution record is the memory of an earlier attribution run;
+    the fresh attribution of that day supersedes it.
+    """
+
+    lines: list[str] = []
+    for item in result.evidence:
+        if item.metadata.get("evidence_scope") != "anomaly":
+            continue
+        day = str(item.metadata.get("date") or item.as_of or "")[:10]
+        if (since and day and day < since) or day in covered:
+            continue
+        if "retro_attribution" in str(item.metadata.get("flags") or ""):
+            continue
+        lines.append(f"- {plain_text(item.claim)} [{item.id}]")
+        if len(lines) >= 3:
+            break
+    return "\n".join(lines)
+
+
 def ranking_lead(text: str, results: list[ToolEnvelope]) -> RankingLead:
     """Answer a superlative question directly from a result's ranked table.
 
@@ -360,6 +421,7 @@ class EvidenceSummarySynthesizer:
                 source = found[0] if found else next((result for result in results if result.capability == "account.portfolio"), None)
                 drawdown = next((result for result in results if result.capability == "market.drawdown" and result.ok), None)
                 since = str(drawdown.metrics.get("window_start") or "") if drawdown is not None else ""
+                attributed = frozenset(str(result.metadata.get("date") or "")[:10] for result in results if result.capability == "market.attribute_move" and result.ok)
                 blocks = [opening]
                 for result in results:
                     if result is source:
@@ -368,6 +430,13 @@ class EvidenceSummarySynthesizer:
                         blocks.append(self._render(result))  # just the coverage line
                     elif result.capability == "web.research":
                         blocks.append(web_lines(result, since))
+                    elif result.capability == "market.drawdown" and result.ok:
+                        blocks.append(drawdown_lines(result))
+                    elif result.capability == "filings.recent" and result.ok and attributed:
+                        # The attribution blocks below read the filings; here they are only listed.
+                        blocks.append(filing_line(result, since))
+                    elif result.capability == "market.anomaly_history" and result.ok and attributed:
+                        blocks.append(anomaly_lines(result, since, attributed))
                     elif result.capability in {"research.stock", "research.compare", "filings.recent", "filings.read_events", "market.anomaly_history"}:
                         blocks.append(catalyst_lines(result, since))
                     elif result.capability == "market.performance" and result.ok:

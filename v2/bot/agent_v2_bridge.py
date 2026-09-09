@@ -118,9 +118,7 @@ class TelegramBotTransport:
             label = html.escape(entry.label)
             if entry.url:
                 label = f'<a href="{html.escape(entry.url, quote=True)}">{label}</a>'
-            sources.append(f"{entry.number}. {label}")
-        if len(numbered.ids) > len(sources):
-            sources.append(f"（另有 {len(numbered.ids) - len(sources)} 条引用略）")
+            sources.append(f"{html.escape(entry.numbers)}. {label}")
         suffix = "\n\n<b>来源</b>\n" + "\n".join(sources) if sources else ""
         await delivery._deliver(self.placeholder, header + answer + suffix)
 
@@ -136,7 +134,14 @@ class TelegramBotTransport:
         fields.append(
             "网页：" + html.escape(telegram_format.web_label(requested=self.web_requested, enabled=_web_enabled()))
         )
-        return f"<b>Agent V2 · {html.escape(result.status.value)}</b>\n<i>{' · '.join(fields)}</i>\n\n"
+        lines = [f"<b>Agent V2 · {html.escape(result.status.value)}</b>", f"<i>{' · '.join(fields)}</i>"]
+        warning = telegram_format.warning_line(result)
+        if warning:
+            lines.append(f"<i>⚠ 校验：{html.escape(warning)}</i>")
+        reason = telegram_format.fallback_reason(result)
+        if reason:
+            lines.append(f"<i>兜底原因：{html.escape(reason)}</i>")
+        return "\n".join(lines) + "\n\n"
 
 
 async def handle_agent_v2(

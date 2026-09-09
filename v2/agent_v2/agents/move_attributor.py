@@ -310,7 +310,7 @@ class MoveAttributor:
             qualifier = "高置信度归因" if confirmed else f"{reason['confidence']}置信度候选解释"
             source_label = {"news": "新闻", "filing": "申报", "memory": "盯盘记忆"}.get(reason["kind"], "来源")
             claim = f"{ticker} {day} {qualifier}：{reason['text']}（{source_label}：“{reason['quote'][:160]}”）。"
-            metadata = {"claim_role": "confirmed_driver" if confirmed else "candidate_driver", "causal_confidence": reason["confidence"], "driver_text": reason["text"], "note": "", "source_kind": reason["kind"], "quote": reason["quote"], "supporting_sources": [{"title": "", "url": reason["url"]}] if reason["url"] else []}
+            metadata = {"claim_role": "confirmed_driver" if confirmed else "candidate_driver", "causal_confidence": reason["confidence"], "driver_text": lead_text(reason["text"]), "note": "", "source_kind": reason["kind"], "quote": reason["quote"], "supporting_sources": [{"title": "", "url": reason["url"]}] if reason["url"] else []}
             if not confirmed:
                 metadata["constraints"] = [_CANDIDATE_RULE]
             reason_items.append(item(role, claim, source_id={"news": "web_news", "filing": "sec_edgar", "memory": "anomaly_memory"}[reason["kind"]], source_title=source_label, source_url=reason["url"], confidence={"高": 0.9, "中": 0.6, "低": 0.3}[reason["confidence"]], metadata=metadata))
@@ -391,6 +391,19 @@ class MoveAttributor:
         else:
             sentence += f"暂未找到可核实的同日催化剂[{assessment.id}]。"
         return sentence
+
+
+def lead_text(text: str) -> str:
+    """A driver or lead as one sentence fragment: no inner full stops, no trailing punctuation.
+
+    The verifier splits on 。 and asks every figure-bearing sentence for a
+    citation; a quoted lead with its own full stops and figures would leave
+    half of itself uncited.
+    """
+
+    cleaned = re.sub(r"\s+", " ", str(text or "")).strip()
+    cleaned = cleaned.rstrip("。；;，,.！!？? ")
+    return re.sub(r"[。；;]\s*", "；", cleaned)
 
 
 def _pct(value: float | None) -> str:
