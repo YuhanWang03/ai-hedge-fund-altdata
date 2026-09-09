@@ -40,14 +40,24 @@ def filings_envelope(ticker: str, context: ExecutionContext, fetch: Callable[[st
     current = today or date.today()
     until = until or current.isoformat()
     since = since or (current - timedelta(days=365)).isoformat()
-    forms = [str(form) for form in (forms or ["8-K"]) if form]
+    explicit = [str(form) for form in (forms or []) if form]
+    forms = explicit or ["8-K"]
     rows: list[Any] = []
     errors: list[str] = []
-    for form in forms:
+
+    def fetch_form(form: str) -> None:
         try:
             rows.extend(fetch(ticker, form, since, until))
         except Exception as exc:  # noqa: BLE001 — one form failing is data, not a crash
             errors.append(f"{form}: {type(exc).__name__}: {str(exc)[:120]}")
+
+    for form in forms:
+        fetch_form(form)
+    # A foreign private issuer (ARM, TSM, BABA) files 6-K instead of 8-K;
+    # with no explicit form list and no 8-K, look there before saying "none".
+    if not explicit and not rows and "8-K" in forms:
+        forms = [*forms, "6-K"]
+        fetch_form("6-K")
     rows.sort(key=lambda row: str(getattr(row, "filing_date", "")), reverse=True)
     rows = rows[:12]
     evidence: list[EvidenceItem] = []

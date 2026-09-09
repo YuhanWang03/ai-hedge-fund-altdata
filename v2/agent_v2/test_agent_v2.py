@@ -855,10 +855,13 @@ def test_history_capabilities_wrap_edgar_filings_and_the_anomaly_memory():
         SimpleNamespace(filing_date="2026-08-20", form="8-K", accession_number="0001-25-000002", cik="0001973239"),
     ]
     calls: list[tuple] = []
+    foreign = [SimpleNamespace(filing_date="2026-07-30", form="6-K", accession_number="0001-25-000009", cik="0001973239")]
 
     def fetch(ticker, form, since, until):
         calls.append((ticker, form, since, until))
-        return list(rows) if form == "8-K" else []
+        if ticker == "ARM":
+            return list(rows) if form == "8-K" else []
+        return list(foreign) if form == "6-K" and ticker == "TSM" else []
 
     recalls = SimpleNamespace(date="2026-08-05", flags="gap_down,volume_spike", doc="ARM  gapped down after earnings;   guidance missed.")
     register_history_capabilities(registry, filings_fetch=fetch, anomaly_recall=lambda ticker, query, days: [recalls], today_factory=lambda: date(2026, 9, 9))
@@ -869,6 +872,14 @@ def test_history_capabilities_wrap_edgar_filings_and_the_anomaly_memory():
     assert "2026-08-20 8-K[" in filings.metadata["narrative"]
     empty = registry.execute(PlanTask("f", "filings.recent", {"ticker": "ARM", "forms": ["10-Q"]}), _context())
     assert empty.ok and empty.evidence[0].metadata["citation_kind"] == "limitations" and "未查到 10-Q 申报" in empty.evidence[0].claim
+    # A foreign private issuer has no 8-K; with no explicit form the adapter looks at 6-K before saying none.
+    calls.clear()
+    tsm = registry.execute(PlanTask("f", "filings.recent", {"ticker": "TSM"}), _context())
+    assert [call[1] for call in calls] == ["8-K", "6-K"]
+    assert tsm.ok and tsm.evidence[0].metadata["form"] == "6-K" and "2026-07-30 6-K[" in tsm.metadata["narrative"]
+    calls.clear()
+    none = registry.execute(PlanTask("f", "filings.recent", {"ticker": "XYZ"}), _context())
+    assert [call[1] for call in calls] == ["8-K", "6-K"] and "未查到 8-K、6-K 申报" in none.evidence[0].claim
     anomalies = registry.execute(PlanTask("a", "market.anomaly_history", {"ticker": "ARM", "lookback_days": 365}), _context())
     assert anomalies.ok and anomalies.evidence[0].claim == "ARM 2026-08-05 盯盘记录：gap_down,volume_spike；ARM gapped down after earnings; guidance missed."
     register_history_capabilities(registry, filings_fetch=fetch, anomaly_recall=lambda *args: (_ for _ in ()).throw(RuntimeError("chroma down")))

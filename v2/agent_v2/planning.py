@@ -301,7 +301,7 @@ class RulePlanner:
             PlanTask("account-portfolio", "account.portfolio", purpose="restate the position's cost basis and unrealized P/L"),
             PlanTask("market-performance", "market.performance", {"ticker": ticker}, purpose="locate the decline across return windows"),
             PlanTask("market-drawdown", "market.drawdown", {"ticker": ticker, **({"loss_pct": float(loss)} if isinstance(loss, (int, float)) else {}), "top": 3}, purpose="peak-to-trough and the worst trading days in the window"),
-            PlanTask("filings-recent", "filings.recent", {"ticker": ticker, "forms": ["8-K"]}, purpose="dated SEC filings over the past year", required=False),
+            PlanTask("filings-recent", "filings.recent", {"ticker": ticker}, purpose="dated SEC filings (8-K, or 6-K for a foreign issuer) over the past year", required=False),
             PlanTask("anomaly-history", "market.anomaly_history", {"ticker": ticker, "lookback_days": 365}, purpose="what the monitor recorded on the worst days", required=False),
         ]
         if request.allow_web:
