@@ -139,6 +139,14 @@ async def activity(
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
+@router.get("/costs")
+async def query_costs(limit: int = Query(100, ge=1, le=500)) -> dict:
+    """Estimated spend for successful, uncached paid data requests."""
+    from v2.data.cost_ledger import cost_report
+
+    return await run_in_threadpool(cost_report, limit)
+
+
 @router.get("/monitoring/universe")
 async def monitoring_universe() -> dict:
     """The production ticker pool scanned by the minute-level streamer."""
