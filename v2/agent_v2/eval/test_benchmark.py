@@ -174,3 +174,15 @@ def test_llm_payload_selects_evidence_round_robin_across_results():
     chosen = _select_evidence(results, evidence, 9)
     assert [item.entity for item in chosen] == ["AAA", "BBB", "CCC"] * 3
     assert _select_evidence(results, evidence[:5], 40) == evidence[:5]
+
+
+def test_run_mode_parallel_workers_keep_case_order_and_call_progress_hook():
+    from v2.agent_v2.eval.benchmark import run_mode
+    from v2.agent_v2.eval.simulated_llm import SimulatedLLMFactory
+
+    cases = tuple(case for case in DEV_CASES if case.id in {"s01", "s02", "s03", "m02"})
+    seen: list[str] = []
+    report = run_mode("v2_llm", cases, repeat=2, llm_factory=SimulatedLLMFactory(noise=0.0, seed=1), fixtures="engine", workers=3, on_case=lambda score: seen.append(score.case_id))
+    assert [score.case_id for score in report.scores] == ["s01", "s01", "s02", "s02", "s03", "s03", "m02", "m02"]
+    assert sorted(seen) == sorted(score.case_id for score in report.scores)
+    assert all(score.verify_outcome == "clean" for score in report.scores)

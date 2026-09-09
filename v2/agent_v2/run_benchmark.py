@@ -32,6 +32,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--simulate", type=float, default=None, metavar="NOISE", help="run v2_llm with the simulated model (noise = share of drafts with an invented figure); a harness dry run, not a model score")
     parser.add_argument("--seed", type=int, default=0, help="seed for the simulated model")
     parser.add_argument("--markdown", default="", help="append a Markdown report to this file")
+    parser.add_argument("--workers", type=int, default=1, help="parallel runs for v2_llm (model-bound); deterministic modes stay sequential")
+    parser.add_argument("--progress", action="store_true", help="print one line per v2_llm run to stderr")
     args = parser.parse_args(argv)
 
     modes = tuple(mode.strip() for mode in args.modes.split(",") if mode.strip())
@@ -59,7 +61,7 @@ def main(argv: list[str] | None = None) -> int:
     elif "v2_llm" in modes and not any(os.environ.get(name) for name in ("AGENT_LLM_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY")):
         print("v2_llm needs AGENT_LLM_API_KEY (or DEEPSEEK_API_KEY / OPENAI_API_KEY); use --simulate for a harness dry run", file=sys.stderr)
         return 2
-    reports = run_benchmark(modes, holdout=args.holdout, repeat=args.repeat, fixtures=args.fixtures, llm_factory=llm_factory)
+    reports = run_benchmark(modes, holdout=args.holdout, repeat=args.repeat, fixtures=args.fixtures, llm_factory=llm_factory, workers=max(1, args.workers), progress=args.progress)
     print(render(reports, failures=not args.no_failures))
     if args.markdown:
         label = f"{'留出集' if args.holdout else '开发集'} · {len(cases)} 例 · fixtures={args.fixtures}" + (f" · 重复 {args.repeat}" if args.repeat > 1 else "")

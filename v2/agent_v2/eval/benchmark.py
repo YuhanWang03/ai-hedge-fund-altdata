@@ -26,8 +26,10 @@ without gating.
 
 from __future__ import annotations
 
+import sys
 import time
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Iterable
 
@@ -303,27 +305,59 @@ def run_v2(case: BenchmarkCase, *, mode: str, llm_factory: Callable[[], Any] | N
     )
 
 
-def run_mode(mode: str, cases: tuple[BenchmarkCase, ...], *, repeat: int = 1, llm_factory: Callable[[], Any] | None = None, fixtures: str = "v1", on_case: Callable[[BenchmarkScore], None] | None = None) -> ModeReport:
+def run_mode(mode: str, cases: tuple[BenchmarkCase, ...], *, repeat: int = 1, llm_factory: Callable[[], Any] | None = None, fixtures: str = "v1", workers: int = 1, on_case: Callable[[BenchmarkScore], None] | None = None) -> ModeReport:
+    """Run every case under one mode; ``workers`` parallelises model-bound v2_llm runs."""
+
     if mode not in MODES:
         raise ValueError(f"unknown mode: {mode}")
     if fixtures not in FIXTURE_MODES:
         raise ValueError(f"unknown fixture mode: {fixtures}")
     if mode != "v2_llm":
         repeat = 1  # deterministic modes cannot flake
+        workers = 1
     label = mode if fixtures == "v1" or mode == "v1_baseline" else f"{mode}@{fixtures}"
     report = ModeReport(mode=label, repeat=repeat)
-    for case in cases:
-        for _ in range(repeat):
-            score = run_v1_baseline(case) if mode == "v1_baseline" else run_v2(case, mode=mode, llm_factory=llm_factory, fixtures=fixtures)
-            report.scores.append(score)
-            if on_case is not None:
-                on_case(score)
+    work = [case for case in cases for _ in range(repeat)]
+
+    def one(case: BenchmarkCase) -> BenchmarkScore:
+        score = run_v1_baseline(case) if mode == "v1_baseline" else run_v2(case, mode=mode, llm_factory=llm_factory, fixtures=fixtures)
+        if on_case is not None:
+            on_case(score)
+        return score
+
+    if workers <= 1:
+        report.scores = [one(case) for case in work]
+    else:
+        # Each run builds its own agent, registry and model client, so runs
+        # share nothing but the recorded fixtures; order is restored afterwards.
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            report.scores = list(pool.map(one, work))
     return report
 
 
-def run_benchmark(modes: Iterable[str] = ("v1_baseline", "v2_rules"), *, holdout: bool = False, repeat: int = 1, llm_factory: Callable[[], Any] | None = None, fixtures: str = "v1") -> list[ModeReport]:
+def progress_printer(total: int, stream=sys.stderr) -> Callable[[BenchmarkScore], None]:
+    """An ``on_case`` hook that keeps a long model-in-the-loop run observable."""
+
+    state = {"done": 0, "passed": 0, "started": time.time()}
+
+    def hook(score: BenchmarkScore) -> None:
+        state["done"] += 1
+        state["passed"] += int(score.passed)
+        elapsed = time.time() - state["started"]
+        eta = (elapsed / state["done"]) * (total - state["done"]) if state["done"] else 0
+        mark = "ok " if score.passed else "FAIL"
+        print(f"[{state['done']:4}/{total}] {mark} {score.case_id:5} {score.verify_outcome or '-':13} llm={score.llm_calls} {score.elapsed_ms:6}ms  pass={state['passed']}/{state['done']}  eta={eta / 60:.1f}m", file=stream, flush=True)
+
+    return hook
+
+
+def run_benchmark(modes: Iterable[str] = ("v1_baseline", "v2_rules"), *, holdout: bool = False, repeat: int = 1, llm_factory: Callable[[], Any] | None = None, fixtures: str = "v1", workers: int = 1, progress: bool = False) -> list[ModeReport]:
     cases = HOLDOUT_CASES if holdout else DEV_CASES
-    return [run_mode(mode, cases, repeat=repeat, llm_factory=llm_factory, fixtures=fixtures) for mode in modes]
+    reports = []
+    for mode in modes:
+        hook = progress_printer(len(cases) * (repeat if mode == "v2_llm" else 1)) if progress and mode == "v2_llm" else None
+        reports.append(run_mode(mode, cases, repeat=repeat, llm_factory=llm_factory, fixtures=fixtures, workers=workers, on_case=hook))
+    return reports
 
 
 # -- rendering ----------------------------------------------------------------

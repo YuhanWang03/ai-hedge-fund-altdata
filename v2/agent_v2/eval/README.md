@@ -95,3 +95,24 @@ repair 时去掉它，再按一半概率"顽固"重犯以触发回退。它验�
 | `simulated_llm.py` | 模拟模型 |
 | `benchmark.py` | 三档模式、评分、稳定性、校验器轴、报表 |
 | `test_benchmark.py` | 契约测试 |
+
+## 在 VPS 上一键跑
+
+`vps_run.sh` 在生产机上用独立的 git worktree 跑整套模型在环评测，不碰生产工作树和
+任何 systemd 服务；复用生产 poetry 环境、`.env` 里的 key 和 git 忽略的 `v2/data` 包。
+
+```
+ssh root@<vps>
+cd /root/hedge-fund && git fetch origin claude/agent-v2-design-review-jozhco
+nohup bash <(git show origin/claude/agent-v2-design-review-jozhco:v2/agent_v2/eval/vps_run.sh) --push \
+    > /root/hedge-fund/logs/agent_v2_eval.nohup 2>&1 &
+tail -f /root/hedge-fund/logs/agent_v2_eval.nohup
+```
+
+顺序：单测 → 真实录制引擎 envelope（FD key 缺失时容错，缺的合成）→ 四组 benchmark
+（engine 与 v1 两层 fixture，各跑开发集与留出集，`v2_llm` 三次重复）→ 报告写到
+`logs/agent_v2_eval/<时间戳>/report.md`，`--push` 会把它提交到分支的
+`v2/agent_v2/eval/reports/`。`--push-recorded` 连录制的 envelope 一起提交（可能有几 MB）。
+
+预算：DeepSeek 上约 800 到 1200 次模型调用，`--workers 3` 下大约 30 到 60 分钟。
+`EXTRA="--simulate 0.2"` 可以在 VPS 上先做一次不花钱的演练。
