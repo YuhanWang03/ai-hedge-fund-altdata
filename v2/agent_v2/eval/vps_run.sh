@@ -148,7 +148,14 @@ if [ "$PUSH" = 1 ]; then
   # Live recordings can run to several MB; push them only when asked.
   if [ "$PUSH_RECORDED" = 1 ] && [ -d v2/agent_v2/eval/recorded ]; then git add v2/agent_v2/eval/recorded; fi
   if git -c user.name="vps-eval" -c user.email="vps-eval@hedge-fund.local" commit -q -m "eval: model-in-the-loop benchmark report $STAMP"; then
-    git push origin "$BRANCH" && echo "   pushed $DEST"
+    # Never block on a credential prompt in a background job; report instead.
+    if GIT_TERMINAL_PROMPT=0 git push origin "$BRANCH"; then
+      echo "   pushed $DEST"
+    else
+      echo "   push failed (no GitHub credentials on this host). The commit is on branch $BRANCH in $WORKTREE;"
+      echo "   push it later with a token:  git -C $WORKTREE push https://<user>:<token>@github.com/YuhanWang03/ai-hedge-fund-altdata.git $BRANCH"
+      echo "   or read the report directly:  $REPORT"
+    fi
   else
     echo "   nothing to commit"
   fi
