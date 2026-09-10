@@ -3,10 +3,14 @@
 Every live run appends one JSON line per sub-agent run (the reader, the
 attributor with its nested reader runs, the news checker): rounds, calls,
 elapsed time, stop reason and yield (what it reported versus what the
-verifier dropped).  Token cost per sub-agent comes from the usage ledger,
+verifier dropped).  Token use per sub-agent comes from the usage ledger,
 where each provider call is attributed to ``agent_v2.<name>`` while the
 sub-agent's loop runs.  ``python -m v2.agent_v2.eval.subagent_report``
 aggregates both.
+
+Cost is measured in tokens, not money: the provider's price changes with the
+time of day, so the report folds uncached input, cached input and output
+into one price-invariant *standard token equivalent* (see ``TOKEN_WEIGHTS``).
 """
 
 from __future__ import annotations
@@ -128,15 +132,37 @@ def aggregate(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return summary
 
 
+#: Weights that turn a call's token counts into one figure, the standard token
+#: equivalent: ``uncached input × 1 + cached input × 1/30 + output × 3``.  They
+#: are the ratios of DeepSeek's list prices (cached input costs 1/30 of uncached,
+#: output costs 3× uncached) and hold in both the peak and the off-peak period,
+#: so the equivalent compares runs made at different times of day, which money
+#: does not.  Money, when the ledger has a price version, stays a trailing column.
+TOKEN_WEIGHTS: dict[str, float] = {"input": 1.0, "cached_input": 1.0 / 30.0, "output": 3.0}
+
+
+def token_equivalent(input_tokens: float, cached_tokens: float, output_tokens: float) -> float:
+    """Standard token equivalent of one call or one total.
+
+    ``input_tokens`` is the whole prompt as the provider reports it (cache hits
+    included); ``cached_tokens`` is the part served from cache.
+    """
+
+    total_input = max(0.0, float(input_tokens or 0))
+    cached = min(total_input, max(0.0, float(cached_tokens or 0)))
+    output = max(0.0, float(output_tokens or 0))
+    return (total_input - cached) * TOKEN_WEIGHTS["input"] + cached * TOKEN_WEIGHTS["cached_input"] + output * TOKEN_WEIGHTS["output"]
+
+
 def usage_by_source(since_days: int | None = None) -> dict[str, dict[str, Any]]:
-    """Token and cost totals per ``agent_v2.*`` source from the usage ledger; empty when the ledger is unavailable."""
+    """Token totals (and the standard equivalent) per ``agent_v2.*`` source from the usage ledger; empty when the ledger is unavailable."""
 
     try:
         from v2.data.cost_ledger import _conn
     except Exception:  # noqa: BLE001 — the ledger is optional infrastructure
         return {}
     cutoff = (datetime.now(tz=timezone.utc) - timedelta(days=since_days)).isoformat() if since_days else ""
-    totals: dict[str, dict[str, Any]] = defaultdict(lambda: {"calls": 0, "input_tokens": 0.0, "output_tokens": 0.0, "cost": {}, "unpriced": 0, "unpriced_reasons": {}, "failed": 0})
+    totals: dict[str, dict[str, Any]] = defaultdict(lambda: {"calls": 0, "input_tokens": 0.0, "cached_tokens": 0.0, "output_tokens": 0.0, "equivalent": 0.0, "cost": {}, "unpriced": 0, "unpriced_reasons": {}, "failed": 0})
     try:
         with _conn() as conn:
             query = "SELECT payload, cost_usd FROM usage_events WHERE category='llm'" + (" AND occurred_at>=?" if cutoff else "")
@@ -151,8 +177,13 @@ def usage_by_source(since_days: int | None = None) -> dict[str, dict[str, Any]]:
                 bucket = totals[source]
                 bucket["calls"] += 1
                 usage = event.get("usage") or {}
-                bucket["input_tokens"] += float(usage.get("input_tokens") or 0)
-                bucket["output_tokens"] += float(usage.get("output_tokens") or 0)
+                input_tokens = float(usage.get("input_tokens") or 0)
+                cached_tokens = min(input_tokens, float(usage.get("cached_tokens") or 0))
+                output_tokens = float(usage.get("output_tokens") or 0)
+                bucket["input_tokens"] += input_tokens
+                bucket["cached_tokens"] += cached_tokens
+                bucket["output_tokens"] += output_tokens
+                bucket["equivalent"] += token_equivalent(input_tokens, cached_tokens, output_tokens)
                 # The ledger prices each event in the provider's currency
                 # (DeepSeek in CNY); the USD column is only filled for USD.
                 amount, currency = event.get("amount"), str(event.get("currency") or "")
@@ -169,7 +200,22 @@ def usage_by_source(since_days: int | None = None) -> dict[str, dict[str, Any]]:
     except Exception as exc:  # noqa: BLE001
         logger.warning("usage ledger unavailable for the sub-agent report: %s", exc)
         return {}
-    return {source: {**bucket, "cost": {currency: round(value, 4) for currency, value in bucket["cost"].items()}} for source, bucket in sorted(totals.items())}
+    return {source: {**bucket, "equivalent": round(bucket["equivalent"], 1), "cost": {currency: round(value, 4) for currency, value in bucket["cost"].items()}} for source, bucket in sorted(totals.items())}
+
+
+def usage_totals(usage: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """The same buckets summed over every source (the 合计 row)."""
+
+    total: dict[str, Any] = {"calls": 0, "input_tokens": 0.0, "cached_tokens": 0.0, "output_tokens": 0.0, "equivalent": 0.0, "cost": {}, "unpriced": 0, "unpriced_reasons": {}, "failed": 0}
+    for row in usage.values():
+        for key in ("calls", "input_tokens", "cached_tokens", "output_tokens", "equivalent", "unpriced", "failed"):
+            total[key] += row.get(key) or 0
+        for currency, value in (row.get("cost") or {}).items():
+            total["cost"][currency] = round(total["cost"].get(currency, 0.0) + value, 4)
+        for reason, count in (row.get("unpriced_reasons") or {}).items():
+            total["unpriced_reasons"][reason] = total["unpriced_reasons"].get(reason, 0) + count
+    total["equivalent"] = round(total["equivalent"], 1)
+    return total
 
 
 def cost_label(row: dict[str, Any]) -> str:
@@ -180,7 +226,25 @@ def cost_label(row: dict[str, Any]) -> str:
         reasons = row.get("unpriced_reasons") or {}
         top = max(reasons.items(), key=lambda item: item[1])[0] if reasons else ""
         parts.append(f"{row['unpriced']} 次待定价" + (f"（{top}）" if top else ""))
-    return "、".join(parts) if parts else "待定价"
+    return "、".join(parts) if parts else "—"
+
+
+def _thousands(value: float) -> str:
+    return f"{int(round(value)):,}"
+
+
+def _usage_row(source: str, row: dict[str, Any], summary: dict[str, dict[str, Any]], *, priced: bool) -> str:
+    input_tokens, cached = float(row.get("input_tokens") or 0), float(row.get("cached_tokens") or 0)
+    equivalent = float(row.get("equivalent") or 0)
+    calls = int(row.get("calls") or 0)
+    runs = (summary.get(source.removeprefix("agent_v2.")) or {}).get("runs") if source.startswith("agent_v2.") else None
+    per_call = _thousands(equivalent / calls) if calls else "—"
+    per_run = _thousands(equivalent / runs) if runs else "—"
+    hit = f"{cached / input_tokens:.0%}" if input_tokens else "—"
+    cells = [source, str(calls), _thousands(input_tokens - cached), _thousands(cached), _thousands(row.get("output_tokens") or 0), _thousands(equivalent), per_call, per_run, hit, str(row.get("failed") or 0)]
+    if priced:
+        cells.append(cost_label(row))
+    return "| " + " | ".join(cells) + " |"
 
 
 def render(summary: dict[str, dict[str, Any]], usage: dict[str, dict[str, Any]], *, since_days: int | None) -> str:
@@ -198,10 +262,16 @@ def render(summary: dict[str, dict[str, Any]], usage: dict[str, dict[str, Any]],
         lines.append("产出 = 校验后保留的原因或事件数；丢弃率 = 被校验器丢弃的占报出总数的比例；空跑 = 一条都没保留的运行。")
     lines.append("")
     if usage:
-        lines.append("| 来源 | 模型调用 | 输入 tokens | 输出 tokens | 估算成本 | 失败 |")
-        lines.append("|---|---|---|---|---|---|")
+        priced = any(row.get("cost") for row in usage.values())
+        header = ["来源", "模型调用", "未缓存输入", "缓存输入", "输出", "标准当量", "当量/调用", "当量/次运行", "缓存命中", "失败"] + (["估算成本"] if priced else [])
+        lines.append("| " + " | ".join(header) + " |")
+        lines.append("|" + "---|" * len(header))
         for source, row in usage.items():
-            lines.append(f"| {source} | {row['calls']} | {int(row['input_tokens'])} | {int(row['output_tokens'])} | {cost_label(row)} | {row['failed']} |")
+            lines.append(_usage_row(source, row, summary, priced=priced))
+        lines.append(_usage_row("合计", usage_totals(usage), {}, priced=priced))
+        lines.append("")
+        lines.append(f"标准当量 = 未缓存输入 × {TOKEN_WEIGHTS['input']:g} + 缓存输入 × 1/{round(1 / TOKEN_WEIGHTS['cached_input'])} + 输出 × {TOKEN_WEIGHTS['output']:g}（按 DeepSeek 价格比例折算，高峰和空闲时段一样，所以不同时段的运行可以直接比）；"
+                     "当量/次运行按子智能体账本里的运行数算，规划器和合成器没有运行数就只看当量/调用；缓存命中 = 缓存输入占全部输入的比例。")
     else:
-        lines.append("用量账本不可用或没有 agent_v2.* 的记录（Token 与成本按来源归属需要线上账本）。")
+        lines.append("用量账本不可用或没有 agent_v2.* 的记录（Token 按来源归属需要线上账本）。")
     return "\n".join(lines)

@@ -2572,11 +2572,24 @@ def test_sub_agent_runs_are_ledgered_and_reported(tmp_path, monkeypatch):
     assert summary["filing_reader"]["runs"] == 2 and summary["filing_reader"]["kept"] == 2
     text = render(summary, {}, since_days=7)
     assert "| move_attributor | 2 | 4.0 | 12.3 |" in text and "| news_checker | 2 |" in text and "用量账本不可用" in text
-    from v2.agent_v2.eval.subagent_ledger import cost_label
+    from v2.agent_v2.eval.subagent_ledger import TOKEN_WEIGHTS, cost_label, token_equivalent, usage_totals
 
-    priced = {"agent_v2.move_attributor": {"calls": 3, "input_tokens": 100, "output_tokens": 20, "cost": {"CNY": 0.0123}, "unpriced": 1, "unpriced_reasons": {"缺少价格版本": 1}, "failed": 0}}
-    assert cost_label(priced["agent_v2.move_attributor"]) == "0.0123 CNY、1 次待定价（缺少价格版本）" and cost_label({"cost": {}, "unpriced": 0}) == "待定价"
-    assert "| agent_v2.move_attributor | 3 | 100 | 20 | 0.0123 CNY、1 次待定价（缺少价格版本） | 0 |" in render(summary, priced, since_days=None)
+    # The standard token equivalent is price-period invariant: uncached input 1, cached input 1/30, output 3.
+    assert TOKEN_WEIGHTS == {"input": 1.0, "cached_input": 1.0 / 30.0, "output": 3.0}
+    assert token_equivalent(3000, 1500, 200) == 1500 + 50 + 600 and token_equivalent(100, 500, 0) == 100 / 30 and token_equivalent(None, None, None) == 0
+    unpriced = {"agent_v2.move_attributor": {"calls": 3, "input_tokens": 3000, "cached_tokens": 1500, "output_tokens": 200, "equivalent": 2150.0, "cost": {}, "unpriced": 3, "unpriced_reasons": {"缺少价格版本": 3}, "failed": 0},
+                "agent_v2.synthesizer": {"calls": 2, "input_tokens": 10000, "cached_tokens": 0, "output_tokens": 1000, "equivalent": 13000.0, "cost": {}, "unpriced": 2, "unpriced_reasons": {"缺少价格版本": 2}, "failed": 1}}
+    text = render(summary, unpriced, since_days=None)
+    # Tokens first; per run uses the sub-agent's ledger runs (2), the synthesizer has no run count; no money column without a price.
+    assert "| 来源 | 模型调用 | 未缓存输入 | 缓存输入 | 输出 | 标准当量 | 当量/调用 | 当量/次运行 | 缓存命中 | 失败 |" in text and "估算成本" not in text and "待定价" not in text
+    assert "| agent_v2.move_attributor | 3 | 1,500 | 1,500 | 200 | 2,150 | 717 | 1,075 | 50% | 0 |" in text
+    assert "| agent_v2.synthesizer | 2 | 10,000 | 0 | 1,000 | 13,000 | 6,500 | — | 0% | 1 |" in text
+    assert "| 合计 | 5 | 11,500 | 1,500 | 1,200 | 15,150 | 3,030 | — | 12% | 1 |" in text and "标准当量 = 未缓存输入 × 1 + 缓存输入 × 1/30 + 输出 × 3" in text
+    assert usage_totals(unpriced)["unpriced_reasons"] == {"缺少价格版本": 5}
+    priced = {"agent_v2.move_attributor": {**unpriced["agent_v2.move_attributor"], "cost": {"CNY": 0.0123}, "unpriced": 1, "unpriced_reasons": {"缺少价格版本": 1}}}
+    assert cost_label(priced["agent_v2.move_attributor"]) == "0.0123 CNY、1 次待定价（缺少价格版本）" and cost_label({"cost": {}, "unpriced": 0}) == "—"
+    text = render(summary, priced, since_days=None)
+    assert "| 缓存命中 | 失败 | 估算成本 |" in text and "| 2,150 | 717 | 1,075 | 50% | 0 | 0.0123 CNY、1 次待定价（缺少价格版本） |" in text and "| 合计 | 3 |" in text
     assert subagent_report.main(["--path", str(ledger), "--json"]) == 0
     # An orchestrator run with a sub-agent envelope writes the ledger by itself; the flag turns it off.
     registry = CapabilityRegistry(default_catalog())
