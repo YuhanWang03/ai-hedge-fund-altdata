@@ -86,6 +86,9 @@ class RouteDecision:
     packs: tuple[str, ...]
     reason: str
     asynchronous: bool = False
+    #: The intent the route was decided from (``intent.Intent``); the planner reads it.
+    intent: Any = None
+
 
 
 @dataclass(frozen=True)

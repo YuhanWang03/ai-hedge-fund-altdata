@@ -207,7 +207,7 @@ def usage_by_run(since_days: int | None = None, *, events: list[tuple[dict[str, 
 def usage_by_source(since_days: int | None = None, *, events: list[tuple[dict[str, Any], Any]] | None = None) -> dict[str, dict[str, Any]]:
     """Token totals (and the standard equivalent) per ``agent_v2.*`` source from the usage ledger; empty when the ledger is unavailable."""
 
-    totals: dict[str, dict[str, Any]] = defaultdict(lambda: {"calls": 0, "input_tokens": 0.0, "cached_tokens": 0.0, "output_tokens": 0.0, "equivalent": 0.0, "cost": {}, "unpriced": 0, "unpriced_reasons": {}, "failed": 0})
+    totals: dict[str, dict[str, Any]] = defaultdict(lambda: {"calls": 0, "input_tokens": 0.0, "cached_tokens": 0.0, "output_tokens": 0.0, "reasoning_tokens": 0.0, "equivalent": 0.0, "cost": {}, "unpriced": 0, "unpriced_reasons": {}, "failed": 0})
     for event, cost in (_usage_events(since_days) if events is None else events):
         source = str(event.get("source") or "")
         bucket = totals[source]
@@ -216,6 +216,7 @@ def usage_by_source(since_days: int | None = None, *, events: list[tuple[dict[st
         bucket["input_tokens"] += input_tokens
         bucket["cached_tokens"] += cached_tokens
         bucket["output_tokens"] += output_tokens
+        bucket["reasoning_tokens"] += float((event.get("usage") or {}).get("reasoning_tokens") or 0)
         bucket["equivalent"] += token_equivalent(input_tokens, cached_tokens, output_tokens)
         # The ledger prices each event in the provider's currency
         # (DeepSeek in CNY); the USD column is only filled for USD.
@@ -236,9 +237,9 @@ def usage_by_source(since_days: int | None = None, *, events: list[tuple[dict[st
 def usage_totals(usage: dict[str, dict[str, Any]]) -> dict[str, Any]:
     """The same buckets summed over every source (the 合计 row)."""
 
-    total: dict[str, Any] = {"calls": 0, "input_tokens": 0.0, "cached_tokens": 0.0, "output_tokens": 0.0, "equivalent": 0.0, "cost": {}, "unpriced": 0, "unpriced_reasons": {}, "failed": 0}
+    total: dict[str, Any] = {"calls": 0, "input_tokens": 0.0, "cached_tokens": 0.0, "output_tokens": 0.0, "reasoning_tokens": 0.0, "equivalent": 0.0, "cost": {}, "unpriced": 0, "unpriced_reasons": {}, "failed": 0}
     for row in usage.values():
-        for key in ("calls", "input_tokens", "cached_tokens", "output_tokens", "equivalent", "unpriced", "failed"):
+        for key in ("calls", "input_tokens", "cached_tokens", "output_tokens", "reasoning_tokens", "equivalent", "unpriced", "failed"):
             total[key] += row.get(key) or 0
         for currency, value in (row.get("cost") or {}).items():
             total["cost"][currency] = round(total["cost"].get(currency, 0.0) + value, 4)
@@ -280,7 +281,10 @@ def _usage_row(source: str, row: dict[str, Any], summary: dict[str, dict[str, An
     per_run = _thousands(equivalent / runs) if runs else "—"
     per_question = _thousands((equivalent if tagged is None else tagged) / questions) if questions else "—"
     hit = f"{cached / input_tokens:.0%}" if input_tokens else "—"
-    cells = [source, str(calls), _thousands(input_tokens - cached), _thousands(cached), _thousands(row.get("output_tokens") or 0), _thousands(equivalent), per_call, per_run, per_question, hit, str(row.get("failed") or 0)]
+    output = float(row.get("output_tokens") or 0)
+    reasoning = float(row.get("reasoning_tokens") or 0)
+    thinking = f"{reasoning / output:.0%}" if output and reasoning else ("—" if not output else "0%")
+    cells = [source, str(calls), _thousands(input_tokens - cached), _thousands(cached), _thousands(output), thinking, _thousands(equivalent), per_call, per_run, per_question, hit, str(row.get("failed") or 0)]
     if priced:
         cells.append(cost_label(row))
     return "| " + " | ".join(cells) + " |"
@@ -325,7 +329,7 @@ def render(summary: dict[str, dict[str, Any]], usage: dict[str, dict[str, Any]],
     lines.append("")
     if usage:
         priced = any(row.get("cost") for row in usage.values())
-        header = ["来源", "模型调用", "未缓存输入", "缓存输入", "输出", "标准当量", "当量/调用", "当量/次运行", "当量/问题", "缓存命中", "失败"] + (["估算成本"] if priced else [])
+        header = ["来源", "模型调用", "未缓存输入", "缓存输入", "输出", "其中推理", "标准当量", "当量/调用", "当量/次运行", "当量/问题", "缓存命中", "失败"] + (["估算成本"] if priced else [])
         lines.append("| " + " | ".join(header) + " |")
         lines.append("|" + "---|" * len(header))
         # With run ids the per-question figure divides only the tagged calls; older untagged calls stay in the totals.
@@ -340,7 +344,7 @@ def render(summary: dict[str, dict[str, Any]], usage: dict[str, dict[str, Any]],
         lines.append(f"标准当量 = 未缓存输入 × {TOKEN_WEIGHTS['input']:g} + 缓存输入 × 1/{round(1 / TOKEN_WEIGHTS['cached_input'])} + 输出 × {TOKEN_WEIGHTS['output']:g}（按 DeepSeek 价格比例折算，高峰和空闲时段一样，所以不同时段的运行可以直接比）；"
                      "当量/次运行按子智能体账本里的运行数算，规划器和合成器没有运行数；"
                      + ("当量/问题按用量账本里的 run_id 数算，每个问题一个 run_id；" if exact else "当量/问题按子智能体账本里用到子智能体的问题数算，没用子智能体的问题不在分母里，所以是上限；")
-                     + "缓存命中 = 缓存输入占全部输入的比例。")
+                     + "缓存命中 = 缓存输入占全部输入的比例；其中推理 = 输出里模型推理 token 的占比（账本没记推理 token 时为 0%）。")
         untagged = sum(int(row.get("calls") or 0) for row in usage.values()) - sum(int(run.get("calls") or 0) for run in (runs or {}).values())
         if runs and untagged > 0:
             lines.append(f"另有 {untagged} 次调用没有 run_id（记 run_id 之前的旧记录），不在当量/问题的分母里。")

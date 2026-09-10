@@ -195,6 +195,6 @@ ANSWER_CASES: tuple[AnswerCase, ...] = (
         False,
         AnswerMode.RESEARCH_GROUNDED,
         expected_warning="归因计数",
-        judge=asserting_judge("内部的计数"),
+        judge=asserting_judge("内部统计口径"),
     ),
 )

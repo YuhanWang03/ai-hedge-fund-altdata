@@ -1,21 +1,20 @@
-"""A deterministic starter planner; an LLM planner can replace this port later.
+"""A deterministic planner keyed on the question's intent; an LLM planner can refine it.
 
-The planner reads a request as *scope* × *topics*:
-
-* scope — the user's account (``持仓``, ``我的``), the watchlist, or explicit
-  tickers;
-* topics — account facts (P&L, risk, earnings calendar), user state, macro,
-  a named manager's 13F, an ARK ETF, and per-ticker topics (a move
-  explanation or a research focus).
-
-Per-ticker topics on an account or watchlist scope become fan-out tasks: the
-plan stays static and the holdings result decides which tickers run.
+The intent (``intent.Intent``) says what the question wants: its kind, the
+time it is about, a direction, the topics (``wants``), the tickers, whether
+it is about the user's account or watchlist, and the structured details a
+command or a lab run needs.  The planner turns those fields into tasks.
+It never reads the wording: translating words into fields is the model's
+job (or the recorded labels', offline), and the templates below are the
+part that must stay deterministic — the drawdown chain with its extreme
+days and sector benchmark, the news plan, the account and watchlist fan-outs.
 """
 
 from __future__ import annotations
 
-import re
+from typing import Any
 
+from v2.agent_v2.intent import FOCUS_OF_WANT, Intent, default_intent
 from v2.agent_v2.models import (
     AnswerMode,
     BudgetClass,
@@ -26,159 +25,58 @@ from v2.agent_v2.models import (
     RouteKind,
 )
 
-# -- single-ticker market questions (kept ahead of composition) ---------------
-_MOVE_EXPLANATION = re.compile(r"(?:为什么|原因|何故).{0,12}(?:涨|跌|异动|波动)|(?:涨|跌|异动|波动).{0,12}(?:为什么|原因|怎么回事|怎么了|何故)|(?:最近|今天|今日).{0,8}(?:怎么回事|怎么了)", re.I)
-_RECENT_PERFORMANCE = re.compile(
-    r"(?:最近|近期|今天|今日|本周|这周|本月|这个月|近\s*\d+\s*(?:天|日|周|月)).{0,12}(?:股价|价格|走势|表现|涨|跌|涨跌|回报|收益率)"
-    r"|(?:股价|价格).{0,8}(?:走势|表现|涨跌|回报|收益率)|(?:走势|涨跌|跑赢|跑输)|(?:股票|股价|价格)?表现(?:如何|怎么样|怎样|好吗|好不好)|成交量|量比|波动率|放量|缩量",
-    re.I,
-)
-_NON_PRICE_PERFORMANCE = re.compile(r"经营|业务|基本面|财务|财报|业绩|盈利|营收|利润|毛利|现金流|估值|投资逻辑|值不值得|技术面|技术指标|均线|RSI|CMF", re.I)
-
-# -- commands ----------------------------------------------------------------
-_WATCHLIST = re.compile(r"关注列表|关注|自选|watchlist", re.I)
-_ALERT = re.compile(r"提醒|预警|alert", re.I)
-_REMOVE = re.compile(r"移除|删除|取消|remove|delete|cancel", re.I)
-_ABOVE = re.compile(r"涨到|涨过|涨破|突破|高于|超过|以上|above|over", re.I)
-_BELOW = re.compile(r"跌到|跌过|跌破|低于|跌至|以下|below|under", re.I)
-_PRICE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:美元|美金|块|元|usd|\$)?", re.I)
-_ALERT_ID = re.compile(r"(?:提醒|预警|alert)\s*(?:#|编号|id)?\s*(\d+)|(?:#|编号|id)\s*(\d+)", re.I)
-
-# -- scope -------------------------------------------------------------------
-_PORTFOLIO_WORDS = re.compile(r"持仓|仓位|仓库|组合|账户|portfolio", re.I)
-_SELF = re.compile(r"我(?!们)")
-_WATCHLIST_SCOPE = re.compile(r"关注列表|关注了|自选|watchlist|关注的", re.I)
-_LIST_RANKING = re.compile(r"哪只|哪个|哪几只|哪些|每只|每个|那几只|那些|谁|最", re.I)
-#: Ranking direction words; with a portfolio source they order the fan-out by P/L.
-_RANK_LOW = re.compile(r"跌|亏|差|弱|回撤|惨", re.I)
-_RANK_HIGH = re.compile(r"涨|赚|好|强|盈利", re.I)
-#: Wording that turns a portfolio ranking into a per-holding market question:
-#: a time frame the card cannot answer, or a request for the reason.
-#: "Why" wording; with a position frame it asks about the loss since purchase.
-_WHY = re.compile(r"为什么|为啥|为何|什么原因|原因|怎么会|怎么回事|何故", re.I)
-#: Wording that makes a "why did it fall" about a stretch, not a day, with no
-#: earlier turn to frame it: "从高点", "买入以来", "这几个月", "跌了这么多".
-_RUNUP_WORDING = re.compile(r"买入以来|买了以后|买入后|建仓以来|从低点|低点以来|低位以来|这几个月|这段时间|近几个月|几个月来|一路涨|涨了这么多|涨这么多|涨得这么|涨这么猛|涨了这么|赚了这么|赚这么多|翻倍|翻了.{0,2}倍|涨了.{0,3}成", re.I)
-_DRAWDOWN_WORDING = re.compile(r"买入以来|买了以后|买入后|建仓以来|从高点|高点以来|高位以来|回撤|这几个月|这段时间|近几个月|几个月来|一路跌|跌了这么多|跌这么多|跌得这么|跌这么狠|跌了这么|亏了这么|亏这么多|亏得这么|腰斩|跌了.{0,3}成", re.I)
-_TODAY = re.compile(r"今天|今日|当日|盘中|日内|昨天|昨日", re.I)
-_DRAWDOWN_WINDOW_WORDS = ((re.compile(r"这个月|近一个月|一个月|最近一个月|本月"), "1m"), (re.compile(r"今年|一年|去年|半年|年初"), "1y"))
-_RECENT_OR_WHY = re.compile(r"今天|今日|当日|盘中|日内|最近|这周|本周|上周|这个月|本月|为什么|原因|怎么回事|什么事|何故", re.I)
-#: A list question needs an evaluative word before "which one" means "look at each".
-_LIST_EVALUATE = re.compile(r"最|值得|表现|怎么样|如何|强|弱|好|差|狠|危险", re.I)
-_NEWS = re.compile(r"新闻|消息|报道|动态|头条|发生了什么|有什么事|出什么事", re.I)
-_HELP = re.compile(r"你能帮我做什么|你能做什么|能做什么|有什么功能|会做什么|怎么用|如何使用", re.I)
-_BRIEFING = re.compile(r"值得注意|该知道|需要注意|有什么新情况|有什么动静|需要关注的", re.I)
-
-# -- account topics ----------------------------------------------------------
-_PERFORMANCE = re.compile(r"盈亏|赚|亏|收益|补回来|回报", re.I)
-_RISK = re.compile(r"风险|回撤|集中度|暴露|占多少|各占|占比|健康|分化|危险|减仓|加仓", re.I)
-_POSITION_WEIGHT = re.compile(r"占仓|仓位占比|集中度|权重|占.{0,4}仓位", re.I)
-_EARNINGS_SCHEDULE = re.compile(r"(?:快|即将|近期|接下来|未来|两周|下周|这周|本周|谁要|谁会|日历|离.{0,6}最近|哪些.{0,6}发财报).{0,12}财报|财报.{0,12}(?:日历|快到|临近|最近的|最近|谁)|谁要发财报|要发财报|离.{0,4}财报.{0,4}(?:最近|最快)", re.I)
-_EARNINGS_EACH = re.compile(r"(?:下次|各自|每只|都是什么时候|分别).{0,12}财报|财报.{0,8}(?:都是什么时候|分别|各自)", re.I)
-_POSITIONING = re.compile(r"加仓|减仓|建仓|清仓", re.I)
-
-# -- user state --------------------------------------------------------------
-_STATE_ALERTS = re.compile(r"提醒列表|有哪些提醒|哪些提醒|提醒有哪些|未触发", re.I)
-_STATE_SETTINGS = re.compile(r"阈值|推送|设置", re.I)
-
-# -- macro -------------------------------------------------------------------
-_MACRO_OVERVIEW = re.compile(r"宏观|大盘|市场(?:怎么|最近|现在|环境|情绪|出什么|怎样)|VIX|美债|利率环境|好时候", re.I)
-_RELEASES: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"\bCPI\b|消费者物价|通胀数据", re.I), "cpi"),
-    (re.compile(r"\bPCE\b", re.I), "pce"),
-    (re.compile(r"\bNFP\b|非农|就业报告", re.I), "nfp"),
-    (re.compile(r"\bGDP\b", re.I), "gdp"),
-    (re.compile(r"\bPPI\b|生产者物价", re.I), "ppi"),
-    (re.compile(r"初请|失业金", re.I), "claims"),
-    (re.compile(r"\bFOMC\b|美联储|议息|利率决议|联储", re.I), "fomc"),
-)
-
-# -- named managers and ARK ETFs ---------------------------------------------
-_MANAGERS: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"巴菲特|buffett|伯克希尔|berkshire", re.I), "buffett"),
-    (re.compile(r"burry|伯里|scion", re.I), "burry"),
-    (re.compile(r"ackman|阿克曼|pershing", re.I), "ackman"),
-    (re.compile(r"einhorn|greenlight", re.I), "einhorn"),
-    (re.compile(r"renaissance|文艺复兴|rentech|西蒙斯", re.I), "renaissance"),
-    (re.compile(r"citadel|城堡", re.I), "citadel"),
-    (re.compile(r"coatue", re.I), "coatue"),
-    (re.compile(r"two\s*sigma", re.I), "twosigma"),
-    (re.compile(r"d\.?\s*e\.?\s*shaw", re.I), "deshaw"),
-    (re.compile(r"木头姐|cathie|凯茜|\bARK\b(?!\s*ETF)", re.I), "ark"),
-)
-_ARK_ETF = re.compile(r"\b(ARK[KQWGFX])\b", re.I)
-
-# -- per-ticker topics -------------------------------------------------------
-_EXPLAIN_MOVE = re.compile(r"为什么(?:涨|跌|动|大涨|大跌)|涨跌原因|异动|怎么了|出什么事|出了什么事|涨了吗|跌了吗|逆势|跌得最|涨得最|最近怎么样|最近如何|怎么样了", re.I)
-_FOCUSES: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"内部人|高管.{0,4}(?:买|卖)|insider|卖得|在卖|在买", re.I), "ownership"),
-    (re.compile(r"谁在持有|持有人|机构持股|机构持有|机构投资者|机构.{0,4}持仓|前十大", re.I), "ownership"),
-    (re.compile(r"\bSEC\b|8-?K|10-?[QK]|申报|重大事项|going concern|高管离职|公告|filing", re.I), "filings"),
-    (re.compile(r"财报|超预期|\bEPS\b|业绩|earnings", re.I), "earnings"),
-    (re.compile(r"资金流|资金.{0,4}(?:流入|流出)|\bCMF\b|\bRSI\b|流出|流入|money\s*flow", re.I), "market"),
-    (re.compile(r"产业链|供应商|客户|上下游|供应链", re.I), "supply_chain"),
-    (re.compile(r"估值|市盈率|市销率|贵不贵|valuation", re.I), "valuation"),
-    (re.compile(r"催化|事件|新闻", re.I), "catalysts"),
-    (re.compile(r"风险|危险|risk", re.I), "risk"),
-    (re.compile(r"完整|全面|深度", re.I), "full"),
-)
-_RESEARCH_CHANGES = re.compile(r"(?:研究|结论|观点|评级).{0,8}(?:变化|上次|之前)|相比上次|和上次|较上次", re.I)
-
 _HELP_ANSWER = (
     "我可以：查看持仓、盈亏和组合风险；研究单只股票的财报、内部人交易、SEC 申报、资金流、估值和产业链；"
     "解释个股异动并对比行业基准；查询宏观数据、知名基金经理的 13F 和 ARK ETF 动向；"
     "对持仓或关注列表逐只排查；运行筛选、回测和事件研究；管理关注列表和价格提醒。"
 )
 
-
-def _focus(text: str) -> str:
-    checks = (
-        (r"估值|市盈率|市销率", "valuation"),
-        (r"财报|业绩|预期", "earnings"),
-        (r"技术|趋势|资金流|CMF|RSI", "market"),
-        (r"机构|内部人|持有人", "ownership"),
-        (r"催化|事件|新闻", "catalysts"),
-        (r"SEC|公告|申报|文件|8-K|10-Q|10-K", "filings"),
-        (r"产业链|供应商|客户|上下游", "supply_chain"),
-        (r"风险", "risk"),
-        (r"完整|全面|深度", "full"),
-    )
-    return next((focus for pattern, focus in checks if re.search(pattern, text, re.I)), "overview")
+#: Wants that ask for research-engine modules (as opposed to market data, account facts or state).
+_RESEARCH_WANTS = ("valuation", "earnings", "filings", "ownership", "supply_chain", "catalysts", "risk", "full", "overview")
 
 
-def _focuses(text: str) -> list[str]:
-    found: list[str] = []
-    for pattern, focus in _FOCUSES:
-        if pattern.search(text) and focus not in found:
+def intent_of(request: NormalizedRequest, route: RouteDecision) -> Intent:
+    """The intent the route carries, or the default for a route built without one."""
+
+    intent = getattr(route, "intent", None)
+    return intent if isinstance(intent, Intent) else default_intent(request)
+
+
+def focuses_of(intent: Intent) -> list[str]:
+    """Research focuses: the explicit ones, else the research wants; three or more (or ``full``) collapse to ``full``."""
+
+    found = list(intent.focus)
+    for want in intent.wants:
+        focus = FOCUS_OF_WANT.get(want)
+        if focus and focus not in found and want in _RESEARCH_WANTS:
             found.append(focus)
     if "full" in found or len(found) > 2:
         return ["full"]
     return found
 
 
-def parse_mutation(text: str, entities: tuple[str, ...]) -> tuple[PlanTask | None, str]:
-    """Map a command sentence to one ``state.mutate`` task, or explain what is missing."""
+def mutation_task(intent: Intent, entities: tuple[str, ...]) -> tuple[PlanTask | None, str]:
+    """Map a command intent to one ``state.mutate`` task, or explain what is missing."""
 
-    ticker = entities[0] if entities else ""
-    if _ALERT.search(text):
-        if _REMOVE.search(text):
-            match = _ALERT_ID.search(text)
-            alert_id = next((group for group in match.groups() if group), "") if match else ""
-            if not alert_id:
-                return None, "取消提醒需要提醒编号（可先查看提醒列表）。"
-            return PlanTask("mutation", "state.mutate", {"operation": "alert.remove", "payload": {"alert_id": int(alert_id)}}, purpose=f"取消提醒 #{alert_id}"), ""
+    command = dict(intent.command or {})
+    operation = str(command.get("operation") or "")
+    ticker = str(command.get("ticker") or (intent.tickers[0] if intent.tickers else "") or (entities[0] if entities else "")).upper()
+    if operation == "alert.remove":
+        alert_id = command.get("alert_id")
+        if not isinstance(alert_id, int):
+            return None, "取消提醒需要提醒编号（可先查看提醒列表）。"
+        return PlanTask("mutation", "state.mutate", {"operation": "alert.remove", "payload": {"alert_id": int(alert_id)}}, purpose=f"取消提醒 #{alert_id}"), ""
+    if operation == "alert.add":
         if not ticker:
             return None, "设置提醒需要股票代码。"
-        direction = "above" if _ABOVE.search(text) else "below" if _BELOW.search(text) else ""
-        prices = [float(value) for value in _PRICE.findall(text) if value and float(value) > 0]
-        if not direction or not prices:
+        direction, price = str(command.get("direction") or ""), command.get("price")
+        if direction not in {"above", "below"} or not isinstance(price, (int, float)) or price <= 0:
             return None, f"为 {ticker} 设置提醒需要方向（涨到/跌到）和目标价。"
-        payload = {"ticker": ticker, "direction": direction, "target_price": prices[-1]}
         label = "涨到" if direction == "above" else "跌到"
-        return PlanTask("mutation", "state.mutate", {"operation": "alert.add", "payload": payload}, purpose=f"当 {ticker} {label} {prices[-1]:g} 美元时提醒"), ""
+        return PlanTask("mutation", "state.mutate", {"operation": "alert.add", "payload": {"ticker": ticker, "direction": direction, "target_price": float(price)}}, purpose=f"当 {ticker} {label} {float(price):g} 美元时提醒"), ""
     if not ticker:
         return None, "关注列表操作需要股票代码。"
-    if _REMOVE.search(text):
+    if operation == "watchlist.remove":
         return PlanTask("mutation", "state.mutate", {"operation": "watchlist.remove", "payload": {"ticker": ticker}}, purpose=f"将 {ticker} 移出关注列表"), ""
     return PlanTask("mutation", "state.mutate", {"operation": "watchlist.add", "payload": {"ticker": ticker}}, purpose=f"将 {ticker} 加入关注列表"), ""
 
@@ -199,6 +97,9 @@ def _budget(tasks: list[PlanTask]) -> BudgetClass:
         # Two or more stocks researched cold in parallel do not fit the
         # focused 60 s; the run was timing out and falling back to the web.
         return BudgetClass.COMPARISON
+    if any(task.capability == "research.stock" for task in tasks):
+        # A cold research run of one stock has overrun 60 s as well.
+        return BudgetClass.STANDARD
     count = len(tasks)
     if count <= 1:
         return BudgetClass.FOCUSED if any(_is_heavy(task.capability) for task in tasks) else BudgetClass.DIRECT
@@ -211,36 +112,33 @@ def _budget(tasks: list[PlanTask]) -> BudgetClass:
     return BudgetClass.DEEP
 
 
-def portfolio_ranking(text: str) -> bool:
-    """Whether the wording ranks the user's holdings by a direction ("哪只跌得最多")."""
+def portfolio_ranking(intent: Intent) -> bool:
+    """Whether the question ranks the user's holdings by a direction ("哪只跌得最多")."""
 
-    return _fan_out_rank(text) is not None
+    return fan_out_rank(intent) is not None
 
 
-def _fan_out_rank(text: str) -> dict | None:
-    """Order a portfolio fan-out by P/L when the question ranks holdings by direction.
+def fan_out_rank(intent: Intent) -> dict | None:
+    """Order a portfolio fan-out by P/L when the question ranks holdings by direction."""
 
-    "哪只跌得最多" over twelve holdings and a cap of eight must look at the
-    biggest losers, not the eight largest positions the card lists first.
-    """
-
-    if not _LIST_RANKING.search(text):
+    if "ranking" not in intent.wants:
         return None
-    low, high = bool(_RANK_LOW.search(text)), bool(_RANK_HIGH.search(text))
-    if low == high:
+    rank = intent.rank or ("low" if intent.direction == "down" else "high" if intent.direction == "up" else "")
+    if not rank:
         return None
-    return {"field": "positions", "key": "pl_pct", "descending": high}
+    return {"field": "positions", "key": "pl_pct", "descending": rank == "high"}
 
 
-class RulePlanner:
-    """Produces conservative plans that work without an LLM or API key."""
+class IntentPlanner:
+    """Produces conservative plans from the intent; works without an LLM or API key given recorded labels."""
 
     def plan(self, request: NormalizedRequest, route: RouteDecision) -> ExecutionPlan:
         text, entities = request.text, request.entities
+        intent = intent_of(request, route)
         if route.kind == RouteKind.GENERAL_KNOWLEDGE:
             return ExecutionPlan(objective=text, route=route.kind, answer_mode=AnswerMode.GENERAL_KNOWLEDGE, budget=BudgetClass.DIRECT)
         if route.kind == RouteKind.COMMAND:
-            task, problem = parse_mutation(text, entities)
+            task, problem = mutation_task(intent, entities)
             return ExecutionPlan(
                 objective=text,
                 route=route.kind,
@@ -252,45 +150,42 @@ class RulePlanner:
                 assumptions=("No mutation is executed until the user confirms the exact operation.",),
             )
         if route.kind in {RouteKind.LAB, RouteKind.ASYNC}:
-            return self._lab(text, entities, route)
-        if _HELP.search(text):
+            return self._lab(text, intent, entities, route)
+        if intent.kind == "help":
             return ExecutionPlan(objective=text, route=route.kind, answer_mode=AnswerMode.GENERAL_KNOWLEDGE, budget=BudgetClass.DIRECT, direct_answer=_HELP_ANSWER)
 
-        tickers = tuple(ticker for ticker in entities if not _ARK_ETF.fullmatch(ticker))
+        tickers = tuple(ticker for ticker in (intent.tickers or entities) if not ticker.startswith("ARK") or ticker in entities and ticker not in intent.ark_etfs)
+        tickers = tuple(ticker for ticker in tickers if ticker not in intent.ark_etfs)
         frame = request.metadata.get("context_frame")
-        if len(tickers) == 1 and isinstance(frame, dict) and self._asks_about_drawdown(text, frame):
-            return self._stretch(text, tickers[0], frame, route, request, "down")
-        if len(tickers) == 1 and isinstance(frame, dict) and self._asks_about_runup(text, frame):
-            return self._stretch(text, tickers[0], frame, route, request, "up")
-        if len(tickers) == 1 and not isinstance(frame, dict) and self._asks_about_a_stretch(text):
-            # No earlier turn framed it, but the wording itself does: the
-            # decline over a stretch, not today's move.
-            window = next((key for pattern, key in _DRAWDOWN_WINDOW_WORDS if pattern.search(text)), "")
-            direct = {"kind": "drawdown", "ticker": tickers[0], "label": "这段跌幅", "window": window}
-            return self._stretch(text, tickers[0], direct, route, request, "down")
-        if len(tickers) == 1 and not isinstance(frame, dict) and self._asks_about_a_rise(text):
-            window = next((key for pattern, key in _DRAWDOWN_WINDOW_WORDS if pattern.search(text)), "")
-            direct = {"kind": "runup", "ticker": tickers[0], "label": "这段涨幅", "window": window}
-            return self._stretch(text, tickers[0], direct, route, request, "up")
-        if len(tickers) == 1 and _NEWS.search(text) and not _MOVE_EXPLANATION.search(text):
-            return self._news(text, tickers[0], route, request)
-        if len(tickers) == 1 and _MOVE_EXPLANATION.search(text):
-            tasks = [PlanTask("market-move", "market.explain_move", {"ticker": tickers[0]}, purpose="separate confirmed market facts from candidate move drivers")]
-            for index, focus in enumerate(_focuses(text), 1):
-                tasks.append(PlanTask(f"research-{index}", "research.stock", {"ticker": tickers[0], "focus": focus}, purpose=f"collect {focus} evidence"))
-            return ExecutionPlan(objective=text, route=route.kind, tasks=tuple(tasks[:5]), answer_mode=AnswerMode.RESEARCH_GROUNDED, budget=_budget(tasks[:5]), web_fallback_allowed=request.allow_web)
-        if len(tickers) == 1 and _RECENT_PERFORMANCE.search(text) and not _NON_PRICE_PERFORMANCE.search(text):
-            return ExecutionPlan(
-                objective=text,
-                route=route.kind,
-                tasks=(PlanTask("market-performance", "market.performance", {"ticker": tickers[0]}, purpose="measure recent returns, volume and benchmark-relative performance"),),
-                answer_mode=AnswerMode.TOOL_GROUNDED,
-                budget=BudgetClass.FOCUSED,
-            )
-        if len(tickers) == 1 and _RESEARCH_CHANGES.search(text):
-            return ExecutionPlan(objective=text, route=route.kind, tasks=(PlanTask("research-change", "research.changes", {"ticker": tickers[0]}, purpose="compare stored research snapshots"),), answer_mode=AnswerMode.RESEARCH_GROUNDED, budget=BudgetClass.DIRECT)
+        notes: list[str] = []
+        if intent.source == "default":
+            notes.append(f"intent: {intent.note}")
 
-        tasks = self._compose(text, tickers)
+        if len(tickers) == 1:
+            stretch = self._stretch_direction(intent, frame if isinstance(frame, dict) else None)
+            if stretch:
+                direction, framing = stretch
+                return self._stretch(text, tickers[0], framing, route, request, direction, notes)
+            if intent.wants_any("news") and not intent.wants_any("attribution"):
+                return self._news(text, tickers[0], route, request, notes)
+            if intent.wants_any("attribution"):
+                tasks = [PlanTask("market-move", "market.explain_move", {"ticker": tickers[0]}, purpose="separate confirmed market facts from candidate move drivers")]
+                for index, focus in enumerate(focuses_of(intent), 1):
+                    tasks.append(PlanTask(f"research-{index}", "research.stock", {"ticker": tickers[0], "focus": focus}, purpose=f"collect {focus} evidence"))
+                return ExecutionPlan(objective=text, route=route.kind, tasks=tuple(tasks[:5]), answer_mode=AnswerMode.RESEARCH_GROUNDED, budget=_budget(tasks[:5]), web_fallback_allowed=request.allow_web, assumptions=tuple(notes))
+            if intent.wants_any("performance") and not any(want in _RESEARCH_WANTS for want in intent.wants) and not intent.focus:
+                return ExecutionPlan(
+                    objective=text,
+                    route=route.kind,
+                    tasks=(PlanTask("market-performance", "market.performance", {"ticker": tickers[0]}, purpose="measure recent returns, volume and benchmark-relative performance"),),
+                    answer_mode=AnswerMode.TOOL_GROUNDED,
+                    budget=BudgetClass.FOCUSED,
+                    assumptions=tuple(notes),
+                )
+            if intent.wants_any("research_changes"):
+                return ExecutionPlan(objective=text, route=route.kind, tasks=(PlanTask("research-change", "research.changes", {"ticker": tickers[0]}, purpose="compare stored research snapshots"),), answer_mode=AnswerMode.RESEARCH_GROUNDED, budget=BudgetClass.DIRECT, assumptions=tuple(notes))
+
+        tasks = self._compose(intent, tickers)
         grounded = any(task.capability.startswith(("research.", "market.")) for task in tasks)
         return ExecutionPlan(
             objective=text,
@@ -299,19 +194,38 @@ class RulePlanner:
             answer_mode=AnswerMode.RESEARCH_GROUNDED if grounded else AnswerMode.TOOL_GROUNDED,
             budget=_budget(tasks),
             web_fallback_allowed=request.allow_web,
+            assumptions=tuple(notes),
         )
 
     # -- pieces ---------------------------------------------------------------
 
     @staticmethod
-    def _news(text: str, ticker: str, route: RouteDecision, request: NormalizedRequest) -> ExecutionPlan:
-        """"What's the news on X": dated events from the web (with consent), recent filings and the monitor's memory.
+    def _stretch_direction(intent: Intent, frame: dict | None) -> tuple[str, dict] | None:
+        """Whether the question is about a stretch (a loss since purchase, a fall from the high) and which way.
 
-        The research engine's catalyst module is not the tool for this: it
-        is a full research run under a lookup's budget.  The web task is a
-        sub-agent that reads pages and locates quotes; without consent the
-        engine skips it and says so, and the two internal sources remain.
+        A framed follow-up ("为什么跌这么狠" after the position with a loss was
+        named) goes by the position's sign unless the question's direction
+        contradicts it, which makes it about today's move instead.
         """
+
+        if not intent.wants_any("attribution", "drawdown", "runup") or intent.scope == "today":
+            return None
+        if frame and frame.get("kind") == "position" and frame.get("field") == "pl_pct" and isinstance(frame.get("value"), (int, float)):
+            loss = frame["value"] < 0
+            if loss and intent.direction != "up" and intent.wants_any("attribution", "drawdown"):
+                return "down", frame
+            if not loss and frame["value"] > 0 and intent.direction != "down" and intent.wants_any("attribution", "runup"):
+                return "up", frame
+            return None
+        if intent.wants_any("drawdown") or (intent.direction == "down" and intent.scope in {"window", "since_purchase"}):
+            return "down", {"kind": "drawdown", "ticker": intent.tickers[0] if intent.tickers else "", "label": "这段跌幅", "window": intent.window}
+        if intent.wants_any("runup") or (intent.direction == "up" and intent.scope in {"window", "since_purchase"}):
+            return "up", {"kind": "runup", "ticker": intent.tickers[0] if intent.tickers else "", "label": "这段涨幅", "window": intent.window}
+        return None
+
+    @staticmethod
+    def _news(text: str, ticker: str, route: RouteDecision, request: NormalizedRequest, notes: list[str]) -> ExecutionPlan:
+        """"What's the news on X": dated events from the web (with consent), recent filings and the monitor's memory."""
 
         from datetime import date, timedelta
 
@@ -323,40 +237,10 @@ class RulePlanner:
         ]
         web_state = "网页已授权并已搜索，不得写成未授权或无法访问网页。" if request.allow_web else "网页未授权，只列申报和盯盘记录，并说明未使用网页。"
         note = f"news: 按日期列出近两周的事件（网页、申报含 Form 4 内幕交易、盯盘记录各注明来源），没有事件的来源明说。{web_state}"
-        return ExecutionPlan(objective=text, route=route.kind, tasks=tuple(tasks), answer_mode=AnswerMode.RESEARCH_GROUNDED, budget=_budget(tasks), web_fallback_allowed=request.allow_web, assumptions=(note,))
+        return ExecutionPlan(objective=text, route=route.kind, tasks=tuple(tasks), answer_mode=AnswerMode.RESEARCH_GROUNDED, budget=_budget(tasks), web_fallback_allowed=request.allow_web, assumptions=(note, *notes))
 
     @staticmethod
-    def _asks_about_a_stretch(text: str) -> bool:
-        """"为什么" plus stretch wording ("从高点", "买入以来", "跌了这么多") and no "今天"."""
-
-        return bool(_WHY.search(text) and _DRAWDOWN_WORDING.search(text) and not _TODAY.search(text) and not _RANK_HIGH.search(text))
-
-    @staticmethod
-    def _asks_about_a_rise(text: str) -> bool:
-        """"为什么" plus run-up wording ("从低点", "涨了这么多") and no "今天"."""
-
-        return bool(_WHY.search(text) and _RUNUP_WORDING.search(text) and not _TODAY.search(text) and not _RANK_LOW.search(text))
-
-    @staticmethod
-    def _asks_about_drawdown(text: str, frame: dict) -> bool:
-        """A "why" follow-up about a position with an unrealized loss, not a question about a rise."""
-
-        value = frame.get("value")
-        if frame.get("kind") != "position" or frame.get("field") != "pl_pct" or not isinstance(value, (int, float)) or value >= 0:
-            return False
-        return bool(_WHY.search(text)) and not _RANK_HIGH.search(text)
-
-    @staticmethod
-    def _asks_about_runup(text: str, frame: dict) -> bool:
-        """A "why" follow-up about a position with an unrealized gain, not a question about a fall."""
-
-        value = frame.get("value")
-        if frame.get("kind") != "position" or frame.get("field") != "pl_pct" or not isinstance(value, (int, float)) or value <= 0:
-            return False
-        return bool(_WHY.search(text)) and not _RANK_LOW.search(text)
-
-    @staticmethod
-    def _stretch(text: str, ticker: str, frame: dict, route: RouteDecision, request: NormalizedRequest, direction: str) -> ExecutionPlan:
+    def _stretch(text: str, ticker: str, frame: dict, route: RouteDecision, request: NormalizedRequest, direction: str, notes: list[str]) -> ExecutionPlan:
         """Explain a loss (or gain) since purchase: cost basis, where in time the stretch sits, events over the period; today's move only as an aside."""
 
         up = direction == "up"
@@ -372,11 +256,6 @@ class RulePlanner:
             f"今日涨跌只用区间回报里的单日数字作一句旁注，并点明它与买入以来的{word}是不同区间；某个{days}找不到对应事件就明说，不得用当日归因冒充。"
         )
         loss = frame.get("value")
-        # Today's move attribution is the slowest step and the one with the
-        # most figures to misquote; the single-day return in the performance
-        # windows is enough for the aside.  The dated history comes from the
-        # price series itself, EDGAR, the monitor's memory and, with consent,
-        # a web search keyed to the worst days.
         tasks = [
             PlanTask("account-portfolio", "account.portfolio", purpose="restate the position's cost basis and unrealized P/L"),
             PlanTask("market-performance", "market.performance", {"ticker": ticker}, purpose=f"locate the {'rise' if up else 'decline'} across return windows"),
@@ -388,9 +267,6 @@ class RulePlanner:
             ),
             PlanTask("filings-recent", "filings.recent", {"ticker": ticker}, purpose="dated SEC filings (8-K, or 6-K for a foreign issuer) over the past year", required=False),
             PlanTask("anomaly-history", "market.anomaly_history", {"ticker": ticker, "lookback_days": 365}, purpose=f"what the monitor recorded on the {'best' if up else 'worst'} days", required=False),
-            # One sub-agent per extreme day: it reads the filings through the
-            # filing reader, consults the monitor's memory and, with the
-            # user's web consent, the news, then remembers what it found.
             PlanTask(
                 "attribute-best-days" if up else "attribute-worst-days",
                 "market.attribute_move",
@@ -408,25 +284,17 @@ class RulePlanner:
             answer_mode=AnswerMode.RESEARCH_GROUNDED,
             budget=BudgetClass.PORTFOLIO,
             web_fallback_allowed=request.allow_web,
-            assumptions=(note,),
-            frame=dict(frame),
+            assumptions=(note, *notes),
+            frame={key: value for key, value in frame.items() if key != "ticker" or value} | ({"ticker": ticker} if not frame.get("ticker") else {}),
         )
 
     @staticmethod
-    def _lab(text: str, entities: tuple[str, ...], route: RouteDecision) -> ExecutionPlan:
-        capability = "lab.screen"
-        if re.search(r"参数扫描", text):
-            capability = "lab.sweep"
-        elif re.search(r"事件研究|异常收益", text):
-            capability = "lab.event_study"
-        elif re.search(r"委员会|大师投票", text):
-            capability = "lab.committee"
-        elif re.search(r"回测", text):
-            capability = "lab.backtest"
-        args: dict = {"tickers": list(entities)} if entities else {}
+    def _lab(text: str, intent: Intent, entities: tuple[str, ...], route: RouteDecision) -> ExecutionPlan:
+        capability = f"lab.{intent.lab or 'screen'}"
+        tickers = list(intent.tickers or entities)
+        args: dict = {"tickers": tickers} if tickers else {}
         if capability == "lab.backtest":
-            strategy = "committee" if "委员会" in text else "insider" if "内部人" in text else "pead" if re.search(r"PEAD|财报", text, re.I) else "momentum"
-            args["strategy"] = strategy
+            args["strategy"] = intent.strategy or "momentum"
         return ExecutionPlan(
             objective=text,
             route=route.kind,
@@ -436,7 +304,7 @@ class RulePlanner:
             assumptions=("Missing experiment parameters must be disclosed before execution.",),
         )
 
-    def _compose(self, text: str, tickers: tuple[str, ...]) -> list[PlanTask]:
+    def _compose(self, intent: Intent, tickers: tuple[str, ...]) -> list[PlanTask]:
         tasks: list[PlanTask] = []
         ids: set[str] = set()
 
@@ -446,61 +314,70 @@ class RulePlanner:
             ids.add(task_id)
             tasks.append(PlanTask(task_id, capability, dict(arguments or {}), depends_on=depends_on, purpose=purpose, fan_out=fan_out))
 
-        managers = [key for pattern, key in _MANAGERS if pattern.search(text)]
-        ark_etfs = list(dict.fromkeys(match.upper() for match in _ARK_ETF.findall(text)))
-        watchlist_scope = bool(_WATCHLIST_SCOPE.search(text))
-        explicit_portfolio = bool(_PORTFOLIO_WORDS.search(text)) and not (managers or ark_etfs) or bool(_PORTFOLIO_WORDS.search(text) and _SELF.search(text))
-        account_scope = explicit_portfolio or (bool(_SELF.search(text)) and not tickers and not watchlist_scope)
+        wants = set(intent.wants)
+        managers, ark_etfs = list(intent.managers[:2]), list(intent.ark_etfs[:2])
+        watchlist_scope = intent.watchlist_scope or "watchlist" in wants
+        account_scope = intent.portfolio_scope
+        explicit_portfolio = "portfolio" in wants
+        list_scope = account_scope or watchlist_scope
+        #: Wants answered at the account level here; they are not research focuses below.
+        account_topics: set[str] = set()
 
         # account-level topics
-        if _PERFORMANCE.search(text) and (account_scope or not tickers) and not managers:
-            periods = [period for pattern, period in ((r"周", "week"), (r"月", "month"), (r"今天|当日|今日|日内", "day")) if re.search(pattern, text)] or ["day"]
-            for period in periods:
+        if "performance" in wants and not tickers and not watchlist_scope and not managers:
+            for period in intent.periods or ("day",):
                 add(f"account-performance-{period}", "account.performance", {"period": period}, purpose=f"account P&L for the {period}")
-        if _RISK.search(text) and (account_scope or not tickers) and not managers:
+            account_topics.add("performance")
+        if "risk" in wants and (account_scope or explicit_portfolio or not tickers) and not managers:
             add("account-risk", "account.risk", purpose="collect portfolio-level risk")
-        if _POSITION_WEIGHT.search(text) and not managers:
-            add("account-risk", "account.risk", purpose="position weights and concentration")
-        if _EARNINGS_SCHEDULE.search(text) and not tickers:
+            account_topics.add("risk")
+        if "earnings" in wants and not tickers and not intent.each and intent.kind != "research":
             add("account-earnings", "account.earnings_schedule", {"days": 14}, purpose="upcoming earnings across holdings and watchlist")
-        if _BRIEFING.search(text) and not tickers:
-            add("account-portfolio", "account.portfolio", purpose="identify positions and weights")
-            add("account-risk", "account.risk", purpose="collect portfolio-level risk")
+            account_topics.add("earnings")
+        if "briefing" in wants and not tickers:
+            # What to watch today: the backdrop, the calendar, the book's risk
+            # and the watchlist; no per-holding attribution (that is a
+            # different question and three sub-agents dearer).
+            add("macro-overview", "macro.overview", purpose="market backdrop")
             add("account-earnings", "account.earnings_schedule", {"days": 14}, purpose="upcoming earnings across holdings and watchlist")
-        if _POSITIONING.search(text) and not tickers:
+            add("account-risk", "account.risk", purpose="today's P/L, drawdown and concentration")
+            add("state-watchlist", "state.read", {"section": "watchlist"}, purpose="the watchlist to keep an eye on")
+        if "positioning" in wants and not tickers:
             add("macro-overview", "macro.overview", purpose="market backdrop before changing exposure")
             add("account-risk", "account.risk", purpose="collect portfolio-level risk")
-            if account_scope:
+            account_topics.add("risk")
+            if account_scope or explicit_portfolio:
                 add("account-portfolio", "account.portfolio", purpose="identify positions and weights")
 
         # user state
-        if _STATE_ALERTS.search(text) or (_ALERT.search(text) and not _STATE_SETTINGS.search(text)):
+        if "alerts" in wants:
             add("state-alerts", "state.read", {"section": "alerts"}, purpose="read configured alerts")
-        elif _STATE_SETTINGS.search(text):
+        elif "settings" in wants:
             add("state-settings", "state.read", {"section": "settings"}, purpose="read user settings")
         if watchlist_scope:
             add("state-watchlist", "state.read", {"section": "watchlist"}, purpose="read the watchlist")
 
         # macro, managers, ARK
-        if _MACRO_OVERVIEW.search(text):
+        if "macro" in wants:
             add("macro-overview", "macro.overview", purpose="macro dashboard")
-        for pattern, release in _RELEASES:
-            if pattern.search(text):
-                add(f"macro-{release}", "macro.release", {"release_type": release}, purpose=f"latest {release.upper()} release")
-        for manager in managers[:2]:
+        if intent.release or "macro_release" in wants:
+            release = intent.release or "fomc"
+            add(f"macro-{release}", "macro.release", {"release_type": release}, purpose=f"latest {release.upper()} release")
+        for manager in managers:
             add(f"manager-{manager}", "institutional.manager_portfolio", {"manager": manager}, purpose=f"latest 13F for {manager}")
-        for symbol in ark_etfs[:2]:
+        for symbol in ark_etfs:
             add(f"etf-{symbol}", "etf.ark_activity", {"symbol": symbol}, purpose=f"{symbol} holdings and activity")
 
         # per-ticker topics
-        explain = bool(_EXPLAIN_MOVE.search(text))
-        focuses = _focuses(text)
-        list_scope = account_scope or watchlist_scope
+        explain = "attribution" in wants
+        # A want answered at the account level is not a research focus, except
+        # "risk" when the holdings are ranked by it ("哪只风险最高" looks at each).
+        focuses = [focus for focus in focuses_of(intent) if focus not in account_topics or (focus == "risk" and "ranking" in wants)]
         if tickers:
             if not explain and not focuses:
-                focuses = [_focus(text)]
-            if len(tickers) >= 2 and focuses and not explain:
-                add("research-compare", "research.compare", {"tickers": list(tickers[:4]), "dimensions": focuses[:2]}, purpose="compare identical dimensions")
+                focuses = ["market"] if "performance" in wants else ["overview"]
+            if len(tickers) >= 2 and (focuses or "compare" in wants) and not explain:
+                add("research-compare", "research.compare", {"tickers": list(tickers[:4]), "dimensions": (focuses or ["overview"])[:2]}, purpose="compare identical dimensions")
             else:
                 for ticker in tickers[:4]:
                     if explain:
@@ -510,23 +387,18 @@ class RulePlanner:
         elif list_scope:
             # Account-level wording ("组合风险", "快发财报") is answered by the
             # account capabilities; per-ticker fan-out needs a per-ticker ask.
-            if "risk" in focuses and not _LIST_RANKING.search(text):
+            if "risk" in focuses and "ranking" not in wants:
                 focuses = [focus for focus in focuses if focus != "risk"]
-            if "earnings" in focuses and _EARNINGS_SCHEDULE.search(text) and not _EARNINGS_EACH.search(text):
+            if "earnings" in focuses and "earnings" in account_topics and not intent.each:
                 focuses = [focus for focus in focuses if focus != "earnings"]
             source = "state-watchlist" if watchlist_scope and not explicit_portfolio else "account-portfolio"
-            rank = _fan_out_rank(text) if source == "account-portfolio" else None
+            rank = fan_out_rank(intent) if source == "account-portfolio" else None
             # "哪只跌得最多" is answered by the position card's own P/L column;
             # only a time frame or a "why" needs the per-holding market look.
-            card_answers = rank is not None and not _RECENT_OR_WHY.search(text)
-            if card_answers:
-                explain = False
-            per_ticker = explain or bool(focuses) or bool(_EARNINGS_EACH.search(text))
-            if _EARNINGS_EACH.search(text) and "earnings" not in focuses:
+            card_answers = rank is not None and intent.scope in {"none", "since_purchase"} and not explain
+            per_ticker = explain or bool(focuses) or intent.each or ("performance" in wants and "ranking" in wants and not card_answers)
+            if intent.each and "earnings" not in focuses:
                 focuses = [*focuses, "earnings"]
-            only_scope = all(task.capability in {"account.portfolio", "state.read"} for task in tasks)
-            if not per_ticker and not card_answers and _LIST_RANKING.search(text) and _LIST_EVALUATE.search(text) and only_scope:
-                explain, per_ticker = True, True
             if source == "account-portfolio" and (explicit_portfolio or per_ticker or not tasks):
                 add("account-portfolio", "account.portfolio", purpose="identify positions and weights")
             if per_ticker:
@@ -535,6 +407,12 @@ class RulePlanner:
                     fan_out["rank"] = rank
                 if explain:
                     add("move-each", "market.explain_move", {}, purpose="explain each holding's recent move", depends_on=(source,), fan_out=dict(fan_out))
+                elif "performance" in wants and not focuses:
+                    add("performance-each", "market.performance", {}, purpose="recent returns and volume for each name", depends_on=(source,), fan_out=dict(fan_out))
                 for focus in focuses[:2]:
                     add(f"research-each-{focus}", "research.stock", {"focus": focus}, purpose=f"{focus} research for each holding", depends_on=(source,), fan_out=dict(fan_out))
         return tasks[:7]
+
+
+#: The name the rest of the code base and the tests grew up with.
+RulePlanner = IntentPlanner

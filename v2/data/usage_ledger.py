@@ -191,8 +191,13 @@ def record_llm(data, model, provider='DeepSeek', source=''):
     if cached is None:
         details = usage.get('prompt_tokens_details') or {}
         cached = details.get('cached_tokens') if isinstance(details, dict) else None
+    # Reasoning tokens are billed as output; kept apart so the report can show how much of the output is thinking.
+    completion_details = usage.get('completion_tokens_details') or {}
+    reasoning = completion_details.get('reasoning_tokens') if isinstance(completion_details, dict) else None
+    if reasoning is None:
+        reasoning = usage.get('reasoning_tokens')
     record('llm', provider, data.get('model') or model,
-           dict(input_tokens=usage.get('prompt_tokens'), output_tokens=usage.get('completion_tokens'), cached_tokens=cached),
+           dict(input_tokens=usage.get('prompt_tokens'), output_tokens=usage.get('completion_tokens'), cached_tokens=cached, **({'reasoning_tokens': reasoning} if reasoning is not None else {})),
            source=source, endpoint='chat', usage_basis='reported' if usage else 'unknown', requested_model=model)
 
 

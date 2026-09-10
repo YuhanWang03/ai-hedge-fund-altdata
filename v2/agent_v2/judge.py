@@ -17,11 +17,13 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_SYSTEM = """你是投研回答的表述审查员，只输出 JSON，不回答用户问题。
-给你若干条目，每条有一段文本（text）和一个不允许出现的断言（claim）。
-逐条判断：这段文本是否做出了这个断言（意思相同即算，措辞不必相同；带"可能、尚未确认、不能据此"这类限定的不算断言）。
+_SYSTEM = """你是投研回答的表述审查员，不回答用户问题。
+给你若干条目，每条有一段文本（text）和一个不允许出现的断言（claim）。text 可能分成"证据："和"回答："两部分：断言说的是回答对这条证据的表述。
+逐条判断：回答是否做出了这个断言（意思相同即算，措辞不必相同；带"可能、尚未确认、不能据此"这类限定的不算断言；回答对别的证据的表述不算）。
 做出了就 asserted=true 并原样引用做出断言的那句话（quote，30 字内可截断），没有就 asserted=false。
-只输出：{"verdicts":[{"id":"...","asserted":true,"quote":"..."}]}"""
+通过 verdicts 工具返回结果；如果无法调用工具，就只输出 {"verdicts":[{"id":"...","asserted":true,"quote":"..."}]}"""
+
+JUDGE_TOOL = {"type": "function", "function": {"name": "verdicts", "description": "逐条给出审查结论。", "parameters": {"type": "object", "properties": {"verdicts": {"type": "array", "items": {"type": "object", "properties": {"id": {"type": "string"}, "asserted": {"type": "boolean"}, "quote": {"type": "string"}}, "required": ["id", "asserted"]}}}, "required": ["verdicts"]}}}
 
 
 class ClaimJudge:
@@ -39,13 +41,12 @@ class ClaimJudge:
         rows = [{"id": str(item["id"]), "text": str(item["text"])[: self.max_text_chars], "claim": str(item["claim"])} for item in items[: self.max_items] if item.get("text") and item.get("claim")]
         if self.llm is None or not rows:
             return {}
-        from v2.agent_v2.agents.base import strip_fence
+        from v2.agent_v2.agents.base import structured_call
         from v2.usage_context import usage_source
 
         try:
             with usage_source(self.usage_source_name):
-                response = self.llm.complete([{"role": "system", "content": _SYSTEM}, {"role": "user", "content": json.dumps({"items": rows}, ensure_ascii=False)}], None)
-            verdicts = json.loads(strip_fence(response.text)).get("verdicts") or []
+                verdicts = structured_call(self.llm, _SYSTEM, {"items": rows}, JUDGE_TOOL).get("verdicts") or []
         except Exception as exc:  # noqa: BLE001 — an unavailable judge means the rule is not applied, never a failed run
             logger.warning("claim judge failed: %s: %s", type(exc).__name__, exc)
             return {}

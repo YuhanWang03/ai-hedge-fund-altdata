@@ -25,7 +25,7 @@ from v2.agent_v2.models import (
     ToolEnvelope,
     VerificationReport,
 )
-from v2.agent_v2.planning import RulePlanner, portfolio_ranking
+from v2.agent_v2.planning import RulePlanner, intent_of, portfolio_ranking
 from v2.agent_v2.synthesis import EvidenceSummarySynthesizer
 from v2.agent_v2.verification import locate_number
 from v2.usage_context import usage_source
@@ -63,7 +63,7 @@ def _planner_budget(request: NormalizedRequest, route: RouteDecision) -> BudgetC
         return BudgetClass.DEEP
     if route.kind == RouteKind.LAB:
         return BudgetClass.LAB
-    if any(word in request.text for word in ("持仓", "组合", "账户")):
+    if intent_of(request, route).portfolio_scope:
         return BudgetClass.PORTFOLIO
     if len(request.entities) >= 2:
         return BudgetClass.COMPARISON
@@ -93,7 +93,8 @@ class StructuredLLMPlanner:
         # Rules also own a ranking of the user's holdings: the position card
         # answers it, and the model tends to fan out over every holding.
         capabilities = {task.capability for task in deterministic.tasks}
-        if "account.portfolio" in capabilities and portfolio_ranking(request.text) and capabilities <= {"account.portfolio", "account.performance", "market.explain_move", "market.performance"}:
+        intent = intent_of(request, route)
+        if "account.portfolio" in capabilities and portfolio_ranking(intent) and capabilities <= {"account.portfolio", "account.performance", "market.explain_move", "market.performance"}:
             return deterministic
         # A follow-up the session framed (a loss since purchase) has a rule
         # plan built around that frame; the model would plan the bare words.
@@ -133,6 +134,7 @@ class StructuredLLMPlanner:
         payload = {
             "query": request.text,
             "entities": list(request.entities),
+            "intent": {key: value for key, value in intent.to_dict().items() if value not in (None, "", [], False)},
             "capabilities": capabilities,
             "maximum_tasks": limit,
             "maximum_long_running_tasks": MAX_LONG_RUNNING_TASKS,

@@ -99,6 +99,8 @@ def build_llm_agent(*, config: AgentV2Config | None = None, llm=None, lab=None, 
         llm = build_llm()
     catalog = default_catalog()
     registry = build_live_registry(catalog, lab=lab, web_search=web_search, llm=llm)
+    from v2.agent_v2.intent import IntentClassifier
+
     return AgentV2(
         catalog=catalog,
         registry=registry,
@@ -106,6 +108,7 @@ def build_llm_agent(*, config: AgentV2Config | None = None, llm=None, lab=None, 
         synthesizer=LLMEvidenceSynthesizer(llm, catalog=catalog),
         session=ShortTermSession(),
         config=config,
+        classifier=IntentClassifier(llm),
     )
 
 
@@ -127,10 +130,9 @@ def build_workspace_agent(
     effective_config = config or AgentV2Config()
     if enable_web and not effective_config.enable_web_fallback:
         effective_config = replace(effective_config, enable_web_fallback=True)
-    if use_llm and effective_config.shadow_intent is None:
-        # Live runs classify every question's intent in the background for
-        # the shadow report; a config that says False keeps it off.
-        effective_config = replace(effective_config, shadow_intent=True)
+    if use_llm and effective_config.record_intents is None:
+        # Live runs ledger every routing decision for the intent report; a config that says False keeps it off.
+        effective_config = replace(effective_config, record_intents=True)
     lab = WorkspaceLabPort()
     web_search = TavilyWebSearchPort(news_provider) if enable_web else None
     if use_llm:

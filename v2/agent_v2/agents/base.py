@@ -106,6 +106,8 @@ def strip_fence(text: str) -> str:
 class BoundedLoop:
     #: The ledger source every model call inside ``run`` is attributed to; subclasses name themselves.
     usage_source_name = "agent_v2.sub_agent"
+    #: Set by the loop for the forced-finish turn; a tool loop then offers only ``finish``.
+    finish_only = False
 
     """Drive a model through JSON actions until it finishes or a limit stops it.
 
@@ -167,6 +169,7 @@ class BoundedLoop:
             messages.append({"role": "user", "content": finish_prompt})
             outcome.calls += 1
             turn_started = time.monotonic()
+            self.finish_only = True  # a tool loop offers only finish on this turn
             action = self.step(messages)
             if action is not None and action.get("action") == "finish":
                 outcome.finished, outcome.final, stop = True, action, "finished"
@@ -253,6 +256,8 @@ class ToolLoop(BoundedLoop):
 
     def tool_specs(self) -> list[dict[str, Any]]:
         finish = {"type": "function", "function": {"name": "finish", "description": self.finish_description, "parameters": self.finish_parameters}}
+        if self.finish_only:
+            return [finish]
         return [tool.spec() for tool in self.tools.values()] + [finish]
 
     def tool_lines(self) -> str:
@@ -332,3 +337,32 @@ class ToolLoop(BoundedLoop):
         """Why this finish may not stand yet (the model is told and continues), or None to accept."""
 
         return None
+
+
+def structured_call(llm: Any, system: str, payload: Any, tool: dict[str, Any]) -> dict[str, Any]:
+    """One model turn that must answer through ``tool`` (a single function); its arguments are returned.
+
+    A model that answers with JSON text instead of calling the tool is still
+    understood; prose or invalid JSON raises ``ValueError``.  Used for every
+    single-shot judgement (intent, judge, challenger, debater) so parsing
+    failures stop being a stop reason.
+    """
+
+    content = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
+    response = llm.complete([{"role": "system", "content": system}, {"role": "user", "content": content}], [tool])
+    calls = list(getattr(response, "tool_calls", None) or [])
+    wanted = tool.get("function", {}).get("name")
+    for call in calls:
+        if call.name == wanted or len(calls) == 1:
+            if call.parse_error:
+                raise ValueError(f"tool arguments are not JSON: {call.parse_error}")
+            if not isinstance(call.arguments, dict):
+                raise ValueError("tool arguments must be an object")
+            return dict(call.arguments)
+    text = (getattr(response, "text", "") or "").strip()
+    if not text:
+        raise ValueError("empty model reply")
+    parsed = json.loads(strip_fence(text))
+    if not isinstance(parsed, dict):
+        raise ValueError("reply must be a JSON object")
+    return parsed

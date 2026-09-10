@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable
 
-from v2.agent_v2.agents.base import LoopLimits, Tool, ToolLoop, _schema, limits_for, strip_fence
+from v2.agent_v2.agents.base import LoopLimits, Tool, ToolLoop, _schema, limits_for, structured_call
 from v2.agent_v2.agents.filing_reader import EdgarFilingSource, FilingReader, FilingSource, locate_quote
 from v2.agent_v2.execution import CapabilityRegistry, ExecutionContext
 from v2.agent_v2.models import EvidenceItem, ResultStatus, ToolEnvelope
@@ -123,10 +123,12 @@ _FINISH_SCHEMA = _schema({"reasons": {"type": "array", "items": _REASON_SCHEMA},
 
 _FINISH_NOW = "轮次已用完。现在只允许 finish：只报你已经拿到来源并能引用原文的原因；没有就返回空 reasons 并说明。"
 
-_CHALLENGE = """你是异动归因的反方，只输出 JSON。给你一天的行情事实和归因者报出的"高置信度驱动"及其原文引文。
+CHALLENGE_TOOL = {"type": "function", "function": {"name": "verdict", "description": "给出对高置信度驱动的反对意见。", "parameters": {"type": "object", "properties": {"objection": {"type": "string", "description": "一句中文，指出具体不足；没有就留空"}, "downgrade": {"type": "boolean"}}, "required": ["objection", "downgrade"]}}}
+
+_CHALLENGE = """你是异动归因的反方，通过 verdict 工具给出结果。给你一天的行情事实和归因者报出的"高置信度驱动"及其原文引文。
 你的任务是找出这个驱动不足以解释当天涨跌的具体理由，只能用给你的事实和引文，不能编造：
 幅度是否相称（引文里的事件能否解释这么大的涨跌）、时间是否对得上（事件是否发生在当日或前一晚）、板块是否同向同幅（那就是板块行情而非公司原因）、引文是否只是分析师观点或长期展望。
-输出：{"objection":"一句中文，指出具体不足；没有就留空","downgrade":true|false}。只有理由具体且成立时才 downgrade。"""
+objection 一句中文指出具体不足（没有就留空），downgrade 只在理由具体且成立时为 true。如果无法调用工具，就只输出 {"objection":"...","downgrade":true|false}。"""
 
 #: Judged, not matched: the attributor's reader did read the filings, so the answer may not say otherwise however it words it.
 _UNREAD_RULE = {"forbid_claim": "申报的正文或内容没有被读取、只知道申报的类型和日期", "warning": ""}
@@ -413,8 +415,7 @@ class MoveAttributor:
         facts_text = f"{facts.ticker} {facts.date} {_pct(facts.change)}，收盘 {facts.close:.2f}" + (f"，行业基准 {facts.sector_etf} {_pct(facts.sector_return_1d)}" if facts.sector_return_1d is not None else "") + (f"，量比 {facts.volume_ratio:.2f}" if facts.volume_ratio is not None else "")
         try:
             with usage_source("agent_v2.challenger"):
-                response = self.llm.complete([{"role": "system", "content": _CHALLENGE}, {"role": "user", "content": f"行情事实：{facts_text}\n高置信度驱动：\n{brief}"}], None)
-            verdict = json.loads(strip_fence(response.text))
+                verdict = structured_call(self.llm, _CHALLENGE, f"行情事实：{facts_text}\n高置信度驱动：\n{brief}", CHALLENGE_TOOL)
             objection = str(verdict.get("objection") or "").strip()[:200]
             downgrade = bool(verdict.get("downgrade")) and bool(objection)
         except Exception as exc:  # noqa: BLE001 — a failed challenge changes nothing

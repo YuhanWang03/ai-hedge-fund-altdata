@@ -2630,7 +2630,7 @@ def test_a_news_question_plans_web_filings_and_memory_under_a_real_budget():
     why = normalize_request("NVDA 今天为什么跌，有什么消息")
     assert RulePlanner().plan(why, route(why)).tasks[0].capability == "market.explain_move"
     # A lone research-engine task or sub-agent never gets the 30-second lookup budget.
-    assert _budget([PlanTask("r", "research.stock", {"ticker": "ARM", "focus": "catalysts"})]) == BudgetClass.FOCUSED
+    assert _budget([PlanTask("r", "research.stock", {"ticker": "ARM", "focus": "catalysts"})]) == BudgetClass.STANDARD  # a cold research run overran 60 s
     assert _budget([PlanTask("m", "market.explain_move", {"ticker": "ARM"})]) == BudgetClass.FOCUSED
     assert _budget([PlanTask("p", "account.portfolio")]) == BudgetClass.DIRECT
 
@@ -2700,17 +2700,17 @@ def test_sub_agent_runs_are_ledgered_and_reported(tmp_path, monkeypatch):
     assert question_count(read_rows(ledger)) == 1 and question_count([]) == 0
     text = render(summary, unpriced, since_days=None, questions=2)
     # Tokens first; per run uses the sub-agent's ledger runs (2), the synthesizer has no run count; per question divides by the ledger's distinct runs; no money column without a price.
-    assert "| 来源 | 模型调用 | 未缓存输入 | 缓存输入 | 输出 | 标准当量 | 当量/调用 | 当量/次运行 | 当量/问题 | 缓存命中 | 失败 |" in text and "估算成本" not in text and "待定价" not in text
+    assert "| 来源 | 模型调用 | 未缓存输入 | 缓存输入 | 输出 | 其中推理 | 标准当量 | 当量/调用 | 当量/次运行 | 当量/问题 | 缓存命中 | 失败 |" in text and "估算成本" not in text and "待定价" not in text
     assert "账本里有 2 个用到子智能体的问题。" in text
-    assert "| agent_v2.move_attributor | 3 | 1,500 | 1,500 | 200 | 2,150 | 717 | 1,075 | 1,075 | 50% | 0 |" in text
-    assert "| agent_v2.synthesizer | 2 | 10,000 | 0 | 1,000 | 13,000 | 6,500 | — | 6,500 | 0% | 1 |" in text
-    assert "| 合计 | 5 | 11,500 | 1,500 | 1,200 | 15,150 | 3,030 | — | 7,575 | 12% | 1 |" in text and "标准当量 = 未缓存输入 × 1 + 缓存输入 × 1/30 + 输出 × 3" in text
-    assert "| 合计 | 5 | 11,500 | 1,500 | 1,200 | 15,150 | 3,030 | — | — | 12% | 1 |" in render(summary, unpriced, since_days=None)
+    assert "| agent_v2.move_attributor | 3 | 1,500 | 1,500 | 200 | 0% | 2,150 | 717 | 1,075 | 1,075 | 50% | 0 |" in text
+    assert "| agent_v2.synthesizer | 2 | 10,000 | 0 | 1,000 | 0% | 13,000 | 6,500 | — | 6,500 | 0% | 1 |" in text
+    assert "| 合计 | 5 | 11,500 | 1,500 | 1,200 | 0% | 15,150 | 3,030 | — | 7,575 | 12% | 1 |" in text and "标准当量 = 未缓存输入 × 1 + 缓存输入 × 1/30 + 输出 × 3" in text
+    assert "| 合计 | 5 | 11,500 | 1,500 | 1,200 | 0% | 15,150 | 3,030 | — | — | 12% | 1 |" in render(summary, unpriced, since_days=None)
     assert usage_totals(unpriced)["unpriced_reasons"] == {"缺少价格版本": 5}
     priced = {"agent_v2.move_attributor": {**unpriced["agent_v2.move_attributor"], "cost": {"CNY": 0.0123}, "unpriced": 1, "unpriced_reasons": {"缺少价格版本": 1}}}
     assert cost_label(priced["agent_v2.move_attributor"]) == "0.0123 CNY、1 次待定价（缺少价格版本）" and cost_label({"cost": {}, "unpriced": 0}) == "—"
     text = render(summary, priced, since_days=None)
-    assert "| 缓存命中 | 失败 | 估算成本 |" in text and "| 2,150 | 717 | 1,075 | — | 50% | 0 | 0.0123 CNY、1 次待定价（缺少价格版本） |" in text and "| 合计 | 3 |" in text
+    assert "| 缓存命中 | 失败 | 估算成本 |" in text and "| 200 | 0% | 2,150 | 717 | 1,075 | — | 50% | 0 | 0.0123 CNY、1 次待定价（缺少价格版本） |" in text and "| 合计 | 3 |" in text
     # Per-run usage from the ledger's run ids: exact question counts and the most expensive questions.
     from v2.agent_v2.eval.subagent_ledger import top_questions, usage_by_run, usage_by_source
 
@@ -2729,8 +2729,8 @@ def test_sub_agent_runs_are_ledgered_and_reported(tmp_path, monkeypatch):
     by_source = usage_by_source(events=events)
     text = render(summary, by_source, since_days=None, questions=99, runs=runs, rows=run_rows)
     # The synthesizer's per-question figure divides the two tagged calls (2,150 + 650) by 2 runs; the untagged call stays in the totals only.
-    assert "用量账本里有 2 个问题（按 run_id 计）。" in text and "| agent_v2.synthesizer | 3 | 2,500 | 1,500 | 300 | 3,450 | 1,150 | — | 1,400 | 38% | 0 |" in text
-    assert "| agent_v2.planner | 1 | 1,000 | 0 | 100 | 1,300 | 1,300 | — | 650 | 0% | 0 |" in text and "| 合计 | 4 | 3,500 | 1,500 | 400 | 4,750 | 1,188 | — | 2,050 | 30% | 0 |" in text
+    assert "用量账本里有 2 个问题（按 run_id 计）。" in text and "| agent_v2.synthesizer | 3 | 2,500 | 1,500 | 300 | 0% | 3,450 | 1,150 | — | 1,400 | 38% | 0 |" in text
+    assert "| agent_v2.planner | 1 | 1,000 | 0 | 100 | 0% | 1,300 | 1,300 | — | 650 | 0% | 0 |" in text and "| 合计 | 4 | 3,500 | 1,500 | 400 | 0% | 4,750 | 1,188 | — | 2,050 | 30% | 0 |" in text
     assert "另有 1 次调用没有 run_id" in text and "按用量账本里的 run_id 数算" in text
     assert "| ARM 为什么跌 | 2026-09-09 15:00 | 2 | 3,450 | synthesizer 2,150、planner 1,300 |" in text and "| （无子智能体记录） | 2026-09-09 16:00 | 1 | 650 | synthesizer 650 |" in text
     assert subagent_report.main(["--path", str(ledger), "--json"]) == 0
@@ -2964,77 +2964,89 @@ def test_orchestrator_runs_the_debate_on_research_answers_only():
     assert not [envelope for envelope in lookup.results if envelope.capability == "debate.challenge"] and quiet.calls == []
 
 
-def test_intent_classifier_validates_the_vocabulary_and_projects_the_regex_decision(tmp_path, monkeypatch):
+def test_intent_drives_routing_and_planning_with_the_model_the_labels_or_the_default(tmp_path, monkeypatch):
     from v2.agent_v2 import intent as intent_mod
     from v2.agent_v2.eval import intent_report
-    from v2.agent_v2.intent import IntentClassifier, Intent, agreement, compare_intents, parse_intent, read_shadow, render, rule_intent, shadow_classify
+    from v2.agent_v2.intent import Intent, IntentClassifier, RecordedIntents, default_intent, parse_intent, read_decisions, record_decision, decision_row, render, resolve_intent, summarize
 
-    # Off-vocabulary values are dropped, an unknown kind is an error.
-    parsed = parse_intent({"kind": "Research", "scope": "yesterday", "direction": "down", "wants": ["valuation", "moon", "compare", "compare"], "tickers": ["mu", "sndk", "not a ticker"], "portfolio_scope": "yes", "confidence": 1.7})
-    assert parsed == Intent(kind="research", scope="none", direction="down", wants=("valuation", "compare"), tickers=("MU", "SNDK"), portfolio_scope=True, confidence=1.0, source="model")
+    # Off-vocabulary values are dropped, an unknown kind is an error, commands are typed.
+    parsed = parse_intent({"kind": "Research", "scope": "yesterday", "direction": "down", "wants": ["valuation", "moon", "compare", "compare"], "tickers": ["mu", "sndk", "not a ticker"], "portfolio_scope": "yes", "confidence": 1.7, "command": {"operation": "alert.add", "ticker": "nvda", "direction": "below", "price": "150"}, "managers": ["buffett", "nobody"], "ark_etfs": ["arkk", "spy"], "window": "1m", "focus": ["valuation", "x"], "lab": "backtest", "strategy": "pead", "periods": ["week", "year"], "rank": "low"})
+    assert parsed.kind == "research" and parsed.scope == "none" and parsed.wants == ("valuation", "compare") and parsed.tickers == ("MU", "SNDK") and parsed.portfolio_scope and parsed.confidence == 1.0
+    assert parsed.command == {"operation": "alert.add", "ticker": "NVDA", "direction": "below", "price": 150.0} and parsed.managers == ("buffett",) and parsed.ark_etfs == ("ARKK",) and parsed.window == "1m" and parsed.focus == ("valuation",) and parsed.lab == "backtest" and parsed.strategy == "pead" and parsed.periods == ("week",) and parsed.rank == "low"
     with pytest.raises(ValueError):
         parse_intent({"kind": "chat"})
 
-    # The regex decision projected onto the same fields.
-    request = normalize_request("ARM 买入以来跌了这么多，是什么原因？")
-    decision = route(request)
-    plan = RulePlanner().plan(request, decision)
-    rules = rule_intent(request, decision, plan)
-    # The projection is faithful to the router: "是什么原因" is not in its research regex, so the kind stays lookup here.
-    assert decision.kind == RouteKind.FAST_LOOKUP and rules.kind == "lookup" and rules.direction == "down" and rules.scope == "since_purchase" and "drawdown" in rules.wants and rules.tickers == ("ARM",) and rules.source == "rules"
-    request = normalize_request("MU和SNDK哪个更值得购买？")
-    rules = rule_intent(request, route(request), RulePlanner().plan(request, route(request)))
-    assert rules.kind == "research" and rules.wants == ("compare",) and rules.tickers == ("MU", "SNDK")
-    request = normalize_request("什么是自由现金流？")
-    assert rule_intent(request, route(request), RulePlanner().plan(request, route(request))).kind == "knowledge"
-    request = normalize_request("把 NVDA 加入关注列表")
-    assert rule_intent(request, route(request), RulePlanner().plan(request, route(request))).kind == "command"
+    # The model classifies through a function tool; JSON text is accepted; prose is a failure that falls back.
+    from v2.agent.llm import ToolCall
 
-    # Agreement is per field; wants agree on the leading want.
-    model = Intent(kind="research", scope="none", direction="none", wants=("compare", "valuation"), tickers=("MU", "SNDK"), source="model")
-    assert compare_intents(rules, model) == {"kind": True, "scope": True, "direction": True, "wants": True, "tickers": True, "portfolio_scope": True}
-    assert compare_intents(rules, Intent(kind="lookup", wants=("news",), tickers=("MU",)))["kind"] is False
+    llm = ScriptedLLM([
+        LLMResponse(tool_calls=[ToolCall(id="c1", name="classify", arguments={"kind": "research", "scope": "today", "direction": "down", "wants": ["attribution", "news"], "tickers": ["AMD"], "portfolio_scope": False, "confidence": 0.9}, raw_arguments="{}")]),
+        LLMResponse(text='{"kind":"knowledge","scope":"none","direction":"none","wants":["valuation"],"tickers":[],"portfolio_scope":false,"confidence":0.8}'),
+        LLMResponse(text="I think it is research."),
+    ])
+    classifier = IntentClassifier(llm)
+    english = normalize_request("why did AMD drop today")
+    intent = classifier.classify(english)
+    assert intent.kind == "research" and intent.scope == "today" and intent.wants == ("attribution", "news") and intent.tickers == ("AMD",) and intent.source == "model"
+    assert llm.calls[0] and json.loads(llm.calls[0][1]["content"])["text"] == "why did AMD drop today"
+    assert classifier.classify(normalize_request("市盈率和市销率有什么区别？")).kind == "knowledge"
+    assert classifier.classify(normalize_request("x")) is None and IntentClassifier(None).classify(english) is None
 
-    # Shadow mode: one model call, one ledger row, the run untouched.
+    # Resolution order: the model, then the recorded label for the exact text, then the default.
+    recorded = RecordedIntents(tmp_path / "labels.json")
+    (tmp_path / "labels.json").write_text(json.dumps({"ARM 最近有哪些新闻？": {"intent": {"kind": "lookup", "scope": "recent", "direction": "none", "wants": ["news"], "tickers": ["ARM"], "portfolio_scope": False}}}), encoding="utf-8")
+    assert resolve_intent(normalize_request("ARM 最近有哪些新闻？"), recorded=recorded).source == "recorded"
+    fallback = resolve_intent(normalize_request("ARM 一句没人标过的话"), recorded=recorded)
+    assert fallback.source == "default" and fallback.kind == "research" and fallback.wants == ("overview",) and fallback.tickers == ("ARM",)
+    assert default_intent(normalize_request("没有代码的话")).kind == "lookup"
+
+    # The route and the plan follow the intent, not the wording: an English question routes as research and plans today's attribution.
+    decision = route(english, intent=intent)
+    assert decision.kind == RouteKind.RESEARCH and decision.intent is intent
+    plan = RulePlanner().plan(english, decision)
+    assert [task.capability for task in plan.tasks] == ["market.explain_move"] and plan.answer_mode == AnswerMode.RESEARCH_GROUNDED
+    knowledge = route(normalize_request("市盈率和市销率有什么区别？"), intent=Intent(kind="knowledge", wants=("valuation",)))
+    assert knowledge.kind == RouteKind.GENERAL_KNOWLEDGE
+    watch = Intent(kind="lookup", scope="recent", wants=("watchlist", "ranking", "performance"), watchlist_scope=True, source="model")
+    plan = RulePlanner().plan(normalize_request("我关注的股票里有没有最近在放量的？"), route(normalize_request("我关注的股票里有没有最近在放量的？"), intent=watch))
+    assert [(task.capability, bool(task.fan_out)) for task in plan.tasks] == [("state.read", False), ("market.performance", True)]  # volume is a performance look, not an attribution
+    briefing = Intent(kind="lookup", scope="today", wants=("briefing", "macro"), source="model")
+    plan = RulePlanner().plan(normalize_request("美股今天有啥注意的？"), route(normalize_request("美股今天有啥注意的？"), intent=briefing))
+    assert [task.capability for task in plan.tasks] == ["macro.overview", "account.earnings_schedule", "account.risk", "state.read"]
+    command = Intent(kind="command", command={"operation": "alert.add", "ticker": "NVDA", "direction": "below", "price": 150.0}, tickers=("NVDA",), source="model")
+    plan = RulePlanner().plan(normalize_request("NVDA 跌到 150 提醒我"), route(normalize_request("NVDA 跌到 150 提醒我"), intent=command))
+    assert plan.requires_confirmation and plan.tasks[0].arguments == {"operation": "alert.add", "payload": {"ticker": "NVDA", "direction": "below", "target_price": 150.0}}
+    default_plan = RulePlanner().plan(normalize_request("ARM 一句没人标过的话"), route(normalize_request("ARM 一句没人标过的话"), intent=fallback))
+    assert [task.capability for task in default_plan.tasks] == ["research.stock"] and any(note.startswith("intent: 未分类") for note in default_plan.assumptions)
+
+    # The decision ledger and its report.
     ledger = tmp_path / "intents.jsonl"
     monkeypatch.setenv("AGENT_V2_INTENT_LEDGER", str(ledger))
-    llm = ScriptedLLM([LLMResponse(text='{"kind":"research","scope":"none","direction":"none","wants":["compare","valuation"],"tickers":["MU","SNDK"],"portfolio_scope":false,"confidence":0.9}'), LLMResponse(text="not json")])
-    request = normalize_request("MU和SNDK哪个更值得购买？")
-    row = shadow_classify(IntentClassifier(llm), request, route(request), RulePlanner().plan(request, route(request)), run_id="run-1", channel="telegram")
-    assert row["model"]["wants"] == ["compare", "valuation"] and row["agree"]["kind"] and row["rules"]["kind"] == "research" and row["channel"] == "telegram"
-    failed = shadow_classify(IntentClassifier(llm), request, route(request), RulePlanner().plan(request, route(request)), run_id="run-2")
-    assert failed["model"] is None and failed["agree"] is None
-    assert IntentClassifier(None).classify(request) is None
-    rows = read_shadow(ledger)
-    assert [r["run_id"] for r in rows] == ["run-1", "run-2"]
-    summary = agreement(rows)
-    assert summary["rows"] == 2 and summary["classified"] == 1 and summary["failed"] == 1 and summary["full_agreement"] == 1 and summary["fields"]["kind"]["rate"] == 1.0
-    text = render(summary, since_days=7)
-    assert "模型给出有效分类 1 个，失败 1 个" in text and "| kind | 1 / 1 | 100% |" in text
-    # A disagreement is listed with both sides.
-    rows.append({"text": "AMD 今天成交量", "model": {"kind": "lookup", "scope": "today", "direction": "none", "wants": ["performance"], "tickers": ["AMD"]}, "rules": {"kind": "research", "scope": "recent", "direction": "none", "wants": ["performance"], "tickers": ["AMD"]}, "agree": {"kind": False, "scope": False, "direction": True, "wants": True, "tickers": True, "portfolio_scope": True}, "elapsed_ms": 900})
-    text = render(agreement(rows), since_days=None)
-    assert "| AMD 今天成交量 | kind、scope | research / recent / none / performance / AMD | lookup / today / none / performance / AMD |" in text
+    record_decision(decision_row(english, intent, plan, run_id="run-1", elapsed_ms=900, channel="telegram"))
+    record_decision(decision_row(normalize_request("ARM 一句没人标过的话"), fallback, default_plan, run_id="run-2"))
+    unsure = Intent(kind="lookup", wants=("overview",), tickers=("ARM",), confidence=0.4, source="model")
+    record_decision(decision_row(normalize_request("ARM这波是不是该跑了？"), unsure, default_plan, run_id="run-3"))
+    rows = read_decisions(ledger)
+    summary = summarize(rows)
+    assert summary["rows"] == 3 and summary["sources"] == {"model": 2, "default": 1} and summary["kinds"]["research"] == 2 and [entry["text"] for entry in summary["unsure"]] == ["ARM这波是不是该跑了？"] and [entry["text"] for entry in summary["unclassified"]] == ["ARM 一句没人标过的话"]
+    text = render(summary, since_days=1)
+    assert "来源：default 1、model 2" in text and "| ARM这波是不是该跑了？ | 0.40 |" in text and "| ARM 一句没人标过的话 |" in text
     assert intent_report.main(["--path", str(ledger), "--json"]) == 0
 
-    # The orchestrator ledgers in the background only when configured; inline for the test.
-    monkeypatch.setenv("AGENT_V2_INTENT_INLINE", "1")
+    # The orchestrator uses its classifier for the route and ledgers the decision when configured.
     registry = CapabilityRegistry(default_catalog())
-    registry.register("market.performance", lambda arguments, context: ToolEnvelope("market.performance", ResultStatus.COMPLETED, subject="ARM", evidence=[EvidenceItem("P", "ARM", "ARM 近 30 天 +1.00%")], metadata={"narrative": "ARM 近 30 天 +1.00%[P]。"}))
-    shadow_llm = ScriptedLLM([LLMResponse(text='{"kind":"lookup","scope":"recent","direction":"none","wants":["performance"],"tickers":["ARM"],"portfolio_scope":false,"confidence":0.8}')])
-    synthesizer = LLMEvidenceSynthesizer(ScriptedLLM([]))
-    synthesizer.llm = shadow_llm  # the shadow uses the synthesizer's model
-    before = len(read_shadow(ledger))
-    AgentV2(catalog=default_catalog(), registry=registry, synthesizer=EvidenceSummarySynthesizer()).run("ARM 最近30天表现")
-    assert len(read_shadow(ledger)) == before  # no model on the synthesizer: nothing to classify with
-    result = AgentV2(catalog=default_catalog(), registry=registry, synthesizer=synthesizer, config=AgentV2Config(shadow_intent=True)).run("ARM 最近30天表现")
-    rows = read_shadow(ledger)
-    assert len(rows) == before + 1 and rows[-1]["run_id"] == result.run_id and rows[-1]["model"]["wants"] == ["performance"] and rows[-1]["agree"]["kind"] and rows[-1]["capabilities"] == ["market.performance"]
-    assert result.status == RunStatus.COMPLETED
+    registry.register("market.explain_move", lambda arguments, context: ToolEnvelope("market.explain_move", ResultStatus.COMPLETED, subject="AMD", evidence=[EvidenceItem("M", "AMD", "AMD 今日 -1.00%")], metadata={"narrative": "AMD 今日 -1.00%[M]。"}))
+    live = IntentClassifier(ScriptedLLM([LLMResponse(text='{"kind":"research","scope":"today","direction":"down","wants":["attribution"],"tickers":["AMD"],"portfolio_scope":false,"confidence":0.9}')]))
+    before = len(read_decisions(ledger))
+    result = AgentV2(catalog=default_catalog(), registry=registry, classifier=live, config=AgentV2Config(record_intents=True)).run("why did AMD drop today")
+    assert result.route.kind == RouteKind.RESEARCH and [item.capability for item in result.results] == ["market.explain_move"]
+    assert len(read_decisions(ledger)) == before + 1 and read_decisions(ledger)[-1]["intent"]["source"] == "model" and read_decisions(ledger)[-1]["run_id"] == result.run_id
+    AgentV2(catalog=default_catalog(), registry=registry).run("why did AMD drop today")
+    assert len(read_decisions(ledger)) == before + 1  # no ledger without the flag
 
 
-def test_workspace_agent_turns_shadow_intent_on_even_with_an_explicit_default_config(monkeypatch):
-    """The bot and the web pass ``AgentV2Config()``; the shadow must still be on for live model runs."""
+def test_workspace_agent_records_intents_even_with_an_explicit_default_config(monkeypatch):
+    """The bot and the web pass ``AgentV2Config()``; live model runs must still ledger their decisions."""
 
     from v2.agent_v2 import runtime
 
@@ -3047,9 +3059,9 @@ def test_workspace_agent_turns_shadow_intent_on_even_with_an_explicit_default_co
     monkeypatch.setattr(runtime, "build_llm_agent", fake_llm_agent)
     monkeypatch.setattr(runtime, "WorkspaceLabPort", lambda: None)
     runtime.build_workspace_agent(config=AgentV2Config(), enable_web=False, use_llm=True)
-    assert captured["config"].shadow_intent is True
-    runtime.build_workspace_agent(config=AgentV2Config(shadow_intent=False), enable_web=False, use_llm=True)
-    assert captured["config"].shadow_intent is False
+    assert captured["config"].record_intents is True
+    runtime.build_workspace_agent(config=AgentV2Config(record_intents=False), enable_web=False, use_llm=True)
+    assert captured["config"].record_intents is False
 
 
 def test_tool_loop_drives_declared_tools_through_native_function_calling():
@@ -3201,9 +3213,9 @@ def test_claim_judge_decides_wording_rules_in_one_call_and_the_synthesizer_uses_
 
     answer = "AMD 上涨。[V1] 期权市场波动是主要原因。[C1] 成交量放大，但当日未收盘不能据此判断。[V1]"
     report = verify_answer(answer, [volume, candidate], answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result], judge=scripted)
-    assert len(calls) == 1 and sorted(item["claim"][:6] for item in calls[0]) == sorted(["用尚未收盘的", "把这条候选解", "把内部计数说"])
+    assert len(calls) == 1 and sorted(item["claim"][:6] for item in calls[0]) == sorted(["用尚未收盘的", "把“证据”里", "把内部计数说"])
     by_claim = {item["claim"][:6]: item for item in calls[0]}
-    assert by_claim["用尚未收盘的"]["text"] == "AMD 上涨。 成交量放大，但当日未收盘不能据此判断。" and by_claim["把内部计数说"]["text"].startswith("AMD 上涨。 期权市场波动是主要原因。")
+    assert by_claim["用尚未收盘的"]["text"] == "证据：AMD 截至查询时的盘中累计成交量为 1,000 股。\n回答：AMD 上涨。 成交量放大，但当日未收盘不能据此判断。" and by_claim["把内部计数说"]["text"].startswith("AMD 上涨。 期权市场波动是主要原因。")
     assert list(report.warnings) == ["候选归因被表述为已确认原因（“期权市场波动是主要原因”）"] and not report.ok
 
     # The model synthesizer owns a judge and repairs a draft the judge rejected.
@@ -3220,3 +3232,32 @@ def test_claim_judge_decides_wording_rules_in_one_call_and_the_synthesizer_uses_
     text = synthesizer.synthesize(normalize_request("AMD 为什么涨"), plan, [result_plain], [candidate])
     assert text == "期权市场波动可能是原因之一，尚未确认。[C1]" and synthesizer.last_outcome == "repaired"
     assert "候选归因被表述为已确认原因（“期权市场波动是主要原因”）" in synth_llm.calls[2][-1]["content"]
+
+
+def test_recorded_intents_reproduce_every_legacy_plan():
+    """The labels were taken from the regex pipeline before it was removed; the intent planner must plan the same tasks from them.
+
+    Each fixture row keeps the legacy route and capabilities; the diff is the
+    regression test for the templates.  Rows that are not questions (test
+    prose harvested along the way) are skipped.
+    """
+
+    from v2.agent_v2.intent import _RECORDED
+
+    rows = _RECORDED._load()
+    assert len(rows) > 300
+    mismatches = []
+    checked = 0
+    for text, row in rows.items():
+        legacy = row.get("legacy") or {}
+        if not legacy or "→" in text or "[" in text or text.endswith(("。", "：", "，")):
+            continue
+        request = normalize_request(text)
+        decision = route(request)
+        plan = RulePlanner().plan(request, decision)
+        checked += 1
+        got = (decision.kind.value, [task.capability for task in plan.tasks], plan.answer_mode.value, plan.requires_confirmation)
+        want = (legacy["route"], legacy["capabilities"], legacy["answer_mode"], legacy["requires_confirmation"])
+        if got != want:
+            mismatches.append((text, got, want))
+    assert checked > 300 and not mismatches, mismatches[:5]

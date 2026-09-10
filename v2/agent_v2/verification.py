@@ -268,7 +268,10 @@ def _sentence_warnings(answer: str, evidence: list[EvidenceItem], results: list[
                     # The judge sees every sentence citing this item at once.
                     seen_claims.add((item.id, str(claim)))
                     citing = [_CITATION.sub("", s).strip() for s in _SENTENCE.findall(answer) if item.id in _CITATION.findall(s)]
-                    claims.append({"id": f"evidence:{item.id}:{len(claims)}", "text": " ".join(citing), "claim": str(claim), "warning": warning})
+                    # The judge sees the evidence the rule is about, so a sentence
+                    # that also cites a confirmed driver is not read as calling
+                    # this candidate confirmed.
+                    claims.append({"id": f"evidence:{item.id}:{len(claims)}", "text": f"证据：{item.claim[:300]}\n回答：{' '.join(citing)}", "claim": str(claim), "warning": warning})
     return warnings
 
 

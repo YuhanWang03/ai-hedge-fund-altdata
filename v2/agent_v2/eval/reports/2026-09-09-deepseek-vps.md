@@ -259,6 +259,26 @@ handler 抛 ValueError 时原话回给模型，其他异常回"执行失败"。�
 （`agent_v2.judge`）。合成器的初稿和修正稿都过这一道，没有模型时这类规则不生效。
 盘中价格、盘中成交量、候选归因、内部计数、申报未读取五条规则全部换掉，输出侧不再有措辞正则。
 
+## 去正则第二、三步：意图驱动路由和规划
+
+路由和规划器不再读字面。`intent.py` 的 `Intent` 是一组固定字段：kind、scope、direction、wants、
+tickers、portfolio_scope、watchlist_scope，外加命令参数（operation、ticker、direction、price、alert_id）、
+宏观数据名、基金经理、ARK 代码、回撤窗口、研究维度、实验类型和策略、盈亏口径、排名方向。线上由
+`IntentClassifier` 一次 function calling 调用产出（`agent_v2.intent`，约 1.5 秒）；没有模型时用
+`eval/recorded_intents.json` 里按原文记录的标签（500 多条，覆盖测试和离线评测用到的全部问题，
+是旧正则管线删除前投影出来的）；没有标签的文本走默认意图（有代码就研究概览，没有就查询），并在
+计划假设里注明。`routing.route()` 从意图定路由，`planning.IntentPlanner` 从意图套模板：下跌/上涨链、
+新闻计划、今日归因、行情、比较、账户和关注列表 fan-out、宏观、13F、命令。规划器和路由里 70 条
+措辞正则全部删除；实体抽取（代码和公司名表）保留。`test_recorded_intents_reproduce_every_legacy_plan`
+把每条标签跑一遍新规划器，和旧管线的路由、能力、回答模式、是否需确认逐项比对，作为模板的回归测试。
+简报模板重做：宏观、财报日历、组合风险、关注列表，不再对持仓逐只归因。
+`intent_report` 改为按来源、kind、wants 的分布和模型拿不准（置信度 < 0.7）、未分类的问题清单。
+
+顺带的四处：评审员看得到规则针对的证据原文，"内部计数"规则只禁系统口径；反方、挑战者、评审员、
+分类器全部通过单个 function 工具返回结果，不再解析文字 JSON；子智能体强制结束那一轮只提供 finish；
+用量账本记推理 token（`completion_tokens_details.reasoning_tokens`），报告多一列"其中推理"；
+含 `research.stock` 的计划预算提到 STANDARD。
+
 ## 下一步
 
 1. 换一批留出集。当前 15 条已被看过三轮，把它们并入开发集，从 Telegram 真实问句里

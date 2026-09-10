@@ -16,15 +16,18 @@ import json
 import time
 from typing import Any
 
-from v2.agent_v2.agents.base import strip_fence
+from v2.agent_v2.agents.base import structured_call
 from v2.agent_v2.execution import ExecutionContext
 from v2.agent_v2.models import EvidenceItem, ResultStatus, ToolEnvelope
 
-_SYSTEM = """你是投研回答的反方辩手，只输出 JSON，不回答用户问题。
+DEBATE_TOOL = {"type": "function", "function": {"name": "objections", "description": "给出反方意见。", "parameters": {"type": "object", "properties": {"stance": {"type": "string", "enum": ["回答偏多", "回答偏空", "回答中性"]}, "objections": {"type": "array", "maxItems": 3, "items": {"type": "object", "properties": {"claim": {"type": "string"}, "objection": {"type": "string"}, "evidence_id": {"type": "string"}}, "required": ["objection", "evidence_id"]}}, "note": {"type": "string"}}, "required": ["stance", "objections"]}}}
+
+_SYSTEM = """你是投研回答的反方辩手，通过 objections 工具给出结果，不回答用户问题。
 给你用户的问题、当前回答和这次运行拿到的证据（id 和内容）。任务：找出回答里最站不住的 1 到 3 个判断，
 每条给出一句具体的反对理由，并且必须指向证据列表里能支持这条反对的 id（相反的数字、被回答忽略的限制、口径不符的引用）。
 不能编造证据，不能用常识反驳；证据不支持反对就不要写。
-输出：{"stance":"回答偏多|回答偏空|回答中性","objections":[{"claim":"被反对的回答判断（原句或概括，30 字内）","objection":"一句反对理由","evidence_id":"证据 id"}],"note":"一句总评或留空"}"""
+字段：stance（回答偏多|回答偏空|回答中性），objections（每条 claim=被反对的回答判断，30 字内；objection=一句反对理由；evidence_id=证据 id），note（一句总评或留空）。
+如果无法调用工具，就只输出同样字段的 JSON。"""
 
 #: Seconds the debate may take; it runs after the answer is verified, on what is left of the budget.
 DEBATE_MIN_SECONDS = 20.0
@@ -55,8 +58,7 @@ class Debater:
         try:
             agent["llm_calls"] = 1
             with usage_source("agent_v2.debater"):
-                response = self.llm.complete([{"role": "system", "content": _SYSTEM}, {"role": "user", "content": payload}], None)
-            verdict = json.loads(strip_fence(response.text))
+                verdict = structured_call(self.llm, _SYSTEM, payload, DEBATE_TOOL)
             stance = str(verdict.get("stance") or "")[:12]
             note = str(verdict.get("note") or "")[:120]
             for row in verdict.get("objections") or []:
