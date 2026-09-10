@@ -310,7 +310,7 @@ class FilingReader:
             refs.sort(key=lambda ref: abs((date.fromisoformat(ref.filing_date) - date.fromisoformat(around[:10])).days) if ref.filing_date else 999)
         chosen = refs[:limit]
         if not chosen:
-            return self._envelope(ticker, window, around, [], [], [], note=f"{window} 未查到申报", metrics={"rounds": 0, "llm_calls": 0}, status=ResultStatus.COMPLETED)
+            return self._envelope(ticker, window, around, [], [], [], note=f"{window} 未查到申报", metrics={"rounds": 0, "llm_calls": 0, "stop_reason": "no_filings", "elapsed_ms": 0}, status=ResultStatus.COMPLETED)
         if self.llm is None:
             return self._envelope(ticker, window, around, chosen, [], [], note="未配置模型，只列出申报，未读取内容", metrics={"rounds": 0, "llm_calls": 0}, status=ResultStatus.PARTIAL_DATA)
 

@@ -1271,8 +1271,10 @@ def test_move_attributor_explains_a_past_day_from_sources_it_fetched_and_remembe
     narrative = result.metadata["narrative"]
     assert narrative.startswith("ARM 在 2026-07-29 收于") and "能直接支持的高置信度驱动：营收指引低于华尔街预期[" in narrative and "跑输行业基准 SMH" in narrative
     assert verify_answer(narrative, result.evidence, answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result]).ok
+    assert "申报读到：2026-07-29 季度营收低于指引区间[E-ARM-0729]。" in narrative
     compact = result.metadata["narrative_compact"]
     assert compact.startswith("2026-07-29 ARM ") and "驱动：营收指引低于华尔街预期[" in compact and "跑输 SMH" in compact
+    assert "申报读到" not in compact  # a confirmed driver keeps the phone version to one lead
     assert "\n" not in compact and len(compact) < len(narrative)
     assert verify_answer(compact, result.evidence, answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result]).ok
     # Without web consent the news action is refused and the loop is told so.
@@ -2274,6 +2276,27 @@ def test_llm_synthesizer_completes_citations_before_verifying_a_draft():
     assert verify_answer(answer, evidence, answer_mode=plan.answer_mode, results=results).ok
 
 
+def test_move_attributor_searches_the_news_once_before_settling_for_memory():
+    from v2.agent_v2.agents.move_attributor import MoveAttributor
+
+    calls: list[str] = []
+
+    def news(query, day):
+        calls.append(query)
+        return []
+
+    finish = LLMResponse(text='{"action":"finish","reasons":[],"next_steps":[],"note":""}')
+    llm = ScriptedLLM([finish, LLMResponse(text='{"action":"news","query":"NVDA stock September 9 2026"}'), finish])
+    attributor = MoveAttributor(llm, price_source_factory=lambda: SimpleNamespace(get_prices=_attributor_prices), news=news, filing_reader=None, memory_recall=None, memory_remember=None, sector_for=lambda ticker: "SMH")
+    result = attributor.run("ARM", ExecutionContext("run", NormalizedRequest("q", "q"), BudgetClass.PORTFOLIO, allow_web=True), day="2026-07-29", today=date(2026, 9, 9))
+    assert calls == ["NVDA stock September 9 2026"] and [step["action"] for step in result.metadata["trace"]] == ["finish_refused", "news", "finish"]
+    assert "还没有搜过新闻" in llm.calls[1][-1]["content"]
+    # Without consent there is no news to insist on.
+    quiet = ScriptedLLM([finish])
+    MoveAttributor(quiet, price_source_factory=lambda: SimpleNamespace(get_prices=_attributor_prices), news=news, filing_reader=None, memory_recall=None, memory_remember=None, sector_for=lambda ticker: "SMH").run("ARM", ExecutionContext("run", NormalizedRequest("q", "q"), BudgetClass.PORTFOLIO), day="2026-07-29", today=date(2026, 9, 9))
+    assert len(quiet.calls) == 1 and calls == ["NVDA stock September 9 2026"]
+
+
 def test_move_attributor_reads_a_filing_dated_just_before_the_day_without_being_asked():
     from v2.agent_v2.agents.filing_reader import FilingRef
     from v2.agent_v2.agents.move_attributor import MoveAttributor
@@ -2338,6 +2361,12 @@ def test_todays_move_goes_to_the_attributor_with_intraday_wording_when_the_sessi
     telegram = _telegram_result("x[evidence-news-1]。", outcome="clean")
     telegram.results = [result]
     assert telegram_format.agent_lines(telegram) == [f"异动归因 ARM 2026-09-09：1 轮 · {summary['elapsed_ms'] / 1000:.1f}s · 完成（盘中）"]
+    # A challenge verdict and a memory decision get their own indented lines.
+    result.metadata["agent"]["challenge"] = {"called": True, "source": "model", "objection": "引文只说股价跟随指引下跌，无法解释 8% 的跌幅", "downgraded": True}
+    result.metadata["agent"]["memory"] = {"written": False, "conflict": True, "note": "记忆中已有更高置信度的归因（高，2026-09-09写入），本次结论未覆盖"}
+    result.metadata["agent"]["reader_runs"] = [{"filings": 0, "sections_read": 0, "events": 0, "rounds": 0, "stop_reason": "no_filings", "elapsed_ms": 0, "trace": []}]
+    lines = telegram_format.agent_lines(telegram)
+    assert lines[1] == "  · 反方降级：引文只说股价跟随指引下跌，无法解释 8% 的跌幅" and lines[2].startswith("  · 记忆冲突：记忆中已有更高置信度的归因") and lines[3] == "  ↳ 申报阅读：0 轮 · 0.0s · 无申报"
     assert telegram.to_dict()["sub_agents"][0]["label"] == "异动归因"
     # After the close the same capability reads as a completed bar and is remembered.
     closed = datetime(2026, 9, 9, 18, 0, tzinfo=ZoneInfo("America/New_York"))
@@ -2520,6 +2549,11 @@ def test_sub_agent_runs_are_ledgered_and_reported(tmp_path, monkeypatch):
     assert summary["filing_reader"]["runs"] == 2 and summary["filing_reader"]["kept"] == 2
     text = render(summary, {}, since_days=7)
     assert "| move_attributor | 2 | 4.0 | 12.3 |" in text and "| news_checker | 2 |" in text and "用量账本不可用" in text
+    from v2.agent_v2.eval.subagent_ledger import cost_label
+
+    priced = {"agent_v2.move_attributor": {"calls": 3, "input_tokens": 100, "output_tokens": 20, "cost": {"CNY": 0.0123}, "unpriced": 1, "failed": 0}}
+    assert cost_label(priced["agent_v2.move_attributor"]) == "0.0123 CNY、1 次待定价" and cost_label({"cost": {}, "unpriced": 0}) == "待定价"
+    assert "| agent_v2.move_attributor | 3 | 100 | 20 | 0.0123 CNY、1 次待定价 | 0 |" in render(summary, priced, since_days=None)
     assert subagent_report.main(["--path", str(ledger), "--json"]) == 0
     # An orchestrator run with a sub-agent envelope writes the ledger by itself; the flag turns it off.
     registry = CapabilityRegistry(default_catalog())

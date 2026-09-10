@@ -136,7 +136,7 @@ def usage_by_source(since_days: int | None = None) -> dict[str, dict[str, Any]]:
     except Exception:  # noqa: BLE001 — the ledger is optional infrastructure
         return {}
     cutoff = (datetime.now(tz=timezone.utc) - timedelta(days=since_days)).isoformat() if since_days else ""
-    totals: dict[str, dict[str, Any]] = defaultdict(lambda: {"calls": 0, "input_tokens": 0.0, "output_tokens": 0.0, "cost_usd": 0.0, "failed": 0})
+    totals: dict[str, dict[str, Any]] = defaultdict(lambda: {"calls": 0, "input_tokens": 0.0, "output_tokens": 0.0, "cost": {}, "unpriced": 0, "failed": 0})
     try:
         with _conn() as conn:
             query = "SELECT payload, cost_usd FROM usage_events WHERE category='llm'" + (" AND occurred_at>=?" if cutoff else "")
@@ -153,13 +153,30 @@ def usage_by_source(since_days: int | None = None) -> dict[str, dict[str, Any]]:
                 usage = event.get("usage") or {}
                 bucket["input_tokens"] += float(usage.get("input_tokens") or 0)
                 bucket["output_tokens"] += float(usage.get("output_tokens") or 0)
-                bucket["cost_usd"] += float(cost or 0)
+                # The ledger prices each event in the provider's currency
+                # (DeepSeek in CNY); the USD column is only filled for USD.
+                amount, currency = event.get("amount"), str(event.get("currency") or "")
+                if amount is None and cost is not None:
+                    amount, currency = cost, "USD"
+                if amount is not None and currency:
+                    bucket["cost"][currency] = bucket["cost"].get(currency, 0.0) + float(amount)
+                else:
+                    bucket["unpriced"] += 1
                 if event.get("state") != "success":
                     bucket["failed"] += 1
     except Exception as exc:  # noqa: BLE001
         logger.warning("usage ledger unavailable for the sub-agent report: %s", exc)
         return {}
-    return {source: {**bucket, "cost_usd": round(bucket["cost_usd"], 4)} for source, bucket in sorted(totals.items())}
+    return {source: {**bucket, "cost": {currency: round(value, 4) for currency, value in bucket["cost"].items()}} for source, bucket in sorted(totals.items())}
+
+
+def cost_label(row: dict[str, Any]) -> str:
+    """``0.0123 CNY`` (one figure per currency), with how many calls had no price."""
+
+    parts = [f"{value:.4f} {currency}" for currency, value in sorted((row.get("cost") or {}).items())]
+    if row.get("unpriced"):
+        parts.append(f"{row['unpriced']} 次待定价")
+    return "、".join(parts) if parts else "待定价"
 
 
 def render(summary: dict[str, dict[str, Any]], usage: dict[str, dict[str, Any]], *, since_days: int | None) -> str:
@@ -177,10 +194,10 @@ def render(summary: dict[str, dict[str, Any]], usage: dict[str, dict[str, Any]],
         lines.append("产出 = 校验后保留的原因或事件数；丢弃率 = 被校验器丢弃的占报出总数的比例；空跑 = 一条都没保留的运行。")
     lines.append("")
     if usage:
-        lines.append("| 来源 | 模型调用 | 输入 tokens | 输出 tokens | 估算成本 USD | 失败 |")
+        lines.append("| 来源 | 模型调用 | 输入 tokens | 输出 tokens | 估算成本 | 失败 |")
         lines.append("|---|---|---|---|---|---|")
         for source, row in usage.items():
-            lines.append(f"| {source} | {row['calls']} | {int(row['input_tokens'])} | {int(row['output_tokens'])} | {row['cost_usd']:.4f} | {row['failed']} |")
+            lines.append(f"| {source} | {row['calls']} | {int(row['input_tokens'])} | {int(row['output_tokens'])} | {cost_label(row)} | {row['failed']} |")
     else:
         lines.append("用量账本不可用或没有 agent_v2.* 的记录（Token 与成本按来源归属需要线上账本）。")
     return "\n".join(lines)

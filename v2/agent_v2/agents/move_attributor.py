@@ -142,6 +142,16 @@ class _AttributionLoop(BoundedLoop):
         self.filing_events = filing_events
         self.recall = recall
         self.gathered = Gathered()
+        self._refused_finish = False
+
+    def accept_finish(self, action: dict[str, Any], messages: list[dict[str, str]]) -> bool:
+        # With the user's web consent the news is looked at once before the
+        # loop settles for memory alone; asked once, never twice.
+        if self.news is not None and self.gathered.news_calls == 0 and not self._refused_finish:
+            self._refused_finish = True
+            messages.append({"role": "user", "content": "网页已授权但还没有搜过新闻；请先 news 搜索一次当日报道，再 finish。"})
+            return False
+        return True
 
     def handle(self, action: dict[str, Any], messages: list[dict[str, str]]) -> bool:
         kind = str(action.get("action") or "")
@@ -483,8 +493,9 @@ class MoveAttributor:
         answer_constraints: list[dict[str, Any]] = [{"forbid": _COUNT_LEAK, "warning": "将内部归因计数直接暴露给用户"}]
         if high == 0:
             answer_constraints.append({"max_cited": {"metadata": {"claim_role": "candidate_driver"}, "max": 1, "warning": "未确认直接驱动时展示了过多弱候选线索"}})
-        narrative = self._narrative(facts, evidence[0], volume, benchmark, reason_items, assessment)
-        compact = self._compact_narrative(facts, evidence[0], benchmark, reason_items, assessment)
+        read_events = [item for item in gathered.filing_events.values()]
+        narrative = self._narrative(facts, evidence[0], volume, benchmark, reason_items, assessment, read_events)
+        compact = self._compact_narrative(facts, evidence[0], benchmark, reason_items, assessment, read_events)
         return ToolEnvelope(
             "market.attribute_move",
             ResultStatus.COMPLETED if reasons else ResultStatus.PARTIAL_DATA,
@@ -499,7 +510,7 @@ class MoveAttributor:
         )
 
     @staticmethod
-    def _narrative(facts: DayFacts, price: EvidenceItem, volume: EvidenceItem | None, benchmark: EvidenceItem | None, reasons: list[EvidenceItem], assessment: EvidenceItem) -> str:
+    def _narrative(facts: DayFacts, price: EvidenceItem, volume: EvidenceItem | None, benchmark: EvidenceItem | None, reasons: list[EvidenceItem], assessment: EvidenceItem, read_events: list[EvidenceItem] | None = None) -> str:
         direction = "上涨" if (facts.change or 0) > 0 else "下跌" if (facts.change or 0) < 0 else "基本持平"
         first = f"{price.claim.rstrip('。')}[{price.id}]。"
         if volume is not None:
@@ -515,6 +526,9 @@ class MoveAttributor:
         if candidates:
             best = max(candidates, key=lambda item: float(item.confidence or 0))
             second += f"最相关的一条候选线索是“{best.metadata['driver_text']}”，只能作为排查方向[{best.id}]。"
+        # What the filing reader found is stated even when no reason was
+        # built on it; otherwise the answer says the filings were unread.
+        second += _read_events_sentence(read_events or [])
         if benchmark is not None and facts.relative_1d is not None:
             relation = "跑赢" if facts.relative_1d > 0 else "跑输"
             when = "截至查询时盘中" if facts.is_intraday else "当天"
@@ -526,7 +540,7 @@ class MoveAttributor:
         return "\n\n".join(part for part in (first, second, third) if part)
 
     @staticmethod
-    def _compact_narrative(facts: DayFacts, price: EvidenceItem, benchmark: EvidenceItem | None, reasons: list[EvidenceItem], assessment: EvidenceItem) -> str:
+    def _compact_narrative(facts: DayFacts, price: EvidenceItem, benchmark: EvidenceItem | None, reasons: list[EvidenceItem], assessment: EvidenceItem, read_events: list[EvidenceItem] | None = None) -> str:
         """The same day in one short paragraph, for a phone screen.
 
         Date and move, how it compared with the sector, and the single best
@@ -548,6 +562,8 @@ class MoveAttributor:
             sentence += f"催化剂未确认；最相关线索：{best.metadata['driver_text']}[{best.id}]。"
         else:
             sentence += f"暂未找到可核实的同日催化剂[{assessment.id}]。"
+        if not confirmed:
+            sentence += _read_events_sentence((read_events or [])[:1])
         return sentence
 
 
@@ -562,6 +578,18 @@ def lead_text(text: str) -> str:
     cleaned = re.sub(r"\s+", " ", str(text or "")).strip()
     cleaned = cleaned.rstrip("。；;，,.！!？? ")
     return re.sub(r"[。；;]\s*", "；", cleaned)
+
+
+def _read_events_sentence(events: list[EvidenceItem]) -> str:
+    """"申报读到：…" for the events the filing reader located, each cited; empty when it read none."""
+
+    parts = []
+    for item in events[:2]:
+        text = item.claim.split("：", 1)[1] if "：" in item.claim else item.claim
+        text = text.split("（", 1)[0].strip().rstrip("。")
+        if text:
+            parts.append(f"{item.metadata.get('date') or item.as_of} {text}[{item.id}]")
+    return ("申报读到：" + "；".join(parts) + "。") if parts else ""
 
 
 def _pct(value: float | None) -> str:

@@ -231,7 +231,7 @@ def completion_note(result: AgentResult) -> str:
     return f"引用补全 {len(completions)} 处" if completions else ""
 
 
-_STOP_LABELS = {"finished": "完成", "rounds": "轮次用尽", "time": "超时", "no_model": "无模型", "no_budget": "无预算"}
+_STOP_LABELS = {"finished": "完成", "rounds": "轮次用尽", "time": "超时", "no_model": "无模型", "no_budget": "无预算", "no_filings": "无申报"}
 _CALL_LABELS = {"news": "新闻", "filing_events": "读申报", "memory": "记忆", "search": "搜索", "read": "读正文", "filings": "申报", "sections_read": "读节", "events": "事件"}
 
 
@@ -246,6 +246,13 @@ def agent_lines(result: AgentResult, *, limit: int = 8) -> list[str]:
         stop = _STOP_LABELS.get(entry["stop_reason"], entry["stop_reason"])
         seconds = entry["elapsed_ms"] / 1000
         lines.append(f"{entry['label']} {entry['subject']}：{entry['rounds']} 轮 · {seconds:.1f}s" + (f" · {calls}" if calls else "") + (f" · {stop}" if stop else "") + ("（盘中）" if entry["intraday"] else ""))
+        challenge = entry.get("challenge") or {}
+        if challenge.get("objection"):
+            verdict = "反方降级" if challenge.get("downgraded") else "反方未采纳"
+            lines.append(f"  · {verdict}：{_one_line(str(challenge['objection']), 90)}")
+        memory = entry.get("memory") or {}
+        if memory.get("conflict") or (memory.get("note") and not memory.get("written")):
+            lines.append(f"  · 记忆{'冲突' if memory.get('conflict') else '未覆盖'}：{_one_line(str(memory.get('note') or ''), 90)}")
         for nested in entry["nested"]:
             nested_calls = "、".join(f"{_CALL_LABELS.get(key, key)} {value}" for key, value in nested["calls"].items() if value)
             lines.append(f"  ↳ {nested['label']}：{nested['rounds']} 轮 · {nested['elapsed_ms'] / 1000:.1f}s" + (f" · {nested_calls}" if nested_calls else "") + (f" · {_STOP_LABELS.get(nested['stop_reason'], nested['stop_reason'])}" if nested["stop_reason"] else ""))
