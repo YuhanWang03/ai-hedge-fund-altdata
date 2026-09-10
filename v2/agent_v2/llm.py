@@ -549,21 +549,8 @@ results 中的评分或限制如需引用，使用 evidence 中 citation_kind �
             "response_style": "detailed" if _DETAILED_ANSWER.search(query) else "brief",
             "response_intent": _response_intent(plan, results),
             "assumptions": list(plan.assumptions),
-            "results": [
-                {
-                    "capability": result.capability,
-                    "status": result.status.value,
-                    "subject": result.subject,
-                    "as_of": result.as_of,
-                    "summary": result.summary[:2500],
-                    "metrics": result.metrics,
-                    "findings": result.findings[:8],
-                    "limitations": result.limitations[:8],
-                    "errors": result.errors[:3],
-                }
-                for result in results
-            ],
-            "evidence": [item.to_dict() for item in _select_evidence(results, evidence, 40)],
+            "results": [_result_row(result) for result in results],
+            "evidence": [_evidence_row(item) for item in _select_evidence(results, evidence, 40)],
         }
         encoded = json.dumps(data, ensure_ascii=False, default=str)
         if len(encoded) <= self.max_context_chars:
@@ -572,7 +559,8 @@ results 中的评分或限制如需引用，使用 evidence 中 citation_kind �
         # allowing transport-level truncation to cut an arbitrary JSON token.
         data["evidence"] = data["evidence"][:16]
         for result in data["results"]:
-            result["findings"] = result["findings"][:3]
+            if result.get("findings"):
+                result["findings"] = result["findings"][:3]
             result["summary"] = result["summary"][:1000]
         encoded = json.dumps(data, ensure_ascii=False, default=str)
         if len(encoded) <= self.max_context_chars:
@@ -583,19 +571,12 @@ results 中的评分或限制如需引用，使用 evidence 中 citation_kind �
                 "status": row["status"],
                 "subject": row["subject"],
                 "summary": row["summary"][:400],
-                "limitations": row["limitations"][:2],
+                **({"limitations": row["limitations"][:2]} if row.get("limitations") else {}),
             }
             for row in data["results"]
         ]
         data["evidence"] = [
-            {
-                "id": row["id"],
-                "entity": row["entity"],
-                "claim": str(row["claim"])[:500],
-                "value": row["value"],
-                "as_of": row["as_of"],
-                "source_id": row["source_id"],
-            }
+            {key: (str(value)[:500] if key == "claim" else value) for key, value in row.items() if key in ("id", "entity", "claim", "value", "as_of", "source_id", "citation_kind")}
             for row in data["evidence"][:12]
         ]
         encoded = json.dumps(data, ensure_ascii=False, default=str)
@@ -620,6 +601,31 @@ results 中的评分或限制如需引用，使用 evidence 中 citation_kind �
             }
             encoded = json.dumps(data, ensure_ascii=False, default=str)
         return encoded
+
+
+#: Evidence fields the synthesizer sees.  Titles, URLs, run ids and the rest
+#: of the metadata are for the surfaces and the verifier, not for the draft:
+#: the model cites by id, and every field sent is an uncached input token
+#: on every call.  ``citation_kind`` stays because the system prompt names it.
+_EVIDENCE_FIELDS = ("id", "entity", "claim", "metric", "value", "unit", "period", "as_of", "source_id", "confidence")
+
+
+def _evidence_row(item: EvidenceItem) -> dict[str, Any]:
+    row = {key: value for key in _EVIDENCE_FIELDS if (value := getattr(item, key)) not in (None, "")}
+    kind = item.metadata.get("citation_kind")
+    if kind:
+        row["citation_kind"] = kind
+    return row
+
+
+def _result_row(result: ToolEnvelope) -> dict[str, Any]:
+    """One result for the payload; empty metrics, findings, limitations and errors are left out."""
+
+    row: dict[str, Any] = {"capability": result.capability, "status": result.status.value, "subject": result.subject, "as_of": result.as_of, "summary": result.summary[:2500]}
+    for key, value in (("metrics", result.metrics), ("findings", result.findings[:8]), ("limitations", result.limitations[:8]), ("errors", result.errors[:3])):
+        if value:
+            row[key] = value
+    return row
 
 
 def _select_evidence(results: list[ToolEnvelope], evidence: list[EvidenceItem], cap: int) -> list[EvidenceItem]:

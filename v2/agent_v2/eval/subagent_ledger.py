@@ -233,22 +233,32 @@ def _thousands(value: float) -> str:
     return f"{int(round(value)):,}"
 
 
-def _usage_row(source: str, row: dict[str, Any], summary: dict[str, dict[str, Any]], *, priced: bool) -> str:
+def question_count(rows: list[dict[str, Any]]) -> int:
+    """Distinct runs in the ledger: the questions that used at least one sub-agent."""
+
+    return len({str(row.get("run_id") or "") for row in rows if row.get("run_id")})
+
+
+def _usage_row(source: str, row: dict[str, Any], summary: dict[str, dict[str, Any]], *, priced: bool, questions: int = 0) -> str:
     input_tokens, cached = float(row.get("input_tokens") or 0), float(row.get("cached_tokens") or 0)
     equivalent = float(row.get("equivalent") or 0)
     calls = int(row.get("calls") or 0)
     runs = (summary.get(source.removeprefix("agent_v2.")) or {}).get("runs") if source.startswith("agent_v2.") else None
     per_call = _thousands(equivalent / calls) if calls else "—"
     per_run = _thousands(equivalent / runs) if runs else "—"
+    per_question = _thousands(equivalent / questions) if questions else "—"
     hit = f"{cached / input_tokens:.0%}" if input_tokens else "—"
-    cells = [source, str(calls), _thousands(input_tokens - cached), _thousands(cached), _thousands(row.get("output_tokens") or 0), _thousands(equivalent), per_call, per_run, hit, str(row.get("failed") or 0)]
+    cells = [source, str(calls), _thousands(input_tokens - cached), _thousands(cached), _thousands(row.get("output_tokens") or 0), _thousands(equivalent), per_call, per_run, per_question, hit, str(row.get("failed") or 0)]
     if priced:
         cells.append(cost_label(row))
     return "| " + " | ".join(cells) + " |"
 
 
-def render(summary: dict[str, dict[str, Any]], usage: dict[str, dict[str, Any]], *, since_days: int | None) -> str:
+def render(summary: dict[str, dict[str, Any]], usage: dict[str, dict[str, Any]], *, since_days: int | None, questions: int = 0) -> str:
     lines = [f"# 子智能体运行报告{f'（近 {since_days} 天）' if since_days else ''}", ""]
+    if questions:
+        lines.append(f"账本里有 {questions} 个用到子智能体的问题。")
+        lines.append("")
     if not summary:
         lines.append("账本里还没有子智能体运行记录。")
     else:
@@ -263,15 +273,15 @@ def render(summary: dict[str, dict[str, Any]], usage: dict[str, dict[str, Any]],
     lines.append("")
     if usage:
         priced = any(row.get("cost") for row in usage.values())
-        header = ["来源", "模型调用", "未缓存输入", "缓存输入", "输出", "标准当量", "当量/调用", "当量/次运行", "缓存命中", "失败"] + (["估算成本"] if priced else [])
+        header = ["来源", "模型调用", "未缓存输入", "缓存输入", "输出", "标准当量", "当量/调用", "当量/次运行", "当量/问题", "缓存命中", "失败"] + (["估算成本"] if priced else [])
         lines.append("| " + " | ".join(header) + " |")
         lines.append("|" + "---|" * len(header))
         for source, row in usage.items():
-            lines.append(_usage_row(source, row, summary, priced=priced))
-        lines.append(_usage_row("合计", usage_totals(usage), {}, priced=priced))
+            lines.append(_usage_row(source, row, summary, priced=priced, questions=questions))
+        lines.append(_usage_row("合计", usage_totals(usage), {}, priced=priced, questions=questions))
         lines.append("")
         lines.append(f"标准当量 = 未缓存输入 × {TOKEN_WEIGHTS['input']:g} + 缓存输入 × 1/{round(1 / TOKEN_WEIGHTS['cached_input'])} + 输出 × {TOKEN_WEIGHTS['output']:g}（按 DeepSeek 价格比例折算，高峰和空闲时段一样，所以不同时段的运行可以直接比）；"
-                     "当量/次运行按子智能体账本里的运行数算，规划器和合成器没有运行数就只看当量/调用；缓存命中 = 缓存输入占全部输入的比例。")
+                     "当量/次运行按子智能体账本里的运行数算，规划器和合成器没有运行数；当量/问题按账本里用到子智能体的问题数算，没用子智能体的问题不在分母里，所以是上限；缓存命中 = 缓存输入占全部输入的比例。")
     else:
         lines.append("用量账本不可用或没有 agent_v2.* 的记录（Token 按来源归属需要线上账本）。")
     return "\n".join(lines)

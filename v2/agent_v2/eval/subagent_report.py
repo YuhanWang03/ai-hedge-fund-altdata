@@ -6,7 +6,7 @@ import argparse
 import json
 from pathlib import Path
 
-from v2.agent_v2.eval.subagent_ledger import TOKEN_WEIGHTS, aggregate, ledger_path, read_rows, render, usage_by_source, usage_totals
+from v2.agent_v2.eval.subagent_ledger import TOKEN_WEIGHTS, aggregate, ledger_path, question_count, read_rows, render, usage_by_source, usage_totals
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -18,10 +18,11 @@ def main(argv: list[str] | None = None) -> int:
     rows = read_rows(args.path, since_days=args.since)
     summary = aggregate(rows)
     usage = usage_by_source(args.since)
+    questions = question_count(rows)
     if args.json:
-        print(json.dumps({"agents": summary, "usage": usage, "usage_total": usage_totals(usage), "token_weights": TOKEN_WEIGHTS, "rows": len(rows)}, ensure_ascii=False, indent=2))
+        print(json.dumps({"agents": summary, "usage": usage, "usage_total": usage_totals(usage), "token_weights": TOKEN_WEIGHTS, "rows": len(rows), "questions": questions}, ensure_ascii=False, indent=2))
     else:
-        print(render(summary, usage, since_days=args.since))
+        print(render(summary, usage, since_days=args.since, questions=questions))
     return 0
 
 

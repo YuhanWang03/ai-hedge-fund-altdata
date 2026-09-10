@@ -456,6 +456,25 @@ def test_llm_synthesizer_derives_intent_and_guidance_from_the_capabilities_used(
     assert "盘中" not in system or capability.startswith("market.")
 
 
+def test_llm_synthesizer_payload_carries_only_the_fields_the_draft_uses():
+    llm = ScriptedLLM([LLMResponse(text="有证据的回答。[E1]")])
+    synthesizer = LLMEvidenceSynthesizer(llm)
+    request = normalize_request("AMD 怎么样")
+    evidence = [
+        EvidenceItem("E1", "AMD", "营收增长 55.3%", metric="revenue_growth", value=0.553, unit="%", period="FY2026", as_of="2026-07-29", source_id="fd_metrics", source_title="AMD 财报", source_url="https://example.com/amd", confidence=0.9, producer_run_id="run-1", metadata={"snapshot": "a", "citable": True}),
+        EvidenceItem("E2", "AMD", "评分 96/100", producer_run_id="run-1", metadata={"citation_kind": "metrics"}),
+    ]
+    envelope = ToolEnvelope("research.stock", ResultStatus.COMPLETED, subject="AMD", summary="研究摘要", evidence=evidence, run_id="run-1")
+    plan = ExecutionPlan("AMD 怎么样", RouteKind.RESEARCH, tasks=(PlanTask("t", "research.stock", {"ticker": "AMD"}),))
+    synthesizer.synthesize(request, plan, [envelope], evidence)
+    payload = json.loads(llm.calls[0][1]["content"])
+    # Titles, URLs, run ids and metadata are for the surfaces and the verifier; the draft cites by id. Empty result fields are left out.
+    assert payload["evidence"][0] == {"id": "E1", "entity": "AMD", "claim": "营收增长 55.3%", "metric": "revenue_growth", "value": 0.553, "unit": "%", "period": "FY2026", "as_of": "2026-07-29", "source_id": "fd_metrics", "confidence": 0.9}
+    assert payload["evidence"][1] == {"id": "E2", "entity": "AMD", "claim": "评分 96/100", "citation_kind": "metrics"}
+    assert payload["results"][0] == {"capability": "research.stock", "status": "completed", "subject": "AMD", "as_of": "", "summary": "研究摘要"}
+    assert "source_url" not in json.dumps(payload) and "producer_run_id" not in json.dumps(payload)
+
+
 def test_llm_synthesizer_normalizes_valid_result_paths_to_evidence_ids():
     llm = ScriptedLLM(
         [
@@ -2579,17 +2598,22 @@ def test_sub_agent_runs_are_ledgered_and_reported(tmp_path, monkeypatch):
     assert token_equivalent(3000, 1500, 200) == 1500 + 50 + 600 and token_equivalent(100, 500, 0) == 100 / 30 and token_equivalent(None, None, None) == 0
     unpriced = {"agent_v2.move_attributor": {"calls": 3, "input_tokens": 3000, "cached_tokens": 1500, "output_tokens": 200, "equivalent": 2150.0, "cost": {}, "unpriced": 3, "unpriced_reasons": {"缺少价格版本": 3}, "failed": 0},
                 "agent_v2.synthesizer": {"calls": 2, "input_tokens": 10000, "cached_tokens": 0, "output_tokens": 1000, "equivalent": 13000.0, "cost": {}, "unpriced": 2, "unpriced_reasons": {"缺少价格版本": 2}, "failed": 1}}
-    text = render(summary, unpriced, since_days=None)
-    # Tokens first; per run uses the sub-agent's ledger runs (2), the synthesizer has no run count; no money column without a price.
-    assert "| 来源 | 模型调用 | 未缓存输入 | 缓存输入 | 输出 | 标准当量 | 当量/调用 | 当量/次运行 | 缓存命中 | 失败 |" in text and "估算成本" not in text and "待定价" not in text
-    assert "| agent_v2.move_attributor | 3 | 1,500 | 1,500 | 200 | 2,150 | 717 | 1,075 | 50% | 0 |" in text
-    assert "| agent_v2.synthesizer | 2 | 10,000 | 0 | 1,000 | 13,000 | 6,500 | — | 0% | 1 |" in text
-    assert "| 合计 | 5 | 11,500 | 1,500 | 1,200 | 15,150 | 3,030 | — | 12% | 1 |" in text and "标准当量 = 未缓存输入 × 1 + 缓存输入 × 1/30 + 输出 × 3" in text
+    from v2.agent_v2.eval.subagent_ledger import question_count
+
+    assert question_count(read_rows(ledger)) == 1 and question_count([]) == 0
+    text = render(summary, unpriced, since_days=None, questions=2)
+    # Tokens first; per run uses the sub-agent's ledger runs (2), the synthesizer has no run count; per question divides by the ledger's distinct runs; no money column without a price.
+    assert "| 来源 | 模型调用 | 未缓存输入 | 缓存输入 | 输出 | 标准当量 | 当量/调用 | 当量/次运行 | 当量/问题 | 缓存命中 | 失败 |" in text and "估算成本" not in text and "待定价" not in text
+    assert "账本里有 2 个用到子智能体的问题。" in text
+    assert "| agent_v2.move_attributor | 3 | 1,500 | 1,500 | 200 | 2,150 | 717 | 1,075 | 1,075 | 50% | 0 |" in text
+    assert "| agent_v2.synthesizer | 2 | 10,000 | 0 | 1,000 | 13,000 | 6,500 | — | 6,500 | 0% | 1 |" in text
+    assert "| 合计 | 5 | 11,500 | 1,500 | 1,200 | 15,150 | 3,030 | — | 7,575 | 12% | 1 |" in text and "标准当量 = 未缓存输入 × 1 + 缓存输入 × 1/30 + 输出 × 3" in text
+    assert "| 合计 | 5 | 11,500 | 1,500 | 1,200 | 15,150 | 3,030 | — | — | 12% | 1 |" in render(summary, unpriced, since_days=None)
     assert usage_totals(unpriced)["unpriced_reasons"] == {"缺少价格版本": 5}
     priced = {"agent_v2.move_attributor": {**unpriced["agent_v2.move_attributor"], "cost": {"CNY": 0.0123}, "unpriced": 1, "unpriced_reasons": {"缺少价格版本": 1}}}
     assert cost_label(priced["agent_v2.move_attributor"]) == "0.0123 CNY、1 次待定价（缺少价格版本）" and cost_label({"cost": {}, "unpriced": 0}) == "—"
     text = render(summary, priced, since_days=None)
-    assert "| 缓存命中 | 失败 | 估算成本 |" in text and "| 2,150 | 717 | 1,075 | 50% | 0 | 0.0123 CNY、1 次待定价（缺少价格版本） |" in text and "| 合计 | 3 |" in text
+    assert "| 缓存命中 | 失败 | 估算成本 |" in text and "| 2,150 | 717 | 1,075 | — | 50% | 0 | 0.0123 CNY、1 次待定价（缺少价格版本） |" in text and "| 合计 | 3 |" in text
     assert subagent_report.main(["--path", str(ledger), "--json"]) == 0
     # An orchestrator run with a sub-agent envelope writes the ledger by itself; the flag turns it off.
     registry = CapabilityRegistry(default_catalog())
