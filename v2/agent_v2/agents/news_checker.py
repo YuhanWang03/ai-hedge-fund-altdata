@@ -154,6 +154,9 @@ class NewsChecker:
         since = (current - timedelta(days=days)).isoformat()
         limits = limits_for(context, max_rounds=self.max_rounds, max_seconds=self.max_seconds)
         loop = _CheckLoop(self.llm, limits, search=self.search, days=days, max_searches=self.max_searches, max_reads=self.max_reads, max_chars=self.max_chars, min_searches=max(1, int(min_searches or 1)))
+        # ``ticker`` may name several stocks ("MU,SNDK") when the question compares them.
+        tickers = [part for part in re.split(r"[,、/\s]+", (ticker or "").upper()) if part]
+        ticker = "、".join(tickers)
         task = f"股票：{ticker or '（未指定）'}\n问题：{query}\n关注区间：{since} 至 {current.isoformat()}\n可用动作：search、read、finish"
         outcome = loop.run(_SYSTEM, task, finish_prompt=_FINISH_NOW)
         raw = [row for row in (outcome.final.get("events") or []) if isinstance(row, dict)] if outcome.finished else []
@@ -175,7 +178,7 @@ class NewsChecker:
                 EvidenceItem(
                     id=f"web-{prefix}-{index}",
                     entity=ticker.upper(),
-                    claim=f"{ticker.upper() + ' ' if ticker else ''}{event['date']}：{event['text']}（新闻：“{event['quote'][:160]}”）。",
+                    claim=f"{ticker.upper() + ' ' if ticker and '、' not in ticker else ''}{event['date']}：{event['text']}（新闻：“{event['quote'][:160]}”）。",
                     as_of=event["date"],
                     source_id=f"web:{netloc}",
                     source_title=row["title"],
@@ -268,8 +271,9 @@ def register_news_checker(registry: CapabilityRegistry, llm: Any, *, search: Sea
     checker = NewsChecker(llm, search or _default_search, **limits)
 
     def handler(arguments: dict[str, Any], context: ExecutionContext) -> ToolEnvelope:
+        tickers = [str(value).upper() for value in (arguments.get("tickers") or []) if value]
         return checker.run(
-            str(arguments.get("ticker") or "").upper(),
+            ",".join(tickers) if tickers else str(arguments.get("ticker") or "").upper(),
             context,
             query=str(arguments.get("query") or ""),
             topic=str(arguments.get("topic") or "general"),

@@ -291,6 +291,38 @@ def test_research_adapter_preserves_engine_evidence():
     assert limitation_evidence.metadata["module_diagnostics"]["expectations"]["completeness"] == 0.25
 
 
+def test_research_compare_keeps_the_tickers_that_worked_when_one_engine_fails(caplog):
+    class FlakyEngine:
+        def run(self, ticker, modules=None):
+            if ticker == "SNDK":
+                raise KeyError("no price history for SNDK")
+            return {"ticker": ticker, "run_id": f"run-{ticker}", "status": "COMPLETED", "core_thesis": f"{ticker} 估值合理", "evidence_index": [{"id": f"ev-{ticker}", "ticker": ticker, "module": "valuation", "claim": f"{ticker} TTM 市盈率 20 倍", "source_ids": ["fd_metrics"], "verified": True}], "sources": [{"id": "fd_metrics", "title": "Metrics", "url": "https://example.test"}]}
+
+    registry = CapabilityRegistry(default_catalog())
+    register_research_capabilities(registry, engine_factory=FlakyEngine)
+    with caplog.at_level("WARNING"):
+        result = registry.execute(PlanTask("c", "research.compare", {"tickers": ["MU", "SNDK"], "dimensions": ["valuation"]}), _context())
+    # The comparison is partial, not lost: MU's evidence stays, SNDK's failure is a limitation and an error, and it is logged.
+    assert result.status == ResultStatus.PARTIAL_ERROR and [item.id for item in result.evidence] == ["ev-MU"]
+    assert result.limitations == ["SNDK 的研究未完成（KeyError），比较只覆盖其余股票"] and result.errors == ["SNDK: KeyError: 'no price history for SNDK'"]
+    assert result.metadata["failed_tickers"] == ["SNDK"] and "research.compare: SNDK failed: KeyError" in caplog.text
+
+    class DownEngine:
+        def run(self, ticker, modules=None):
+            raise RuntimeError("provider down")
+
+    registry = CapabilityRegistry(default_catalog())
+    register_research_capabilities(registry, engine_factory=DownEngine)
+    result = registry.execute(PlanTask("c", "research.compare", {"tickers": ["MU", "SNDK"]}), _context())
+    assert result.status == ResultStatus.FAILED and not result.evidence and len(result.errors) == 2
+
+    # A capability that raises is still turned into a failed envelope, and now leaves a trace in the log.
+    registry.register("research.stock", lambda arguments, context: (_ for _ in ()).throw(ValueError("boom")))
+    with caplog.at_level("WARNING"):
+        failed = registry.execute(PlanTask("s", "research.stock", {"ticker": "MU"}), _context())
+    assert failed.status == ResultStatus.FAILED and "capability research.stock failed: ValueError: boom" in caplog.text
+
+
 def test_research_adapter_disambiguates_conflicting_ids_from_cached_results():
     class CachedEngine:
         def run(self, ticker, modules=None):
@@ -1670,6 +1702,12 @@ def test_web_fallback_requires_runtime_and_per_request_opt_in():
     enabled = agent.run("分析 NVDA 的最新事件", allow_web=True)
     assert all(result.capability != "web.research" for result in disabled.results)
     assert calls == ["分析 NVDA 的最新事件"]
+    # A two-stock question hands both tickers to the fallback.
+    registry.register("research.compare", lambda arguments, context: ToolEnvelope("research.compare", ResultStatus.FAILED, errors=["provider down"]))
+    seen: list[dict] = []
+    registry.register("web.research", lambda args, context: seen.append(dict(args)) or web(args, context))
+    agent.run("MU和SNDK哪个更值得购买？", allow_web=True)
+    assert seen and seen[-1]["ticker"] == "MU" and seen[-1]["tickers"] == ["MU", "SNDK"]
     assert enabled.answer_mode == AnswerMode.WEB_GROUNDED
     assert enabled.plan.tasks[-1].capability == "web.research"
     assert "[WEB1]" in enabled.answer
@@ -2471,6 +2509,13 @@ def test_news_checker_reports_dated_events_with_quotes_it_located():
     assert result.capability == "web.research" and result.ok and searches == ["Arm Holdings stock July 29 2026 falls"]
     events = [item for item in result.evidence if item.metadata.get("evidence_type") == "news_event"]
     assert [(item.as_of, item.source_url, item.metadata["read"]) for item in events] == [("2026-07-29", "https://example.com/arm-guidance", True), ("2026-07-28", "https://example.com/opinion", False)]
+    # A comparison names several stocks: the task, subject and label carry all of them, claims are not prefixed with one.
+    llm.calls.clear()
+    llm.responses = list(llm.responses) if hasattr(llm, "responses") else llm.responses
+    both = NewsChecker(ScriptedLLM([LLMResponse(text='{"action":"search","query":"Micron SanDisk"}'), LLMResponse(text='{"action":"finish","events":[{"date":"2026-07-29","text":"指引低于预期","source":"r1","quote":"revenue guidance came in below Wall Street expectations"}],"note":""}')]), search)
+    pair = both.run("MU,SNDK", _context(), query="MU 和 SNDK 哪个更值得买", topic="company_event", recency_days=60, today=date(2026, 9, 9))
+    assert pair.subject == "MU、SNDK" and pair.metadata["agent"]["subject"].startswith("MU、SNDK ")
+    assert [item.claim.startswith("2026-07-29：") for item in pair.evidence if item.metadata.get("evidence_type") == "news_event"] == [True]
     assert events[0].claim == "ARM 2026-07-29：营收指引低于华尔街预期，股价下跌 8%（新闻：“revenue guidance came in below Wall Street expectations”）。"
     assert result.metrics["events"] == 2 and result.metrics["reads"] == 1 and "2 条事件没有日期或引文与正文不符，已丢弃" in result.limitations[0]
     assert verify_answer(result.metadata["narrative"], result.evidence, answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result]).ok

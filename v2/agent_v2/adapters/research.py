@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from v2.usage_context import ContextExecutor as ThreadPoolExecutor
 from dataclasses import replace
 from typing import Any, Callable
 
 from v2.agent_v2.execution import CapabilityRegistry, ExecutionContext
 from v2.agent_v2.models import EvidenceItem, ResultStatus, ToolEnvelope
+
+logger = logging.getLogger(__name__)
 
 _FOCUS_MODULES = {
     "overview": ["fundamental", "valuation", "earnings", "risk"],
@@ -211,10 +214,26 @@ def register_research_capabilities(
         dimensions = arguments.get("dimensions") or ["overview"]
         focus = str(dimensions[0]) if dimensions else "overview"
         modules = _FOCUS_MODULES.get(focus, _FOCUS_MODULES["overview"])
+
+        def research(ticker: str) -> ToolEnvelope | Exception:
+            # One ticker's engine failing (a new listing with no data, a
+            # provider error) must not take the other's research with it.
+            try:
+                return _envelope(engine_factory().run(ticker, modules=modules), "research.stock")
+            except Exception as exc:  # noqa: BLE001 — reported per ticker below
+                logger.warning("research.compare: %s failed: %s: %s", ticker, type(exc).__name__, exc)
+                return exc
+
         with ThreadPoolExecutor(max_workers=max(1, len(tickers))) as pool:
-            rows = list(pool.map(lambda ticker: engine_factory().run(ticker, modules=modules), tickers))
-        envelopes = [_envelope(row, "research.stock") for row in rows]
-        status = ResultStatus.COMPLETED if all(item.ok for item in envelopes) else ResultStatus.PARTIAL_ERROR
+            rows = list(pool.map(research, tickers))
+        envelopes = [row for row in rows if isinstance(row, ToolEnvelope)]
+        failed = [(ticker, row) for ticker, row in zip(tickers, rows) if not isinstance(row, ToolEnvelope)]
+        if not envelopes:
+            status = ResultStatus.FAILED
+        elif all(item.ok for item in envelopes) and not failed:
+            status = ResultStatus.COMPLETED
+        else:
+            status = ResultStatus.PARTIAL_ERROR
         summaries = [f"{item.subject}: {item.summary}" for item in envelopes if item.summary]
         return ToolEnvelope(
             "research.compare",
@@ -223,8 +242,9 @@ def register_research_capabilities(
             summary="\n".join(summaries),
             findings=[finding for item in envelopes for finding in item.findings],
             evidence=[evidence for item in envelopes for evidence in item.evidence],
-            limitations=[value for item in envelopes for value in item.limitations],
-            metadata={"dimensions": list(dimensions), "research_run_ids": [item.run_id for item in envelopes]},
+            limitations=[value for item in envelopes for value in item.limitations] + [f"{ticker} 的研究未完成（{type(exc).__name__}），比较只覆盖其余股票" for ticker, exc in failed],
+            errors=[f"{ticker}: {type(exc).__name__}: {str(exc)[:200]}" for ticker, exc in failed],
+            metadata={"dimensions": list(dimensions), "research_run_ids": [item.run_id for item in envelopes], "failed_tickers": [ticker for ticker, _exc in failed]},
         )
 
     def changes(arguments: dict[str, Any], context: ExecutionContext) -> ToolEnvelope:

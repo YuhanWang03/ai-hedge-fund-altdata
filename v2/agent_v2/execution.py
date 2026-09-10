@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from concurrent.futures import FIRST_COMPLETED, Future, wait
 from v2.usage_context import ContextExecutor as ThreadPoolExecutor
@@ -48,6 +49,8 @@ _TIME_LIMITS_SECONDS = {
     BudgetClass.LAB: 600.0,
     BudgetClass.DEEP: 1800.0,
 }
+
+logger = logging.getLogger(__name__)
 
 
 def task_limit(budget: BudgetClass) -> int:
@@ -146,6 +149,7 @@ class CapabilityRegistry:
             result.elapsed_ms = result.elapsed_ms or int((time.time() - started) * 1000)
             return result
         except Exception as exc:  # a capability failure is data for the orchestrator
+            logger.warning("capability %s failed: %s: %s", task.capability, type(exc).__name__, exc)
             return ToolEnvelope(
                 task.capability,
                 ResultStatus.FAILED,

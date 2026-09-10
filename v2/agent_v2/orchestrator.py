@@ -311,6 +311,8 @@ class AgentV2:
                 "query": request.text[:500],
                 "topic": topic,
                 "ticker": request.entities[0] if request.entities else "",
+                # A comparison question names several stocks; the checker looks at all of them.
+                **({"tickers": list(request.entities[:4])} if len(request.entities) > 1 else {}),
                 "recency_days": 30,
             },
             required=False,
