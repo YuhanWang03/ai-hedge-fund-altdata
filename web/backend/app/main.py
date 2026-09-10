@@ -29,19 +29,33 @@ from app.routers import agent_v2, chat, committee, dashboard, health, portfolio,
 async def lifespan(app):
     async def poll_prices():
         from v2.data.price_sync import sync_prices
+        from v2.data.usage_ledger import reconcile_pending
         while True:
             try:
                 await asyncio.to_thread(sync_prices)
+                await asyncio.to_thread(reconcile_pending)
             except Exception:
                 logging.getLogger(__name__).warning('Official price sync unavailable')
             await asyncio.sleep(6 * 3600)
     task = asyncio.create_task(poll_prices())
+    async def poll_quota():
+        from v2.data.billing_rules import sync_tavily
+        while True:
+            try:
+                await asyncio.to_thread(sync_tavily)
+            except Exception:
+                logging.getLogger(__name__).warning('Tavily quota sync unavailable')
+            await asyncio.sleep(300)
+    quota_task = asyncio.create_task(poll_quota())
     try:
         yield
     finally:
         task.cancel()
+        quota_task.cancel()
         with suppress(asyncio.CancelledError):
             await task
+        with suppress(asyncio.CancelledError):
+            await quota_task
 
 
 app = FastAPI(title="AI Hedge Fund · Web", version="0.1.0", lifespan=lifespan)
