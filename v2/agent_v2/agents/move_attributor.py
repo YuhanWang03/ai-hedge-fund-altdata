@@ -283,10 +283,12 @@ class MoveAttributor:
         current = today or (now.date() if now is not None else date.today())
         source = self.price_source_factory()
         start = (current - timedelta(days=430)).isoformat()
-        prices = list(source.get_prices(ticker, start, current.isoformat()) or [])
+        from v2.agent_v2.adapters.market import _usable as usable_bars
+
+        prices = usable_bars(source.get_prices(ticker, start, current.isoformat()))
         target = (day or current.isoformat())[:10]
         sector = self.sector_for(ticker) if self.sector_for else ""
-        sector_prices = list(source.get_prices(sector, start, current.isoformat()) or []) if sector and sector != ticker else []
+        sector_prices = usable_bars(source.get_prices(sector, start, current.isoformat())) if sector and sector != ticker else []
         facts = day_facts(ticker, target, prices, sector, sector_prices, now=now)
         if facts is None:
             return ToolEnvelope(capability, ResultStatus.FAILED, subject=ticker, errors=["no price history for that date"])

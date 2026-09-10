@@ -1063,6 +1063,17 @@ def test_history_capabilities_wrap_edgar_filings_and_the_anomaly_memory():
     from v2.agent_v2.adapters.history import _form_label
 
     assert _form_label("4") == "Form 4（内幕交易）" and _form_label("8-K") == "8-K"
+    # A NaN placeholder bar at the end of the series poisons nothing: it is dropped before any figure.
+    class Trailing:
+        def get_prices(self, ticker, start, end):
+            rows = _attributor_prices(ticker, start, end)
+            return [*rows, _Bar("2026-09-10", float("nan"), 79_204_871)]
+
+    nan_registry = CapabilityRegistry(default_catalog())
+    register_market_capabilities(nan_registry, price_source_factory=Trailing, move_provider=lambda ticker: None, now_factory=lambda: datetime(2026, 9, 9, 20, 0, tzinfo=ZoneInfo("America/New_York")), sector_for=lambda ticker: "SMH")
+    performance = nan_registry.execute(PlanTask("p", "market.performance", {"ticker": "ARM"}), _context())
+    assert performance.ok and performance.as_of == "2026-09-09" and all(value == value for value in performance.metrics["returns"].values())  # no NaN
+    assert "nan" not in performance.metadata["narrative"]
     assert "2026-08-20 8-K[" in filings.metadata["narrative"]
     empty = registry.execute(PlanTask("f", "filings.recent", {"ticker": "ARM", "forms": ["10-Q"]}), _context())
     assert empty.ok and empty.evidence[0].metadata["citation_kind"] == "limitations" and "未查到 10-Q 申报" in empty.evidence[0].claim

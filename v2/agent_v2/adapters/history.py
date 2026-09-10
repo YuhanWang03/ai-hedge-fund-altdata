@@ -81,7 +81,7 @@ def filings_envelope(ticker: str, context: ExecutionContext, fetch: Callable[[st
                 claim=f"{ticker} 于 {filing_date} 向 SEC 提交了 {_form_label(form)}（{accession}）。",
                 as_of=filing_date,
                 source_id="sec_edgar",
-                source_title=f"{ticker} {form} {filing_date}",
+                source_title=f"{ticker} {_form_label(form)} {filing_date}",
                 source_url=url,
                 producer_run_id=context.run_id,
                 metadata={"evidence_scope": "filing", "date": filing_date, "form": form, "accession": accession},

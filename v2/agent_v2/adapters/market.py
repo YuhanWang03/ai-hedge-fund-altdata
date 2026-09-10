@@ -74,6 +74,25 @@ def _scoped(evidence: list[EvidenceItem], scope: str) -> list[EvidenceItem]:
     return [item for item in evidence if item.metadata.get("evidence_scope") == scope]
 
 
+def _usable(prices) -> list:
+    """Bars with a finite, positive close, in order; a NaN placeholder row would poison every figure.
+
+    Kept dependency-free: the offline eval runs this adapter without the
+    data package, and the yfinance source drops such rows itself.
+    """
+
+    kept = []
+    for bar in prices or []:
+        try:
+            close = float(bar.close)
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if not math.isfinite(close) or close <= 0:
+            continue
+        kept.append(bar)
+    return kept
+
+
 def _default_price_source():
     from v2.data.price_source import default_price_source
 
@@ -149,7 +168,7 @@ def _performance_envelope(ticker: str, context: ExecutionContext, price_source, 
     current = _as_et(now)
     today = current.date()
     start = today - timedelta(days=430)
-    prices = price_source.get_prices(ticker, start.isoformat(), today.isoformat()) or []
+    prices = _usable(price_source.get_prices(ticker, start.isoformat(), today.isoformat()))
     if len(prices) < 2:
         return ToolEnvelope("market.performance", ResultStatus.FAILED, subject=ticker, errors=["no recent price history"])
 
@@ -194,7 +213,7 @@ def _performance_envelope(ticker: str, context: ExecutionContext, price_source, 
     relative: dict[str, dict[str, float | None]] = {}
     limitations: list[str] = []
     for benchmark in dict.fromkeys((sector_etf, BENCHMARK_ETF)):
-        benchmark_prices = price_source.get_prices(benchmark, start.isoformat(), today.isoformat()) or []
+        benchmark_prices = _usable(price_source.get_prices(benchmark, start.isoformat(), today.isoformat()))
         benchmark_windows = {key: _return(benchmark_prices, window) for key, window in (("1d", 1), ("5d", 5), ("1m", 21))}
         comparable = {key: value for key, value in benchmark_windows.items() if value is not None and windows.get(key) is not None}
         if not comparable:
@@ -509,7 +528,7 @@ def _drawdown_envelope(ticker: str, context: ExecutionContext, price_source, *, 
     current = _as_et(now)
     today = current.date()
     start = today - timedelta(days=430)
-    prices = list(price_source.get_prices(ticker, start.isoformat(), today.isoformat()) or [])
+    prices = _usable(price_source.get_prices(ticker, start.isoformat(), today.isoformat()))
     # A session still in progress is not a completed daily bar.
     if prices and _observation_state(str(prices[-1].time)[:10], current)["is_intraday"]:
         prices = prices[:-1]
@@ -569,7 +588,7 @@ def _drawdown_envelope(ticker: str, context: ExecutionContext, price_source, *, 
         span_start, span_end = (trough_day, peak_day) if up else (peak_day, trough_day)
         if benchmark and benchmark.upper() != ticker.upper():
             try:
-                benchmark_prices = list(price_source.get_prices(benchmark, (date.fromisoformat(span_start) - timedelta(days=7)).isoformat(), span_end) or [])
+                benchmark_prices = _usable(price_source.get_prices(benchmark, (date.fromisoformat(span_start) - timedelta(days=7)).isoformat(), span_end))
             except Exception as exc:  # noqa: BLE001
                 benchmark_prices = []
                 limitations_extra = f"{benchmark} 同期行情不可用：{type(exc).__name__}"

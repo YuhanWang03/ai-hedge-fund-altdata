@@ -188,6 +188,7 @@ class YFinancePriceSource:
             return []
 
         prices: list[Price] = []
+        skipped = 0
         for idx, row in df.iterrows():
             try:
                 row_date = idx.date() if hasattr(idx, "date") else idx
@@ -195,6 +196,13 @@ class YFinancePriceSource:
                     row_date.isoformat() if hasattr(row_date, "isoformat")
                     else str(row_date)
                 )
+                # yfinance emits a placeholder row (NaN OHLC) for a session
+                # that has not printed yet, or for a day it re-indexed after
+                # the close; such a row is not a bar, and one NaN close would
+                # make every return, drawdown and relative figure NaN.
+                if any(_is_nan(row[key]) for key in ("Open", "High", "Low", "Close")) or float(row["Close"]) <= 0:
+                    skipped += 1
+                    continue
                 prices.append(Price(
                     time=row_time,   # Price model field is `time` (ISO str), not `date`
                     open=float(row["Open"]),
@@ -210,7 +218,24 @@ class YFinancePriceSource:
                 )
                 continue
 
+        if skipped:
+            logger.info("yfinance %s: skipped %d row(s) without a usable close", ticker, skipped)
         return sorted(prices, key=lambda p: p.time)
+
+
+def usable_bars(prices):
+    """Bars with a finite, positive close; any source can leak a NaN placeholder row."""
+
+    kept = []
+    for bar in prices or []:
+        try:
+            close = float(bar.close)
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if _is_nan(close) or close <= 0:
+            continue
+        kept.append(bar)
+    return kept
 
 
 def _is_nan(v) -> bool:

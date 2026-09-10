@@ -307,3 +307,21 @@ def test_module_exports_public_names():
     ):
         assert hasattr(price_source, name), f"missing {name}"
         assert name in price_source.__all__, f"{name} not in __all__"
+
+
+def test_yfinance_skips_placeholder_rows_without_a_close():
+    """A NaN OHLC row (a session not yet printed, or a re-indexed day) is not a bar."""
+    df = _make_df([
+        {"date": "2026-09-08", "Open": 100.0, "High": 101.0, "Low": 99.0, "Close": 100.5, "Volume": 1_000_000},
+        {"date": "2026-09-09", "Open": float("nan"), "High": float("nan"), "Low": float("nan"), "Close": float("nan"), "Volume": 79_204_871},
+    ])
+    src = price_source.YFinancePriceSource(ticker_factory=lambda s: _FakeYFTicker("NVDA", history_return=df))
+    prices = src.get_prices("NVDA", date(2026, 9, 1), date(2026, 9, 9))
+    assert [p.time for p in prices] == ["2026-09-08"]
+
+
+def test_usable_bars_drops_rows_without_a_finite_positive_close():
+    """The guard any consumer can apply to bars from any source; needs no pandas."""
+    from types import SimpleNamespace
+    bars = [SimpleNamespace(time="a", close=10.0), SimpleNamespace(time="b", close=float("nan")), SimpleNamespace(time="c", close=0.0), SimpleNamespace(time="d", close=None)]
+    assert [b.time for b in price_source.usable_bars(bars)] == ["a"] and price_source.usable_bars(None) == []
