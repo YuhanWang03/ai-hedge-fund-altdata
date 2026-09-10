@@ -145,10 +145,15 @@ def _fetch_tavily():
                     c.execute('UPDATE tavily_quota SET payload=? WHERE month=?', (json.dumps(invalid), q['month']))
             return {**q, 'status': 'error', 'message': '账户不是已配置的每月 1000 credits 免费套餐；未自动套用此计价规则'}
         used, paid = number(account['plan_usage']), number(account['paygo_usage'])
+        total = used+paid
         if used > limit:
-            raise ValueError('invalid usage')
+            # Researcher can report cumulative plan_usage, including PAYG.
+            # Accept only when the separately reported excess corroborates it.
+            if not math.isclose(used-limit, paid, abs_tol=1e-6, rel_tol=0):
+                raise ValueError('inconsistent cumulative usage')
+            total = used
         official = dict(plan=plan, plan_usage=used, plan_limit=limit, paygo_usage=paid)
-        return save_quota(used+paid, 'Tavily /usage 官方账户快照', now_iso(), official)
+        return save_quota(total, 'Tavily /usage 官方账户快照', now_iso(), official)
     except Exception:
         return {**q, 'status': 'error', 'message': '账户同步失败或返回格式无法识别，未覆盖已有校准；可稍后重试'}
 

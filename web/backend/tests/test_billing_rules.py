@@ -125,6 +125,20 @@ def test_bad_calibration_rejected(value):
         rules.save_quota(value, 'test', ledger.now_iso())
 
 
+@pytest.mark.parametrize('plan_used,paid,expected', [(1658, 658, 1658), (1658, 700, None)])
+def test_tavily_cumulative_plan_usage(monkeypatch, plan_used, paid, expected):
+    monkeypatch.setenv('TAVILY_API_KEY', 'test-key')
+    monkeypatch.setattr(rules.requests, 'get', lambda *args, **kwargs: SimpleNamespace(
+        status_code=200, raise_for_status=lambda: None, json=lambda: {'account': {
+            'current_plan': 'Researcher', 'plan_limit': 1000, 'plan_usage': plan_used, 'paygo_usage': paid}}))
+    result = rules.sync_tavily()
+    if expected is None:
+        assert result['status'] == 'error'
+    else:
+        assert result['used'] == expected
+        assert result['paid_credits_estimate'] == paid
+
+
 def test_new_endpoints_require_owner(monkeypatch):
     from fastapi.testclient import TestClient
     from app.main import app
