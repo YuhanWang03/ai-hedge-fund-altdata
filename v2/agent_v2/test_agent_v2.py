@@ -2639,7 +2639,9 @@ def test_sub_agent_runs_are_ledgered_and_reported(tmp_path, monkeypatch):
     assert [(entry["question"], entry["equivalent"], entry["top_sources"][0]) for entry in ranked] == [("ARM 为什么跌", 3450.0, ("synthesizer", 2150.0)), ("", 650.0, ("synthesizer", 650.0))]
     by_source = usage_by_source(events=events)
     text = render(summary, by_source, since_days=None, questions=99, runs=runs, rows=run_rows)
-    assert "用量账本里有 2 个问题（按 run_id 计）。" in text and "| agent_v2.synthesizer | 3 | 2,500 | 1,500 | 300 | 3,450 | 1,150 | — | 1,725 | 38% | 0 |" in text
+    # The synthesizer's per-question figure divides the two tagged calls (2,150 + 650) by 2 runs; the untagged call stays in the totals only.
+    assert "用量账本里有 2 个问题（按 run_id 计）。" in text and "| agent_v2.synthesizer | 3 | 2,500 | 1,500 | 300 | 3,450 | 1,150 | — | 1,400 | 38% | 0 |" in text
+    assert "| agent_v2.planner | 1 | 1,000 | 0 | 100 | 1,300 | 1,300 | — | 650 | 0% | 0 |" in text and "| 合计 | 4 | 3,500 | 1,500 | 400 | 4,750 | 1,188 | — | 2,050 | 30% | 0 |" in text
     assert "另有 1 次调用没有 run_id" in text and "按用量账本里的 run_id 数算" in text
     assert "| ARM 为什么跌 | 2026-09-09 15:00 | 2 | 3,450 | synthesizer 2,150、planner 1,300 |" in text and "| （无子智能体记录） | 2026-09-09 16:00 | 1 | 650 | synthesizer 650 |" in text
     assert subagent_report.main(["--path", str(ledger), "--json"]) == 0

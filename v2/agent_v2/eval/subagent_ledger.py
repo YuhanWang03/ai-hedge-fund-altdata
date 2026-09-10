@@ -269,14 +269,16 @@ def question_count(rows: list[dict[str, Any]]) -> int:
     return len({str(row.get("run_id") or "") for row in rows if row.get("run_id")})
 
 
-def _usage_row(source: str, row: dict[str, Any], summary: dict[str, dict[str, Any]], *, priced: bool, questions: int = 0) -> str:
+def _usage_row(source: str, row: dict[str, Any], summary: dict[str, dict[str, Any]], *, priced: bool, questions: int = 0, tagged: float | None = None) -> str:
+    """``tagged`` is the equivalent of the calls that carry a run id (what the per-question figure divides); None when the whole total does."""
+
     input_tokens, cached = float(row.get("input_tokens") or 0), float(row.get("cached_tokens") or 0)
     equivalent = float(row.get("equivalent") or 0)
     calls = int(row.get("calls") or 0)
     runs = (summary.get(source.removeprefix("agent_v2.")) or {}).get("runs") if source.startswith("agent_v2.") else None
     per_call = _thousands(equivalent / calls) if calls else "—"
     per_run = _thousands(equivalent / runs) if runs else "—"
-    per_question = _thousands(equivalent / questions) if questions else "—"
+    per_question = _thousands((equivalent if tagged is None else tagged) / questions) if questions else "—"
     hit = f"{cached / input_tokens:.0%}" if input_tokens else "—"
     cells = [source, str(calls), _thousands(input_tokens - cached), _thousands(cached), _thousands(row.get("output_tokens") or 0), _thousands(equivalent), per_call, per_run, per_question, hit, str(row.get("failed") or 0)]
     if priced:
@@ -326,9 +328,14 @@ def render(summary: dict[str, dict[str, Any]], usage: dict[str, dict[str, Any]],
         header = ["来源", "模型调用", "未缓存输入", "缓存输入", "输出", "标准当量", "当量/调用", "当量/次运行", "当量/问题", "缓存命中", "失败"] + (["估算成本"] if priced else [])
         lines.append("| " + " | ".join(header) + " |")
         lines.append("|" + "---|" * len(header))
+        # With run ids the per-question figure divides only the tagged calls; older untagged calls stay in the totals.
+        tagged: dict[str, float] = defaultdict(float)
+        for run in (runs or {}).values():
+            for source, value in (run.get("sources") or {}).items():
+                tagged[source] += float(value)
         for source, row in usage.items():
-            lines.append(_usage_row(source, row, summary, priced=priced, questions=questions))
-        lines.append(_usage_row("合计", usage_totals(usage), {}, priced=priced, questions=questions))
+            lines.append(_usage_row(source, row, summary, priced=priced, questions=questions, tagged=tagged.get(source, 0.0) if exact else None))
+        lines.append(_usage_row("合计", usage_totals(usage), {}, priced=priced, questions=questions, tagged=sum(tagged.values()) if exact else None))
         lines.append("")
         lines.append(f"标准当量 = 未缓存输入 × {TOKEN_WEIGHTS['input']:g} + 缓存输入 × 1/{round(1 / TOKEN_WEIGHTS['cached_input'])} + 输出 × {TOKEN_WEIGHTS['output']:g}（按 DeepSeek 价格比例折算，高峰和空闲时段一样，所以不同时段的运行可以直接比）；"
                      "当量/次运行按子智能体账本里的运行数算，规划器和合成器没有运行数；"
