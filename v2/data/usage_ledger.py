@@ -44,6 +44,9 @@ def timestamp(value):
 
 
 def add_price(data):
+    currency = data.get('currency', 'USD')
+    if currency not in ('USD', 'CNY'):
+        raise ValueError('仅支持 USD 和 CNY')
     provider = data.get('provider')
     if provider not in ('DeepSeek', 'Tavily', 'Financial Datasets', 'Other LLM'):
         raise ValueError('不支持的供应商')
@@ -66,7 +69,7 @@ def add_price(data):
         raise ValueError('请填写价格来源／套餐说明')
     record = dict(id=uuid.uuid4().hex, provider=provider, model=model,
                   effective_at=effective, review_after=review, created_at=now_iso(),
-                  rates=rates, source=source, currency='USD')
+                  rates=rates, source=source, currency=currency)
     with _conn() as conn:
         init(conn)
         conn.execute('INSERT INTO usage_prices VALUES (?,?,?,?,?,?,?)',
@@ -77,7 +80,7 @@ def add_price(data):
 def prices():
     with _conn() as conn:
         init(conn)
-        return [json.loads(r[0]) for r in conn.execute('SELECT payload FROM usage_prices ORDER BY effective_at DESC, created_at DESC')]
+        return [{k: v for k, v in json.loads(r[0]).items() if k != 'page_snapshot'} for r in conn.execute('SELECT payload FROM usage_prices ORDER BY effective_at DESC, created_at DESC LIMIT 100')]
 
 
 def record(category, provider, model, usage, *, endpoint='', ticker=None,
@@ -94,6 +97,16 @@ def record(category, provider, model, usage, *, endpoint='', ticker=None,
             init(conn)
             row = conn.execute('SELECT payload FROM usage_prices WHERE provider=? AND model=? AND effective_at<=? ORDER BY effective_at DESC, created_at DESC LIMIT 1', (provider, model, at)).fetchone()
             price = json.loads(row[0]) if row else None
+            if price:
+                price.pop('page_snapshot', None)
+                if price.get('schedule'):
+                    schedule = price['schedule']
+                    local = datetime.fromisoformat(at).astimezone(ZoneInfo(schedule['timezone']))
+                    minute = local.hour * 60 + local.minute
+                    peak = local.weekday() in schedule['weekdays'] and any(start <= minute < end for start, end in schedule['windows'])
+                    price['applied_period'] = '高峰时段' if peak else '空闲时段'
+                    if peak:
+                        price['rates'] = schedule['peak_rates']
             # Preserve the existing configurable FD estimate until an explicit
             # version is supplied. Store its rates on each event, not at read time.
             if not price and category == 'data':
@@ -119,12 +132,14 @@ def record(category, provider, model, usage, *, endpoint='', ticker=None,
                 else:
                     reason = '未返回 credits 用量'
             status = 'estimated' if cost is not None else 'pending'
+            currency = price.get('currency', 'USD') if price else None
+            usd_cost = cost if currency == 'USD' else None
             event = dict(id=uuid.uuid4().hex, occurred_at=at, category=category, provider=provider,
                          model=model, endpoint=endpoint, ticker=ticker, source=source, usage=usage, channel=current_channel(),
-                         usage_basis=usage_basis, state=state, cost_usd=cost, status=status,
+                         usage_basis=usage_basis, state=state, amount=cost, currency=currency, cost_usd=usd_cost, status=status,
                          reason='' if cost is not None else reason, price=price)
             conn.execute('INSERT INTO usage_events VALUES (?,?,?,?,?,?,?,?)',
-                         (event['id'], at, category, provider, model, cost, status, json.dumps(event)))
+                         (event['id'], at, category, provider, model, usd_cost, status, json.dumps(event)))
     except Exception:
         logger.warning('Usage accounting failed; provider response retained', exc_info=False)
 
@@ -151,6 +166,7 @@ def record_llm(data, model, provider='DeepSeek', source=''):
 
 
 def report(limit=100):
+    from v2.data.price_sync import sync_status
     # Old FD entries remain immutable and are included once. New entries live
     # in usage_events, allowing unknown cost to be NULL, never fictitious zero.
     with _conn() as conn:
@@ -162,28 +178,38 @@ def report(limit=100):
                            'source': '旧 FD 账本', 'price': None, 'reason': ''})
     today = datetime.now(ET).date().isoformat()
     totals = dict(today_cost_usd=0., month_cost_usd=0., total_cost_usd=0., total_requests=len(events), pending_requests=0)
+    currencies = {code: dict(currency=code, today_amount=0., month_amount=0., total_amount=0.) for code in ('CNY', 'USD')}
     groups = {}
     for event in events:
         event.setdefault('channel', 'unknown')  # Never infer the source of old records.
+        event.setdefault('amount', event.get('cost_usd'))
+        event.setdefault('currency', (event.get('price') or {}).get('currency') or ('USD' if event['amount'] is not None else None))
         day = datetime.fromisoformat(event['occurred_at']).astimezone(ET).date().isoformat()
-        group = groups.setdefault((event['category'], event['provider']), dict(category=event['category'], provider=event['provider'], cost_usd=0., requests=0, pending=0, input_tokens=0, output_tokens=0, credits=0))
+        group = groups.setdefault((event['category'], event['provider']), dict(category=event['category'], provider=event['provider'], cost_usd=0., amounts={'CNY': 0., 'USD': 0.}, requests=0, pending=0, input_tokens=0, output_tokens=0, credits=0))
         group['requests'] += 1
         u = event['usage']
         group['input_tokens'] += u.get('input_tokens') or 0
         group['output_tokens'] += u.get('output_tokens') or 0
         if event['category'] == 'search':
             group['credits'] += u.get('units') or 0
-        if event['cost_usd'] is None:
+        if event['amount'] is None or event['currency'] not in currencies:
             totals['pending_requests'] += 1
             group['pending'] += 1
             continue
-        cost = event['cost_usd']
-        group['cost_usd'] += cost
-        totals['total_cost_usd'] += cost
+        cost = event['amount']
+        currency = event['currency']
+        bucket = currencies[currency]
+        group['amounts'][currency] += cost
+        bucket['total_amount'] += cost
         if day == today:
-            totals['today_cost_usd'] += cost
+            bucket['today_amount'] += cost
         if day[:7] == today[:7]:
-            totals['month_cost_usd'] += cost
-    return {**totals, 'currency': 'USD', 'timezone': 'America/New_York', 'basis': 'usage_estimates',
-            'by_provider': list(groups.values()), 'prices': prices(),
+            bucket['month_amount'] += cost
+        if currency == 'USD':
+            group['cost_usd'] += cost
+    # Compatibility fields are USD-only, never a cross-currency total.
+    for name in ('today', 'month', 'total'):
+        totals[name + '_cost_usd'] = currencies['USD'][name + '_amount']
+    return {**totals, 'currencies': list(currencies.values()), 'timezone': 'America/New_York', 'basis': 'usage_estimates',
+            'by_provider': list(groups.values()), 'prices': prices(), 'price_sync': sync_status(),
             'recent': sorted(events, key=lambda e: e['occurred_at'], reverse=True)[:max(1, min(limit, 500))]}

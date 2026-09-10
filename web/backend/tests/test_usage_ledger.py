@@ -146,4 +146,42 @@ def test_cost_endpoints_require_owner_when_configured(monkeypatch):
     assert client.get('/api/costs').status_code == 401
     assert client.get('/api/costs/deepseek-balance').status_code == 401
     assert client.post('/api/costs/prices', json={}).status_code == 401
+    assert client.post('/api/costs/prices/sync').status_code == 401
     assert client.get('/api/costs', headers={'X-Owner-Token': 'owner-test'}).status_code == 200
+
+
+def test_cny_and_usd_are_never_added_or_converted():
+    p = price()
+    ledger.add_price({**p, 'currency': 'CNY', 'effective_at': '2026-02-01T00:00:00+00:00'})
+    ledger.record('llm', 'DeepSeek', 'm', {'input_tokens': 1_000_000, 'cached_tokens': 0, 'output_tokens': 0}, occurred_at='2026-01-15T00:00:00+00:00')
+    ledger.record('llm', 'DeepSeek', 'm', {'input_tokens': 2_000_000, 'cached_tokens': 0, 'output_tokens': 0}, occurred_at='2026-02-15T00:00:00+00:00')
+    result = ledger.report()
+    assert {r['currency']: r['total_amount'] for r in result['currencies']} == {'CNY': 2., 'USD': 1.}
+    assert result['by_provider'][0]['amounts'] == {'CNY': 2., 'USD': 1.}
+    assert result['total_cost_usd'] == 1.
+    cny = next(e for e in result['recent'] if e['currency'] == 'CNY')
+    assert cny['amount'] == 2. and cny['cost_usd'] is None
+    assert result['pending_requests'] == 0
+    with ledger._conn() as conn:
+        assert conn.execute('SELECT cost_usd FROM usage_events WHERE id=?', (cny['id'],)).fetchone()[0] is None
+
+
+def test_legacy_usd_and_unknown_currency():
+    from v2.data.cost_ledger import record_fd_request
+    record_fd_request('/news/')
+    ledger.record_llm({}, 'unconfigured')
+    result = ledger.report()
+    legacy = next(e for e in result['recent'] if e['usage_basis'] == 'legacy')
+    pending = next(e for e in result['recent'] if e['status'] == 'pending')
+    assert legacy['currency'] == 'USD' and legacy['amount'] == legacy['cost_usd']
+    assert pending['currency'] is None and pending['amount'] is None
+    assert result['currencies'][0]['total_amount'] == 0
+
+
+def test_currency_validation_and_price_snapshot():
+    p = price()
+    with pytest.raises(ValueError):
+        ledger.add_price({**p, 'currency': 'EUR'})
+    ledger.record_llm({'usage': {'prompt_tokens': 100, 'completion_tokens': 10, 'prompt_cache_hit_tokens': 0}}, 'm')
+    ledger.add_price({**p, 'currency': 'CNY', 'effective_at': '2026-02-01T00:00:00+00:00'})
+    assert ledger.report()['recent'][0]['currency'] == 'USD'

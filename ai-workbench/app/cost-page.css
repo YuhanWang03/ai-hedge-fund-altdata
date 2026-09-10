@@ -1,6 +1,8 @@
 .unified-costs { display:grid; gap:16px; }
 .unified-costs .page-heading .run-button { width:auto; flex:none; }
 .unified-costs .cost-summary-grid small { display:block; margin-top:10px; color:#75859e; font-size:12px; }
+.unified-costs .cost-summary-grid .currency-total { font-size:24px; margin-top:8px; overflow-wrap:anywhere; }
+.currency-line { display:block; font-size:14px; white-space:nowrap; line-height:1.8; }
 .unified-costs .cost-breakdown small { display:block; margin-top:6px; }
 .unified-costs select,.unified-costs input { padding:9px 12px; border:1px solid #dce5f2; border-radius:8px; background:white; color:#334155; min-width:0; }
 .usage-list details { border-top:1px solid #e7edf5; }
