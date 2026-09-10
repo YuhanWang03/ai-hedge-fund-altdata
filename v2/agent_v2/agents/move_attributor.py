@@ -26,10 +26,7 @@ from v2.agent_v2.execution import CapabilityRegistry, ExecutionContext
 from v2.agent_v2.models import EvidenceItem, ResultStatus, ToolEnvelope
 
 _WS = re.compile(r"\s+")
-_COUNT_LEAK = r"\d+\s*个(?:高置信度|候选)"
-_DIRECT_CAUSE = r"主要原因|直接原因|直接驱动|由.{0,20}推动|因为|催化剂是|归因于"
-_HEDGED_CAUSE = r"可能|或许|候选|低置信|中置信|尚未确认|无法确认|不能确认"
-_CANDIDATE_RULE = {"forbid": _DIRECT_CAUSE, "unless": _HEDGED_CAUSE, "warning": "候选归因被表述为已确认原因"}
+from v2.agent_v2.adapters.market import _CANDIDATE_RULE, _COUNT_LEAK_RULE  # noqa: E402 — the wording rules live next to the market data
 
 
 @dataclass
@@ -131,7 +128,8 @@ _CHALLENGE = """你是异动归因的反方，只输出 JSON。给你一天的�
 幅度是否相称（引文里的事件能否解释这么大的涨跌）、时间是否对得上（事件是否发生在当日或前一晚）、板块是否同向同幅（那就是板块行情而非公司原因）、引文是否只是分析师观点或长期展望。
 输出：{"objection":"一句中文，指出具体不足；没有就留空","downgrade":true|false}。只有理由具体且成立时才 downgrade。"""
 
-_UNREAD_CLAIM = r"(?:申报|正文|内容|文件|原文)(?:内容|正文)?(?:尚|均|并|都|还)?未(?:被)?(?:读取|阅读|读)|未(?:读取|阅读)(?:申报|其内容|内容|正文|原文)|没有(?:读取|阅读)(?:申报|正文|内容)|(?:只|仅)(?:能)?(?:看到|列出)(?:表格类型|日期和表格类型|类型和日期)"
+#: Judged, not matched: the attributor's reader did read the filings, so the answer may not say otherwise however it words it.
+_UNREAD_RULE = {"forbid_claim": "申报的正文或内容没有被读取、只知道申报的类型和日期", "warning": ""}
 
 #: Below this share of the stock's move, the sector's same-direction move is "the sector did it".
 SECTOR_EXPLAINS_SHARE = 0.7
@@ -493,11 +491,11 @@ class MoveAttributor:
             limitations.append("没有高置信度的同日催化剂证据，具体触发原因尚未确认。")
         if not allow_news:
             limitations.append("用户未授权网页搜索，归因未使用新闻。")
-        answer_constraints: list[dict[str, Any]] = [{"forbid": _COUNT_LEAK, "warning": "将内部归因计数直接暴露给用户"}]
+        answer_constraints: list[dict[str, Any]] = [dict(_COUNT_LEAK_RULE)]
         if gathered.filing_events:
             # The reader located events in the filings: an answer that says
             # they were not read contradicts its own evidence.
-            answer_constraints.append({"forbid": _UNREAD_CLAIM, "warning": f"{day} 附近的申报已由申报阅读者读取并摘出事件，回答却称申报内容未读取；请引用那些申报事件"})
+            answer_constraints.append({**_UNREAD_RULE, "warning": f"{day} 附近的申报已由申报阅读者读取并摘出事件，回答却称申报内容未读取；请引用那些申报事件"})
         if high == 0:
             answer_constraints.append({"max_cited": {"metadata": {"claim_role": "candidate_driver"}, "max": 1, "warning": "未确认直接驱动时展示了过多弱候选线索"}})
         read_events = [item for item in gathered.filing_events.values()]

@@ -286,7 +286,7 @@ class AgentV2:
         if not plan.tasks and decision.kind != RouteKind.GENERAL_KNOWLEDGE:
             answer_mode = AnswerMode.INSUFFICIENT_EVIDENCE
         self._emit(on_progress, run_id, RunStatus.VERIFYING, "verifying citations")
-        verification = verify_answer(answer, evidence, answer_mode=answer_mode, results=results)
+        verification = verify_answer(answer, evidence, answer_mode=answer_mode, results=results, judge=getattr(self.synthesizer, "judge", None))
         failures = [result for result in results if not result.ok]
         debate = self._debate(request, decision, plan, answer, evidence, results, context)
         if debate is not None:

@@ -14,6 +14,9 @@ evidence and results:
 
 ``ToolEnvelope.metadata``
     ``require_cited_numbers``: every sentence with a figure needs a citation.
+    ``{"forbid_claim": sentence, "warning": str}`` (on evidence or on the
+    answer): the text must not assert the sentence; judged by the model in
+    one call when a ``judge`` is given, so paraphrases are caught too.
     ``answer_constraints``: list of ``{"forbid": regex, "warning": str}`` for
     the whole answer, ``{"max_cited": {"metadata": {...}, "max": n,
     "warning": str}}`` capping how many of *this result's* items with matching
@@ -25,12 +28,16 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from typing import Any, Callable
 
 from v2.agent_v2.models import AnswerMode, EvidenceItem, ToolEnvelope, VerificationReport
 
 _CITATION = re.compile(r"\[([A-Za-z0-9_.:-]+)\]")
 _SENTENCE = re.compile(r"[^。！？!?\n]+(?:[。！？!?]+|$)(?:\s*\[[A-Za-z0-9_.:-]+\])*")
+
+
+#: ``judge(items) -> {id: quote}``: which of the ``{"id", "text", "claim"}`` items assert their claim.
+Judge = Callable[[list[dict[str, str]]], dict[str, str]]
 
 
 def verify_answer(
@@ -39,6 +46,7 @@ def verify_answer(
     *,
     answer_mode: AnswerMode,
     results: list[ToolEnvelope] | None = None,
+    judge: Judge | None = None,
 ) -> VerificationReport:
     known = {item.id for item in evidence}
     cited = set(_CITATION.findall(answer or ""))
@@ -71,8 +79,10 @@ def verify_answer(
             report = grounding.check(answer_without_citations, observations)
             ungrounded = tuple(report.ungrounded)
             traced = tuple(dict.fromkeys(report.traced))
-            warnings.extend(_sentence_warnings(answer or "", evidence, results or [], grounding))
-            warnings.extend(_answer_warnings(answer or "", evidence, results or []))
+            claims: list[dict[str, str]] = []
+            warnings.extend(_sentence_warnings(answer or "", evidence, results or [], grounding, claims))
+            warnings.extend(_answer_warnings(answer or "", evidence, results or [], claims))
+            warnings.extend(_judged_warnings(claims, judge))
     return VerificationReport(
         ok=not unknown and not warnings and not ungrounded,
         unknown_citations=unknown,
@@ -217,12 +227,18 @@ def _excerpt(sentence: str, limit: int = 30) -> str:
     return flat if len(flat) <= limit else flat[:limit].rstrip() + "…"
 
 
-def _sentence_warnings(answer: str, evidence: list[EvidenceItem], results: list[ToolEnvelope], grounding) -> list[str]:
-    """Require nearby citations to support nearby figures and honour evidence-level rules."""
+def _sentence_warnings(answer: str, evidence: list[EvidenceItem], results: list[ToolEnvelope], grounding, claims: list[dict[str, str]] | None = None) -> list[str]:
+    """Require nearby citations to support nearby figures and honour evidence-level rules.
+
+    ``claims`` collects ``forbid_claim`` rules (a sentence in plain language the
+    cited text must not assert) for the judge; they are decided in one call by
+    the caller, not here.
+    """
 
     known = {item.id: item for item in evidence}
     require_cited_numbers = any(result.metadata.get("require_cited_numbers") for result in results)
     warnings: list[str] = []
+    seen_claims: set[tuple[str, str]] = set()
     for raw_sentence in _SENTENCE.findall(answer):
         sentence = raw_sentence.strip()
         if not sentence:
@@ -247,15 +263,36 @@ def _sentence_warnings(answer: str, evidence: list[EvidenceItem], results: list[
                     warnings.append(warning)
                 if rule.get("forbid") and _matches(rule["forbid"], plain) and not _matches(rule.get("unless"), plain):
                     warnings.append(warning)
+                claim = rule.get("forbid_claim")
+                if claim and claims is not None and (item.id, str(claim)) not in seen_claims:
+                    # The judge sees every sentence citing this item at once.
+                    seen_claims.add((item.id, str(claim)))
+                    citing = [_CITATION.sub("", s).strip() for s in _SENTENCE.findall(answer) if item.id in _CITATION.findall(s)]
+                    claims.append({"id": f"evidence:{item.id}:{len(claims)}", "text": " ".join(citing), "claim": str(claim), "warning": warning})
     return warnings
 
 
-def _answer_warnings(answer: str, evidence: list[EvidenceItem], results: list[ToolEnvelope]) -> list[str]:
-    """Apply result-level rules that look at the answer as a whole."""
+def _judged_warnings(claims: list[dict[str, str]], judge: Judge | None) -> list[str]:
+    """One judge call for every ``forbid_claim`` rule the answer triggered; without a judge the rules do not apply."""
+
+    if not claims or judge is None:
+        return []
+    asserted = judge([{"id": row["id"], "text": row["text"], "claim": row["claim"]} for row in claims])
+    warnings: list[str] = []
+    for row in claims:
+        quote = asserted.get(row["id"])
+        if quote is not None:
+            warnings.append(row["warning"] + (f"（“{quote}”）" if quote else ""))
+    return warnings
+
+
+def _answer_warnings(answer: str, evidence: list[EvidenceItem], results: list[ToolEnvelope], claims: list[dict[str, str]] | None = None) -> list[str]:
+    """Apply result-level rules that look at the answer as a whole (``forbid_claim`` rules go to ``claims`` for the judge)."""
 
     known = {item.id: item for item in evidence}
     cited = [known[value] for value in _CITATION.findall(answer) if value in known]
     warnings: list[str] = []
+    plain_answer = _CITATION.sub("", answer)
     for result in results:
         own = {item.id for item in result.evidence}
         for rule in result.metadata.get("answer_constraints") or []:
@@ -263,6 +300,8 @@ def _answer_warnings(answer: str, evidence: list[EvidenceItem], results: list[To
                 continue
             if rule.get("forbid") and _matches(rule["forbid"], answer):
                 warnings.append(str(rule.get("warning") or f"{result.capability} 的回答规则未满足"))
+            if rule.get("forbid_claim") and claims is not None:
+                claims.append({"id": f"answer:{result.capability}:{len(claims)}", "text": plain_answer, "claim": str(rule["forbid_claim"]), "warning": str(rule.get("warning") or f"{result.capability} 的回答规则未满足")})
             cap = rule.get("max_cited")
             if isinstance(cap, dict):
                 wanted = dict(cap.get("metadata") or {})

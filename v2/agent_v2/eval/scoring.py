@@ -49,7 +49,7 @@ class AnswerScore:
 def score_answer_case(case: AnswerCase) -> AnswerScore:
     envelope = case.envelope()
     answer = case.answer(envelope)
-    report = verify_answer(answer, envelope.evidence, answer_mode=case.answer_mode, results=[envelope])
+    report = verify_answer(answer, envelope.evidence, answer_mode=case.answer_mode, results=[envelope], judge=case.judge)
     warnings = tuple(report.warnings) + tuple(f"ungrounded: {value}" for value in report.ungrounded_numbers) + tuple(f"unknown citation: {value}" for value in report.unknown_citations)
     passed = report.ok == case.expect_ok
     if passed and not case.expect_ok and case.expected_warning:

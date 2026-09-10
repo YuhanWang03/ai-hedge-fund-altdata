@@ -357,6 +357,10 @@ class LLMEvidenceSynthesizer:
         max_context_chars: int = 28_000,
     ) -> None:
         self.llm = llm
+        from v2.agent_v2.judge import ClaimJudge
+
+        #: Decides the verifier's forbid_claim rules with one model call per draft.
+        self.judge = ClaimJudge(llm) if llm is not None else None
         self.catalog = catalog or default_catalog()
         self.fallback = fallback or EvidenceSummarySynthesizer()
         self.max_context_chars = max(4_000, max_context_chars)
@@ -477,7 +481,7 @@ results 中的评分或限制如需引用，使用 evidence 中 citation_kind �
 
             answer = self._complete(answer, evidence, results)
             self._keep_draft(answer)
-            report = verify_answer(answer, evidence, answer_mode=plan.answer_mode, results=results)
+            report = verify_answer(answer, evidence, answer_mode=plan.answer_mode, results=results, judge=self.judge)
             self._record_report("draft", report)
             if report.ok:
                 self.last_outcome = "clean"
@@ -496,7 +500,7 @@ results 中的评分或限制如需引用，使用 evidence 中 citation_kind �
             )
             repair = self._complete(repair, evidence, results)
             self._keep_draft(repair)
-            repair_report = verify_answer(repair, evidence, answer_mode=plan.answer_mode, results=results)
+            repair_report = verify_answer(repair, evidence, answer_mode=plan.answer_mode, results=results, judge=self.judge)
             self._record_report("repair", repair_report)
             if repair_report.ok:
                 self.last_outcome = "repaired"

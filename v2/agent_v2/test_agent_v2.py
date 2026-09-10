@@ -1327,9 +1327,18 @@ def test_move_attributor_explains_a_past_day_from_sources_it_fetched_and_remembe
     assert narrative.startswith("ARM 在 2026-07-29 收于") and "能直接支持的高置信度驱动：营收指引低于华尔街预期[" in narrative and "跑输行业基准 SMH" in narrative
     assert verify_answer(narrative, result.evidence, answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result]).ok
     assert "申报读到：2026-07-29 季度营收低于指引区间[E-ARM-0729]。" in narrative
-    # An answer that calls the read filings unread is sent back by the verifier.
-    unread = verify_answer(f"ARM 当天提交了 6-K，但申报内容未读取，不能据此推断影响[{result.evidence[0].id}]。", result.evidence, answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result])
-    assert any("回答却称申报内容未读取" in warning for warning in unread.warnings)
+    # An answer that calls the read filings unread is sent back by the verifier: the rule is a sentence the judge decides, in any wording.
+    seen_claims: list[dict] = []
+
+    def judge(items):
+        seen_claims.extend(items)
+        return {item["id"]: "正文未读取" for item in items if "没有被读取" in item["claim"]}
+
+    unread = verify_answer(f"ARM 当天提交了 6-K，日期和表格类型可见，正文未读取[{result.evidence[0].id}]。", result.evidence, answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result], judge=judge)
+    assert any(warning.startswith("2026-07-29 附近的申报已由申报阅读者读取并摘出事件，回答却称申报内容未读取") and warning.endswith("（“正文未读取”）") for warning in unread.warnings)
+    assert any(item["claim"].startswith("申报的正文或内容没有被读取") and item["id"].startswith("answer:market.attribute_move") for item in seen_claims)
+    # Without a judge (no model) the claim rules are simply not applied.
+    assert verify_answer(f"ARM 当天提交了 6-K，正文未读取[{result.evidence[0].id}]。", result.evidence, answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result]).ok
     compact = result.metadata["narrative_compact"]
     assert compact.startswith("2026-07-29 ARM ") and "驱动：营收指引低于华尔街预期[" in compact and "跑输 SMH" in compact
     assert "申报读到" not in compact  # a confirmed driver keeps the phone version to one lead
@@ -3143,14 +3152,11 @@ def checker_loop_specs(llm):
 
 
 def test_read_filings_are_stamped_and_unread_claims_are_caught_in_every_wording():
-    import re
-
-    from v2.agent_v2.agents.move_attributor import _UNREAD_CLAIM, clip, mark_read_filings
+    from v2.agent_v2.agents.move_attributor import _UNREAD_RULE, clip, mark_read_filings
     from v2.agent_v2.interfaces.telegram_format import _one_line
 
-    for wording in ("正文未读取", "申报内容未读取", "未读取正文", "没有读取申报", "文件尚未阅读", "只列出日期和表格类型"):
-        assert re.search(_UNREAD_CLAIM, wording), wording
-    assert not re.search(_UNREAD_CLAIM, "申报阅读者已读取正文")
+    # The rule is a sentence for the judge, not a pattern over wordings.
+    assert _UNREAD_RULE["forbid_claim"].startswith("申报的正文或内容没有被读取") and "forbid" not in _UNREAD_RULE
 
     bare = EvidenceItem("evidence-filing-a", "ARM", "ARM 于 2026-07-29 向 SEC 提交了 6-K（0001）。", source_id="sec_edgar", source_url="https://www.sec.gov/Archives/edgar/data/1973239/0001/", metadata={"evidence_scope": "filing", "date": "2026-07-29", "form": "6-K", "accession": "0001"})
     other = EvidenceItem("evidence-filing-b", "ARM", "ARM 于 2026-07-29 向 SEC 提交了 6-K（0002）。", source_id="sec_edgar", source_url="https://www.sec.gov/Archives/edgar/data/1973239/0002/", metadata={"evidence_scope": "filing", "date": "2026-07-29", "form": "6-K", "accession": "0002"})
@@ -3170,3 +3176,47 @@ def test_read_filings_are_stamped_and_unread_claims_are_caught_in_every_wording(
     assert clip(long, 60) == "当日高增长半导体股遭整体抛售、纳指跌 2.60%，ARM 作为估值极高的芯片股被同向抛压…"
     assert clip("短句", 60) == "短句" and clip("没有标点的一长串文字" * 10, 30).endswith("…") and len(clip("没有标点的一长串文字" * 10, 30)) <= 30
     assert _one_line("  多  空格 ", 80) == "多 空格" and _one_line(long, 60) == clip(long, 60)
+
+
+def test_claim_judge_decides_wording_rules_in_one_call_and_the_synthesizer_uses_it():
+    from v2.agent_v2.adapters.market import _CANDIDATE_RULE, _INTRADAY_VOLUME_RULE
+    from v2.agent_v2.judge import ClaimJudge
+
+    # The judge: one call, verdicts by id, quotes trimmed, unknown ids ignored, failure means no verdicts.
+    llm = ScriptedLLM([LLMResponse(text='{"verdicts":[{"id":"a","asserted":true,"quote":"AMD 属于缩量上涨"},{"id":"b","asserted":false},{"id":"zzz","asserted":true}]}'), LLMResponse(text="not json")])
+    judge = ClaimJudge(llm)
+    items = [{"id": "a", "text": "AMD 属于缩量上涨。", "claim": "用盘中成交量断定缩量"}, {"id": "b", "text": "AMD 可能缩量。", "claim": "用盘中成交量断定缩量"}]
+    assert judge(items) == {"a": "AMD 属于缩量上涨"} and len(llm.calls) == 1 and json.loads(llm.calls[0][1]["content"])["items"][0]["claim"] == "用盘中成交量断定缩量"
+    assert judge(items) == {} and ClaimJudge(None)(items) == {} and judge([]) == {}
+
+    # The verifier collects every forbid_claim (per cited evidence and per answer) into one judge call and warns with the quote.
+    volume = EvidenceItem("V1", "AMD", "AMD 截至查询时的盘中累计成交量为 1,000 股。", metadata={"constraints": [_INTRADAY_VOLUME_RULE]})
+    candidate = EvidenceItem("C1", "AMD", "中置信度候选解释：期权市场波动。", metadata={"claim_role": "candidate_driver", "constraints": [_CANDIDATE_RULE]})
+    result = ToolEnvelope("market.explain_move", ResultStatus.COMPLETED, subject="AMD", evidence=[volume, candidate], metadata={"answer_constraints": [{"forbid_claim": "把内部计数说给用户", "warning": "将内部归因计数直接暴露给用户"}]})
+    calls: list[list[dict]] = []
+
+    def scripted(items):
+        calls.append(items)
+        return {item["id"]: "期权市场波动是主要原因" for item in items if "候选" in item["claim"]}
+
+    answer = "AMD 上涨。[V1] 期权市场波动是主要原因。[C1] 成交量放大，但当日未收盘不能据此判断。[V1]"
+    report = verify_answer(answer, [volume, candidate], answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result], judge=scripted)
+    assert len(calls) == 1 and sorted(item["claim"][:6] for item in calls[0]) == sorted(["用尚未收盘的", "把这条候选解", "把内部计数说"])
+    by_claim = {item["claim"][:6]: item for item in calls[0]}
+    assert by_claim["用尚未收盘的"]["text"] == "AMD 上涨。 成交量放大，但当日未收盘不能据此判断。" and by_claim["把内部计数说"]["text"].startswith("AMD 上涨。 期权市场波动是主要原因。")
+    assert list(report.warnings) == ["候选归因被表述为已确认原因（“期权市场波动是主要原因”）"] and not report.ok
+
+    # The model synthesizer owns a judge and repairs a draft the judge rejected.
+    synth_llm = ScriptedLLM([
+        LLMResponse(text="期权市场波动是主要原因。[C1]"),  # draft
+        LLMResponse(text='{"verdicts":[{"id":"evidence:C1:0","asserted":true,"quote":"期权市场波动是主要原因"}]}'),  # judge on the draft
+        LLMResponse(text="期权市场波动可能是原因之一，尚未确认。[C1]"),  # repair
+        LLMResponse(text='{"verdicts":[{"id":"evidence:C1:0","asserted":false}]}'),  # judge on the repair
+    ])
+    synthesizer = LLMEvidenceSynthesizer(synth_llm)
+    assert synthesizer.judge is not None
+    plan = ExecutionPlan("AMD 为什么涨", RouteKind.RESEARCH, tasks=(PlanTask("t", "market.explain_move", {"ticker": "AMD"}),), answer_mode=AnswerMode.RESEARCH_GROUNDED)
+    result_plain = ToolEnvelope("market.explain_move", ResultStatus.COMPLETED, subject="AMD", evidence=[candidate])
+    text = synthesizer.synthesize(normalize_request("AMD 为什么涨"), plan, [result_plain], [candidate])
+    assert text == "期权市场波动可能是原因之一，尚未确认。[C1]" and synthesizer.last_outcome == "repaired"
+    assert "候选归因被表述为已确认原因（“期权市场波动是主要原因”）" in synth_llm.calls[2][-1]["content"]

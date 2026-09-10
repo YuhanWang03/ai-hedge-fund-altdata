@@ -30,6 +30,17 @@ class AnswerCase:
     expect_ok: bool
     answer_mode: AnswerMode = AnswerMode.TOOL_GROUNDED
     expected_warning: str = ""
+    #: ``judge(items) -> {id: quote}`` standing in for the model that decides forbid_claim rules; None leaves those rules unapplied.
+    judge: Callable[[list[dict[str, str]]], dict[str, str]] | None = None
+
+
+def asserting_judge(*claim_words: str) -> Callable[[list[dict[str, str]]], dict[str, str]]:
+    """A scripted judge: every item whose claim mentions one of ``claim_words`` counts as asserted (the model's verdict, replayed)."""
+
+    def judge(items: list[dict[str, str]]) -> dict[str, str]:
+        return {item["id"]: item["text"][:30] for item in items if any(word in item["claim"] for word in claim_words)}
+
+    return judge
 
 
 class _Prices:
@@ -106,6 +117,7 @@ ANSWER_CASES: tuple[AnswerCase, ...] = (
         lambda env: f"AMD 收盘价为 {env.metrics['close']:.2f} 美元。[{_scoped(env, 'price').id}]",
         False,
         expected_warning="盘中价格",
+        judge=asserting_judge("盘中价格"),
     ),
     AnswerCase(
         "p_intraday_volume_conclusion",
@@ -114,6 +126,7 @@ ANSWER_CASES: tuple[AnswerCase, ...] = (
         lambda env: f"AMD 属于缩量上涨。[{_scoped(env, 'volume').id}]",
         False,
         expected_warning="未收盘成交量",
+        judge=asserting_judge("成交量"),
     ),
     AnswerCase(
         "p_invented_number",
@@ -154,6 +167,7 @@ ANSWER_CASES: tuple[AnswerCase, ...] = (
         False,
         AnswerMode.RESEARCH_GROUNDED,
         expected_warning="候选归因",
+        judge=asserting_judge("候选解释"),
     ),
     AnswerCase(
         "m_too_many_candidates",
@@ -181,5 +195,6 @@ ANSWER_CASES: tuple[AnswerCase, ...] = (
         False,
         AnswerMode.RESEARCH_GROUNDED,
         expected_warning="归因计数",
+        judge=asserting_judge("内部的计数"),
     ),
 )

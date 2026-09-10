@@ -49,17 +49,16 @@ def _observation_state(as_of: str, now: datetime | None = None) -> dict[str, Any
 # Wording rules the verifier enforces on sentences that cite market evidence.
 # They live here, next to the data that makes them necessary, and reach the
 # verifier only through the generic ``constraints`` / ``citable`` metadata.
-_INTRADAY_MARKER = r"盘中|截至查询时|截至.{0,30}(?:ET|美东)"
-_FINAL_VOLUME_CONCLUSION = r"缩量|放量|量能不足|成交量.{0,12}(?:未|没有).{0,6}(?:放大|跟上)|持续性存疑"
-_INTRADAY_CAUTION = r"不能|无法|不应|不得|尚不能|待收盘|未收盘|尚未定型|不宜"
-_DIRECT_CAUSE = r"主要原因|直接原因|直接驱动|由.{0,20}推动|因为|催化剂是|归因于"
-_HEDGED_CAUSE = r"可能|或许|候选|低置信|中置信|尚未确认|无法确认|不能确认"
 _REJECTED_CANDIDATE_NOTE = re.compile(r"无直接证据|未提及|关联弱|不匹配|Tier 3|长期预测", re.I)
-_COUNT_LEAK = r"0\s*个.{0,12}(?:驱动|催化|原因)"
 
-_INTRADAY_PRICE_RULE = {"require": _INTRADAY_MARKER, "warning": "盘中价格被表述为完整收盘口径"}
-_INTRADAY_VOLUME_RULE = {"forbid": _FINAL_VOLUME_CONCLUSION, "unless": _INTRADAY_CAUTION, "warning": "未收盘成交量被用于判定放量、缩量或持续性"}
-_CANDIDATE_RULE = {"forbid": _DIRECT_CAUSE, "unless": _HEDGED_CAUSE, "warning": "候选归因被表述为已确认原因"}
+# The rules are sentences, not patterns: the verifier hands each one with
+# the text that cites the evidence to the claim judge (one model call per
+# answer), so a paraphrase is caught as surely as the wording we once
+# matched.  When the rule applies is still decided here, from the data.
+_INTRADAY_PRICE_RULE = {"forbid_claim": "把盘中价格说成收盘价或完整交易日的口径（没有说明是盘中、截至查询时的价格）", "warning": "盘中价格被表述为完整收盘口径"}
+_INTRADAY_VOLUME_RULE = {"forbid_claim": "用尚未收盘的盘中累计成交量断定放量、缩量、量能不足或走势能否持续", "warning": "未收盘成交量被用于判定放量、缩量或持续性"}
+_CANDIDATE_RULE = {"forbid_claim": "把这条候选解释说成已经确认的原因、主要原因或直接驱动（没有“可能”“候选”“尚未确认”这类限定）", "warning": "候选归因被表述为已确认原因"}
+_COUNT_LEAK_RULE = {"forbid_claim": "把系统内部的计数直接说给用户，比如“0 个高置信度驱动”“1 个候选原因”这样的数量表述", "warning": "将内部归因计数直接暴露给用户"}
 
 
 def _pct(value: float | None) -> str:
@@ -329,7 +328,7 @@ def _move_envelope(ticker: str, context: ExecutionContext, anomaly, *, now: date
             },
         )
     )
-    answer_constraints: list[dict[str, Any]] = [{"forbid": _COUNT_LEAK, "warning": "将内部归因计数直接暴露给用户"}]
+    answer_constraints: list[dict[str, Any]] = [dict(_COUNT_LEAK_RULE)]
     if high_confidence == 0:
         answer_constraints.append({"max_cited": {"metadata": {"claim_role": "candidate_driver"}, "max": 1, "warning": "未确认直接驱动时展示了过多弱候选线索"}})
     envelope = ToolEnvelope(
