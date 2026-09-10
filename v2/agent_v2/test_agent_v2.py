@@ -1484,6 +1484,17 @@ def test_telegram_delivery_numbers_citations_and_compacts_worst_days(monkeypatch
     assert numbered.text == "ARM 自买入以来浮亏 20%[1]。\n\n2026-07-29 ARM -13.21%[1]，跑输 SMH 约 10.00%。驱动：营收指引低于预期[2]。"
     # Brackets that are not evidence ids are left alone.
     assert telegram_format.number_citations("ARM [2026-07-29] 跌 [evidence-news-1]", result.evidence).text == "ARM [2026-07-29] 跌 [1]"
+    # Further text continues the same numbering: known ids keep theirs, a new id gets the next number.
+    extra = EvidenceItem("evidence-risk-9", "ARM", "风险因素变化 15 项。", source_id="sec_filings")
+    order = list(numbered.ids)
+    note = telegram_format.number_citations("反对（引 [evidence-risk-9]）和（引 [evidence-news-1]）", [*result.evidence, extra], order=order)
+    assert note.text == "反对（引 [3]）和（引 [2]）" and order == ["evidence-market-price-42f5c41951e36ef1", "evidence-news-1", "evidence-risk-9"]
+    labelled = telegram_format.source_entries(tuple(order), [*result.evidence, extra])
+    assert (labelled[-1].numbers, labelled[-1].label) == ("3", "SEC 申报（EDGAR）")
+    engine = EvidenceItem("e-1", "NVDA", "x", metadata={"module": "valuation"})
+    assert telegram_format.source_entries(("e-1",), [engine])[0].label == "研究引擎·valuation"
+    web = EvidenceItem("w-1", "NVDA", "x", source_id="web:reuters.com")
+    assert telegram_format.source_entries(("w-1",), [web])[0].label == "网页（reuters.com）"
     entries = telegram_format.source_entries(numbered.ids, result.evidence)
     assert [(entry.numbers, entry.label, entry.url) for entry in entries] == [
         ("1", "日线行情", ""),
@@ -1513,6 +1524,15 @@ def test_telegram_delivery_numbers_citations_and_compacts_worst_days(monkeypatch
     assert "<i>⚠ 校验：未确认直接驱动时展示了过多弱候选线索</i>" in header and "<i>兜底原因：初稿：行情事实缺少邻近引用；修正稿：未知引用 results.metrics</i>" in header
     assert "[evidence-" not in body and "[1]。" in body and "跑输 SMH" in body and "当日成交量" not in body
     assert body.endswith('<b>来源</b>\n1. 日线行情\n2. <a href="https://example.com/arm">Arm slides on soft guidance · Arm Holdings slides after guidance disappoints; the stock f…</a>')
+    # A debater note citing an id the answer never used gets the next number and a source line.
+    debated = _telegram_result("模型自己的话[evidence-news-1]。", outcome="clean")
+    risk = EvidenceItem("evidence-risk-9", "ARM", "风险因素变化 15 项。", source_id="sec_filings")
+    debated.evidence.append(risk)
+    debated.results.append(ToolEnvelope("debate.challenge", ResultStatus.COMPLETED, subject="ARM", metadata={"agent": {"name": "debater", "label": "反方", "subject": "ARM", "rounds": 1, "llm_calls": 1, "elapsed_ms": 1500, "stop_reason": "finished", "calls": {"objections": 1}, "notes": ["该证据只说明数量变化，未给出方向（引 [evidence-risk-9]）"]}, "trace": [], "citation_kind": "display"}))
+    asyncio.run(transport.deliver(7, debated))
+    delivered = placeholder.sent[-1]
+    assert "模型自己的话[1]。" in delivered and "<b>来源</b>\n1. <a href" in delivered and "\n2. SEC 申报（EDGAR）" in delivered
+    assert "反方 ARM：1 轮 · 1.5s · 反对 1 · 完成\n  · 该证据只说明数量变化，未给出方向（引 [2]）" in delivered
     # A model-written answer never contains the narrative verbatim and is delivered as written.
     clean = _telegram_result("模型自己的话[evidence-news-1]。", outcome="clean")
     transport = TelegramBotTransport(object(), placeholder, web_requested=True)

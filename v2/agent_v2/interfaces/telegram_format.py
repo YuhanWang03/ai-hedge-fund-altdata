@@ -33,26 +33,28 @@ class NumberedAnswer:
     ids: tuple[str, ...]
 
 
-def number_citations(answer: str, evidence: list[EvidenceItem]) -> NumberedAnswer:
+def number_citations(answer: str, evidence: list[EvidenceItem], *, order: list[str] | None = None) -> NumberedAnswer:
     """Replace ``[evidence-id]`` citations with ``[1]``, ``[2]``… by first appearance.
 
     Only ids that exist in the evidence list are renumbered, so a bracketed
     ticker or figure the model wrote stays as it is.  A run of adjacent
-    citations such as ``[a][b]`` becomes ``[1][2]``.
+    citations such as ``[a][b]`` becomes ``[1][2]``.  Pass the ``order``
+    of an earlier call to number further text (the sub-agent notes) in the
+    same sequence: ids already seen keep their numbers, new ones continue.
     """
 
     known = {item.id for item in evidence}
-    order: list[str] = []
+    sequence = order if order is not None else []
 
     def replace(match: re.Match[str]) -> str:
         identifier = match.group(1)
         if identifier not in known:
             return match.group(0)
-        if identifier not in order:
-            order.append(identifier)
-        return f"[{order.index(identifier) + 1}]"
+        if identifier not in sequence:
+            sequence.append(identifier)
+        return f"[{sequence.index(identifier) + 1}]"
 
-    return NumberedAnswer(_CITATION.sub(replace, answer or ""), tuple(order))
+    return NumberedAnswer(_CITATION.sub(replace, answer or ""), tuple(sequence))
 
 
 def compact_attributions(answer: str, result: AgentResult) -> str:
@@ -85,6 +87,18 @@ SOURCE_LABELS = {
     "research_engine": "研究引擎",
     "research_store": "研究库",
     "legacy_responder": "账户卡片",
+    # The research engine's data sources, by their source ids.
+    "fd_company": "公司资料（Financial Datasets）",
+    "fd_metrics": "基本面指标（Financial Datasets）",
+    "fd_earnings": "财报数据（Financial Datasets）",
+    "fd_insiders": "内部人交易（Financial Datasets）",
+    "yf_prices": "行情（Yahoo Finance）",
+    "yf_calendar": "财报日历（Yahoo Finance）",
+    "sec_filings": "SEC 申报（EDGAR）",
+    "local_13f": "13F 持仓归档",
+    "local_etf": "ARK 持仓归档",
+    "macro_snapshot": "宏观快照（FRED、Yahoo Finance）",
+    "supply_chain": "产业链关系（多源）",
 }
 _LEGACY_TITLE = "Existing deterministic responder"
 
@@ -94,7 +108,13 @@ def _origin(item: EvidenceItem) -> str:
         return SOURCE_LABELS[item.source_id]
     if item.source_title == _LEGACY_TITLE:
         return SOURCE_LABELS["legacy_responder"]
-    return _one_line(item.source_title or item.source_id or str(item.metadata.get("evidence_scope") or "")) or "其他来源"
+    if item.source_id.startswith("web:"):
+        return f"网页（{item.source_id[4:]}）"
+    module = str(item.metadata.get("module") or "")
+    fallback = item.source_title or item.source_id or str(item.metadata.get("evidence_scope") or "")
+    if not fallback and module:
+        fallback = f"研究引擎·{module}"
+    return _one_line(fallback) or "其他来源"
 
 
 def _one_line(text: str, limit: int = 80) -> str:

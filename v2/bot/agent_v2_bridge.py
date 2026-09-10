@@ -113,14 +113,17 @@ class TelegramBotTransport:
             result.evidence,
         )
         answer = presentation.to_telegram_html(numbered.text)
+        # The sub-agent notes (the debater's objections) cite evidence too:
+        # they continue the answer's numbering and their sources join the list.
+        order = list(numbered.ids)
+        agents = [telegram_format.number_citations(line, result.evidence, order=order).text for line in telegram_format.agent_lines(result)]
         sources = []
-        for entry in telegram_format.source_entries(numbered.ids, result.evidence):
+        for entry in telegram_format.source_entries(tuple(order), result.evidence):
             label = html.escape(entry.label)
             if entry.url:
                 label = f'<a href="{html.escape(entry.url, quote=True)}">{label}</a>'
             sources.append(f"{html.escape(entry.numbers)}. {label}")
         suffix = "\n\n<b>来源</b>\n" + "\n".join(sources) if sources else ""
-        agents = telegram_format.agent_lines(result)
         if agents:
             suffix += "\n\n<b>子智能体</b>\n" + "\n".join(html.escape(line) for line in agents)
         await delivery._deliver(self.placeholder, header + answer + suffix)
