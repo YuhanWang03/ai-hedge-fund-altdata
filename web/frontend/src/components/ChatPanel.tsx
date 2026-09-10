@@ -17,17 +17,22 @@ interface AgentMeta {
 }
 
 const STOP_LABELS: Record<string, string> = { finished: "完成", rounds: "轮次用尽", time: "超时", no_model: "无模型", no_budget: "无预算" };
-const CALL_LABELS: Record<string, string> = { news: "新闻", filing_events: "读申报", memory: "记忆", search: "搜索", read: "读正文", filings: "申报", sections_read: "读节", events: "事件" };
+const CALL_LABELS: Record<string, string> = { news: "新闻", filing_events: "读申报", memory: "记忆", search: "搜索", read: "读正文", filings: "申报", sections_read: "读节", events: "事件", objections: "反对" };
 
 function callSummary(calls: Record<string, number | null | undefined>): string {
   return Object.entries(calls).filter(([, value]) => value).map(([key, value]) => `${CALL_LABELS[key] || key} ${value}`).join("、");
 }
 
-function SubAgentTrace({ label, rounds, elapsedMs, stop, calls, trace, intraday }: { label: string; rounds: number; elapsedMs: number; stop: string; calls: Record<string, number | null | undefined>; trace: { round: number; action: string; detail: string; ms: number }[]; intraday?: boolean }) {
+function SubAgentTrace({ label, rounds, elapsedMs, stop, calls, trace, intraday, notes }: { label: string; rounds: number; elapsedMs: number; stop: string; calls: Record<string, number | null | undefined>; trace: { round: number; action: string; detail: string; ms: number }[]; intraday?: boolean; notes?: string[] }) {
   const summary = [label, `${rounds} 轮`, `${(elapsedMs / 1000).toFixed(1)}s`, callSummary(calls), STOP_LABELS[stop] || stop, intraday ? "盘中" : ""].filter(Boolean).join(" · ");
   return (
     <details className="mt-1">
       <summary className="cursor-pointer text-slate-600">{summary}</summary>
+      {notes && notes.length > 0 && (
+        <ul className="mt-1 list-disc space-y-0.5 pl-5 text-amber-700">
+          {notes.map((note, index) => <li key={index}>{note}</li>)}
+        </ul>
+      )}
       <ol className="mt-1 list-decimal space-y-0.5 pl-5">
         {trace.map((step, index) => (
           <li key={`${step.round}-${index}`}>
@@ -264,7 +269,7 @@ export default function ChatPanel({ inject }: { inject?: { text: string; nonce: 
                   </div>
                   {message.agent.subAgents.map((agent, agentIndex) => (
                     <div key={`${agent.capability}-${agentIndex}`} className="mt-1">
-                      <SubAgentTrace label={`${agent.label} ${agent.subject}`} rounds={agent.rounds} elapsedMs={agent.elapsed_ms} stop={agent.stop_reason} calls={agent.calls} trace={agent.trace} intraday={agent.intraday} />
+                      <SubAgentTrace label={`${agent.label} ${agent.subject}`} rounds={agent.rounds} elapsedMs={agent.elapsed_ms} stop={agent.stop_reason} calls={agent.calls} trace={agent.trace} intraday={agent.intraday} notes={agent.notes} />
                       {agent.nested.map((nested, nestedIndex) => (
                         <div key={nestedIndex} className="ml-4">
                           <SubAgentTrace label={nested.label} rounds={nested.rounds} elapsedMs={nested.elapsed_ms} stop={nested.stop_reason} calls={nested.calls} trace={nested.trace} />

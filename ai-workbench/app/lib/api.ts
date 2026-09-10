@@ -55,6 +55,8 @@ export type AgentV2SubAgent = {
   stop_reason: string;
   calls: Record<string, number | null | undefined>;
   intraday?: boolean;
+  notes?: string[];
+  stance?: string;
   trace: AgentV2TraceStep[];
   nested: { label: string; rounds: number; elapsed_ms: number; stop_reason: string; calls: Record<string, number | null | undefined>; trace: AgentV2TraceStep[] }[];
 };

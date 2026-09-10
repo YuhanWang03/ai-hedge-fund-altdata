@@ -354,3 +354,4 @@
   .research-module-badges, .research-module-cache, .research-module-summary { grid-column: 1 / -1; }
 }
 .sub-agent{margin-top:6px;padding-left:2px}.sub-agent.nested{margin-left:14px;margin-top:3px}.agent-trace summary{cursor:pointer;color:#536176;font-size:9px}.agent-trace ol{margin:5px 0 0;padding-left:16px;display:grid;gap:3px}.agent-trace li{display:flex;flex-wrap:wrap;align-items:baseline;gap:5px;font-size:8px;color:#657286}.agent-trace li code{border-radius:4px;padding:1px 4px;background:#eef2f6;color:#42526a;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:8px}.agent-trace li em{font-style:normal;color:#42526a;overflow-wrap:anywhere}.agent-trace li small{color:#909baa}
+.agent-notes{margin:5px 0 0;padding-left:16px;display:grid;gap:3px}.agent-notes li{font-size:9px;color:#8b650c;overflow-wrap:anywhere}

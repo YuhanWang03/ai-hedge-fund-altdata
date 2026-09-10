@@ -232,7 +232,7 @@ def completion_note(result: AgentResult) -> str:
 
 
 _STOP_LABELS = {"finished": "完成", "rounds": "轮次用尽", "time": "超时", "no_model": "无模型", "no_budget": "无预算", "no_filings": "无申报"}
-_CALL_LABELS = {"news": "新闻", "filing_events": "读申报", "memory": "记忆", "search": "搜索", "read": "读正文", "filings": "申报", "sections_read": "读节", "events": "事件"}
+_CALL_LABELS = {"news": "新闻", "filing_events": "读申报", "memory": "记忆", "search": "搜索", "read": "读正文", "filings": "申报", "sections_read": "读节", "events": "事件", "objections": "反对"}
 
 
 def agent_lines(result: AgentResult, *, limit: int = 8) -> list[str]:
@@ -246,6 +246,8 @@ def agent_lines(result: AgentResult, *, limit: int = 8) -> list[str]:
         stop = _STOP_LABELS.get(entry["stop_reason"], entry["stop_reason"])
         seconds = entry["elapsed_ms"] / 1000
         lines.append(f"{entry['label']} {entry['subject']}：{entry['rounds']} 轮 · {seconds:.1f}s" + (f" · {calls}" if calls else "") + (f" · {stop}" if stop else "") + ("（盘中）" if entry["intraday"] else ""))
+        for note in (entry.get("notes") or [])[:3]:
+            lines.append(f"  · {_one_line(note, 110)}")
         challenge = entry.get("challenge") or {}
         if challenge.get("objection"):
             verdict = "反方降级" if challenge.get("downgraded") else "反方未采纳"

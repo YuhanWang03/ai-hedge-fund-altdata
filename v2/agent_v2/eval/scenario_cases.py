@@ -10,7 +10,7 @@ and that the sub-agent's events and the news reach the answer.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from v2.agent_v2.catalog import default_catalog
 from v2.agent_v2.execution import CapabilityRegistry
@@ -123,7 +123,8 @@ def build_drawdown_registry() -> CapabilityRegistry:
             price = EvidenceItem(f"AT-{ticker}-{day}-price", ticker, f"{ticker} 在 {day} 收于 730.00 美元，较前一交易日 +3.50%。", as_of=day, metadata={"evidence_scope": "price"})
             assessment = EvidenceItem(f"AT-{ticker}-{day}-assessment", ticker, f"{ticker} {day} 异动归因中有 0 个高置信度直接驱动，0 个候选解释。", as_of=day, metadata={"evidence_scope": "attribution", "claim_role": "attribution_assessment"})
             narrative = f"{price.claim.rstrip('。')}[{price.id}]。\n\n“为什么上涨”目前还不能下定论：暂未找到可核实的同日催化剂，具体触发原因尚未确认[{assessment.id}]。"
-            return ToolEnvelope("market.attribute_move", ResultStatus.COMPLETED, subject=ticker, as_of=day, summary=price.claim, metrics={"price_change_pct": 0.035, "confirmed_driver_count": 0}, evidence=[price, assessment], metadata={"narrative": narrative, "narrative_compact": f"{day} {ticker} +3.50%[{price.id}]。暂未找到可核实的同日催化剂[{assessment.id}]。", "require_cited_numbers": True, "date": day})
+            rise_agent = {"name": "move_attributor", "label": "异动归因", "subject": f"{ticker} {day}", "rounds": 2, "llm_calls": 2, "elapsed_ms": 8, "seconds_allowed": 120, "stop_reason": "finished", "calls": {"news": 1 if c.allow_web else 0, "filing_events": 0, "memory": 1}, "yield": {"kept": 0, "dropped": 0, "confirmed": 0}, "reader_runs": []}
+            return ToolEnvelope("market.attribute_move", ResultStatus.COMPLETED, subject=ticker, as_of=day, summary=price.claim, metrics={"price_change_pct": 0.035, "confirmed_driver_count": 0}, evidence=[price, assessment], metadata={"narrative": narrative, "narrative_compact": f"{day} {ticker} +3.50%[{price.id}]。暂未找到可核实的同日催化剂[{assessment.id}]。", "require_cited_numbers": True, "date": day, "agent": rise_agent, "trace": [{"round": 1, "action": "memory", "detail": "", "ms": 4}, {"round": 2, "action": "finish", "detail": "reasons=0", "ms": 4}]})
         price = EvidenceItem(f"AT-{ticker}-{day}-price", ticker, f"{ticker} 在 {day} 收于 275.10 美元，较前一交易日 -13.21%。", as_of=day, metadata={"evidence_scope": "price"})
         filing_event = EvidenceItem(f"E-{ticker}-{day}", ticker, f"{ticker} {day}：财报指引低于预期（6-K {day} s2：“guidance below expectations”）。", as_of=day, metadata={"evidence_scope": "filing_event", "date": day})
         reasons = [EvidenceItem(f"AT-{ticker}-{day}-filing", ticker, f"{ticker} {day} 中置信度候选解释：财报指引低于预期（申报：“guidance below expectations”）。", as_of=day, confidence=0.6, metadata={"evidence_scope": "candidate", "claim_role": "candidate_driver", "causal_confidence": "中", "driver_text": "财报指引低于预期", "source_kind": "filing"})]
@@ -135,16 +136,18 @@ def build_drawdown_registry() -> CapabilityRegistry:
             second = f"能直接支持的高置信度驱动：财报后指引令市场失望，股价大跌[{reasons[0].id}]。最相关的一条候选线索是“财报指引低于预期”，只能作为排查方向[{reasons[-1].id}]。"
         else:
             second = f"“为什么下跌”目前还不能下定论：暂未找到可核实的同日催化剂，具体触发原因尚未确认[{assessment.id}]。最相关的一条候选线索是“财报指引低于预期”，只能作为排查方向[{reasons[-1].id}]。"
+        confirmed = 1 if c.allow_web else 0
+        agent = {"name": "move_attributor", "label": "异动归因", "subject": f"{ticker} {day}", "rounds": 3 if c.allow_web else 2, "llm_calls": 3 if c.allow_web else 2, "elapsed_ms": 12, "seconds_allowed": 120, "stop_reason": "finished", "calls": {"news": 1 if c.allow_web else 0, "filing_events": 1, "memory": 1}, "yield": {"kept": len(reasons), "dropped": 0, "confirmed": confirmed}, "reader_runs": [{"filings": 1, "sections_read": 2, "events": 1, "rounds": 2, "stop_reason": "finished", "elapsed_ms": 5, "trace": []}]}
         return ToolEnvelope(
             "market.attribute_move",
             ResultStatus.COMPLETED,
             subject=ticker,
             as_of=day,
             summary=price.claim,
-            metrics={"price_change_pct": -0.1321, "confirmed_driver_count": 1 if c.allow_web else 0},
+            metrics={"price_change_pct": -0.1321, "confirmed_driver_count": confirmed},
             evidence=[price, *reasons, filing_event, assessment],
             limitations=[] if c.allow_web else ["用户未授权网页搜索，归因未使用新闻。"],
-            metadata={"narrative": first + "\n\n" + second, "require_cited_numbers": True, "date": day},
+            metadata={"narrative": first + "\n\n" + second, "require_cited_numbers": True, "date": day, "agent": agent, "trace": [{"round": 1, "action": "filing_events", "detail": "", "ms": 5}, {"round": 2, "action": "finish", "detail": f"reasons={len(reasons)}", "ms": 3}]},
         )
 
     registry.register("market.attribute_move", attribute)
@@ -170,6 +173,8 @@ class ScenarioCase:
     #: Whether the last turn must have been rewritten from the conversation.
     expect_rewritten: bool | None = None
     expect_verified: bool = True
+    #: Sub-agents that must have run (name → minimum runs), each finishing on its own.
+    expected_agents: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -183,6 +188,9 @@ class ScenarioScore:
     verified_ok: bool
     called: tuple[str, ...] = ()
     missing_phrases: tuple[str, ...] = ()
+    #: Sub-agents seen: "move_attributor×3 finished" per name; and whether they met the case's expectation.
+    agents: tuple[str, ...] = ()
+    agents_ok: bool = True
 
 
 _DRAWDOWN_PHRASES = (
@@ -207,6 +215,7 @@ SCENARIO_CASES: tuple[ScenarioCase, ...] = (
         _DRAWDOWN_PHRASES + ("“为什么下跌”目前还不能下定论：暂未找到可核实的同日催化剂",),
         ("组合价值", "2026-03-01", "Revenue growth", "AT-ARM-2026-08-05-news"),
         expect_rewritten=True,
+        expected_agents={"move_attributor": 1},
     ),
     ScenarioCase(
         "sc_drawdown_why_web",
@@ -218,6 +227,7 @@ SCENARIO_CASES: tuple[ScenarioCase, ...] = (
         ("组合价值", "尚未确认"),
         allow_web=True,
         expect_rewritten=True,
+        expected_agents={"move_attributor": 1},
     ),
     ScenarioCase(
         "sc_direct_drawdown_question",
@@ -235,6 +245,7 @@ SCENARIO_CASES: tuple[ScenarioCase, ...] = (
         ),
         ("组合价值", "IVV 70 sh"),
         expect_rewritten=False,
+        expected_agents={"move_attributor": 1},
     ),
     ScenarioCase(
         "sc_today_is_not_a_stretch",
@@ -269,6 +280,7 @@ SCENARIO_CASES: tuple[ScenarioCase, ...] = (
         ),
         ("为什么下跌", "组合价值", "回撤"),
         expect_rewritten=True,
+        expected_agents={"move_attributor": 1},
     ),
     ScenarioCase(
         "sc_rise_after_loss_ranking_is_todays_move",
@@ -294,7 +306,7 @@ def run_scenario(case: ScenarioCase):
     """Play the scenario's turns through one agent and session; return the last result."""
 
     memory = ShortTermSession()
-    agent = AgentV2(catalog=default_catalog(), registry=build_drawdown_registry(), session=memory, config=AgentV2Config(enable_web_fallback=case.allow_web))
+    agent = AgentV2(catalog=default_catalog(), registry=build_drawdown_registry(), session=memory, config=AgentV2Config(enable_web_fallback=case.allow_web, record_sub_agents=False))
     result = None
     for turn in case.turns:
         result = agent.run(turn, session_id=f"scenario-{case.id}", allow_web=case.allow_web)
@@ -314,5 +326,17 @@ def score_scenario(case: ScenarioCase) -> ScenarioScore:
     rewritten = bool(result.request.metadata.get("rewritten"))
     rewritten_ok = case.expect_rewritten is None or rewritten == case.expect_rewritten
     verified_ok = result.verification.ok == case.expect_verified
-    passed = capabilities_ok and discipline_ok and phrases_ok and rewritten_ok and verified_ok
-    return ScenarioScore(case.id, passed, capabilities_ok, discipline_ok, phrases_ok, rewritten_ok, verified_ok, called, missing + tuple(f"leaked: {phrase}" for phrase in leaked))
+    from collections import Counter
+
+    from v2.agent_v2.models import sub_agent_summaries
+
+    summaries = sub_agent_summaries(result.results)
+    runs = Counter(entry["name"] for entry in summaries)
+    stops = {entry["name"]: Counter() for entry in summaries}
+    for entry in summaries:
+        stops[entry["name"]][entry["stop_reason"] or "?"] += 1
+    agents = tuple(f"{name}×{count} " + "/".join(f"{stop} {n}" for stop, n in sorted(stops[name].items())) for name, count in sorted(runs.items()))
+    finished = all(entry["stop_reason"] in {"finished", "no_filings"} for entry in summaries)
+    agents_ok = all(runs.get(name, 0) >= minimum for name, minimum in case.expected_agents.items()) and finished
+    passed = capabilities_ok and discipline_ok and phrases_ok and rewritten_ok and verified_ok and agents_ok
+    return ScenarioScore(case.id, passed, capabilities_ok, discipline_ok, phrases_ok, rewritten_ok, verified_ok, called, missing + tuple(f"leaked: {phrase}" for phrase in leaked), agents, agents_ok)

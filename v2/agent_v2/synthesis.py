@@ -503,6 +503,8 @@ class EvidenceSummarySynthesizer:
 
     @staticmethod
     def _render(result: ToolEnvelope) -> str:
+        if result.metadata.get("citation_kind") == "display":
+            return ""  # a display-only envelope (the debate) is shown beside the answer, not in it
         narrative = str(result.metadata.get("narrative") or "").strip()
         if result.ok and narrative:
             return narrative

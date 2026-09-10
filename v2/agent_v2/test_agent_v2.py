@@ -2712,3 +2712,62 @@ def test_challenger_downgrades_a_driver_the_sector_explains_or_the_model_refutes
     agreeing = ScriptedLLM([LLMResponse(text='{"action":"news","query":"arm"}'), confirmed_finish, LLMResponse(text='{"objection":"","downgrade":false}')])
     result = MoveAttributor(agreeing, price_source_factory=lambda: SimpleNamespace(get_prices=_attributor_prices), news=news, filing_reader=None, memory_recall=None, memory_remember=None, sector_for=lambda ticker: "SMH").run("ARM", context, day="2026-07-29", today=date(2026, 9, 9))
     assert result.metrics["confirmed_driver_count"] == 1 and "反方意见" not in " ".join(result.limitations) and sub_agent_summaries([result])[0]["challenge"]["downgraded"] is False
+
+
+def test_debater_objections_must_cite_the_runs_own_evidence():
+    from v2.agent_v2.agents.debater import Debater
+    from v2.agent_v2.interfaces import telegram_format
+    from v2.agent_v2.models import sub_agent_summaries
+
+    evidence = [
+        EvidenceItem("R-growth", "NVDA", "Revenue growth is +83.4% on the latest available basis."),
+        EvidenceItem("R-valuation", "NVDA", "Forward P/E 45.2; EV/Sales 28.1, top decile of the sector."),
+        EvidenceItem("R-hidden", "NVDA", "internal score", metadata={"citable": False}),
+    ]
+    verdict = {"stance": "回答偏多", "objections": [
+        {"claim": "估值合理", "objection": "前瞻市盈率 45 倍、EV/Sales 处于板块前十分位，回答没有把估值风险计入", "evidence_id": "R-valuation"},
+        {"claim": "增长可持续", "objection": "没有证据", "evidence_id": "R-nowhere"},
+        {"claim": "评分高", "objection": "内部评分不可引用", "evidence_id": "R-hidden"},
+    ], "note": "回答只讲增长不讲估值"}
+    llm = ScriptedLLM([LLMResponse(text=json.dumps(verdict, ensure_ascii=False))])
+    context = ExecutionContext("run", NormalizedRequest("q", "q"), BudgetClass.STANDARD)
+    result = Debater(llm).run("分析 NVDA 的估值", "NVDA 增长强劲，估值合理[R-growth]。", evidence, context, subject="NVDA")
+    assert result.capability == "debate.challenge" and result.ok and result.metrics == {"objections": 1, "dropped": 2, "elapsed_ms": result.metrics["elapsed_ms"], "stop_reason": "finished"}
+    assert result.metadata["objections"] == [{"claim": "估值合理", "objection": "前瞻市盈率 45 倍、EV/Sales 处于板块前十分位，回答没有把估值风险计入", "evidence_id": "R-valuation"}]
+    payload = json.loads(llm.calls[0][-1]["content"])
+    assert [row["id"] for row in payload["evidence"]] == ["R-growth", "R-valuation"]  # the uncitable item is not offered
+    (summary,) = sub_agent_summaries([result])
+    assert summary["name"] == "debater" and summary["stance"] == "回答偏多" and summary["notes"] == ["前瞻市盈率 45 倍、EV/Sales 处于板块前十分位，回答没有把估值风险计入（引 [R-valuation]）"]
+    telegram = _telegram_result("x[evidence-news-1]。", outcome="clean")
+    telegram.results = [result]
+    assert telegram_format.agent_lines(telegram) == [f"反方 NVDA：1 轮 · {result.metrics['elapsed_ms'] / 1000:.1f}s · 反对 1 · 完成", "  · 前瞻市盈率 45 倍、EV/Sales 处于板块前十分位，回答没有把估值风险计入（引 [R-valuation]）"]
+    # Nothing to object to: the record says so, and the answer is untouched.
+    quiet = Debater(ScriptedLLM([LLMResponse(text='{"stance":"回答中性","objections":[],"note":"结论与证据一致"}')])).run("q", "答[R-growth]。", evidence, context)
+    assert quiet.metadata["agent"]["notes"] == ["未找到证据支持的反对意见：结论与证据一致"] and quiet.metrics["objections"] == 0
+    # No model: no call, a partial display record.
+    assert Debater(None).run("q", "答", evidence, context).metrics["stop_reason"] == "no_model"
+
+
+def test_orchestrator_runs_the_debate_on_research_answers_only():
+    from v2.agent_v2.synthesis import EvidenceSummarySynthesizer
+
+    registry = CapabilityRegistry(default_catalog())
+    registry.register("research.stock", lambda arguments, context: ToolEnvelope("research.stock", ResultStatus.COMPLETED, subject="NVDA", summary="NVDA revenue growth was 10%.", evidence=[EvidenceItem("E1", "NVDA", "NVDA revenue growth was 10%.")]))
+    verdict = LLMResponse(text='{"stance":"回答偏多","objections":[{"claim":"增长强","objection":"10% 的增长在证据里只是最新一期，不能外推","evidence_id":"E1"}],"note":""}')
+
+    class Synth(EvidenceSummarySynthesizer):
+        def __init__(self, llm):
+            self.llm = llm
+
+    llm = ScriptedLLM([verdict])
+    agent = AgentV2(catalog=default_catalog(), registry=registry, synthesizer=Synth(llm), config=AgentV2Config(record_sub_agents=False))
+    result = agent.run("分析 NVDA 的增长")
+    debate = [envelope for envelope in result.results if envelope.capability == "debate.challenge"]
+    assert len(debate) == 1 and debate[0].metadata["objections"][0]["evidence_id"] == "E1" and len(llm.calls) == 1
+    assert "反对" not in result.answer and result.verification.ok and result.to_dict()["sub_agents"][0]["name"] == "debater"
+    # Off by configuration, and never on a lookup.
+    quiet = ScriptedLLM([verdict])
+    off = AgentV2(catalog=default_catalog(), registry=registry, synthesizer=Synth(quiet), config=AgentV2Config(record_sub_agents=False, debate=False)).run("分析 NVDA 的增长")
+    assert not [envelope for envelope in off.results if envelope.capability == "debate.challenge"] and quiet.calls == []
+    lookup = AgentV2(catalog=default_catalog(), registry=_framed_registry(), synthesizer=Synth(quiet), config=AgentV2Config(record_sub_agents=False)).run("我的仓库里哪只跌的最多?")
+    assert not [envelope for envelope in lookup.results if envelope.capability == "debate.challenge"] and quiet.calls == []

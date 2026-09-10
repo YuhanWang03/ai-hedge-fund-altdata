@@ -343,6 +343,8 @@ def sub_agent_summaries(results: list[ToolEnvelope]) -> list[dict[str, Any]]:
             "yield": dict(agent.get("yield") or {}),
             "memory": dict(agent.get("memory") or {}),
             "challenge": dict(agent.get("challenge") or {}),
+            "notes": [str(note) for note in (agent.get("notes") or []) if note],
+            "stance": str(agent.get("stance") or ""),
             "trace": [dict(step) for step in (result.metadata.get("trace") or []) if isinstance(step, dict)],
             "nested": [
                 {"label": "申报阅读", "rounds": int(run.get("rounds") or 0), "elapsed_ms": int(run.get("elapsed_ms") or 0), "stop_reason": str(run.get("stop_reason") or ""), "calls": {"filings": run.get("filings"), "sections_read": run.get("sections_read"), "events": run.get("events")}, "trace": [dict(step) for step in (run.get("trace") or []) if isinstance(step, dict)]}

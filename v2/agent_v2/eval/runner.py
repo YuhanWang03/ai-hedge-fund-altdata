@@ -50,5 +50,5 @@ def render(report: SuiteReport) -> str:
         lines.append(f"{mark} {score.case_id}: verdict={'ok' if score.verifier_ok else 'rejected'} expected={'ok' if score.expected_ok else 'rejected'} warnings={'; '.join(score.warnings) or '-'}")
     for score in report.scenario_scores:
         mark = "PASS" if score.passed else "FAIL"
-        lines.append(f"{mark} {score.case_id}: plan={score.capabilities_ok} discipline={score.discipline_ok} phrases={score.phrases_ok} rewritten={score.rewritten_ok} verified={score.verified_ok} called={','.join(score.called)}" + (f" missing={' | '.join(score.missing_phrases)}" if score.missing_phrases else ""))
+        lines.append(f"{mark} {score.case_id}: plan={score.capabilities_ok} discipline={score.discipline_ok} phrases={score.phrases_ok} rewritten={score.rewritten_ok} verified={score.verified_ok} agents={score.agents_ok} called={','.join(score.called)}" + (f" sub_agents={'; '.join(score.agents)}" if score.agents else "") + (f" missing={' | '.join(score.missing_phrases)}" if score.missing_phrases else ""))
     return "\n".join(lines)

@@ -53,6 +53,8 @@ class AgentV2Config:
     max_seconds: float | None = None
     #: Append every sub-agent run to the run ledger (data/agent_v2_subagents.jsonl).
     record_sub_agents: bool = True
+    #: After a research answer is verified, one adversarial pass lists the objections the run's evidence supports.
+    debate: bool = True
 
 
 class AgentV2:
@@ -224,6 +226,9 @@ class AgentV2:
         self._emit(on_progress, run_id, RunStatus.VERIFYING, "verifying citations")
         verification = verify_answer(answer, evidence, answer_mode=answer_mode, results=results)
         failures = [result for result in results if not result.ok]
+        debate = self._debate(request, decision, plan, answer, evidence, results, context)
+        if debate is not None:
+            results = [*results, debate]
         knowledge_unavailable = not results and decision.kind == RouteKind.GENERAL_KNOWLEDGE and not bool(getattr(self.synthesizer, "supports_general_knowledge", False))
         if failures or not verification.ok or knowledge_unavailable or outcome.stop_reason != "completed" or (not results and decision.kind != RouteKind.GENERAL_KNOWLEDGE):
             status = RunStatus.PARTIAL
@@ -244,6 +249,28 @@ class AgentV2:
             stop_reason=outcome.stop_reason,
             synthesis=synthesis,
         )
+
+    def _debate(self, request, decision, plan, answer: str, evidence, results, context: ExecutionContext):
+        """One adversarial pass over a research answer, when configured, a model is present and time remains.
+
+        Returns the debater's display envelope (no evidence of its own) or None.
+        """
+
+        if not self.config.debate or decision.kind != RouteKind.RESEARCH or plan.answer_mode != AnswerMode.RESEARCH_GROUNDED:
+            return None
+        if not any(result.ok and (result.capability.startswith("research.") or result.capability in {"market.performance", "market.explain_move", "market.attribute_move", "web.research"}) for result in results):
+            return None
+        llm = getattr(self.synthesizer, "llm", None)
+        if llm is None or not evidence:
+            return None
+        from v2.agent_v2.agents.debater import DEBATE_MIN_SECONDS, Debater
+
+        if context.remaining_seconds() < DEBATE_MIN_SECONDS:
+            return None
+        try:
+            return Debater(llm).run(request.text, answer, evidence, context, subject=request.entities[0] if request.entities else "")
+        except Exception:  # noqa: BLE001 — the debate never breaks an answer
+            return None
 
     def _synthesis_diagnostics(self) -> dict:
         diagnostics = getattr(self.synthesizer, "diagnostics", None)

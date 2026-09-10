@@ -265,14 +265,15 @@ def run_v1_baseline(case: BenchmarkCase) -> BenchmarkScore:
 def _v2_agent(mode: str, llm_factory: Callable[[], Any] | None, fixtures: str) -> tuple[AgentV2, RecordedCalls, CountingLLM | None, LLMEvidenceSynthesizer | None]:
     registry, calls = build_benchmark_registry(fixtures=fixtures)
     if mode == "v2_rules":
-        return AgentV2(catalog=registry.catalog, registry=registry, synthesizer=EvidenceSummarySynthesizer(), config=AgentV2Config(max_seconds=60)), calls, None, None
+        return AgentV2(catalog=registry.catalog, registry=registry, synthesizer=EvidenceSummarySynthesizer(), config=AgentV2Config(max_seconds=60, record_sub_agents=False)), calls, None, None
     if llm_factory is None:
         from v2.agent.llm import build_llm
 
         llm_factory = build_llm
     llm = CountingLLM(llm_factory())
     synthesizer = LLMEvidenceSynthesizer(llm, catalog=registry.catalog)
-    agent = AgentV2(catalog=registry.catalog, registry=registry, planner=StructuredLLMPlanner(llm, registry.catalog), synthesizer=synthesizer, config=AgentV2Config(max_seconds=120))
+    # The benchmark counts the model calls a synthesis needs; the debate is a separate pass, measured by the sub-agent ledger.
+    agent = AgentV2(catalog=registry.catalog, registry=registry, planner=StructuredLLMPlanner(llm, registry.catalog), synthesizer=synthesizer, config=AgentV2Config(max_seconds=120, debate=False, record_sub_agents=False))
     return agent, calls, llm, synthesizer
 
 
