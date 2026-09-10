@@ -154,15 +154,15 @@ def token_equivalent(input_tokens: float, cached_tokens: float, output_tokens: f
     return (total_input - cached) * TOKEN_WEIGHTS["input"] + cached * TOKEN_WEIGHTS["cached_input"] + output * TOKEN_WEIGHTS["output"]
 
 
-def usage_by_source(since_days: int | None = None) -> dict[str, dict[str, Any]]:
-    """Token totals (and the standard equivalent) per ``agent_v2.*`` source from the usage ledger; empty when the ledger is unavailable."""
+def _usage_events(since_days: int | None) -> list[tuple[dict[str, Any], Any]]:
+    """The ``agent_v2.*`` LLM events (payload, usd cost) from the usage ledger; empty when it is unavailable."""
 
     try:
         from v2.data.cost_ledger import _conn
     except Exception:  # noqa: BLE001 — the ledger is optional infrastructure
-        return {}
+        return []
     cutoff = (datetime.now(tz=timezone.utc) - timedelta(days=since_days)).isoformat() if since_days else ""
-    totals: dict[str, dict[str, Any]] = defaultdict(lambda: {"calls": 0, "input_tokens": 0.0, "cached_tokens": 0.0, "output_tokens": 0.0, "equivalent": 0.0, "cost": {}, "unpriced": 0, "unpriced_reasons": {}, "failed": 0})
+    events: list[tuple[dict[str, Any], Any]] = []
     try:
         with _conn() as conn:
             query = "SELECT payload, cost_usd FROM usage_events WHERE category='llm'" + (" AND occurred_at>=?" if cutoff else "")
@@ -171,35 +171,65 @@ def usage_by_source(since_days: int | None = None) -> dict[str, dict[str, Any]]:
                     event = json.loads(payload)
                 except (TypeError, json.JSONDecodeError):
                     continue
-                source = str(event.get("source") or "")
-                if not source.startswith("agent_v2."):
-                    continue
-                bucket = totals[source]
-                bucket["calls"] += 1
-                usage = event.get("usage") or {}
-                input_tokens = float(usage.get("input_tokens") or 0)
-                cached_tokens = min(input_tokens, float(usage.get("cached_tokens") or 0))
-                output_tokens = float(usage.get("output_tokens") or 0)
-                bucket["input_tokens"] += input_tokens
-                bucket["cached_tokens"] += cached_tokens
-                bucket["output_tokens"] += output_tokens
-                bucket["equivalent"] += token_equivalent(input_tokens, cached_tokens, output_tokens)
-                # The ledger prices each event in the provider's currency
-                # (DeepSeek in CNY); the USD column is only filled for USD.
-                amount, currency = event.get("amount"), str(event.get("currency") or "")
-                if amount is None and cost is not None:
-                    amount, currency = cost, "USD"
-                if amount is not None and currency:
-                    bucket["cost"][currency] = bucket["cost"].get(currency, 0.0) + float(amount)
-                else:
-                    bucket["unpriced"] += 1
-                    reason = str(event.get("reason") or "未说明")
-                    bucket["unpriced_reasons"][reason] = bucket["unpriced_reasons"].get(reason, 0) + 1
-                if event.get("state") != "success":
-                    bucket["failed"] += 1
+                if str(event.get("source") or "").startswith("agent_v2."):
+                    events.append((event, cost))
     except Exception as exc:  # noqa: BLE001
         logger.warning("usage ledger unavailable for the sub-agent report: %s", exc)
-        return {}
+        return []
+    return events
+
+
+def _event_tokens(event: dict[str, Any]) -> tuple[float, float, float]:
+    usage = event.get("usage") or {}
+    input_tokens = float(usage.get("input_tokens") or 0)
+    cached_tokens = min(input_tokens, float(usage.get("cached_tokens") or 0))
+    return input_tokens, cached_tokens, float(usage.get("output_tokens") or 0)
+
+
+def usage_by_run(since_days: int | None = None, *, events: list[tuple[dict[str, Any], Any]] | None = None) -> dict[str, dict[str, Any]]:
+    """Per run id (one question): calls, standard equivalent and the equivalent per source; events without a run id are skipped."""
+
+    runs: dict[str, dict[str, Any]] = defaultdict(lambda: {"calls": 0, "equivalent": 0.0, "sources": {}, "at": ""})
+    for event, _cost in (_usage_events(since_days) if events is None else events):
+        run_id = str(event.get("run_id") or "")
+        if not run_id:
+            continue
+        bucket = runs[run_id]
+        bucket["calls"] += 1
+        equivalent = token_equivalent(*_event_tokens(event))
+        bucket["equivalent"] += equivalent
+        source = str(event.get("source") or "")
+        bucket["sources"][source] = bucket["sources"].get(source, 0.0) + equivalent
+        bucket["at"] = max(bucket["at"], str(event.get("occurred_at") or ""))
+    return {run_id: {**bucket, "equivalent": round(bucket["equivalent"], 1), "sources": {source: round(value, 1) for source, value in bucket["sources"].items()}} for run_id, bucket in runs.items()}
+
+
+def usage_by_source(since_days: int | None = None, *, events: list[tuple[dict[str, Any], Any]] | None = None) -> dict[str, dict[str, Any]]:
+    """Token totals (and the standard equivalent) per ``agent_v2.*`` source from the usage ledger; empty when the ledger is unavailable."""
+
+    totals: dict[str, dict[str, Any]] = defaultdict(lambda: {"calls": 0, "input_tokens": 0.0, "cached_tokens": 0.0, "output_tokens": 0.0, "equivalent": 0.0, "cost": {}, "unpriced": 0, "unpriced_reasons": {}, "failed": 0})
+    for event, cost in (_usage_events(since_days) if events is None else events):
+        source = str(event.get("source") or "")
+        bucket = totals[source]
+        bucket["calls"] += 1
+        input_tokens, cached_tokens, output_tokens = _event_tokens(event)
+        bucket["input_tokens"] += input_tokens
+        bucket["cached_tokens"] += cached_tokens
+        bucket["output_tokens"] += output_tokens
+        bucket["equivalent"] += token_equivalent(input_tokens, cached_tokens, output_tokens)
+        # The ledger prices each event in the provider's currency
+        # (DeepSeek in CNY); the USD column is only filled for USD.
+        amount, currency = event.get("amount"), str(event.get("currency") or "")
+        if amount is None and cost is not None:
+            amount, currency = cost, "USD"
+        if amount is not None and currency:
+            bucket["cost"][currency] = bucket["cost"].get(currency, 0.0) + float(amount)
+        else:
+            bucket["unpriced"] += 1
+            reason = str(event.get("reason") or "未说明")
+            bucket["unpriced_reasons"][reason] = bucket["unpriced_reasons"].get(reason, 0) + 1
+        if event.get("state") != "success":
+            bucket["failed"] += 1
     return {source: {**bucket, "equivalent": round(bucket["equivalent"], 1), "cost": {currency: round(value, 4) for currency, value in bucket["cost"].items()}} for source, bucket in sorted(totals.items())}
 
 
@@ -254,10 +284,30 @@ def _usage_row(source: str, row: dict[str, Any], summary: dict[str, dict[str, An
     return "| " + " | ".join(cells) + " |"
 
 
-def render(summary: dict[str, dict[str, Any]], usage: dict[str, dict[str, Any]], *, since_days: int | None, questions: int = 0) -> str:
+def top_questions(runs: dict[str, dict[str, Any]], rows: list[dict[str, Any]], *, limit: int = 5) -> list[dict[str, Any]]:
+    """The most expensive runs, with the question text from the sub-agent ledger when that run used one."""
+
+    questions = {str(row.get("run_id") or ""): str(row.get("question") or "") for row in rows if row.get("run_id")}
+    ranked = sorted(runs.items(), key=lambda item: (-float(item[1].get("equivalent") or 0), item[0]))[: max(1, limit)]
+    result = []
+    for run_id, bucket in ranked:
+        sources = sorted((bucket.get("sources") or {}).items(), key=lambda item: -item[1])
+        result.append({"run_id": run_id, "question": questions.get(run_id, ""), "at": str(bucket.get("at") or "")[:16].replace("T", " "), "calls": int(bucket.get("calls") or 0), "equivalent": float(bucket.get("equivalent") or 0), "top_sources": [(source.removeprefix("agent_v2."), value) for source, value in sources[:3]]})
+    return result
+
+
+def render(summary: dict[str, dict[str, Any]], usage: dict[str, dict[str, Any]], *, since_days: int | None, questions: int = 0, runs: dict[str, dict[str, Any]] | None = None, rows: list[dict[str, Any]] | None = None) -> str:
+    """``questions`` is the number of questions behind the usage table: the usage ledger's distinct run ids
+    when it has them, otherwise the sub-agent ledger's (an upper bound on per-question figures)."""
+
     lines = [f"# 子智能体运行报告{f'（近 {since_days} 天）' if since_days else ''}", ""]
-    if questions:
-        lines.append(f"账本里有 {questions} 个用到子智能体的问题。")
+    exact = bool(runs)
+    if exact:
+        questions = len(runs)
+        lines.append(f"用量账本里有 {questions} 个问题（按 run_id 计）。")
+        lines.append("")
+    elif questions:
+        lines.append(f"子智能体账本里有 {questions} 个用到子智能体的问题。")
         lines.append("")
     if not summary:
         lines.append("账本里还没有子智能体运行记录。")
@@ -281,7 +331,20 @@ def render(summary: dict[str, dict[str, Any]], usage: dict[str, dict[str, Any]],
         lines.append(_usage_row("合计", usage_totals(usage), {}, priced=priced, questions=questions))
         lines.append("")
         lines.append(f"标准当量 = 未缓存输入 × {TOKEN_WEIGHTS['input']:g} + 缓存输入 × 1/{round(1 / TOKEN_WEIGHTS['cached_input'])} + 输出 × {TOKEN_WEIGHTS['output']:g}（按 DeepSeek 价格比例折算，高峰和空闲时段一样，所以不同时段的运行可以直接比）；"
-                     "当量/次运行按子智能体账本里的运行数算，规划器和合成器没有运行数；当量/问题按账本里用到子智能体的问题数算，没用子智能体的问题不在分母里，所以是上限；缓存命中 = 缓存输入占全部输入的比例。")
+                     "当量/次运行按子智能体账本里的运行数算，规划器和合成器没有运行数；"
+                     + ("当量/问题按用量账本里的 run_id 数算，每个问题一个 run_id；" if exact else "当量/问题按子智能体账本里用到子智能体的问题数算，没用子智能体的问题不在分母里，所以是上限；")
+                     + "缓存命中 = 缓存输入占全部输入的比例。")
+        untagged = sum(int(row.get("calls") or 0) for row in usage.values()) - sum(int(run.get("calls") or 0) for run in (runs or {}).values())
+        if runs and untagged > 0:
+            lines.append(f"另有 {untagged} 次调用没有 run_id（记 run_id 之前的旧记录），不在当量/问题的分母里。")
+        ranked = top_questions(runs, rows or []) if runs else []
+        if ranked:
+            lines.append("")
+            lines.append("| 最贵的问题 | 时间 | 模型调用 | 标准当量 | 主要来源 |")
+            lines.append("|---|---|---|---|---|")
+            for entry in ranked:
+                sources = "、".join(f"{name} {_thousands(value)}" for name, value in entry["top_sources"])
+                lines.append(f"| {entry['question'] or '（无子智能体记录）'} | {entry['at']} | {entry['calls']} | {_thousands(entry['equivalent'])} | {sources} |")
     else:
         lines.append("用量账本不可用或没有 agent_v2.* 的记录（Token 按来源归属需要线上账本）。")
     return "\n".join(lines)

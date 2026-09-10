@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from v2.data.cost_ledger import _conn, _prices, _PATH_TO_ENDPOINT
-from v2.usage_context import current_channel
+from v2.usage_context import current_channel, current_run
 
 logger = logging.getLogger(__name__)
 ET = ZoneInfo('America/New_York')
@@ -135,7 +135,7 @@ def record(category, provider, model, usage, *, endpoint='', ticker=None,
             currency = price.get('currency', 'USD') if price else None
             usd_cost = cost if currency == 'USD' else None
             event = dict(id=uuid.uuid4().hex, occurred_at=at, category=category, provider=provider,
-                         model=model, endpoint=endpoint, ticker=ticker, source=source, usage=usage, channel=current_channel(),
+                         model=model, endpoint=endpoint, ticker=ticker, source=source, run_id=current_run() or None, usage=usage, channel=current_channel(),
                          usage_basis=usage_basis, state=state, amount=cost, currency=currency, cost_usd=usd_cost, status=status,
                          reason='' if cost is not None else reason, price=price)
             conn.execute('INSERT INTO usage_events VALUES (?,?,?,?,?,?,?,?)',

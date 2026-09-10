@@ -34,6 +34,26 @@ def usage_source(value):
         _source.reset(token)
 
 
+_run = ContextVar('usage_run', default=None)
+
+
+def current_run(default=''):
+    """The agent run id the current provider call belongs to, when a run is in progress."""
+
+    return _run.get() or default
+
+
+@contextmanager
+def usage_run(value):
+    """Tag provider calls made inside the block with the run id ``value`` (one agent question)."""
+
+    token = _run.set(str(value))
+    try:
+        yield
+    finally:
+        _run.reset(token)
+
+
 @contextmanager
 def usage_channel(value):
     if value not in CHANNELS:

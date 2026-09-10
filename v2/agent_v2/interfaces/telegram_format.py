@@ -122,6 +122,19 @@ def _one_line(text: str, limit: int = 80) -> str:
     return flat if len(flat) <= limit else flat[: limit - 1].rstrip() + "…"
 
 
+_NOTE_CITATION = re.compile(r"^(?P<head>.*?)(?P<tail>（引 \[[^\]]+\]）)\s*$", re.S)
+
+
+def _note_line(note: str, limit: int) -> str:
+    """One line of a sub-agent note: the text is cut, the trailing ``（引 [id]）`` never is."""
+
+    match = _NOTE_CITATION.match(str(note or ""))
+    if match is None:
+        return _one_line(note, limit)
+    tail = match.group("tail")
+    return _one_line(match.group("head"), max(20, limit - len(tail))) + tail
+
+
 def _ranges(numbers: list[int]) -> str:
     """``[2, 3, 4, 7, 9, 10]`` → ``2–4、7、9–10``."""
 
@@ -152,7 +165,8 @@ def source_entries(ids: tuple[str, ...], evidence: list[EvidenceItem], *, max_li
     """
 
     by_id = {item.id: item for item in evidence}
-    linked: list[SourceEntry] = []
+    # One line per page: several claims from the same article share a line.
+    linked: dict[str, tuple[str, list[int]]] = {}
     grouped: dict[str, list[int]] = {}
     overflow: list[int] = []
     for index, identifier in enumerate(ids, start=1):
@@ -160,20 +174,29 @@ def source_entries(ids: tuple[str, ...], evidence: list[EvidenceItem], *, max_li
         if item is None:
             continue
         url = link_for(item)
-        if url and len(linked) < max_linked:
-            title = _one_line(item.source_title) or _origin(item)
-            # A filing's title already says what its claim says.
-            claim = "" if item.source_id == "sec_edgar" else _one_line(item.claim, 60)
-            label = title if not claim or claim.startswith(title) else f"{title} · {claim}"
-            linked.append(SourceEntry(str(index), label, url))
+        if url and url in linked:
+            linked[url][1].append(index)
+        elif url and len(linked) < max_linked:
+            linked[url] = (_linked_label(item), [index])
         elif url:
             overflow.append(index)
         else:
             grouped.setdefault(_origin(item), []).append(index)
-    entries = [SourceEntry(_ranges(numbers), origin) for origin, numbers in grouped.items()]
+    entries = [SourceEntry(_ranges(numbers), label, url) for url, (label, numbers) in linked.items()]
+    entries.extend(SourceEntry(_ranges(numbers), origin) for origin, numbers in grouped.items())
     if overflow:
         entries.append(SourceEntry(_ranges(overflow), "其余带链接的来源（略）"))
-    return sorted(linked + entries, key=lambda entry: int(re.match(r"\d+", entry.numbers).group(0)))
+    return sorted(entries, key=lambda entry: int(re.match(r"\d+", entry.numbers).group(0)))
+
+
+def _linked_label(item: EvidenceItem) -> str:
+    """``标题（2026-09-04）``: the answer already quotes the claim, so the line names the page and its date."""
+
+    title = _one_line(item.source_title) or _origin(item)
+    day = str(item.as_of or "")[:10]
+    if item.source_id == "sec_edgar" or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day) or day in title:
+        return title
+    return f"{title}（{day}）"
 
 
 def link_for(item: EvidenceItem) -> str:
@@ -267,7 +290,7 @@ def agent_lines(result: AgentResult, *, limit: int = 8) -> list[str]:
         seconds = entry["elapsed_ms"] / 1000
         lines.append(f"{entry['label']} {entry['subject']}：{entry['rounds']} 轮 · {seconds:.1f}s" + (f" · {calls}" if calls else "") + (f" · {stop}" if stop else "") + ("（盘中）" if entry["intraday"] else ""))
         for note in (entry.get("notes") or [])[:3]:
-            lines.append(f"  · {_one_line(note, 110)}")
+            lines.append(f"  · {_note_line(note, 110)}")
         challenge = entry.get("challenge") or {}
         if challenge.get("objection"):
             verdict = "反方降级" if challenge.get("downgraded") else "反方未采纳"

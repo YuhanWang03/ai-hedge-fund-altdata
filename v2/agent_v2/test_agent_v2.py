@@ -1515,10 +1515,18 @@ def test_telegram_delivery_numbers_citations_and_compacts_worst_days(monkeypatch
     web = EvidenceItem("w-1", "NVDA", "x", source_id="web:reuters.com")
     assert telegram_format.source_entries(("w-1",), [web])[0].label == "网页（reuters.com）"
     entries = telegram_format.source_entries(numbered.ids, result.evidence)
+    # A linked page shows its title (and date), not the claim the answer already quotes.
     assert [(entry.numbers, entry.label, entry.url) for entry in entries] == [
         ("1", "日线行情", ""),
-        ("2", "Arm slides on soft guidance · Arm Holdings slides after guidance disappoints; the stock f…", "https://example.com/arm"),
+        ("2", "Arm slides on soft guidance", "https://example.com/arm"),
     ]
+    dated = EvidenceItem("w-2", "ARM", "x", as_of="2026-09-04", source_title="Opinions on Recent Earnings", source_url="https://example.com/q")
+    assert telegram_format.source_entries(("w-2",), [dated])[0].label == "Opinions on Recent Earnings（2026-09-04）"
+    # Several claims from the same page share one line, numbered as a range.
+    same_page = [EvidenceItem(f"q{i}", "ARM", f"claim {i}", as_of="2026-09-04", source_title="Opinions on Recent Earnings", source_url="https://example.com/q") for i in range(1, 4)]
+    other = EvidenceItem("q4", "ARM", "other", source_title="Other", source_url="https://example.com/o")
+    merged = telegram_format.source_entries(("q1", "q2", "q4", "q3"), [*same_page, other])
+    assert [(entry.numbers, entry.label) for entry in merged] == [("1–2、4", "Opinions on Recent Earnings（2026-09-04）"), ("3", "Other")]
     # Unlinked items are one line per origin, with their numbers as ranges.
     many = [EvidenceItem(f"m{i}", "ARM", f"row {i}", source_id="market_data") for i in range(1, 8)]
     many[3] = EvidenceItem("m4", "ARM", "card\n━━━\nrow", source_title="Existing deterministic responder")
@@ -1542,7 +1550,7 @@ def test_telegram_delivery_numbers_citations_and_compacts_worst_days(monkeypatch
     assert "合成：兜底摘要" in header and "校验：有警告（1）" in header and "网页：已关闭（去掉 --noweb 可用新闻归因）" in header
     assert "<i>⚠ 校验：未确认直接驱动时展示了过多弱候选线索</i>" in header and "<i>兜底原因：初稿：行情事实缺少邻近引用；修正稿：未知引用 results.metrics</i>" in header
     assert "[evidence-" not in body and "[1]。" in body and "跑输 SMH" in body and "当日成交量" not in body
-    assert body.endswith('<b>来源</b>\n1. 日线行情\n2. <a href="https://example.com/arm">Arm slides on soft guidance · Arm Holdings slides after guidance disappoints; the stock f…</a>')
+    assert body.endswith('<b>来源</b>\n1. 日线行情\n2. <a href="https://example.com/arm">Arm slides on soft guidance</a>')
     # A debater note citing an id the answer never used gets the next number and a source line.
     debated = _telegram_result("模型自己的话[evidence-news-1]。", outcome="clean")
     risk = EvidenceItem("evidence-risk-9", "ARM", "风险因素变化 15 项。", source_id="sec_filings")
@@ -2614,6 +2622,26 @@ def test_sub_agent_runs_are_ledgered_and_reported(tmp_path, monkeypatch):
     assert cost_label(priced["agent_v2.move_attributor"]) == "0.0123 CNY、1 次待定价（缺少价格版本）" and cost_label({"cost": {}, "unpriced": 0}) == "—"
     text = render(summary, priced, since_days=None)
     assert "| 缓存命中 | 失败 | 估算成本 |" in text and "| 2,150 | 717 | 1,075 | — | 50% | 0 | 0.0123 CNY、1 次待定价（缺少价格版本） |" in text and "| 合计 | 3 |" in text
+    # Per-run usage from the ledger's run ids: exact question counts and the most expensive questions.
+    from v2.agent_v2.eval.subagent_ledger import top_questions, usage_by_run, usage_by_source
+
+    run_rows = read_rows(ledger)
+    run_id = run_rows[0]["run_id"]
+    events = [
+        ({"source": "agent_v2.planner", "run_id": run_id, "occurred_at": "2026-09-09T15:00:00+00:00", "usage": {"input_tokens": 1000, "cached_tokens": 0, "output_tokens": 100}, "state": "success"}, None),
+        ({"source": "agent_v2.synthesizer", "run_id": run_id, "occurred_at": "2026-09-09T15:00:20+00:00", "usage": {"input_tokens": 3000, "cached_tokens": 1500, "output_tokens": 200}, "state": "success"}, None),
+        ({"source": "agent_v2.synthesizer", "run_id": "agent-v2-other", "occurred_at": "2026-09-09T16:00:00+00:00", "usage": {"input_tokens": 500, "cached_tokens": 0, "output_tokens": 50}, "state": "success"}, None),
+        ({"source": "agent_v2.synthesizer", "occurred_at": "2026-09-08T16:00:00+00:00", "usage": {"input_tokens": 500, "cached_tokens": 0, "output_tokens": 50}, "state": "success"}, None),
+    ]
+    runs = usage_by_run(events=events)
+    assert set(runs) == {run_id, "agent-v2-other"} and runs[run_id] == {"calls": 2, "equivalent": 3450.0, "sources": {"agent_v2.planner": 1300.0, "agent_v2.synthesizer": 2150.0}, "at": "2026-09-09T15:00:20+00:00"}
+    ranked = top_questions(runs, run_rows)
+    assert [(entry["question"], entry["equivalent"], entry["top_sources"][0]) for entry in ranked] == [("ARM 为什么跌", 3450.0, ("synthesizer", 2150.0)), ("", 650.0, ("synthesizer", 650.0))]
+    by_source = usage_by_source(events=events)
+    text = render(summary, by_source, since_days=None, questions=99, runs=runs, rows=run_rows)
+    assert "用量账本里有 2 个问题（按 run_id 计）。" in text and "| agent_v2.synthesizer | 3 | 2,500 | 1,500 | 300 | 3,450 | 1,150 | — | 1,725 | 38% | 0 |" in text
+    assert "另有 1 次调用没有 run_id" in text and "按用量账本里的 run_id 数算" in text
+    assert "| ARM 为什么跌 | 2026-09-09 15:00 | 2 | 3,450 | synthesizer 2,150、planner 1,300 |" in text and "| （无子智能体记录） | 2026-09-09 16:00 | 1 | 650 | synthesizer 650 |" in text
     assert subagent_report.main(["--path", str(ledger), "--json"]) == 0
     # An orchestrator run with a sub-agent envelope writes the ledger by itself; the flag turns it off.
     registry = CapabilityRegistry(default_catalog())
@@ -2623,6 +2651,16 @@ def test_sub_agent_runs_are_ledgered_and_reported(tmp_path, monkeypatch):
     assert len(read_rows(ledger)) == before + 1 and read_rows(ledger)[-1]["question"] == "ARM 今天为什么跌"
     AgentV2(catalog=default_catalog(), registry=registry, config=AgentV2Config(record_sub_agents=False)).run("ARM 今天为什么跌")
     assert len(read_rows(ledger)) == before + 1
+
+
+def test_provider_calls_carry_the_run_id_of_the_question(monkeypatch):
+    from v2.usage_context import current_run
+
+    seen: list[str] = []
+    registry = CapabilityRegistry(default_catalog())
+    registry.register("market.performance", lambda arguments, context: seen.append(current_run("")) or ToolEnvelope("market.performance", ResultStatus.COMPLETED, subject="ARM", evidence=[EvidenceItem("P", "ARM", "ARM 近 30 天 +1.00%")], metadata={"narrative": "ARM 近 30 天 +1.00%[P]。"}))
+    result = AgentV2(catalog=default_catalog(), registry=registry).run("ARM 最近30天表现")
+    assert seen == [result.run_id] and current_run("") == ""
 
 
 def test_provider_calls_inside_a_sub_agent_are_attributed_to_it():
@@ -2798,6 +2836,11 @@ def test_debater_objections_must_cite_the_runs_own_evidence():
     telegram = _telegram_result("x[evidence-news-1]。", outcome="clean")
     telegram.results = [result]
     assert telegram_format.agent_lines(telegram) == [f"反方 NVDA：1 轮 · {result.metrics['elapsed_ms'] / 1000:.1f}s · 反对 1 · 完成", "  · 前瞻市盈率 45 倍、EV/Sales 处于板块前十分位，回答没有把估值风险计入（引 [R-valuation]）"]
+    # A long note is cut before its citation, never through it, so the bridge can still number the id.
+    long_note = "同一评分体系里技术分项仅 20 分、供应链覆盖度 14/100，" * 4 + "不能据此判定明显偏低（引 [evidence-research-limitations-4]）"
+    line = telegram_format._note_line(long_note, 110)
+    assert line.endswith("…（引 [evidence-research-limitations-4]）") and len(line) <= 110 + len("（引 [evidence-research-limitations-4]）")
+    assert telegram_format._note_line("短说明", 110) == "短说明"
     # Nothing to object to: the record says so, and the answer is untouched.
     quiet = Debater(ScriptedLLM([LLMResponse(text='{"stance":"回答中性","objections":[],"note":"结论与证据一致"}')])).run("q", "答[R-growth]。", evidence, context)
     assert quiet.metadata["agent"]["notes"] == ["未找到证据支持的反对意见：结论与证据一致"] and quiet.metrics["objections"] == 0

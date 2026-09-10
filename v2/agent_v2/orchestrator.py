@@ -95,7 +95,14 @@ class AgentV2:
     ) -> AgentResult:
         started = time.time()
         run_id = f"agent-v2-{uuid.uuid4().hex[:12]}"
+        # Every provider call made for this question carries the run id in
+        # the usage ledger, so token use can be read back per question.
+        from v2.usage_context import usage_run
 
+        with usage_run(run_id):
+            return self._run(run_id, text, session_id=session_id, allow_web=allow_web, on_progress=on_progress, started=started)
+
+    def _run(self, run_id: str, text: str, *, session_id: str, allow_web: bool, on_progress: ProgressSink | None, started: float) -> AgentResult:
         # A pending write is resolved before anything else: "确认" executes it,
         # "取消" drops it, and any other message drops it and proceeds normally.
         pending = self.session.pop_pending(session_id) if self.session is not None and session_id else None

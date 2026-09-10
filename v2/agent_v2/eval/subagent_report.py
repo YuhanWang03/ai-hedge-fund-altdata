@@ -6,7 +6,7 @@ import argparse
 import json
 from pathlib import Path
 
-from v2.agent_v2.eval.subagent_ledger import TOKEN_WEIGHTS, aggregate, ledger_path, question_count, read_rows, render, usage_by_source, usage_totals
+from v2.agent_v2.eval.subagent_ledger import TOKEN_WEIGHTS, aggregate, ledger_path, _usage_events, question_count, read_rows, render, top_questions, usage_by_run, usage_by_source, usage_totals
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -17,12 +17,14 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     rows = read_rows(args.path, since_days=args.since)
     summary = aggregate(rows)
-    usage = usage_by_source(args.since)
-    questions = question_count(rows)
+    events = _usage_events(args.since)
+    usage = usage_by_source(events=events)
+    runs = usage_by_run(events=events)
+    questions = len(runs) or question_count(rows)
     if args.json:
-        print(json.dumps({"agents": summary, "usage": usage, "usage_total": usage_totals(usage), "token_weights": TOKEN_WEIGHTS, "rows": len(rows), "questions": questions}, ensure_ascii=False, indent=2))
+        print(json.dumps({"agents": summary, "usage": usage, "usage_total": usage_totals(usage), "token_weights": TOKEN_WEIGHTS, "rows": len(rows), "questions": questions, "questions_from": "usage_ledger" if runs else "subagent_ledger", "top_questions": top_questions(runs, rows)}, ensure_ascii=False, indent=2))
     else:
-        print(render(summary, usage, since_days=args.since, questions=questions))
+        print(render(summary, usage, since_days=args.since, questions=questions, runs=runs, rows=rows))
     return 0
 
 
