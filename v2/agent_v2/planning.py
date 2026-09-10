@@ -65,6 +65,7 @@ _DRAWDOWN_WINDOW_WORDS = ((re.compile(r"这个月|近一个月|一个月|最近�
 _RECENT_OR_WHY = re.compile(r"今天|今日|当日|盘中|日内|最近|这周|本周|上周|这个月|本月|为什么|原因|怎么回事|什么事|何故", re.I)
 #: A list question needs an evaluative word before "which one" means "look at each".
 _LIST_EVALUATE = re.compile(r"最|值得|表现|怎么样|如何|强|弱|好|差|狠|危险", re.I)
+_NEWS = re.compile(r"新闻|消息|报道|动态|头条|发生了什么|有什么事|出什么事", re.I)
 _HELP = re.compile(r"你能帮我做什么|你能做什么|能做什么|有什么功能|会做什么|怎么用|如何使用", re.I)
 _BRIEFING = re.compile(r"值得注意|该知道|需要注意|有什么新情况|有什么动静|需要关注的", re.I)
 
@@ -182,12 +183,21 @@ def parse_mutation(text: str, entities: tuple[str, ...]) -> tuple[PlanTask | Non
     return PlanTask("mutation", "state.mutate", {"operation": "watchlist.add", "payload": {"ticker": ticker}}, purpose=f"将 {ticker} 加入关注列表"), ""
 
 
+def _is_heavy(capability: str) -> bool:
+    """A research-engine run or a sub-agent: never a 30-second lookup."""
+
+    from v2.agent_v2.catalog import default_catalog
+
+    spec = default_catalog().get(capability)
+    return capability.startswith("research.") or bool(spec is not None and spec.long_running)
+
+
 def _budget(tasks: list[PlanTask]) -> BudgetClass:
     if any(task.fan_out for task in tasks):
         return BudgetClass.PORTFOLIO
     count = len(tasks)
     if count <= 1:
-        return BudgetClass.DIRECT
+        return BudgetClass.FOCUSED if any(_is_heavy(task.capability) for task in tasks) else BudgetClass.DIRECT
     if count <= 2:
         return BudgetClass.FOCUSED
     if count <= 5:
@@ -258,6 +268,8 @@ class RulePlanner:
             window = next((key for pattern, key in _DRAWDOWN_WINDOW_WORDS if pattern.search(text)), "")
             direct = {"kind": "runup", "ticker": tickers[0], "label": "这段涨幅", "window": window}
             return self._stretch(text, tickers[0], direct, route, request, "up")
+        if len(tickers) == 1 and _NEWS.search(text) and not _MOVE_EXPLANATION.search(text):
+            return self._news(text, tickers[0], route, request)
         if len(tickers) == 1 and _MOVE_EXPLANATION.search(text):
             tasks = [PlanTask("market-move", "market.explain_move", {"ticker": tickers[0]}, purpose="separate confirmed market facts from candidate move drivers")]
             for index, focus in enumerate(_focuses(text), 1):
@@ -286,6 +298,27 @@ class RulePlanner:
         )
 
     # -- pieces ---------------------------------------------------------------
+
+    @staticmethod
+    def _news(text: str, ticker: str, route: RouteDecision, request: NormalizedRequest) -> ExecutionPlan:
+        """"What's the news on X": dated events from the web (with consent), recent filings and the monitor's memory.
+
+        The research engine's catalyst module is not the tool for this: it
+        is a full research run under a lookup's budget.  The web task is a
+        sub-agent that reads pages and locates quotes; without consent the
+        engine skips it and says so, and the two internal sources remain.
+        """
+
+        from datetime import date, timedelta
+
+        since = (date.today() - timedelta(days=14)).isoformat()
+        tasks = [
+            PlanTask("web-news", "web.research", {"query": f"{ticker} stock news latest two weeks", "topic": "company_event", "ticker": ticker, "recency_days": 14}, purpose="dated events from news pages, quotes located in the text", required=False),
+            PlanTask("filings-recent", "filings.recent", {"ticker": ticker, "since": since}, purpose="what the company filed in the last two weeks", required=False),
+            PlanTask("anomaly-history", "market.anomaly_history", {"ticker": ticker, "lookback_days": 30}, purpose="what the monitor recorded in the last month", required=False),
+        ]
+        note = "news: 按日期列出近两周的事件（网页、申报、盯盘记录各注明来源），没有事件的来源明说；网页未授权时只列申报和盯盘记录并说明未使用网页。"
+        return ExecutionPlan(objective=text, route=route.kind, tasks=tuple(tasks), answer_mode=AnswerMode.RESEARCH_GROUNDED, budget=_budget(tasks), web_fallback_allowed=request.allow_web, assumptions=(note,))
 
     @staticmethod
     def _asks_about_a_stretch(text: str) -> bool:

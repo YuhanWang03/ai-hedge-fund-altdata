@@ -2413,3 +2413,57 @@ def test_live_registry_puts_the_news_checker_behind_web_research_when_a_model_is
 
     plain = build_live_registry(default_catalog(), lab=None, web_search=SnippetPort(), llm=None)
     assert plain.execute(PlanTask("w", "web.research", {"query": "q", "topic": "general", "ticker": "ARM"}), consenting).evidence[0].id == "W"
+
+
+def test_a_news_question_plans_web_filings_and_memory_under_a_real_budget():
+    import re
+
+    from v2.agent_v2.planning import _budget
+
+    for text in ("ARM最近有什么新闻？", "NVDA 最近有什么消息", "英伟达有什么新闻", "ARM 最近有什么动态"):
+        request = normalize_request(text, allow_web=True)
+        plan = RulePlanner().plan(request, route(request))
+        assert [task.capability for task in plan.tasks] == ["web.research", "filings.recent", "market.anomaly_history"], text
+        web = plan.tasks[0]
+        assert web.arguments["ticker"] in {"ARM", "NVDA"} and web.arguments["topic"] == "company_event" and web.arguments["recency_days"] == 14 and not web.required
+        assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", plan.tasks[1].arguments["since"]) and plan.tasks[2].arguments["lookback_days"] == 30
+        assert plan.budget == BudgetClass.STANDARD and plan.assumptions[0].startswith("news: ")
+        # The model planner leaves it to the rules.
+        llm = ScriptedLLM([LLMResponse(text="{}")])
+        assert [task.capability for task in StructuredLLMPlanner(llm, default_catalog()).plan(request, route(request)).tasks][0] == "web.research" and llm.calls == []
+    # "Why did it move" still wins over the news wording.
+    why = normalize_request("NVDA 今天为什么跌，有什么消息")
+    assert RulePlanner().plan(why, route(why)).tasks[0].capability == "market.explain_move"
+    # A lone research-engine task or sub-agent never gets the 30-second lookup budget.
+    assert _budget([PlanTask("r", "research.stock", {"ticker": "ARM", "focus": "catalysts"})]) == BudgetClass.FOCUSED
+    assert _budget([PlanTask("m", "market.explain_move", {"ticker": "ARM"})]) == BudgetClass.FOCUSED
+    assert _budget([PlanTask("p", "account.portfolio")]) == BudgetClass.DIRECT
+
+
+def test_web_fallback_gets_a_grace_when_the_internal_step_spent_the_budget():
+    import time
+
+    from v2.agent_v2.orchestrator import WEB_FALLBACK_GRACE_SECONDS
+
+    seen: dict[str, float] = {}
+    registry = CapabilityRegistry(default_catalog())
+
+    def exhausted(arguments, context):
+        object.__setattr__(context, "deadline", time.monotonic() - 1)  # the engine's clock has run out
+        return ToolEnvelope("research.stock", ResultStatus.FAILED, subject="ARM", errors=["timed out after 60s wall-clock budget"])
+
+    def web(arguments, context):
+        seen["remaining"] = context.remaining_seconds()
+        return ToolEnvelope("web.research", ResultStatus.COMPLETED, subject="ARM", evidence=[EvidenceItem("W-1", "ARM", "ARM 2026-09-03：宣布新产品（新闻：“Arm announced a new product on September 3”）。", as_of="2026-09-03", source_url="https://example.com/a")])
+
+    registry.register("research.stock", exhausted)
+    registry.register("web.research", web)
+    agent = AgentV2(catalog=default_catalog(), registry=registry, config=AgentV2Config(enable_web_fallback=True))
+    result = agent.run("分析 ARM 的估值", allow_web=True)
+    assert 40 <= seen["remaining"] <= WEB_FALLBACK_GRACE_SECONDS and "W-1" in [item.id for item in result.evidence]
+    assert any("grace" in note for note in result.plan.assumptions) and result.plan.tasks[-1].capability == "web.research"
+    # With time to spare the grace is not applied.
+    seen.clear()
+    registry.register("research.stock", lambda arguments, context: ToolEnvelope("research.stock", ResultStatus.FAILED, subject="ARM", errors=["boom"]))
+    result = agent.run("分析 ARM 的估值", allow_web=True)
+    assert seen["remaining"] > WEB_FALLBACK_GRACE_SECONDS and not any("grace" in note for note in result.plan.assumptions)

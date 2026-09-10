@@ -87,7 +87,7 @@ class StructuredLLMPlanner:
 
     def plan(self, request: NormalizedRequest, route: RouteDecision) -> ExecutionPlan:
         deterministic = self.fallback.plan(request, route)
-        if deterministic.tasks and deterministic.tasks[0].capability in {"market.performance", "market.explain_move"}:
+        if deterministic.tasks and deterministic.tasks[0].capability in {"market.performance", "market.explain_move", "web.research"}:
             return deterministic
         # Rules also own a ranking of the user's holdings: the position card
         # answers it, and the model tends to fan out over every holding.

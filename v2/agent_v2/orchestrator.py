@@ -36,6 +36,9 @@ from v2.agent_v2.routing import normalize_request, route
 from v2.agent_v2.synthesis import EvidenceSummarySynthesizer
 from v2.agent_v2.verification import verify_answer
 
+#: Seconds the one web attempt gets when the internal step spent the budget.
+WEB_FALLBACK_GRACE_SECONDS = 45.0
+
 _CONFIRM = re.compile(r"^\s*(?:确认|确定|是的?|好的?|执行|yes|y|ok|confirm)\s*[。！!.]?\s*$", re.I)
 _CANCEL = re.compile(r"^\s*(?:取消|不用了?|不要|算了|否|no|n|cancel)\s*[。！!.]?\s*$", re.I)
 
@@ -255,8 +258,15 @@ class AgentV2:
         eligible = plan.web_fallback_allowed and request.allow_web and decision.kind in {RouteKind.FAST_LOOKUP, RouteKind.RESEARCH} and self.registry.registered("web.research")
         existing_evidence = outcome.ledger.items()
         internal_failed = any(not result.ok for result in outcome.results)
-        if not eligible or (existing_evidence and not internal_failed) or context.remaining_seconds() <= 0:
+        if not eligible or (existing_evidence and not internal_failed):
             return plan, outcome
+        notes = ["Web fallback ran because internal evidence was missing or failed."]
+        if context.remaining_seconds() < WEB_FALLBACK_GRACE_SECONDS:
+            # The internal step used the budget (a timeout, typically); the
+            # one web attempt gets its own grace rather than nothing, so the
+            # run still ends with an answer instead of "未完成".
+            object.__setattr__(context, "deadline", time.monotonic() + WEB_FALLBACK_GRACE_SECONDS)
+            notes.append(f"Web fallback ran with a {WEB_FALLBACK_GRACE_SECONDS:.0f} s grace after internal capabilities used the budget.")
         topic = "company_event" if request.entities else "financial_research"
         task = PlanTask(
             id="web-fallback",
@@ -279,7 +289,7 @@ class AgentV2:
             plan,
             tasks=(*plan.tasks, task),
             answer_mode=mode,
-            assumptions=(*plan.assumptions, "Web fallback ran because internal evidence was missing or failed."),
+            assumptions=(*plan.assumptions, *notes),
         )
         return plan, outcome
 
