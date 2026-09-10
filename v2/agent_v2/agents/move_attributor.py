@@ -128,6 +128,8 @@ _CHALLENGE = """你是异动归因的反方，只输出 JSON。给你一天的�
 幅度是否相称（引文里的事件能否解释这么大的涨跌）、时间是否对得上（事件是否发生在当日或前一晚）、板块是否同向同幅（那就是板块行情而非公司原因）、引文是否只是分析师观点或长期展望。
 输出：{"objection":"一句中文，指出具体不足；没有就留空","downgrade":true|false}。只有理由具体且成立时才 downgrade。"""
 
+_UNREAD_CLAIM = r"申报(?:内容)?(?:尚|均|并)?未(?:被)?读取|未读取(?:申报|其内容|内容)|没有读取申报"
+
 #: Below this share of the stock's move, the sector's same-direction move is "the sector did it".
 SECTOR_EXPLAINS_SHARE = 0.7
 
@@ -491,6 +493,10 @@ class MoveAttributor:
         if not allow_news:
             limitations.append("用户未授权网页搜索，归因未使用新闻。")
         answer_constraints: list[dict[str, Any]] = [{"forbid": _COUNT_LEAK, "warning": "将内部归因计数直接暴露给用户"}]
+        if gathered.filing_events:
+            # The reader located events in the filings: an answer that says
+            # they were not read contradicts its own evidence.
+            answer_constraints.append({"forbid": _UNREAD_CLAIM, "warning": f"{day} 附近的申报已由申报阅读者读取并摘出事件，回答却称申报内容未读取；请引用那些申报事件"})
         if high == 0:
             answer_constraints.append({"max_cited": {"metadata": {"claim_role": "candidate_driver"}, "max": 1, "warning": "未确认直接驱动时展示了过多弱候选线索"}})
         read_events = [item for item in gathered.filing_events.values()]
@@ -616,6 +622,29 @@ def _default_recall(ticker: str, query: str, lookback_days: int) -> list[Any]:
 _RANK = {"高": 3, "中": 2, "低": 1}
 
 
+_REASON_NOISE = re.compile(r"[\s，,。．.、；;：:（）()\[\]“”\"'’‘\-—–]|公司|市场|股价|当日|当天|引发|导致|因此|其|的|了|与|和|及|并|对|将|仍|在|被|为", re.I)
+
+
+def same_reason(first: str, second: str, *, threshold: float = 0.42) -> bool:
+    """Whether two top reasons describe the same event, allowing for rewording.
+
+    Both are reduced to their content characters (particles, punctuation
+    and boilerplate removed) and compared as sequences; a shared core
+    such as 智能手机版税收入下滑 survives any amount of surrounding prose.
+    """
+
+    from difflib import SequenceMatcher
+
+    a, b = _REASON_NOISE.sub("", first or "").lower(), _REASON_NOISE.sub("", second or "").lower()
+    if not a or not b:
+        return False
+    if a in b or b in a:
+        return True
+    matcher = SequenceMatcher(None, a, b, autojunk=False)
+    longest = matcher.find_longest_match(0, len(a), 0, len(b)).size
+    return matcher.ratio() >= threshold or longest >= max(6, int(0.35 * min(len(a), len(b))))
+
+
 def govern_memory(existing: Any, reasons: list[dict[str, Any]], *, today: str) -> dict[str, Any]:
     """Decide whether a fresh attribution replaces the stored one for that day.
 
@@ -632,11 +661,12 @@ def govern_memory(existing: Any, reasons: list[dict[str, Any]], *, today: str) -
     stored_best = int(meta.get("confidence_rank") or 0)
     stored_top = str(meta.get("top_reason") or "")
     version = int(meta.get("version") or 0)
+    differs = bool(top and stored_top and not same_reason(top, stored_top))
     if existing is not None and stored_best > best:
-        return {"write": False, "note": f"记忆中已有更高置信度的归因（{meta.get('confidence') or '?'}，{meta.get('written_at') or '早先'}写入），本次结论未覆盖", "metadata": meta, "conflict": bool(top and stored_top and top != stored_top)}
+        return {"write": False, "note": f"记忆中已有更高置信度的归因（{meta.get('confidence') or '?'}，{meta.get('written_at') or '早先'}写入），本次结论未覆盖", "metadata": meta, "conflict": differs}
     label = next((key for key, value in _RANK.items() if value == best), "无")
     metadata = {"confidence": label, "confidence_rank": best, "top_reason": top[:200], "version": version + 1, "written_at": today}
-    conflict = bool(existing is not None and top and stored_top and top != stored_top)
+    conflict = existing is not None and differs
     if conflict:
         metadata["previous_reason"] = stored_top[:200]
         metadata["previous_confidence"] = str(meta.get("confidence") or "")

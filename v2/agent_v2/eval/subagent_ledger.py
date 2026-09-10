@@ -136,7 +136,7 @@ def usage_by_source(since_days: int | None = None) -> dict[str, dict[str, Any]]:
     except Exception:  # noqa: BLE001 — the ledger is optional infrastructure
         return {}
     cutoff = (datetime.now(tz=timezone.utc) - timedelta(days=since_days)).isoformat() if since_days else ""
-    totals: dict[str, dict[str, Any]] = defaultdict(lambda: {"calls": 0, "input_tokens": 0.0, "output_tokens": 0.0, "cost": {}, "unpriced": 0, "failed": 0})
+    totals: dict[str, dict[str, Any]] = defaultdict(lambda: {"calls": 0, "input_tokens": 0.0, "output_tokens": 0.0, "cost": {}, "unpriced": 0, "unpriced_reasons": {}, "failed": 0})
     try:
         with _conn() as conn:
             query = "SELECT payload, cost_usd FROM usage_events WHERE category='llm'" + (" AND occurred_at>=?" if cutoff else "")
@@ -162,6 +162,8 @@ def usage_by_source(since_days: int | None = None) -> dict[str, dict[str, Any]]:
                     bucket["cost"][currency] = bucket["cost"].get(currency, 0.0) + float(amount)
                 else:
                     bucket["unpriced"] += 1
+                    reason = str(event.get("reason") or "未说明")
+                    bucket["unpriced_reasons"][reason] = bucket["unpriced_reasons"].get(reason, 0) + 1
                 if event.get("state") != "success":
                     bucket["failed"] += 1
     except Exception as exc:  # noqa: BLE001
@@ -175,7 +177,9 @@ def cost_label(row: dict[str, Any]) -> str:
 
     parts = [f"{value:.4f} {currency}" for currency, value in sorted((row.get("cost") or {}).items())]
     if row.get("unpriced"):
-        parts.append(f"{row['unpriced']} 次待定价")
+        reasons = row.get("unpriced_reasons") or {}
+        top = max(reasons.items(), key=lambda item: item[1])[0] if reasons else ""
+        parts.append(f"{row['unpriced']} 次待定价" + (f"（{top}）" if top else ""))
     return "、".join(parts) if parts else "待定价"
 
 

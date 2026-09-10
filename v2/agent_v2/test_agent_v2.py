@@ -1272,6 +1272,9 @@ def test_move_attributor_explains_a_past_day_from_sources_it_fetched_and_remembe
     assert narrative.startswith("ARM 在 2026-07-29 收于") and "能直接支持的高置信度驱动：营收指引低于华尔街预期[" in narrative and "跑输行业基准 SMH" in narrative
     assert verify_answer(narrative, result.evidence, answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result]).ok
     assert "申报读到：2026-07-29 季度营收低于指引区间[E-ARM-0729]。" in narrative
+    # An answer that calls the read filings unread is sent back by the verifier.
+    unread = verify_answer(f"ARM 当天提交了 6-K，但申报内容未读取，不能据此推断影响[{result.evidence[0].id}]。", result.evidence, answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result])
+    assert any("回答却称申报内容未读取" in warning for warning in unread.warnings)
     compact = result.metadata["narrative_compact"]
     assert compact.startswith("2026-07-29 ARM ") and "驱动：营收指引低于华尔街预期[" in compact and "跑输 SMH" in compact
     assert "申报读到" not in compact  # a confirmed driver keeps the phone version to one lead
@@ -2551,9 +2554,9 @@ def test_sub_agent_runs_are_ledgered_and_reported(tmp_path, monkeypatch):
     assert "| move_attributor | 2 | 4.0 | 12.3 |" in text and "| news_checker | 2 |" in text and "用量账本不可用" in text
     from v2.agent_v2.eval.subagent_ledger import cost_label
 
-    priced = {"agent_v2.move_attributor": {"calls": 3, "input_tokens": 100, "output_tokens": 20, "cost": {"CNY": 0.0123}, "unpriced": 1, "failed": 0}}
-    assert cost_label(priced["agent_v2.move_attributor"]) == "0.0123 CNY、1 次待定价" and cost_label({"cost": {}, "unpriced": 0}) == "待定价"
-    assert "| agent_v2.move_attributor | 3 | 100 | 20 | 0.0123 CNY、1 次待定价 | 0 |" in render(summary, priced, since_days=None)
+    priced = {"agent_v2.move_attributor": {"calls": 3, "input_tokens": 100, "output_tokens": 20, "cost": {"CNY": 0.0123}, "unpriced": 1, "unpriced_reasons": {"缺少价格版本": 1}, "failed": 0}}
+    assert cost_label(priced["agent_v2.move_attributor"]) == "0.0123 CNY、1 次待定价（缺少价格版本）" and cost_label({"cost": {}, "unpriced": 0}) == "待定价"
+    assert "| agent_v2.move_attributor | 3 | 100 | 20 | 0.0123 CNY、1 次待定价（缺少价格版本） | 0 |" in render(summary, priced, since_days=None)
     assert subagent_report.main(["--path", str(ledger), "--json"]) == 0
     # An orchestrator run with a sub-agent envelope writes the ledger by itself; the flag turns it off.
     registry = CapabilityRegistry(default_catalog())
@@ -2612,6 +2615,14 @@ def test_memory_governance_keeps_a_confirmed_attribution_and_records_drift():
     assert changed["note"].startswith("与上次归因不同（上次：财报指引不及预期）")
     same = govern_memory(stored, high, today="2026-09-12")
     assert same["write"] and not same["conflict"] and same["note"] == ""
+    # The same event reworded is not drift.
+    from v2.agent_v2.agents.move_attributor import same_reason
+
+    assert same_reason("Arm 财报虽超预期，但公司指引下一季度智能手机版税收入将下滑，引发市场对核心授权业务前景的担忧，股价承压下跌", "财报营收与 EPS 超指引上限，但公司指引下季智能手机版税收入下滑，引发对核心授权业务的担忧")
+    assert same_reason("当日为韩国主导的芯片与AI板块普跌，ARM 作为高估值半导体股被同步抛售，且此前12个月涨幅巨大引发获利了结。", "韩国主导的芯片与 AI 板块普跌、叠加前期大涨后的获利了结")
+    assert not same_reason("财报指引不及预期", "美国商务部放开对阿联酋的出口管制")
+    reworded = govern_memory(Stored(**{**fresh["metadata"], "top_reason": "公司财报指引不及预期，股价下跌"}), [{"text": "财报指引不及预期", "confidence": "高"}], today="2026-09-12")
+    assert reworded["write"] and not reworded["conflict"]
     # Empty results never overwrite anything that exists.
     assert not govern_memory(stored, [], today="2026-09-12")["write"]
 

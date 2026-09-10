@@ -138,7 +138,7 @@ def default_catalog() -> CapabilityCatalog:
             "research",
             "Dated SEC filings (8-K by default) for one stock over a date range, from EDGAR. Use to find what the company disclosed around specific dates.",
             _object({"ticker": _TICKER, "since": {"type": "string"}, "until": {"type": "string"}, "forms": {"type": "array", "items": {"type": "string"}}}, ["ticker"]),
-            answer_guidance="filings：只陈述申报的日期、表格类型和链接；申报内容未读取时不得推测其影响。",
+            answer_guidance="filings：只陈述申报的日期、表格类型和链接。同一运行里若有 evidence_scope=filing_event 的证据（申报阅读者从原文摘出的事件），申报已被读取，须引用那些事件，不得写“申报内容未读取”；没有这类证据时才说申报内容未读取、不得推测其影响。",
         ),
         CapabilitySpec(
             "filings.read_events",
