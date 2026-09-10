@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import os
 import re
 import time
 import uuid
@@ -43,6 +45,24 @@ _CONFIRM = re.compile(r"^\s*(?:确认|确定|是的?|好的?|执行|yes|y|ok|con
 _CANCEL = re.compile(r"^\s*(?:取消|不用了?|不要|算了|否|no|n|cancel)\s*[。！!.]?\s*$", re.I)
 
 
+logger = logging.getLogger(__name__)
+
+_INTENT_POOL = None
+
+
+def _intent_pool():
+    """A single background worker for shadow classification; ``None`` (inline) when AGENT_V2_INTENT_INLINE is set."""
+
+    global _INTENT_POOL
+    if os.environ.get("AGENT_V2_INTENT_INLINE"):
+        return None
+    if _INTENT_POOL is None:
+        from v2.usage_context import ContextExecutor
+
+        _INTENT_POOL = ContextExecutor(max_workers=1, thread_name_prefix="intent-shadow")
+    return _INTENT_POOL
+
+
 @dataclass(frozen=True)
 class AgentV2Config:
     max_parallel: int = 4
@@ -55,6 +75,11 @@ class AgentV2Config:
     record_sub_agents: bool = True
     #: After a research answer is verified, one adversarial pass lists the objections the run's evidence supports.
     debate: bool = True
+    #: Classify every question's intent with the model in the background and
+    #: ledger it next to the regex decision (data/agent_v2_intents.jsonl);
+    #: the run itself is not changed.  Off by default so scripted-model tests
+    #: and offline evals stay deterministic; the live runtime turns it on.
+    shadow_intent: bool = False
 
 
 class AgentV2:
@@ -137,6 +162,7 @@ class AgentV2:
         self._emit(on_progress, run_id, RunStatus.ROUTED, decision.reason)
         plan = self.planner.plan(request, decision)
         self._emit(on_progress, run_id, RunStatus.PLANNED, f"planned {len(plan.tasks)} task(s)")
+        self._shadow_intent(run_id, request, decision, plan)
 
         if plan.requires_confirmation and not self.config.allow_mutations:
             return self._await_confirmation(run_id, request, decision, plan, started)
@@ -147,6 +173,31 @@ class AgentV2:
 
         context = self._context(run_id, request, plan, on_progress, started)
         return self._execute(run_id, request, decision, plan, context, on_progress, started)
+
+    # -- intent shadow --------------------------------------------------------
+
+    def _shadow_intent(self, run_id: str, request: NormalizedRequest, decision: RouteDecision, plan: ExecutionPlan) -> None:
+        """Classify the question in the background and ledger it beside the regex decision; never touches the run."""
+
+        llm = getattr(self.synthesizer, "llm", None)
+        if not self.config.shadow_intent or llm is None:
+            return
+        from v2.agent_v2.intent import IntentClassifier, shadow_classify
+
+        classifier = IntentClassifier(llm)
+        channel = str(request.metadata.get("channel") or "")
+
+        def work() -> None:
+            try:
+                shadow_classify(classifier, request, decision, plan, run_id=run_id, channel=channel)
+            except Exception as exc:  # noqa: BLE001 — shadow work must never surface
+                logger.warning("intent shadow failed: %s: %s", type(exc).__name__, exc)
+
+        pool = _intent_pool()
+        if pool is None:
+            work()
+        else:
+            pool.submit(work)
 
     # -- confirmation ---------------------------------------------------------
 

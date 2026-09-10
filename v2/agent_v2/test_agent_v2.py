@@ -2953,3 +2953,72 @@ def test_orchestrator_runs_the_debate_on_research_answers_only():
     assert not [envelope for envelope in off.results if envelope.capability == "debate.challenge"] and quiet.calls == []
     lookup = AgentV2(catalog=default_catalog(), registry=_framed_registry(), synthesizer=Synth(quiet), config=AgentV2Config(record_sub_agents=False)).run("我的仓库里哪只跌的最多?")
     assert not [envelope for envelope in lookup.results if envelope.capability == "debate.challenge"] and quiet.calls == []
+
+
+def test_intent_classifier_validates_the_vocabulary_and_projects_the_regex_decision(tmp_path, monkeypatch):
+    from v2.agent_v2 import intent as intent_mod
+    from v2.agent_v2.eval import intent_report
+    from v2.agent_v2.intent import IntentClassifier, Intent, agreement, compare_intents, parse_intent, read_shadow, render, rule_intent, shadow_classify
+
+    # Off-vocabulary values are dropped, an unknown kind is an error.
+    parsed = parse_intent({"kind": "Research", "scope": "yesterday", "direction": "down", "wants": ["valuation", "moon", "compare", "compare"], "tickers": ["mu", "sndk", "not a ticker"], "portfolio_scope": "yes", "confidence": 1.7})
+    assert parsed == Intent(kind="research", scope="none", direction="down", wants=("valuation", "compare"), tickers=("MU", "SNDK"), portfolio_scope=True, confidence=1.0, source="model")
+    with pytest.raises(ValueError):
+        parse_intent({"kind": "chat"})
+
+    # The regex decision projected onto the same fields.
+    request = normalize_request("ARM 买入以来跌了这么多，是什么原因？")
+    decision = route(request)
+    plan = RulePlanner().plan(request, decision)
+    rules = rule_intent(request, decision, plan)
+    # The projection is faithful to the router: "是什么原因" is not in its research regex, so the kind stays lookup here.
+    assert decision.kind == RouteKind.FAST_LOOKUP and rules.kind == "lookup" and rules.direction == "down" and rules.scope == "since_purchase" and "drawdown" in rules.wants and rules.tickers == ("ARM",) and rules.source == "rules"
+    request = normalize_request("MU和SNDK哪个更值得购买？")
+    rules = rule_intent(request, route(request), RulePlanner().plan(request, route(request)))
+    assert rules.kind == "research" and rules.wants == ("compare",) and rules.tickers == ("MU", "SNDK")
+    request = normalize_request("什么是自由现金流？")
+    assert rule_intent(request, route(request), RulePlanner().plan(request, route(request))).kind == "knowledge"
+    request = normalize_request("把 NVDA 加入关注列表")
+    assert rule_intent(request, route(request), RulePlanner().plan(request, route(request))).kind == "command"
+
+    # Agreement is per field; wants agree on the leading want.
+    model = Intent(kind="research", scope="none", direction="none", wants=("compare", "valuation"), tickers=("MU", "SNDK"), source="model")
+    assert compare_intents(rules, model) == {"kind": True, "scope": True, "direction": True, "wants": True, "tickers": True, "portfolio_scope": True}
+    assert compare_intents(rules, Intent(kind="lookup", wants=("news",), tickers=("MU",)))["kind"] is False
+
+    # Shadow mode: one model call, one ledger row, the run untouched.
+    ledger = tmp_path / "intents.jsonl"
+    monkeypatch.setenv("AGENT_V2_INTENT_LEDGER", str(ledger))
+    llm = ScriptedLLM([LLMResponse(text='{"kind":"research","scope":"none","direction":"none","wants":["compare","valuation"],"tickers":["MU","SNDK"],"portfolio_scope":false,"confidence":0.9}'), LLMResponse(text="not json")])
+    request = normalize_request("MU和SNDK哪个更值得购买？")
+    row = shadow_classify(IntentClassifier(llm), request, route(request), RulePlanner().plan(request, route(request)), run_id="run-1", channel="telegram")
+    assert row["model"]["wants"] == ["compare", "valuation"] and row["agree"]["kind"] and row["rules"]["kind"] == "research" and row["channel"] == "telegram"
+    failed = shadow_classify(IntentClassifier(llm), request, route(request), RulePlanner().plan(request, route(request)), run_id="run-2")
+    assert failed["model"] is None and failed["agree"] is None
+    assert IntentClassifier(None).classify(request) is None
+    rows = read_shadow(ledger)
+    assert [r["run_id"] for r in rows] == ["run-1", "run-2"]
+    summary = agreement(rows)
+    assert summary["rows"] == 2 and summary["classified"] == 1 and summary["failed"] == 1 and summary["full_agreement"] == 1 and summary["fields"]["kind"]["rate"] == 1.0
+    text = render(summary, since_days=7)
+    assert "模型给出有效分类 1 个，失败 1 个" in text and "| kind | 1 / 1 | 100% |" in text
+    # A disagreement is listed with both sides.
+    rows.append({"text": "AMD 今天成交量", "model": {"kind": "lookup", "scope": "today", "direction": "none", "wants": ["performance"], "tickers": ["AMD"]}, "rules": {"kind": "research", "scope": "recent", "direction": "none", "wants": ["performance"], "tickers": ["AMD"]}, "agree": {"kind": False, "scope": False, "direction": True, "wants": True, "tickers": True, "portfolio_scope": True}, "elapsed_ms": 900})
+    text = render(agreement(rows), since_days=None)
+    assert "| AMD 今天成交量 | kind、scope | research / recent / none / performance / AMD | lookup / today / none / performance / AMD |" in text
+    assert intent_report.main(["--path", str(ledger), "--json"]) == 0
+
+    # The orchestrator ledgers in the background only when configured; inline for the test.
+    monkeypatch.setenv("AGENT_V2_INTENT_INLINE", "1")
+    registry = CapabilityRegistry(default_catalog())
+    registry.register("market.performance", lambda arguments, context: ToolEnvelope("market.performance", ResultStatus.COMPLETED, subject="ARM", evidence=[EvidenceItem("P", "ARM", "ARM 近 30 天 +1.00%")], metadata={"narrative": "ARM 近 30 天 +1.00%[P]。"}))
+    shadow_llm = ScriptedLLM([LLMResponse(text='{"kind":"lookup","scope":"recent","direction":"none","wants":["performance"],"tickers":["ARM"],"portfolio_scope":false,"confidence":0.8}')])
+    synthesizer = LLMEvidenceSynthesizer(ScriptedLLM([]))
+    synthesizer.llm = shadow_llm  # the shadow uses the synthesizer's model
+    before = len(read_shadow(ledger))
+    AgentV2(catalog=default_catalog(), registry=registry, synthesizer=EvidenceSummarySynthesizer()).run("ARM 最近30天表现")
+    assert len(read_shadow(ledger)) == before  # no model on the synthesizer: nothing to classify with
+    result = AgentV2(catalog=default_catalog(), registry=registry, synthesizer=synthesizer, config=AgentV2Config(shadow_intent=True)).run("ARM 最近30天表现")
+    rows = read_shadow(ledger)
+    assert len(rows) == before + 1 and rows[-1]["run_id"] == result.run_id and rows[-1]["model"]["wants"] == ["performance"] and rows[-1]["agree"]["kind"] and rows[-1]["capabilities"] == ["market.performance"]
+    assert result.status == RunStatus.COMPLETED

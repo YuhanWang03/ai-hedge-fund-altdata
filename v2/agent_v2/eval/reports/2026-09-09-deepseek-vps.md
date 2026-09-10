@@ -229,6 +229,16 @@ engine 层 token 翻倍来自真实证据的体量（每份研究 envelope 20 �
 "某个子智能体至少运行 N 次且都正常结束"（`expected_agents`），评测输出多了 `agents=` 和
 `sub_agents=` 两栏。回撤、上涨、直接进入三类场景都要求异动归因者运行过。
 
+## 去正则第一步：意图分类影子模式
+
+路由和规则规划器靠 70 条正则把用户的话翻译成要跑的任务，每种新问法补一条。
+第一步不改行为：每个线上问题在后台多一次便宜的模型调用（`agent_v2.intent`），把问题归成
+固定字段（kind、scope、direction、wants、tickers、portfolio_scope），和路由、计划反推出的
+同一组字段并排写进 `data/agent_v2_intents.jsonl`。
+`python -m v2.agent_v2.eval.intent_report --since 7` 给出每个字段的一致率和逐条不一致
+清单。一致率决定第二步（意图驱动路由，正则退为兜底）什么时候切；第三步把规划模板改成按
+意图字段触发，正则逐批退役。
+
 ## 下一步
 
 1. 换一批留出集。当前 15 条已被看过三轮，把它们并入开发集，从 Telegram 真实问句里
