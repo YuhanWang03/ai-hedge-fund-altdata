@@ -162,6 +162,9 @@ class StructuredLLMPlanner:
             if any(_long_running(task, self.catalog) for task in tasks) and budget in {BudgetClass.DIRECT, BudgetClass.FOCUSED}:
                 budget = BudgetClass.STANDARD
                 limit = min(self.max_tasks, task_limit(budget))
+            if any(task.capability == "research.compare" for task in tasks) and budget in {BudgetClass.DIRECT, BudgetClass.FOCUSED, BudgetClass.STANDARD}:
+                budget = BudgetClass.COMPARISON
+                limit = min(self.max_tasks, task_limit(budget))
             trimmed = _trim_to_budget(tasks, limit)
             if len(trimmed) < len(tasks):
                 dropped = ", ".join(task.capability for task in tasks if task not in trimmed)

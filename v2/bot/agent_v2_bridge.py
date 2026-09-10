@@ -145,6 +145,9 @@ class TelegramBotTransport:
         warning = telegram_format.warning_line(result)
         if warning:
             lines.append(f"<i>⚠ 校验：{html.escape(warning)}</i>")
+        budget = telegram_format.budget_line(result)
+        if budget:
+            lines.append(f"<i>⏱ {html.escape(budget)}</i>")
         reason = telegram_format.fallback_reason(result)
         if reason:
             lines.append(f"<i>兜底原因：{html.escape(reason)}</i>")

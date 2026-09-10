@@ -51,6 +51,10 @@ def _context() -> ExecutionContext:
 def test_router_separates_knowledge_research_lab_and_commands():
     assert route(normalize_request("什么是自由现金流？")).kind == RouteKind.GENERAL_KNOWLEDGE
     assert route(normalize_request("比较 NVDA 和 AMD 的风险")).kind == RouteKind.RESEARCH
+    # A "which is the better buy" comparison is research: it earns the comparison budget and the debater.
+    for text in ("MU和SNDK哪个更值得购买？", "NVDA 和 AMD 哪个更好", "AMD 值得买吗", "现在 ARM 值得入手吗"):
+        assert route(normalize_request(text)).kind == RouteKind.RESEARCH, text
+    assert route(normalize_request("AMD 今天成交量")).kind == RouteKind.FAST_LOOKUP
     assert route(normalize_request("回测 NVDA 动量策略")).kind == RouteKind.LAB
     assert route(normalize_request("把 NVDA 加入关注列表")).kind == RouteKind.COMMAND
 
@@ -1915,6 +1919,37 @@ def test_executor_enforces_the_wall_clock_budget():
     assert by_capability["research.stock"].status == ResultStatus.FAILED and "timed out" in by_capability["research.stock"].errors[0]
     assert by_capability["account.risk"].status == ResultStatus.SKIPPED
     assert outcome.ledger.ids() == {"F1"}
+
+
+def test_a_comparison_plan_gets_the_comparison_budget_on_any_route():
+    from v2.agent_v2.execution import time_limit
+
+    request = normalize_request("MU和SNDK哪个更值得购买？")
+    plan = RulePlanner().plan(request, route(request))
+    assert [task.capability for task in plan.tasks] == ["research.compare"] and plan.budget == BudgetClass.COMPARISON and time_limit(plan.budget) >= 240
+    # The budget follows the task, not the route: a fast lookup that plans a compare still gets it.
+    from v2.agent_v2.models import RouteDecision
+
+    lookup = RulePlanner().plan(request, RouteDecision(RouteKind.FAST_LOOKUP, ("account", "research"), "single-purpose lookup"))
+    assert lookup.tasks[0].capability == "research.compare" and lookup.budget == BudgetClass.COMPARISON
+
+
+def test_telegram_header_names_the_task_the_deadline_cut():
+    from v2.agent_v2.interfaces import telegram_format
+    from v2.agent_v2.models import ExecutionPlan, ResultStatus, ToolEnvelope
+
+    result = _telegram_result("x[evidence-news-1]。", outcome="clean")
+    assert telegram_format.budget_line(result) == ""
+    result.stop_reason = "deadline"
+    result.plan = ExecutionPlan(objective="q", route=RouteKind.FAST_LOOKUP, budget=BudgetClass.FOCUSED)
+    result.results = [
+        ToolEnvelope("research.compare", ResultStatus.FAILED, errors=["timed out after 60s wall-clock budget"]),
+        ToolEnvelope("account.risk", ResultStatus.SKIPPED, errors=["wall-clock budget exhausted"]),
+        ToolEnvelope("web.research", ResultStatus.COMPLETED),
+    ]
+    assert telegram_format.budget_line(result) == "预算用尽：research.compare 未在 60 秒内完成；account.risk 未开始"
+    result.results = []
+    assert telegram_format.budget_line(result) == "预算用尽：60 秒预算已耗尽"
 
 
 def test_orchestrator_surfaces_deadline_as_partial_with_a_stop_reason():

@@ -195,6 +195,10 @@ def _is_heavy(capability: str) -> bool:
 def _budget(tasks: list[PlanTask]) -> BudgetClass:
     if any(task.fan_out for task in tasks):
         return BudgetClass.PORTFOLIO
+    if any(task.capability == "research.compare" for task in tasks):
+        # Two or more stocks researched cold in parallel do not fit the
+        # focused 60 s; the run was timing out and falling back to the web.
+        return BudgetClass.COMPARISON
     count = len(tasks)
     if count <= 1:
         return BudgetClass.FOCUSED if any(_is_heavy(task.capability) for task in tasks) else BudgetClass.DIRECT

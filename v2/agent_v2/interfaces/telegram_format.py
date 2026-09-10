@@ -12,7 +12,7 @@ import re
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
-from v2.agent_v2.models import AgentResult, EvidenceItem
+from v2.agent_v2.models import AgentResult, EvidenceItem, ResultStatus
 
 _CITATION = re.compile(r"\[([A-Za-z0-9_.:~-]+)\]")
 
@@ -245,6 +245,24 @@ def _attempt_clauses(synthesis: dict) -> list[str]:
         stage = stages.get(str(attempt.get("stage")), str(attempt.get("stage") or "草稿"))
         clauses.append(f"{stage}：{_one_line(problems[0], 70) if problems else '校验未通过'}")
     return clauses
+
+
+def budget_line(result: AgentResult) -> str:
+    """``预算用尽：research.compare 未在 60 秒内完成`` when the run stopped on its deadline, else empty."""
+
+    if result.stop_reason != "deadline":
+        return ""
+    from v2.agent_v2.execution import time_limit
+
+    seconds = time_limit(result.plan.budget)
+    timed_out = [r.capability for r in result.results if r.status == ResultStatus.FAILED and any("timed out" in error for error in r.errors)]
+    skipped = [r.capability for r in result.results if r.status == ResultStatus.SKIPPED]
+    parts = []
+    if timed_out:
+        parts.append("、".join(dict.fromkeys(timed_out)) + f" 未在 {seconds:.0f} 秒内完成")
+    if skipped:
+        parts.append("、".join(dict.fromkeys(skipped)) + " 未开始")
+    return "预算用尽：" + ("；".join(parts) if parts else f"{seconds:.0f} 秒预算已耗尽")
 
 
 def fallback_reason(result: AgentResult) -> str:
