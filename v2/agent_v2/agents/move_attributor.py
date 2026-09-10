@@ -13,12 +13,14 @@ later question about the same stretch finds it.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable
 
-from v2.agent_v2.agents.base import BoundedLoop, LoopLimits, limits_for
+from v2.agent_v2.agents.base import BoundedLoop, LoopLimits, limits_for, strip_fence
 from v2.agent_v2.agents.filing_reader import EdgarFilingSource, FilingReader, FilingSource, locate_quote
 from v2.agent_v2.execution import CapabilityRegistry, ExecutionContext
 from v2.agent_v2.models import EvidenceItem, ResultStatus, ToolEnvelope
@@ -120,6 +122,14 @@ _SYSTEM = """你是异动归因者，只输出 JSON，不回答用户问题。
 规则：每条原因必须指向你本轮真正拿到的来源并附原文引文；只有新闻或申报原文直接、同日、幅度相称地支持时才能标"高"；仅有盯盘记忆支持的最多标"中"；市场整体波动、传闻、幅度不相称的标"低"；找不到原因就返回空 reasons 并在 note 里说明。不要编造来源。"""
 
 _FINISH_NOW = "轮次已用完。现在只允许 finish：只报你已经拿到来源并能引用原文的原因；没有就返回空 reasons 并说明。"
+
+_CHALLENGE = """你是异动归因的反方，只输出 JSON。给你一天的行情事实和归因者报出的"高置信度驱动"及其原文引文。
+你的任务是找出这个驱动不足以解释当天涨跌的具体理由，只能用给你的事实和引文，不能编造：
+幅度是否相称（引文里的事件能否解释这么大的涨跌）、时间是否对得上（事件是否发生在当日或前一晚）、板块是否同向同幅（那就是板块行情而非公司原因）、引文是否只是分析师观点或长期展望。
+输出：{"objection":"一句中文，指出具体不足；没有就留空","downgrade":true|false}。只有理由具体且成立时才 downgrade。"""
+
+#: Below this share of the stock's move, the sector's same-direction move is "the sector did it".
+SECTOR_EXPLAINS_SHARE = 0.7
 
 
 class _AttributionLoop(BoundedLoop):
@@ -312,6 +322,11 @@ class MoveAttributor:
         note = str(outcome.final.get("note") or "") if outcome.finished else outcome.note
         if dropped:
             note = (note + "；" if note else "") + f"{dropped} 条原因没有可核对的来源，已丢弃"
+        challenge = self._challenge(facts, reasons, context)
+        if challenge.get("objection"):
+            note = (note + "；" if note else "") + f"反方意见：{challenge['objection']}" + ("（已降为中置信度）" if challenge.get("downgraded") else "（未采纳）")
+        if challenge.get("called"):
+            outcome.trace.append({"round": outcome.rounds + 1, "action": "challenge", "detail": (challenge.get("objection") or "无异议")[:90], "ms": int(challenge.get("ms") or 0)})
         next_steps = [str(step) for step in (outcome.final.get("next_steps") or []) if step] if outcome.finished else []
         remembered = ""
         memory_note = ""
@@ -352,8 +367,49 @@ class MoveAttributor:
             "intraday": facts.is_intraday,
             "yield": {"kept": len(reasons), "dropped": dropped, "confirmed": sum(1 for reason in reasons if reason["confidence"] == "高")},
             "memory": {"written": bool(remembered), "conflict": memory_conflict, "note": memory_note},
+            "challenge": {key: value for key, value in challenge.items() if key != "ms"},
         }
         return envelope
+
+    def _challenge(self, facts: DayFacts, reasons: list[dict[str, Any]], context: ExecutionContext) -> dict[str, Any]:
+        """Test a confirmed driver before it is reported as such.
+
+        First the arithmetic nobody argues with: when the sector moved the
+        same way and accounts for most of the move, the company-specific
+        driver is at best a contributor.  Then, with time to spare, one
+        adversarial model call looks for a concrete objection in the same
+        sources; only a specific objection downgrades, and it is reported
+        either way.
+        """
+
+        confirmed = [reason for reason in reasons if reason["confidence"] == "高"]
+        if not confirmed:
+            return {"called": False}
+        change, sector = facts.change, facts.sector_return_1d
+        if change and sector is not None and change * sector > 0 and abs(sector) >= SECTOR_EXPLAINS_SHARE * abs(change):
+            objection = f"当日行业基准 {facts.sector_etf} 同向 {_pct(sector)}，占 {facts.ticker} {_pct(change)} 的大部分，公司特定原因未必是主因"
+            for reason in confirmed:
+                reason["confidence"] = "中"
+            return {"called": False, "source": "sector", "objection": objection, "downgraded": True}
+        if self.llm is None or (context.remaining_seconds() < 15 and getattr(context, "deadline", None) is not None):
+            return {"called": False}
+        from v2.usage_context import usage_source
+
+        started = time.monotonic()
+        brief = "\n".join(f"- {reason['text']}（{reason['kind']}：“{reason['quote'][:200]}”）" for reason in confirmed[:2])
+        facts_text = f"{facts.ticker} {facts.date} {_pct(facts.change)}，收盘 {facts.close:.2f}" + (f"，行业基准 {facts.sector_etf} {_pct(facts.sector_return_1d)}" if facts.sector_return_1d is not None else "") + (f"，量比 {facts.volume_ratio:.2f}" if facts.volume_ratio is not None else "")
+        try:
+            with usage_source("agent_v2.challenger"):
+                response = self.llm.complete([{"role": "system", "content": _CHALLENGE}, {"role": "user", "content": f"行情事实：{facts_text}\n高置信度驱动：\n{brief}"}], None)
+            verdict = json.loads(strip_fence(response.text))
+            objection = str(verdict.get("objection") or "").strip()[:200]
+            downgrade = bool(verdict.get("downgrade")) and bool(objection)
+        except Exception as exc:  # noqa: BLE001 — a failed challenge changes nothing
+            return {"called": True, "source": "model", "error": type(exc).__name__, "ms": int((time.monotonic() - started) * 1000)}
+        if downgrade:
+            for reason in confirmed:
+                reason["confidence"] = "中"
+        return {"called": True, "source": "model", "objection": objection, "downgraded": downgrade, "ms": int((time.monotonic() - started) * 1000)}
 
     def _filing_just_before(self, ticker: str, day: str) -> bool:
         """Whether EDGAR lists a filing dated within the three days up to ``day``."""

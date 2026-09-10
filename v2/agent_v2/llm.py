@@ -116,6 +116,7 @@ class StructuredLLMPlanner:
                 "name": spec.name,
                 "description": spec.description,
                 "input_schema": spec.input_schema,
+                **({"long_running": True} if spec.long_running else {}),
             }
             for spec in allowed
             if not spec.mutating
@@ -125,6 +126,8 @@ class StructuredLLMPlanner:
 相同信息只获取一次；多股票比较优先 research.compare；账户问题先取账户事实。
 需要对持仓或关注列表里的每只股票分别执行某个 capability 时，先安排 account.portfolio 或 state.read，再安排一个带 fan_out 的任务：
 {"id":"t2","capability":"research.stock","arguments":{"focus":"filings"},"depends_on":["t1"],"fan_out":{"from":"t1","field":"tickers","argument":"ticker","max":8}}。
+标记 long_running 的 capability 是子智能体（读申报、异动归因、网页核查），每个要 10–60 秒和多次模型调用：一份计划最多安排 2 个，带 fan_out 的最多展开 3 次，只在问题确实问"为什么涨跌、最近发生了什么事、有什么新闻"时才用；
+两只股票"最近为什么走势分化"这类问题，对每只分别安排 market.performance 和 market.explain_move，不要用 research.compare 代替归因。
 量化实验必须从用户原话提取参数，不要虚构参数；未提供的参数交给工具默认值。
 输出格式：{"objective":"...","tasks":[{"id":"t1","capability":"...","arguments":{},"depends_on":[],"required":true,"purpose":"...","fan_out":null}],"assumptions":[]}。"""
         payload = {
@@ -132,6 +135,8 @@ class StructuredLLMPlanner:
             "entities": list(request.entities),
             "capabilities": capabilities,
             "maximum_tasks": limit,
+            "maximum_long_running_tasks": MAX_LONG_RUNNING_TASKS,
+            "maximum_long_running_fan_out": MAX_LONG_RUNNING_FAN_OUT,
         }
         try:
             with usage_source("agent_v2.planner"):
@@ -152,6 +157,11 @@ class StructuredLLMPlanner:
                 # and let the model add what the wording implies on top.
                 tasks = _merge_tasks(deterministic.tasks, tasks)
             tasks = _inherit_fan_out_rank(tasks, deterministic.tasks)
+            tasks, delegation_notes = _cap_long_running(tasks, self.catalog)
+            assumptions.extend(delegation_notes)
+            if any(_long_running(task, self.catalog) for task in tasks) and budget in {BudgetClass.DIRECT, BudgetClass.FOCUSED}:
+                budget = BudgetClass.STANDARD
+                limit = min(self.max_tasks, task_limit(budget))
             trimmed = _trim_to_budget(tasks, limit)
             if len(trimmed) < len(tasks):
                 dropped = ", ".join(task.capability for task in tasks if task not in trimmed)
@@ -264,6 +274,55 @@ def _merge_tasks(base: tuple[PlanTask, ...], extra: tuple[PlanTask, ...]) -> tup
         depends = tuple(dep if dep in ids else dep for dep in task.depends_on)
         merged.append(replace(task, id=task_id, depends_on=depends))
     return tuple(merged)
+
+
+#: Sub-agents the model planner may schedule in one plan, and how far one of them may fan out.
+MAX_LONG_RUNNING_TASKS = 2
+MAX_LONG_RUNNING_FAN_OUT = 3
+#: Capabilities backed by a bounded model loop (several model calls, 10–120 s each).  The
+#: research engine is long-running too, but it is governed by the task limit, not this cap.
+SUB_AGENT_CAPABILITIES = frozenset({"filings.read_events", "market.attribute_move", "market.explain_move", "web.research"})
+
+
+def _long_running(task: PlanTask, catalog: CapabilityCatalog) -> bool:
+    return task.capability in SUB_AGENT_CAPABILITIES
+
+
+def _cap_long_running(tasks: tuple[PlanTask, ...], catalog: CapabilityCatalog) -> tuple[tuple[PlanTask, ...], list[str]]:
+    """Keep the model's delegation to sub-agents within the cost cap.
+
+    The first ``MAX_LONG_RUNNING_TASKS`` long-running tasks stay; the rest
+    are dropped (dependents of a dropped task go with it); a fan-out on a
+    long-running task is clamped to ``MAX_LONG_RUNNING_FAN_OUT``.  Every
+    change is written into the plan's assumptions.
+    """
+
+    notes: list[str] = []
+    kept: list[PlanTask] = []
+    seen_long = 0
+    dropped: list[str] = []
+    for task in tasks:
+        if not _long_running(task, catalog):
+            kept.append(task)
+            continue
+        seen_long += 1
+        if seen_long > MAX_LONG_RUNNING_TASKS:
+            dropped.append(task.capability)
+            continue
+        fan_out = task.fan_out
+        if isinstance(fan_out, dict) and int(fan_out.get("max") or 0) > MAX_LONG_RUNNING_FAN_OUT:
+            task = replace(task, fan_out={**fan_out, "max": MAX_LONG_RUNNING_FAN_OUT})
+            notes.append(f"Planner clamped the fan-out of {task.capability} to {MAX_LONG_RUNNING_FAN_OUT} (sub-agent cost cap)")
+        kept.append(task)
+    if dropped:
+        notes.append(f"Planner dropped {len(dropped)} sub-agent task(s) beyond the cap of {MAX_LONG_RUNNING_TASKS}: {', '.join(dropped)}")
+    while True:
+        ids = {task.id for task in kept}
+        dangling = [task for task in kept if set(task.depends_on) - ids]
+        if not dangling:
+            break
+        kept = [task for task in kept if task not in dangling]
+    return tuple(kept), notes
 
 
 def _trim_to_budget(tasks: tuple[PlanTask, ...], limit: int) -> tuple[PlanTask, ...]:

@@ -2585,3 +2585,74 @@ def test_attributor_surfaces_the_memory_decision():
     # The plain string form (older callers, tests) still works.
     legacy = MoveAttributor(ScriptedLLM([finish]), price_source_factory=lambda: SimpleNamespace(get_prices=_attributor_prices), news=None, filing_reader=None, memory_recall=None, memory_remember=lambda facts, reasons: "ARM_2026-07-29_retro", sector_for=lambda ticker: "SMH")
     assert legacy.run("ARM", ExecutionContext("run", NormalizedRequest("q", "q"), BudgetClass.PORTFOLIO), day="2026-07-29", today=date(2026, 9, 9)).metrics["remembered_as"] == "ARM_2026-07-29_retro"
+
+
+def test_model_planner_delegation_to_sub_agents_is_capped():
+    from v2.agent_v2.llm import MAX_LONG_RUNNING_FAN_OUT, MAX_LONG_RUNNING_TASKS, _cap_long_running
+
+    catalog = default_catalog()
+    tasks = (
+        PlanTask("t1", "account.portfolio"),
+        PlanTask("t2", "market.explain_move", {"ticker": "NVDA"}),
+        PlanTask("t3", "market.attribute_move", {"ticker": "NVDA"}, depends_on=("t1",), fan_out={"from": "t1", "field": "tickers", "argument": "ticker", "max": 8}),
+        PlanTask("t4", "web.research", {"query": "q", "topic": "general"}),
+        PlanTask("t5", "research.stock", {"ticker": "NVDA", "focus": "overview"}, depends_on=("t4",)),
+    )
+    kept, notes = _cap_long_running(tasks, catalog)
+    assert [task.id for task in kept] == ["t1", "t2", "t3"]  # t4 beyond the cap, t5 depended on it
+    assert kept[2].fan_out["max"] == MAX_LONG_RUNNING_FAN_OUT and MAX_LONG_RUNNING_TASKS == 2
+    assert notes == [f"Planner clamped the fan-out of market.attribute_move to {MAX_LONG_RUNNING_FAN_OUT} (sub-agent cost cap)", "Planner dropped 1 sub-agent task(s) beyond the cap of 2: web.research"]
+    # End to end: the model plans per-ticker attribution for a divergence question and the catalog payload flags sub-agents.
+    rows = [
+        {"id": "p1", "capability": "market.performance", "arguments": {"ticker": "NVDA"}},
+        {"id": "p2", "capability": "market.performance", "arguments": {"ticker": "AMD"}},
+        {"id": "m1", "capability": "market.explain_move", "arguments": {"ticker": "NVDA"}},
+        {"id": "m2", "capability": "market.explain_move", "arguments": {"ticker": "AMD"}},
+        {"id": "m3", "capability": "filings.read_events", "arguments": {"ticker": "NVDA", "around": "2026-09-01"}},
+    ]
+    llm = ScriptedLLM([LLMResponse(text=json.dumps({"objective": "x", "tasks": rows}))])
+    request = normalize_request("比较 NVDA 和 AMD 最近为什么走势分化")
+    plan = StructuredLLMPlanner(llm, catalog).plan(request, route(request))
+    payload = json.loads(llm.calls[0][1]["content"])
+    assert payload["maximum_long_running_tasks"] == 2 and any(spec.get("long_running") for spec in payload["capabilities"] if spec["name"] == "market.explain_move")
+    assert [task.capability for task in plan.tasks] == ["market.performance", "market.performance", "market.explain_move", "market.explain_move"]
+    assert any("dropped 1 sub-agent task" in note for note in plan.assumptions) and plan.budget in {BudgetClass.STANDARD, BudgetClass.COMPARISON}
+
+
+def test_challenger_downgrades_a_driver_the_sector_explains_or_the_model_refutes():
+    from v2.agent_v2.agents.move_attributor import MoveAttributor
+    from v2.agent_v2.models import sub_agent_summaries
+
+    def sector_prices(ticker, start, end):
+        rows = []
+        close = 300.0 if ticker == "ARM" else 100.0
+        for index in range(260):
+            day = date(2026, 1, 5) + timedelta(days=index)
+            if day.weekday() >= 5 or day.isoformat() > str(end):
+                continue
+            close *= 0.92 if day == date(2026, 7, 29) else 1.001  # the sector fell as much as the stock
+            rows.append(_Bar(day.isoformat(), round(close, 2)))
+        return rows
+
+    def news(query, day):
+        return [{"title": "Arm falls as guidance disappoints", "url": "https://example.com/arm-guidance", "content": "Arm Holdings shares slid 8% after the company's revenue guidance came in below Wall Street expectations.", "published_date": "2026-07-29"}]
+
+    confirmed_finish = LLMResponse(text=json.dumps({"action": "finish", "reasons": [{"text": "营收指引低于华尔街预期", "confidence": "高", "source": {"kind": "news", "url": "https://example.com/arm-guidance"}, "quote": "revenue guidance came in below Wall Street expectations"}], "next_steps": [], "note": ""}, ensure_ascii=False))
+    context = ExecutionContext("run", NormalizedRequest("q", "q"), BudgetClass.PORTFOLIO, allow_web=True)
+    # The sector fell the same way and by the same amount: the driver is a contributor at most, no model call needed.
+    same_sector = MoveAttributor(ScriptedLLM([LLMResponse(text='{"action":"news","query":"arm"}'), confirmed_finish]), price_source_factory=lambda: SimpleNamespace(get_prices=sector_prices), news=news, filing_reader=None, memory_recall=None, memory_remember=None, sector_for=lambda ticker: "SMH")
+    result = same_sector.run("ARM", context, day="2026-07-29", today=date(2026, 9, 9))
+    roles = [item.metadata["claim_role"] for item in result.evidence if item.metadata.get("claim_role") in {"confirmed_driver", "candidate_driver"}]
+    assert roles == ["candidate_driver"] and result.metrics["confirmed_driver_count"] == 0
+    assert "反方意见：当日行业基准 SMH 同向 -8.00%" in " ".join(result.limitations) and "（已降为中置信度）" in " ".join(result.limitations)
+    (summary,) = sub_agent_summaries([result])
+    assert summary["challenge"]["source"] == "sector" and summary["challenge"]["downgraded"] is True
+    # The stock fell far more than the sector: one adversarial model call; a specific objection downgrades.
+    refuting = ScriptedLLM([LLMResponse(text='{"action":"news","query":"arm"}'), confirmed_finish, LLMResponse(text='{"objection":"引文只说股价跟随指引下跌，没有说明指引下调幅度，无法解释 8% 的跌幅","downgrade":true}')])
+    result = MoveAttributor(refuting, price_source_factory=lambda: SimpleNamespace(get_prices=_attributor_prices), news=news, filing_reader=None, memory_recall=None, memory_remember=None, sector_for=lambda ticker: "SMH").run("ARM", context, day="2026-07-29", today=date(2026, 9, 9))
+    assert result.metrics["confirmed_driver_count"] == 0 and refuting.calls[-1][0]["content"].startswith("你是异动归因的反方") and [step["action"] for step in result.metadata["trace"]][-1] == "challenge"
+    assert sub_agent_summaries([result])[0]["challenge"] == {"called": True, "source": "model", "objection": "引文只说股价跟随指引下跌，没有说明指引下调幅度，无法解释 8% 的跌幅", "downgraded": True}
+    # No objection: the driver stands, and the challenge is still on record.
+    agreeing = ScriptedLLM([LLMResponse(text='{"action":"news","query":"arm"}'), confirmed_finish, LLMResponse(text='{"objection":"","downgrade":false}')])
+    result = MoveAttributor(agreeing, price_source_factory=lambda: SimpleNamespace(get_prices=_attributor_prices), news=news, filing_reader=None, memory_recall=None, memory_remember=None, sector_for=lambda ticker: "SMH").run("ARM", context, day="2026-07-29", today=date(2026, 9, 9))
+    assert result.metrics["confirmed_driver_count"] == 1 and "反方意见" not in " ".join(result.limitations) and sub_agent_summaries([result])[0]["challenge"]["downgraded"] is False
