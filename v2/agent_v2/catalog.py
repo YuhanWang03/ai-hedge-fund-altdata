@@ -323,6 +323,6 @@ def default_catalog() -> CapabilityCatalog:
             ),
             mutating=True,
         ),
-        CapabilitySpec("web.research", "web", "Search bounded external evidence when internal sources have a documented gap.", _object({"query": {"type": "string", "minLength": 1, "maxLength": 500}, "topic": {"type": "string"}, "ticker": _TICKER, "recency_days": {"type": "integer", "minimum": 1, "maximum": 3650}}, ["query", "topic"]), long_running=True),
+        CapabilitySpec("web.research", "web", "Search bounded external evidence when internal sources have a documented gap; with a model it reads pages and reports dated events with located quotes.", _object({"query": {"type": "string", "minLength": 1, "maxLength": 500}, "topic": {"type": "string"}, "ticker": _TICKER, "recency_days": {"type": "integer", "minimum": 1, "maximum": 3650}, "min_searches": {"type": "integer", "minimum": 1, "maximum": 3}}, ["query", "topic"]), long_running=True),
     )
     return CapabilityCatalog(specs)

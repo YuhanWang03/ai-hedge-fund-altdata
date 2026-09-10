@@ -51,14 +51,25 @@ class Found:
 
 
 class _CheckLoop(BoundedLoop):
-    def __init__(self, llm: Any, limits: LoopLimits, *, search: SearchFn, days: int, max_searches: int, max_reads: int, max_chars: int) -> None:
+    def __init__(self, llm: Any, limits: LoopLimits, *, search: SearchFn, days: int, max_searches: int, max_reads: int, max_chars: int, min_searches: int = 1) -> None:
         super().__init__(llm, limits)
         self.search = search
         self.days = days
         self.max_searches = max_searches
+        self.min_searches = min(min_searches, max_searches)
         self.max_reads = max_reads
         self.max_chars = max_chars
         self.found = Found()
+        self._refused_finish = False
+
+    def accept_finish(self, action: dict[str, Any], messages: list[dict[str, str]]) -> bool:
+        # A broad question ("what's the news") deserves a second angle before
+        # the loop declares itself done on one search; once is enough to ask.
+        if self.found.searches < self.min_searches and not self._refused_finish:
+            self._refused_finish = True
+            messages.append({"role": "user", "content": f"目前只搜索了 {self.found.searches} 次；请换一个角度（另一个事件关键词或时间段）再搜索一次，然后再 finish。"})
+            return False
+        return True
 
     def handle(self, action: dict[str, Any], messages: list[dict[str, str]]) -> bool:
         kind = str(action.get("action") or "")
@@ -124,6 +135,8 @@ class _CheckLoop(BoundedLoop):
 
 class NewsChecker:
     def __init__(self, llm: Any, search: SearchFn, *, max_rounds: int = 6, max_seconds: float = 75.0, max_searches: int = 3, max_reads: int = 3, max_chars: int = 5000, max_events: int = 5) -> None:
+        """Bounds for one run; ``min_searches`` is per call because it depends on the question."""
+
         self.llm = llm
         self.search = search
         self.max_rounds = max(1, max_rounds)
@@ -133,12 +146,12 @@ class NewsChecker:
         self.max_chars = max(500, max_chars)
         self.max_events = max(1, max_events)
 
-    def run(self, ticker: str, context: ExecutionContext, *, query: str, topic: str = "", recency_days: int = 30, today: date | None = None) -> ToolEnvelope:
+    def run(self, ticker: str, context: ExecutionContext, *, query: str, topic: str = "", recency_days: int = 30, today: date | None = None, min_searches: int = 1) -> ToolEnvelope:
         current = today or date.today()
         days = min(3650, max(1, int(recency_days or 30)))
         since = (current - timedelta(days=days)).isoformat()
         limits = limits_for(context, max_rounds=self.max_rounds, max_seconds=self.max_seconds)
-        loop = _CheckLoop(self.llm, limits, search=self.search, days=days, max_searches=self.max_searches, max_reads=self.max_reads, max_chars=self.max_chars)
+        loop = _CheckLoop(self.llm, limits, search=self.search, days=days, max_searches=self.max_searches, max_reads=self.max_reads, max_chars=self.max_chars, min_searches=max(1, int(min_searches or 1)))
         task = f"股票：{ticker or '（未指定）'}\n问题：{query}\n关注区间：{since} 至 {current.isoformat()}\n可用动作：search、read、finish"
         outcome = loop.run(_SYSTEM, task, finish_prompt=_FINISH_NOW)
         raw = [row for row in (outcome.final.get("events") or []) if isinstance(row, dict)] if outcome.finished else []
@@ -258,6 +271,7 @@ def register_news_checker(registry: CapabilityRegistry, llm: Any, *, search: Sea
             topic=str(arguments.get("topic") or "general"),
             recency_days=int(arguments.get("recency_days") or 30),
             today=today_factory(),
+            min_searches=int(arguments.get("min_searches") or 1),
         )
 
     registry.register("web.research", handler)

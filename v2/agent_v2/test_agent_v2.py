@@ -1059,6 +1059,10 @@ def test_history_capabilities_wrap_edgar_filings_and_the_anomaly_memory():
     assert filings.ok and calls[0] == ("ARM", "8-K", "2025-09-09", "2026-09-09")
     assert [item.metadata["date"] for item in filings.evidence] == ["2026-08-20", "2026-08-05"]
     assert filings.evidence[0].source_url == "https://www.sec.gov/Archives/edgar/data/1973239/000125000002/"
+    # An insider filing is labelled for the reader, not left as a bare "4".
+    from v2.agent_v2.adapters.history import _form_label
+
+    assert _form_label("4") == "Form 4（内幕交易）" and _form_label("8-K") == "8-K"
     assert "2026-08-20 8-K[" in filings.metadata["narrative"]
     empty = registry.execute(PlanTask("f", "filings.recent", {"ticker": "ARM", "forms": ["10-Q"]}), _context())
     assert empty.ok and empty.evidence[0].metadata["citation_kind"] == "limitations" and "未查到 10-Q 申报" in empty.evidence[0].claim
@@ -2382,6 +2386,16 @@ def test_news_checker_reports_dated_events_with_quotes_it_located():
     assert verify_answer(result.metadata["narrative"], result.evidence, answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result]).ok
     assert result.metadata["agent"]["name"] == "news_checker" and [step["action"] for step in result.metadata["trace"]] == ["search", "read", "finish"]
     assert web_lines(result, "2026-07-01").startswith("- Arm falls as guidance disappoints（2026-07-29）：ARM 2026-07-29：营收指引低于华尔街预期")
+    # A broad question: one search is refused once, then a second angle is required before finishing.
+    two_angles = ScriptedLLM([
+        LLMResponse(text='{"action":"search","query":"Arm news September 2026"}'),
+        LLMResponse(text='{"action":"finish","events":[],"note":"够了"}'),
+        LLMResponse(text='{"action":"search","query":"Arm insider selling September 2026"}'),
+        LLMResponse(text='{"action":"finish","events":[],"note":"两个角度都搜了"}'),
+    ])
+    broad = NewsChecker(two_angles, search).run("ARM", _context(), query="ARM 最近有什么新闻", today=date(2026, 9, 9), min_searches=2)
+    assert broad.metrics["searches"] == 2 and [step["action"] for step in broad.metadata["trace"]] == ["search", "finish_refused", "search", "finish"]
+    assert "请换一个角度" in two_angles.calls[2][-1]["content"]
     # No events at all: a limitations item says so and the envelope is partial, never empty.
     silent = NewsChecker(ScriptedLLM([LLMResponse(text='{"action":"finish","events":[],"note":"没有找到"}')]), search)
     none = silent.run("ARM", _context(), query="q", today=date(2026, 9, 9))
@@ -2425,12 +2439,14 @@ def test_a_news_question_plans_web_filings_and_memory_under_a_real_budget():
         plan = RulePlanner().plan(request, route(request))
         assert [task.capability for task in plan.tasks] == ["web.research", "filings.recent", "market.anomaly_history"], text
         web = plan.tasks[0]
-        assert web.arguments["ticker"] in {"ARM", "NVDA"} and web.arguments["topic"] == "company_event" and web.arguments["recency_days"] == 14 and not web.required
-        assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", plan.tasks[1].arguments["since"]) and plan.tasks[2].arguments["lookback_days"] == 30
-        assert plan.budget == BudgetClass.STANDARD and plan.assumptions[0].startswith("news: ")
+        assert web.arguments["ticker"] in {"ARM", "NVDA"} and web.arguments["topic"] == "company_event" and web.arguments["recency_days"] == 14 and web.arguments["min_searches"] == 2 and not web.required
+        assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", plan.tasks[1].arguments["since"]) and plan.tasks[1].arguments["forms"] == ["8-K", "6-K", "4"] and plan.tasks[2].arguments["lookback_days"] == 30
+        assert plan.budget == BudgetClass.STANDARD and plan.assumptions[0].startswith("news: ") and "网页已授权并已搜索" in plan.assumptions[0]
         # The model planner leaves it to the rules.
         llm = ScriptedLLM([LLMResponse(text="{}")])
         assert [task.capability for task in StructuredLLMPlanner(llm, default_catalog()).plan(request, route(request)).tasks][0] == "web.research" and llm.calls == []
+    without = normalize_request("ARM最近有什么新闻？")
+    assert "网页未授权" in RulePlanner().plan(without, route(without)).assumptions[0]
     # "Why did it move" still wins over the news wording.
     why = normalize_request("NVDA 今天为什么跌，有什么消息")
     assert RulePlanner().plan(why, route(why)).tasks[0].capability == "market.explain_move"

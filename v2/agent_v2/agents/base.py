@@ -138,6 +138,9 @@ class BoundedLoop:
                 outcome.trace.append({"round": outcome.rounds, "action": "bad_turn", "detail": "", "ms": int((time.monotonic() - turn_started) * 1000)})
                 continue
             if action.get("action") == "finish":
+                if not self.accept_finish(action, messages):
+                    outcome.trace.append({"round": outcome.rounds, "action": "finish_refused", "detail": self.describe_finish(action), "ms": int((time.monotonic() - turn_started) * 1000)})
+                    continue
                 outcome.finished, outcome.final, stop = True, action, "finished"
                 outcome.trace.append({"round": outcome.rounds, "action": "finish", "detail": self.describe_finish(action), "ms": int((time.monotonic() - turn_started) * 1000)})
                 break
@@ -156,6 +159,14 @@ class BoundedLoop:
         outcome.stop_reason = stop
         outcome.elapsed_ms = int((time.monotonic() - started) * 1000)
         return outcome
+
+    def accept_finish(self, action: dict[str, Any], messages: list[dict[str, str]]) -> bool:
+        """Whether a finish may stand; a subclass that wants more work first appends why and returns False.
+
+        The forced finish after the last round is never refused.
+        """
+
+        return True
 
     def describe_finish(self, action: dict[str, Any]) -> str:
         """What the finish carried, for the trace; subclasses know their own payload."""

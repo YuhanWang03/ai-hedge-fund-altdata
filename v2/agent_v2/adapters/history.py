@@ -36,6 +36,13 @@ def _evidence_id(kind: str, ticker: str, key: str) -> str:
     return f"evidence-{kind}-{hashlib.sha1(f'{kind}|{ticker}|{key}'.encode('utf-8')).hexdigest()[:16]}"
 
 
+_FORM_LABELS = {"4": "Form 4（内幕交易）", "3": "Form 3（内幕人初始持股）", "144": "Form 144（拟出售通知）", "13D": "13D", "13G": "13G"}
+
+
+def _form_label(form: str) -> str:
+    return _FORM_LABELS.get(str(form).upper(), str(form))
+
+
 def filings_envelope(ticker: str, context: ExecutionContext, fetch: Callable[[str, str, str, str], list[Any]], *, since: str = "", until: str = "", forms: list[str] | None = None, today: date | None = None) -> ToolEnvelope:
     current = today or date.today()
     until = until or current.isoformat()
@@ -71,7 +78,7 @@ def filings_envelope(ticker: str, context: ExecutionContext, fetch: Callable[[st
             EvidenceItem(
                 id=_evidence_id("filing", ticker, accession or f"{form}:{filing_date}"),
                 entity=ticker,
-                claim=f"{ticker} 于 {filing_date} 向 SEC 提交了 {form}（{accession}）。",
+                claim=f"{ticker} 于 {filing_date} 向 SEC 提交了 {_form_label(form)}（{accession}）。",
                 as_of=filing_date,
                 source_id="sec_edgar",
                 source_title=f"{ticker} {form} {filing_date}",

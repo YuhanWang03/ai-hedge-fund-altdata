@@ -313,11 +313,12 @@ class RulePlanner:
 
         since = (date.today() - timedelta(days=14)).isoformat()
         tasks = [
-            PlanTask("web-news", "web.research", {"query": f"{ticker} stock news latest two weeks", "topic": "company_event", "ticker": ticker, "recency_days": 14}, purpose="dated events from news pages, quotes located in the text", required=False),
-            PlanTask("filings-recent", "filings.recent", {"ticker": ticker, "since": since}, purpose="what the company filed in the last two weeks", required=False),
+            PlanTask("web-news", "web.research", {"query": f"{ticker} stock news latest two weeks", "topic": "company_event", "ticker": ticker, "recency_days": 14, "min_searches": 2}, purpose="dated events from news pages, quotes located in the text", required=False),
+            PlanTask("filings-recent", "filings.recent", {"ticker": ticker, "since": since, "forms": ["8-K", "6-K", "4"]}, purpose="what the company and its insiders filed in the last two weeks", required=False),
             PlanTask("anomaly-history", "market.anomaly_history", {"ticker": ticker, "lookback_days": 30}, purpose="what the monitor recorded in the last month", required=False),
         ]
-        note = "news: 按日期列出近两周的事件（网页、申报、盯盘记录各注明来源），没有事件的来源明说；网页未授权时只列申报和盯盘记录并说明未使用网页。"
+        web_state = "网页已授权并已搜索，不得写成未授权或无法访问网页。" if request.allow_web else "网页未授权，只列申报和盯盘记录，并说明未使用网页。"
+        note = f"news: 按日期列出近两周的事件（网页、申报含 Form 4 内幕交易、盯盘记录各注明来源），没有事件的来源明说。{web_state}"
         return ExecutionPlan(objective=text, route=route.kind, tasks=tuple(tasks), answer_mode=AnswerMode.RESEARCH_GROUNDED, budget=_budget(tasks), web_fallback_allowed=request.allow_web, assumptions=(note,))
 
     @staticmethod
