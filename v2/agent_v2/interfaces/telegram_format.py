@@ -118,8 +118,12 @@ def _origin(item: EvidenceItem) -> str:
 
 
 def _one_line(text: str, limit: int = 80) -> str:
+    """One line of at most ``limit`` characters; a cut lands on a punctuation mark near the limit and never inside a bracket."""
+
+    from v2.agent_v2.agents.move_attributor import clip
+
     flat = re.sub(r"\s+", " ", str(text or "")).strip()
-    return flat if len(flat) <= limit else flat[: limit - 1].rstrip() + "…"
+    return flat if len(flat) <= limit else clip(flat, limit)
 
 
 _NOTE_CITATION = re.compile(r"^(?P<head>.*?)(?P<tail>（引 \[[^\]]+\]）)\s*$", re.S)

@@ -131,7 +131,7 @@ _CHALLENGE = """你是异动归因的反方，只输出 JSON。给你一天的�
 幅度是否相称（引文里的事件能否解释这么大的涨跌）、时间是否对得上（事件是否发生在当日或前一晚）、板块是否同向同幅（那就是板块行情而非公司原因）、引文是否只是分析师观点或长期展望。
 输出：{"objection":"一句中文，指出具体不足；没有就留空","downgrade":true|false}。只有理由具体且成立时才 downgrade。"""
 
-_UNREAD_CLAIM = r"申报(?:内容)?(?:尚|均|并)?未(?:被)?读取|未读取(?:申报|其内容|内容)|没有读取申报"
+_UNREAD_CLAIM = r"(?:申报|正文|内容|文件|原文)(?:内容|正文)?(?:尚|均|并|都|还)?未(?:被)?(?:读取|阅读|读)|未(?:读取|阅读)(?:申报|其内容|内容|正文|原文)|没有(?:读取|阅读)(?:申报|正文|内容)|(?:只|仅)(?:能)?(?:看到|列出)(?:表格类型|日期和表格类型|类型和日期)"
 
 #: Below this share of the stock's move, the sector's same-direction move is "the sector did it".
 SECTOR_EXPLAINS_SHARE = 0.7
@@ -460,9 +460,9 @@ class MoveAttributor:
         volume = None
         if facts.volume_ratio is not None:
             if facts.is_intraday:
-                volume = item("volume", f"{ticker} 截至查询时的盘中累计成交量为 {facts.volume} 股，相当于 30 日完整交易日均量 {facts.average_volume_30d:.0f} 股的 {facts.volume_ratio:.2f} 倍；当日未收盘，不能据此判定是否放量或缩量。", metric="volume_ratio", value=facts.volume_ratio, metadata={**session, "constraints": [_INTRADAY_VOLUME_RULE]})
+                volume = item("volume", f"{ticker} 截至查询时的盘中累计成交量为 {int(facts.volume):,} 股，相当于 30 日完整交易日均量 {facts.average_volume_30d:,.0f} 股的 {facts.volume_ratio:.2f} 倍；当日未收盘，不能据此判定是否放量或缩量。", metric="volume_ratio", value=facts.volume_ratio, metadata={**session, "constraints": [_INTRADAY_VOLUME_RULE]})
             else:
-                volume = item("volume", f"{ticker} {day} 成交量为 {facts.volume} 股，30 日均量为 {facts.average_volume_30d:.0f} 股，量比 {facts.volume_ratio:.2f} 倍。", metric="volume_ratio", value=facts.volume_ratio, metadata=session)
+                volume = item("volume", f"{ticker} {day} 成交量为 {int(facts.volume):,} 股，30 日均量为 {facts.average_volume_30d:,.0f} 股，量比 {facts.volume_ratio:.2f} 倍。", metric="volume_ratio", value=facts.volume_ratio, metadata=session)
             evidence.append(volume)
         benchmark = None
         if facts.sector_return_1d is not None:
@@ -574,6 +574,50 @@ class MoveAttributor:
         return sentence
 
 
+def mark_read_filings(results: list[ToolEnvelope]) -> int:
+    """Stamp ``filings.recent`` records whose filing an attributor's reader read, so the draft cannot call them unread.
+
+    The stretch chain lists a day's filings (form and date only) and, separately,
+    the attributor reads them and reports dated events.  Both reach the
+    synthesizer; without this the draft picks the bare record and says the
+    text was not read.  The record's claim gains the read events' ids.
+    """
+
+    read: dict[str, list[EvidenceItem]] = {}
+    by_form_date: dict[tuple[str, str, str], list[EvidenceItem]] = {}
+    for result in results:
+        if result.capability not in {"market.attribute_move", "market.explain_move", "filings.read_events"}:
+            continue
+        for item in result.evidence:
+            if item.metadata.get("evidence_scope") != "filing_event":
+                continue
+            url = (item.source_url or "").rstrip("/")
+            if url:
+                read.setdefault(url, []).append(item)
+            key = (item.entity.upper(), str(item.metadata.get("form") or ""), str(item.metadata.get("filing_date") or ""))
+            by_form_date.setdefault(key, []).append(item)
+    if not read and not by_form_date:
+        return 0
+    marked = 0
+    for result in results:
+        if result.capability != "filings.recent":
+            continue
+        for item in result.evidence:
+            if item.metadata.get("evidence_scope") != "filing" or item.metadata.get("read_by"):
+                continue
+            url = (item.source_url or "").rstrip("/")
+            # Two same-day filings of one form are told apart by URL; form and date only stand in when the record has no link.
+            events = read.get(url) if url else by_form_date.get((item.entity.upper(), str(item.metadata.get("form") or ""), str(item.metadata.get("date") or "")))
+            if not events:
+                continue
+            ids = list(dict.fromkeys(event.id for event in events))[:3]
+            # EvidenceItem is frozen; the ledger holds this same object, so the stamp reaches the synthesizer and the verifier alike.
+            object.__setattr__(item, "claim", item.claim.rstrip("。") + "；申报阅读者已读取正文，读到的事件见 " + "、".join(f"[{event_id}]" for event_id in ids) + "。")
+            item.metadata["read_by"] = ids
+            marked += 1
+    return marked
+
+
 def lead_text(text: str) -> str:
     """A driver or lead as one sentence fragment: no inner full stops, no trailing punctuation.
 
@@ -626,6 +670,26 @@ _RANK = {"高": 3, "中": 2, "低": 1}
 _REASON_NOISE = re.compile(r"[\s，,。．.、；;：:（）()\[\]“”\"'’‘\-—–]|公司|市场|股价|当日|当天|引发|导致|因此|其|的|了|与|和|及|并|对|将|仍|在|被|为", re.I)
 
 
+def clip(text: str, limit: int) -> str:
+    """Cut at a punctuation mark near the limit and never leave a bracket open; ``…`` marks the cut."""
+
+    flat = " ".join(str(text or "").split())
+    if len(flat) <= limit:
+        return flat
+    cut = flat[: max(1, limit - 1)]
+    tail = max(0, len(cut) - 25)
+    marks = [cut.rfind(mark, tail) for mark in "，。；、）)"]
+    best = max(marks)
+    if best > 0:
+        cut = cut[: best + 1] if cut[best] in "）)" else cut[:best]
+    while cut.count("（") > cut.count("）") or cut.count("(") > cut.count(")"):
+        opened = max(cut.rfind("（"), cut.rfind("("))
+        if opened <= 0:
+            break
+        cut = cut[:opened].rstrip("，、；：,; ")
+    return cut.rstrip("，、；：") + "…"
+
+
 def same_reason(first: str, second: str, *, threshold: float = 0.42) -> bool:
     """Whether two top reasons describe the same event, allowing for rewording.
 
@@ -671,7 +735,7 @@ def govern_memory(existing: Any, reasons: list[dict[str, Any]], *, today: str) -
     if conflict:
         metadata["previous_reason"] = stored_top[:200]
         metadata["previous_confidence"] = str(meta.get("confidence") or "")
-    note = f"与上次归因不同（上次：{stored_top[:60]}），已覆盖为本次结论" if conflict else ""
+    note = f"与上次归因不同（上次：{clip(stored_top, 60)}），已覆盖为本次结论" if conflict else ""
     return {"write": True, "note": note, "metadata": metadata, "conflict": conflict}
 
 

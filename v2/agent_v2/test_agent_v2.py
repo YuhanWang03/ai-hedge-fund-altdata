@@ -3140,3 +3140,33 @@ def checker_loop_specs(llm):
     from v2.agent_v2.agents.news_checker import _CheckLoop
 
     return _CheckLoop(llm, LoopLimits(), search=lambda *a, **k: [], days=30, max_searches=3, max_reads=3, max_chars=5000).tool_specs()
+
+
+def test_read_filings_are_stamped_and_unread_claims_are_caught_in_every_wording():
+    import re
+
+    from v2.agent_v2.agents.move_attributor import _UNREAD_CLAIM, clip, mark_read_filings
+    from v2.agent_v2.interfaces.telegram_format import _one_line
+
+    for wording in ("正文未读取", "申报内容未读取", "未读取正文", "没有读取申报", "文件尚未阅读", "只列出日期和表格类型"):
+        assert re.search(_UNREAD_CLAIM, wording), wording
+    assert not re.search(_UNREAD_CLAIM, "申报阅读者已读取正文")
+
+    bare = EvidenceItem("evidence-filing-a", "ARM", "ARM 于 2026-07-29 向 SEC 提交了 6-K（0001）。", source_id="sec_edgar", source_url="https://www.sec.gov/Archives/edgar/data/1973239/0001/", metadata={"evidence_scope": "filing", "date": "2026-07-29", "form": "6-K", "accession": "0001"})
+    other = EvidenceItem("evidence-filing-b", "ARM", "ARM 于 2026-07-29 向 SEC 提交了 6-K（0002）。", source_id="sec_edgar", source_url="https://www.sec.gov/Archives/edgar/data/1973239/0002/", metadata={"evidence_scope": "filing", "date": "2026-07-29", "form": "6-K", "accession": "0002"})
+    by_date = EvidenceItem("evidence-filing-c", "ARM", "ARM 于 2026-07-28 向 SEC 提交了 8-K（0003）。", source_id="sec_edgar", metadata={"evidence_scope": "filing", "date": "2026-07-28", "form": "8-K", "accession": "0003"})
+    recent = ToolEnvelope("filings.recent", ResultStatus.COMPLETED, subject="ARM", evidence=[bare, other, by_date])
+    event = EvidenceItem("evidence-filing-event-1", "ARM", "ARM 2026-07-29：营收指引低于预期（6-K 2026-07-29 s1：“…”）。", as_of="2026-07-29", source_url="https://www.sec.gov/Archives/edgar/data/1973239/0001", metadata={"evidence_scope": "filing_event", "date": "2026-07-29", "form": "6-K", "filing_date": "2026-07-29"})
+    dated = EvidenceItem("evidence-filing-event-2", "ARM", "ARM 2026-07-28：高管变动（8-K 2026-07-28 s2：“…”）。", as_of="2026-07-28", metadata={"evidence_scope": "filing_event", "date": "2026-07-28", "form": "8-K", "filing_date": "2026-07-28"})
+    attributed = ToolEnvelope("market.attribute_move", ResultStatus.COMPLETED, subject="ARM", evidence=[event, dated])
+    assert mark_read_filings([recent, attributed]) == 2
+    # Matched by URL (trailing slash ignored) and by form + date; the untouched record stays bare; a second pass changes nothing.
+    assert bare.claim == "ARM 于 2026-07-29 向 SEC 提交了 6-K（0001）；申报阅读者已读取正文，读到的事件见 [evidence-filing-event-1]。" and bare.metadata["read_by"] == ["evidence-filing-event-1"]
+    assert by_date.metadata["read_by"] == ["evidence-filing-event-2"] and "read_by" not in other.metadata
+    assert mark_read_filings([recent, attributed]) == 0 and mark_read_filings([recent]) == 0
+
+    # Clipping lands on punctuation and never leaves a bracket open.
+    long = "当日高增长半导体股遭整体抛售、纳指跌 2.60%，ARM 作为估值极高的芯片股被同向抛压，跌幅（约 -9.4% 至收盘 224.89 美元）与板块相当"
+    assert clip(long, 60) == "当日高增长半导体股遭整体抛售、纳指跌 2.60%，ARM 作为估值极高的芯片股被同向抛压…"
+    assert clip("短句", 60) == "短句" and clip("没有标点的一长串文字" * 10, 30).endswith("…") and len(clip("没有标点的一长串文字" * 10, 30)) <= 30
+    assert _one_line("  多  空格 ", 80) == "多 空格" and _one_line(long, 60) == clip(long, 60)

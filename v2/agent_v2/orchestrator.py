@@ -274,6 +274,9 @@ class AgentV2:
 
         plan, outcome = self._web_fallback(request, decision, plan, outcome, context)
         results = outcome.results
+        from v2.agent_v2.agents.move_attributor import mark_read_filings
+
+        mark_read_filings(results)
 
         self._emit(on_progress, run_id, RunStatus.SYNTHESIZING, "synthesizing evidence")
         evidence = outcome.ledger.items()
