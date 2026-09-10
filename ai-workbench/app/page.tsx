@@ -9,6 +9,7 @@ import { LabPage, labMenu, type LabTool } from './lab';
 import { RelationshipMap } from './relationship-map';
 import { MoneyflowPanel, type FlowAnalysis } from './moneyflow-panel';
 import { CostPage, type CostReport } from './cost-page';
+import { ResearchHelp } from './research-help';
 
 type MainSection = 'core' | 'research' | 'lab' | 'cost';
 type ResearchTool = 'stock' | 'fundamentals' | 'valuation' | 'earnings' | 'expectations' | 'institutional' | 'moneyflow' | 'macro' | 'chain' | 'risk';
@@ -636,7 +637,7 @@ function ResearchPage({ tool, ticker, setTicker, ask, run, result, busy }: { too
   const resultTicker = ticker.trim().toUpperCase();
   const engine = result?.ticker === resultTicker ? result.engine : null;
   const progress = result?.ticker === resultTicker ? result.progress || {} : {};
-  return <div className="page research-page"><div className="page-heading"><div><h1>{labels[tool][0]}</h1><p>{labels[tool][1]}</p></div><span className="on-demand-tag">研究引擎</span></div><div className="research-search"><label><span>{tool === 'macro' ? '关联股票代码' : '股票代码'}</span><input value={ticker} onChange={e => setTicker(e.target.value.toUpperCase().replace(/[^A-Z0-9.-]/g, '').slice(0, 8))}/></label><button disabled={busy || !ticker} onClick={() => void run(tool, ticker)}>{busy ? '研究中…' : engine ? '刷新当前模块' : '开始研究'}</button></div><StockResearchView tool={tool} ticker={ticker} result={engine || null} progress={progress} busy={busy} run={run}/></div>;
+  return <div className="page research-page"><div className="page-heading"><div><div className="research-title"><h1>{labels[tool][0]}</h1><ResearchHelp key={tool} tool={tool}/></div><p>{labels[tool][1]}</p></div><span className="on-demand-tag">研究引擎</span></div><div className="research-search"><label><span>{tool === 'macro' ? '关联股票代码' : '股票代码'}</span><input value={ticker} onChange={e => setTicker(e.target.value.toUpperCase().replace(/[^A-Z0-9.-]/g, '').slice(0, 8))}/></label><button disabled={busy || !ticker} onClick={() => void run(tool, ticker)}>{busy ? '研究中…' : engine ? '刷新当前模块' : '开始研究'}</button></div><StockResearchView tool={tool} ticker={ticker} result={engine || null} progress={progress} busy={busy} run={run}/></div>;
 }
 function ResearchResultView({ result }: { result: ToolResult }) { return <section className="surface research-result"><div className="surface-header"><div><h2>最新研究结果</h2><span>{result.intent ? `识别为 ${result.intent}` : '来自现有研究管线'}</span></div></div><pre>{result.text}</pre>{result.image && <Image src={result.image} width={1000} height={700} unoptimized alt="研究结果图表"/>}</section> }
 function formatResearchValue(value: unknown, kind = 'number') { if (value == null || value === '') return 'N/A'; if (typeof value !== 'number') return String(value); if (!Number.isFinite(value)) return 'N/A'; if (kind === 'pct') return `${value >= 0 ? '+' : ''}${(value * 100).toFixed(1)}%`; if (kind === 'money') return Math.abs(value) >= 1e9 ? `$${(value / 1e9).toFixed(2)}B` : Math.abs(value) >= 1e6 ? `$${(value / 1e6).toFixed(1)}M` : `$${value.toLocaleString()}`; return value.toFixed(2) }
