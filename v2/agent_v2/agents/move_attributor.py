@@ -123,6 +123,8 @@ _FINISH_NOW = "轮次已用完。现在只允许 finish：只报你已经拿到�
 
 
 class _AttributionLoop(BoundedLoop):
+    usage_source_name = "agent_v2.move_attributor"
+
     def __init__(self, llm: Any, limits: LoopLimits, *, facts: DayFacts, news: Callable[[str], list[dict[str, Any]]] | None, filing_events: Callable[[], ToolEnvelope] | None, recall: Callable[[str], list[Any]] | None) -> None:
         super().__init__(llm, limits)
         self.facts = facts
@@ -336,6 +338,7 @@ class MoveAttributor:
             "calls": {"news": loop.gathered.news_calls, "filing_events": loop.gathered.reader_calls, "memory": loop.gathered.memory_calls},
             "reader_runs": loop.gathered.reader_runs,
             "intraday": facts.is_intraday,
+            "yield": {"kept": len(reasons), "dropped": dropped, "confirmed": sum(1 for reason in reasons if reason["confidence"] == "高")},
         }
         return envelope
 

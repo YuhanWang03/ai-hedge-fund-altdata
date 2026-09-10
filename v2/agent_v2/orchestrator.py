@@ -51,6 +51,8 @@ class AgentV2Config:
     allow_mutations: bool = False
     #: Override the per-budget wall-clock allowance (seconds) for every run.
     max_seconds: float | None = None
+    #: Append every sub-agent run to the run ledger (data/agent_v2_subagents.jsonl).
+    record_sub_agents: bool = True
 
 
 class AgentV2:
@@ -331,4 +333,8 @@ class AgentV2:
         )
         if self.session is not None:
             self.session.record(result)
+        if result.results and self.config.record_sub_agents:
+            from v2.agent_v2.eval.subagent_ledger import record_runs
+
+            record_runs(result)
         return result

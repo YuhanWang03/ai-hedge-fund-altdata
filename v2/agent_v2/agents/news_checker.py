@@ -51,6 +51,8 @@ class Found:
 
 
 class _CheckLoop(BoundedLoop):
+    usage_source_name = "agent_v2.news_checker"
+
     def __init__(self, llm: Any, limits: LoopLimits, *, search: SearchFn, days: int, max_searches: int, max_reads: int, max_chars: int, min_searches: int = 1) -> None:
         super().__init__(llm, limits)
         self.search = search
@@ -159,7 +161,9 @@ class NewsChecker:
         note = str(outcome.final.get("note") or "") if outcome.finished else outcome.note
         if dropped:
             note = (note + "；" if note else "") + f"{dropped} 条事件没有日期或引文与正文不符，已丢弃"
-        return self._envelope(ticker, query, topic, since, current.isoformat(), events[: self.max_events], loop.found, note=note, outcome=outcome, run_id=context.run_id)
+        envelope = self._envelope(ticker, query, topic, since, current.isoformat(), events[: self.max_events], loop.found, note=note, outcome=outcome, run_id=context.run_id)
+        envelope.metadata["agent"]["yield"] = {"kept": min(len(events), self.max_events), "dropped": dropped}
+        return envelope
 
     def _envelope(self, ticker: str, query: str, topic: str, since: str, until: str, events: list[dict[str, Any]], found: Found, *, note: str, outcome, run_id: str) -> ToolEnvelope:
         prefix = hashlib.sha1(f"{ticker}|{query}".encode("utf-8")).hexdigest()[:8]

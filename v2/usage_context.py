@@ -14,6 +14,26 @@ def current_channel():
     return value if value in CHANNELS else 'unknown'
 
 
+_source = ContextVar('usage_source', default=None)
+
+
+def current_source(default=''):
+    """The ledger ``source`` for the current call: a sub-agent's name when one is running."""
+
+    return _source.get() or default
+
+
+@contextmanager
+def usage_source(value):
+    """Attribute provider calls made inside the block to ``value`` (e.g. ``agent_v2.move_attributor``)."""
+
+    token = _source.set(str(value))
+    try:
+        yield
+    finally:
+        _source.reset(token)
+
+
 @contextmanager
 def usage_channel(value):
     if value not in CHANNELS:

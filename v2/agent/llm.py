@@ -170,7 +170,8 @@ class OpenAICompatLLM:
                     data = json.loads(response.read().decode("utf-8"))
                 from urllib.parse import urlparse
                 from v2.data.usage_ledger import record_llm
-                record_llm(data, self.model, 'DeepSeek' if urlparse(self.base_url).hostname == 'api.deepseek.com' else 'Other LLM', 'agent.chat')
+                from v2.usage_context import current_source
+                record_llm(data, self.model, 'DeepSeek' if urlparse(self.base_url).hostname == 'api.deepseek.com' else 'Other LLM', current_source('agent.chat'))
                 accounted = True
                 return self._to_response(data, int((time.time() - started) * 1000))
             except urllib.error.HTTPError as exc:
@@ -200,8 +201,9 @@ class OpenAICompatLLM:
     def _record_unknown_attempt(self):
         from urllib.parse import urlparse
         from v2.data.usage_ledger import record
+        from v2.usage_context import current_source
         record('llm', 'DeepSeek' if urlparse(self.base_url).hostname == 'api.deepseek.com' else 'Other LLM',
-               self.model, {}, source='agent.chat', state='failed', usage_basis='unknown')
+               self.model, {}, source=current_source('agent.chat'), state='failed', usage_basis='unknown')
 
     @staticmethod
     def _to_response(data: dict[str, Any], latency_ms: int) -> LLMResponse:

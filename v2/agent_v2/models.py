@@ -340,6 +340,7 @@ def sub_agent_summaries(results: list[ToolEnvelope]) -> list[dict[str, Any]]:
             "stop_reason": str(agent.get("stop_reason") or ""),
             "calls": dict(agent.get("calls") or {}),
             "intraday": bool(agent.get("intraday", False)),
+            "yield": dict(agent.get("yield") or {}),
             "trace": [dict(step) for step in (result.metadata.get("trace") or []) if isinstance(step, dict)],
             "nested": [
                 {"label": "申报阅读", "rounds": int(run.get("rounds") or 0), "elapsed_ms": int(run.get("elapsed_ms") or 0), "stop_reason": str(run.get("stop_reason") or ""), "calls": {"filings": run.get("filings"), "sections_read": run.get("sections_read"), "events": run.get("events")}, "trace": [dict(step) for step in (run.get("trace") or []) if isinstance(step, dict)]}

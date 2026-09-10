@@ -250,6 +250,8 @@ _FINISH_NOW = "轮次已用完。现在只允许 finish：把已读章节里有�
 
 
 class _ReadLoop(BoundedLoop):
+    usage_source_name = "agent_v2.filing_reader"
+
     """The filing reader's loop: the one non-finish action reads up to three sections."""
 
     def __init__(self, llm: Any, limits: LoopLimits, source: FilingSource, chosen: list[FilingRef], max_chars: int) -> None:
@@ -329,7 +331,7 @@ class FilingReader:
         metrics = {"rounds": outcome.rounds, "llm_calls": outcome.calls, "elapsed_ms": outcome.elapsed_ms, "stop_reason": outcome.stop_reason, "seconds_allowed": round(outcome.seconds_allowed, 1)}
         envelope = self._envelope(ticker, window, around, chosen, verified, sorted(loop.read), note=note, metrics=metrics, status=status)
         envelope.metadata["trace"] = list(outcome.trace)
-        envelope.metadata["agent"] = {"name": "filing_reader", "label": "申报阅读", "subject": f"{ticker} {around or window}", "rounds": outcome.rounds, "llm_calls": outcome.calls, "elapsed_ms": outcome.elapsed_ms, "seconds_allowed": round(outcome.seconds_allowed, 1), "stop_reason": outcome.stop_reason, "calls": {"read": len(loop.read)}}
+        envelope.metadata["agent"] = {"name": "filing_reader", "label": "申报阅读", "subject": f"{ticker} {around or window}", "rounds": outcome.rounds, "llm_calls": outcome.calls, "elapsed_ms": outcome.elapsed_ms, "seconds_allowed": round(outcome.seconds_allowed, 1), "stop_reason": outcome.stop_reason, "calls": {"read": len(loop.read)}, "yield": {"kept": len(verified), "dropped": dropped}}
         return envelope
 
     def _envelope(self, ticker: str, window: str, around: str, refs: list[FilingRef], events: list[dict[str, Any]], read: list[tuple[int, str]], *, note: str, metrics: dict[str, Any], status: ResultStatus) -> ToolEnvelope:

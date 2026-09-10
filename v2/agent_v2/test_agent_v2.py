@@ -2483,3 +2483,63 @@ def test_web_fallback_gets_a_grace_when_the_internal_step_spent_the_budget():
     registry.register("research.stock", lambda arguments, context: ToolEnvelope("research.stock", ResultStatus.FAILED, subject="ARM", errors=["boom"]))
     result = agent.run("分析 ARM 的估值", allow_web=True)
     assert seen["remaining"] > WEB_FALLBACK_GRACE_SECONDS and not any("grace" in note for note in result.plan.assumptions)
+
+
+def test_sub_agent_runs_are_ledgered_and_reported(tmp_path, monkeypatch):
+    from v2.agent_v2.eval import subagent_report
+    from v2.agent_v2.eval.subagent_ledger import aggregate, read_rows, record_runs, render, rows_for
+
+    ledger = tmp_path / "subagents.jsonl"
+    monkeypatch.setenv("AGENT_V2_SUBAGENT_LEDGER", str(ledger))
+    attributed = ToolEnvelope("market.attribute_move", ResultStatus.COMPLETED, subject="ARM", as_of="2026-07-29", metadata={
+        "agent": {"name": "move_attributor", "label": "异动归因", "subject": "ARM 2026-07-29", "rounds": 4, "llm_calls": 5, "elapsed_ms": 12300, "seconds_allowed": 120, "stop_reason": "finished", "calls": {"news": 2, "filing_events": 1, "memory": 1}, "yield": {"kept": 2, "dropped": 1, "confirmed": 1}, "reader_runs": [{"filings": 2, "sections_read": 4, "events": 1, "rounds": 3, "stop_reason": "finished", "elapsed_ms": 6100, "trace": []}]},
+        "trace": [{"round": 1, "action": "news", "detail": "", "ms": 900}],
+    })
+    checker = ToolEnvelope("web.research", ResultStatus.PARTIAL_DATA, subject="ARM", metadata={"agent": {"name": "news_checker", "label": "新闻核查", "subject": "ARM", "rounds": 6, "llm_calls": 7, "elapsed_ms": 40000, "seconds_allowed": 75, "stop_reason": "rounds", "calls": {"search": 3, "read": 3}, "yield": {"kept": 0, "dropped": 2}}, "trace": []})
+    result = _telegram_result("x[evidence-news-1]。", outcome="clean")
+    result.results = [attributed, checker]
+    result.request = NormalizedRequest("ARM 为什么跌", "ARM 为什么跌", metadata={"channel": "telegram"})
+    rows = rows_for(result)
+    assert [(row["agent"], row["nested"], row["channel"]) for row in rows] == [("move_attributor", False, "telegram"), ("filing_reader", True, "telegram"), ("news_checker", False, "telegram")]
+    assert record_runs(result) == 3 and record_runs(result) == 3 and len(read_rows(ledger)) == 6
+    summary = aggregate(read_rows(ledger))
+    assert summary["move_attributor"]["runs"] == 2 and summary["move_attributor"]["rounds_avg"] == 4.0 and summary["move_attributor"]["seconds_avg"] == 12.3
+    assert summary["move_attributor"]["kept_per_run"] == 2.0 and summary["move_attributor"]["drop_rate"] == 0.333 and summary["move_attributor"]["confirmed"] == 2
+    assert summary["news_checker"]["empty_runs"] == 2 and summary["news_checker"]["stop_reasons"] == {"rounds": 2} and summary["news_checker"]["calls"] == {"search": 6, "read": 6}
+    assert summary["filing_reader"]["runs"] == 2 and summary["filing_reader"]["kept"] == 2
+    text = render(summary, {}, since_days=7)
+    assert "| move_attributor | 2 | 4.0 | 12.3 |" in text and "| news_checker | 2 |" in text and "用量账本不可用" in text
+    assert subagent_report.main(["--path", str(ledger), "--json"]) == 0
+    # An orchestrator run with a sub-agent envelope writes the ledger by itself; the flag turns it off.
+    registry = CapabilityRegistry(default_catalog())
+    registry.register("market.explain_move", lambda arguments, context: ToolEnvelope("market.explain_move", ResultStatus.COMPLETED, subject="ARM", evidence=[EvidenceItem("M", "ARM", "ARM 今日 -1.00%")], metadata={"narrative": "ARM 今日 -1.00%[M]。", "agent": {"name": "move_attributor", "rounds": 1, "llm_calls": 1, "elapsed_ms": 10, "stop_reason": "finished", "calls": {}, "yield": {"kept": 0, "dropped": 0}}, "trace": []}))
+    before = len(read_rows(ledger))
+    AgentV2(catalog=default_catalog(), registry=registry).run("ARM 今天为什么跌")
+    assert len(read_rows(ledger)) == before + 1 and read_rows(ledger)[-1]["question"] == "ARM 今天为什么跌"
+    AgentV2(catalog=default_catalog(), registry=registry, config=AgentV2Config(record_sub_agents=False)).run("ARM 今天为什么跌")
+    assert len(read_rows(ledger)) == before + 1
+
+
+def test_provider_calls_inside_a_sub_agent_are_attributed_to_it():
+    from v2.usage_context import current_source, usage_source
+
+    class Probe(ScriptedLLM):
+        sources: list[str] = []
+
+        def complete(self, messages, tools=None):
+            Probe.sources.append(current_source("agent.chat"))
+            return super().complete(messages, tools)
+
+    from v2.agent_v2.agents.base import BoundedLoop, LoopLimits
+
+    class Echo(BoundedLoop):
+        usage_source_name = "agent_v2.probe"
+
+        def handle(self, action, messages):
+            return True
+
+    assert current_source("agent.chat") == "agent.chat"
+    Echo(Probe([LLMResponse(text='{"action":"finish"}')]), LoopLimits(max_rounds=2)).run("s", "t", finish_prompt="f")
+    assert Probe.sources == ["agent_v2.probe"] and current_source("agent.chat") == "agent.chat"
+    with usage_source("agent_v2.synthesizer"):
+        assert current_source() == "agent_v2.synthesizer"

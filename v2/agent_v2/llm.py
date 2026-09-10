@@ -28,6 +28,7 @@ from v2.agent_v2.models import (
 from v2.agent_v2.planning import RulePlanner, portfolio_ranking
 from v2.agent_v2.synthesis import EvidenceSummarySynthesizer
 from v2.agent_v2.verification import locate_number
+from v2.usage_context import usage_source
 
 logger = logging.getLogger(__name__)
 
@@ -133,13 +134,14 @@ class StructuredLLMPlanner:
             "maximum_tasks": limit,
         }
         try:
-            response = self.llm.complete(
-                [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-                ],
-                None,
-            )
+            with usage_source("agent_v2.planner"):
+                response = self.llm.complete(
+                    [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+                    ],
+                    None,
+                )
             raw = json.loads(_strip_fence(response.text))
             tasks = self._tasks(raw.get("tasks"), {spec.name for spec in allowed})
             if not tasks:
@@ -474,7 +476,8 @@ results 中的评分或限制如需引用，使用 evidence 中 citation_kind �
         return "\n".join(f"- {line}" for line in lines)
 
     def _draft(self, messages: list[dict[str, str]], results: list[ToolEnvelope], evidence: list[EvidenceItem]) -> str:
-        response = self.llm.complete(messages, None)
+        with usage_source("agent_v2.synthesizer"):
+            response = self.llm.complete(messages, None)
         answer = presentation.strip_deliberation(response.text)
         if not answer:
             raise ValueError("synthesizer returned an empty answer")

@@ -98,6 +98,9 @@ def strip_fence(text: str) -> str:
 
 
 class BoundedLoop:
+    #: The ledger source every model call inside ``run`` is attributed to; subclasses name themselves.
+    usage_source_name = "agent_v2.sub_agent"
+
     """Drive a model through JSON actions until it finishes or a limit stops it.
 
     Subclasses implement :meth:`handle` — apply one non-finish action and
@@ -124,6 +127,12 @@ class BoundedLoop:
         if self.limits.seconds < MINIMUM_LOOP_SECONDS:
             outcome.stop_reason = "no_budget"
             return outcome
+        from v2.usage_context import usage_source
+
+        with usage_source(self.usage_source_name):
+            return self._run(outcome, started, system, task, finish_prompt=finish_prompt, preamble=preamble)
+
+    def _run(self, outcome: LoopOutcome, started: float, system: str, task: str, *, finish_prompt: str, preamble: list[dict[str, str]] | None) -> LoopOutcome:
         messages: list[dict[str, str]] = [{"role": "system", "content": system}, {"role": "user", "content": task}, *(preamble or [])]
         stop = "rounds"
         for _ in range(self.limits.max_rounds):
