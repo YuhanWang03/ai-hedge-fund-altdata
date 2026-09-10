@@ -62,17 +62,20 @@ class AnomalyMemory:
     # Write side
     # ------------------------------------------------------------------
 
-    def remember(self, anomaly: Anomaly, *, doc_id: str | None = None) -> str:
+    def remember(self, anomaly: Anomaly, *, doc_id: str | None = None, metadata: dict | None = None) -> str:
         """Index *anomaly* in the collection. Returns the deterministic id.
 
         ``doc_id`` lets a retrospective attribution (the agent explaining a
         past day) sit beside the monitor's own record instead of replacing it.
+        ``metadata`` adds scalar fields (governance: confidence, version,
+        when it was written) next to the standard ones.
         """
         doc_text = self._build_document(anomaly)
         doc_id = doc_id or f"{anomaly.ticker}_{anomaly.date}"
         # ChromaDB 1.x requires numeric values for $gte / $lte, so we store an
         # int representation alongside the human-readable date string.
         metadata = {
+            **{key: value for key, value in (metadata or {}).items() if isinstance(value, (str, int, float, bool))},
             "ticker": anomaly.ticker,
             "date": anomaly.date,                  # for display
             "date_int": _date_to_int(anomaly.date), # for numeric range filter
@@ -91,6 +94,21 @@ class AnomalyMemory:
     # ------------------------------------------------------------------
     # Read side
     # ------------------------------------------------------------------
+
+    def get(self, doc_id: str) -> HistoricalAnomaly | None:
+        """The record stored under ``doc_id``, with its metadata, or None."""
+
+        try:
+            found = self._collection.get(ids=[doc_id])
+        except Exception as exc:
+            logger.warning("ChromaDB get failed for %s: %s", doc_id, exc)
+            return None
+        metas = (found or {}).get("metadatas") or []
+        docs = (found or {}).get("documents") or []
+        if not metas or not docs or not isinstance(metas[0], dict):
+            return None
+        meta = metas[0]
+        return HistoricalAnomaly(date=str(meta.get("date", "")), flags=str(meta.get("flags", "")), doc=str(docs[0] or ""), metadata={key: value for key, value in meta.items() if key not in {"date_int"}})
 
     def recall(
         self,
@@ -146,6 +164,7 @@ class AnomalyMemory:
                 date=str(meta.get("date", "")),
                 flags=str(meta.get("flags", "")),
                 doc=str(doc or ""),
+                metadata={key: value for key, value in meta.items() if key not in {"date_int"}},
             ))
         return history
 

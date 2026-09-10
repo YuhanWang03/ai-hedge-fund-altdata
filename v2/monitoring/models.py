@@ -26,6 +26,7 @@ class HistoricalAnomaly(BaseModel):
     date: str
     flags: str       # comma-separated flag list (e.g. "52w_high,volume_spike")
     doc: str         # the embedded document text — useful for showing context
+    metadata: dict = {}  # governance fields on a retro record: confidence, version, written_at, top_reason
 
 
 class MonitorConfig(BaseModel):

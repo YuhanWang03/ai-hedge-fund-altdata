@@ -184,9 +184,11 @@ class _AttributionLoop(BoundedLoop):
             lines = []
             for row in rows[:6]:
                 day = str(getattr(row, "date", "") or "")[:10]
-                entry = {"date": day, "flags": str(getattr(row, "flags", "") or ""), "doc": _WS.sub(" ", str(getattr(row, "doc", "") or ""))}
+                meta = dict(getattr(row, "metadata", None) or {})
+                entry = {"date": day, "flags": str(getattr(row, "flags", "") or ""), "doc": _WS.sub(" ", str(getattr(row, "doc", "") or "")), "confidence": str(meta.get("confidence") or ""), "written_at": str(meta.get("written_at") or "")}
                 self.gathered.memory[day] = entry
-                lines.append(f"- {day} | {entry['flags'] or '无标志'} | {entry['doc'][:300]}")
+                stamp = f"（归因记录，{entry['confidence'] or '未知'}置信度，{entry['written_at'] or '日期未知'}写入）" if "retro_attribution" in entry["flags"] else ""
+                lines.append(f"- {day} | {entry['flags'] or '无标志'}{stamp} | {entry['doc'][:300]}")
             messages.append({"role": "user", "content": "盯盘记忆：\n" + ("\n".join(lines) or "（无）")})
             return True
         messages.append({"role": "user", "content": "未知动作；可用：news、filing_events、memory、finish。"})
@@ -312,12 +314,22 @@ class MoveAttributor:
             note = (note + "；" if note else "") + f"{dropped} 条原因没有可核对的来源，已丢弃"
         next_steps = [str(step) for step in (outcome.final.get("next_steps") or []) if step] if outcome.finished else []
         remembered = ""
+        memory_note = ""
+        memory_conflict = False
         # An open session's facts are not final: nothing is written to memory yet.
         if self.memory_remember is not None and outcome.finished and not facts.is_intraday:
             try:
-                remembered = self.memory_remember(facts, reasons)
+                decision = self.memory_remember(facts, reasons)
             except Exception:  # noqa: BLE001 — memory is optional infrastructure
-                remembered = ""
+                decision = ""
+            if isinstance(decision, dict):
+                remembered = str(decision.get("id") or "") if decision.get("written", True) else ""
+                memory_note = str(decision.get("note") or "")
+                memory_conflict = bool(decision.get("conflict"))
+            else:
+                remembered = str(decision or "")
+        if memory_note:
+            note = (note + "；" if note else "") + memory_note
         envelope = self._envelope(facts, reasons, loop.gathered, note=note, next_steps=next_steps, metrics={"rounds": outcome.rounds, "llm_calls": outcome.calls, "elapsed_ms": outcome.elapsed_ms, "stop_reason": outcome.stop_reason, "seconds_allowed": round(outcome.seconds_allowed, 1), "news_calls": loop.gathered.news_calls, "reader_calls": loop.gathered.reader_calls, "memory_calls": loop.gathered.memory_calls, "remembered_as": remembered}, allow_news=allow_news)
         envelope.capability = capability
         # What the sub-agent did, for the surfaces to show: one line per
@@ -339,6 +351,7 @@ class MoveAttributor:
             "reader_runs": loop.gathered.reader_runs,
             "intraday": facts.is_intraday,
             "yield": {"kept": len(reasons), "dropped": dropped, "confirmed": sum(1 for reason in reasons if reason["confidence"] == "高")},
+            "memory": {"written": bool(remembered), "conflict": memory_conflict, "note": memory_note},
         }
         return envelope
 
@@ -514,10 +527,46 @@ def _default_recall(ticker: str, query: str, lookback_days: int) -> list[Any]:
     return AnomalyMemory().recall(ticker, query, lookback_days=lookback_days, n_results=6)
 
 
-def _default_remember(facts: DayFacts, reasons: list[dict[str, Any]]) -> str:
+_RANK = {"高": 3, "中": 2, "低": 1}
+
+
+def govern_memory(existing: Any, reasons: list[dict[str, Any]], *, today: str) -> dict[str, Any]:
+    """Decide whether a fresh attribution replaces the stored one for that day.
+
+    Rules: a stored record whose best confidence is higher than the new
+    result's is kept (a later run with only candidates does not erase a
+    confirmed driver); otherwise the new result is written with a version
+    number, and when its top reason differs from the stored one the change
+    is recorded (``previous_reason``) so the drift is visible, not silent.
+    """
+
+    best = max((_RANK.get(str(reason.get("confidence")), 0) for reason in reasons), default=0)
+    top = next((str(reason.get("text") or "") for reason in sorted(reasons, key=lambda reason: -_RANK.get(str(reason.get("confidence")), 0))), "")
+    meta = dict(getattr(existing, "metadata", None) or {}) if existing is not None else {}
+    stored_best = int(meta.get("confidence_rank") or 0)
+    stored_top = str(meta.get("top_reason") or "")
+    version = int(meta.get("version") or 0)
+    if existing is not None and stored_best > best:
+        return {"write": False, "note": f"记忆中已有更高置信度的归因（{meta.get('confidence') or '?'}，{meta.get('written_at') or '早先'}写入），本次结论未覆盖", "metadata": meta, "conflict": bool(top and stored_top and top != stored_top)}
+    label = next((key for key, value in _RANK.items() if value == best), "无")
+    metadata = {"confidence": label, "confidence_rank": best, "top_reason": top[:200], "version": version + 1, "written_at": today}
+    conflict = bool(existing is not None and top and stored_top and top != stored_top)
+    if conflict:
+        metadata["previous_reason"] = stored_top[:200]
+        metadata["previous_confidence"] = str(meta.get("confidence") or "")
+    note = f"与上次归因不同（上次：{stored_top[:60]}），已覆盖为本次结论" if conflict else ""
+    return {"write": True, "note": note, "metadata": metadata, "conflict": conflict}
+
+
+def _default_remember(facts: DayFacts, reasons: list[dict[str, Any]]) -> dict[str, Any]:
     from v2.memory import AnomalyMemory
     from v2.monitoring.models import Anomaly, NewsSource, ScoredReason
 
+    memory = AnomalyMemory()
+    doc_id = f"{facts.ticker}_{facts.date}_retro"
+    decision = govern_memory(memory.get(doc_id), reasons, today=date.today().isoformat())
+    if not decision["write"]:
+        return {"id": doc_id, "written": False, "note": decision["note"], "conflict": decision["conflict"]}
     anomaly = Anomaly(
         ticker=facts.ticker,
         date=facts.date,
@@ -532,7 +581,8 @@ def _default_remember(facts: DayFacts, reasons: list[dict[str, Any]]) -> str:
         reasons=[ScoredReason(text=reason["text"], confidence=reason["confidence"]) for reason in reasons],
         sources=[NewsSource(title=reason["kind"], url=reason["url"]) for reason in reasons if reason["url"]],
     )
-    return AnomalyMemory().remember(anomaly, doc_id=f"{facts.ticker}_{facts.date}_retro")
+    written = memory.remember(anomaly, doc_id=doc_id, metadata=decision["metadata"])
+    return {"id": written, "written": True, "note": decision["note"], "conflict": decision["conflict"]}
 
 
 def _default_price_source():

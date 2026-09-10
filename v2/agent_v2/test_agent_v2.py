@@ -2543,3 +2543,45 @@ def test_provider_calls_inside_a_sub_agent_are_attributed_to_it():
     assert Probe.sources == ["agent_v2.probe"] and current_source("agent.chat") == "agent.chat"
     with usage_source("agent_v2.synthesizer"):
         assert current_source() == "agent_v2.synthesizer"
+
+
+def test_memory_governance_keeps_a_confirmed_attribution_and_records_drift():
+    from v2.agent_v2.agents.move_attributor import govern_memory
+
+    class Stored:
+        def __init__(self, **metadata):
+            self.metadata = metadata
+
+    high = [{"text": "财报指引不及预期", "confidence": "高"}]
+    candidates = [{"text": "板块回调", "confidence": "中"}]
+    # Nothing stored: written as version 1 with its best confidence and top reason.
+    fresh = govern_memory(None, high, today="2026-09-10")
+    assert fresh["write"] and fresh["metadata"] == {"confidence": "高", "confidence_rank": 3, "top_reason": "财报指引不及预期", "version": 1, "written_at": "2026-09-10"} and not fresh["conflict"]
+    stored = Stored(**fresh["metadata"])
+    # A later run with only candidates does not erase a confirmed driver.
+    kept = govern_memory(stored, candidates, today="2026-09-11")
+    assert not kept["write"] and "记忆中已有更高置信度的归因" in kept["note"] and kept["conflict"]
+    # An equal or better result overwrites, versioned, and a different top reason is recorded as drift.
+    changed = govern_memory(stored, [{"text": "出口管制放宽", "confidence": "高"}], today="2026-09-12")
+    assert changed["write"] and changed["conflict"] and changed["metadata"]["version"] == 2 and changed["metadata"]["previous_reason"] == "财报指引不及预期"
+    assert changed["note"].startswith("与上次归因不同（上次：财报指引不及预期）")
+    same = govern_memory(stored, high, today="2026-09-12")
+    assert same["write"] and not same["conflict"] and same["note"] == ""
+    # Empty results never overwrite anything that exists.
+    assert not govern_memory(stored, [], today="2026-09-12")["write"]
+
+
+def test_attributor_surfaces_the_memory_decision():
+    from v2.agent_v2.agents.move_attributor import MoveAttributor
+    from v2.agent_v2.models import sub_agent_summaries
+
+    finish = LLMResponse(text=json.dumps({"action": "finish", "reasons": [], "next_steps": [], "note": ""}, ensure_ascii=False))
+    decisions = [{"id": "ARM_2026-07-29_retro", "written": False, "note": "记忆中已有更高置信度的归因（高，2026-09-09写入），本次结论未覆盖", "conflict": True}]
+    attributor = MoveAttributor(ScriptedLLM([finish]), price_source_factory=lambda: SimpleNamespace(get_prices=_attributor_prices), news=None, filing_reader=None, memory_recall=None, memory_remember=lambda facts, reasons: decisions[0], sector_for=lambda ticker: "SMH")
+    result = attributor.run("ARM", ExecutionContext("run", NormalizedRequest("q", "q"), BudgetClass.PORTFOLIO), day="2026-07-29", today=date(2026, 9, 9))
+    assert result.metrics["remembered_as"] == "" and "本次结论未覆盖" in " ".join(result.limitations)
+    (summary,) = sub_agent_summaries([result])
+    assert summary["memory"] == {"written": False, "conflict": True, "note": decisions[0]["note"]}
+    # The plain string form (older callers, tests) still works.
+    legacy = MoveAttributor(ScriptedLLM([finish]), price_source_factory=lambda: SimpleNamespace(get_prices=_attributor_prices), news=None, filing_reader=None, memory_recall=None, memory_remember=lambda facts, reasons: "ARM_2026-07-29_retro", sector_for=lambda ticker: "SMH")
+    assert legacy.run("ARM", ExecutionContext("run", NormalizedRequest("q", "q"), BudgetClass.PORTFOLIO), day="2026-07-29", today=date(2026, 9, 9)).metrics["remembered_as"] == "ARM_2026-07-29_retro"
