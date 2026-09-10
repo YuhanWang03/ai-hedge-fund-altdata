@@ -10,6 +10,11 @@
 .research-help-dialog header button { display:flex; justify-content:center; align-items:center; width:32px; height:32px; border:0; border-radius:8px; background:#f1f5fa; color:#71849d; font-size:23px; cursor:pointer; }
 .research-help-dialog header button:hover { background:#e6eefb; color:#2e6cd7; }
 .research-help-content { padding:4px 24px 20px; }
+.research-help-content .research-help-intro { padding:16px 0 4px; color:#4c6585; }
+.research-help-billing { margin-top:16px; border:1px solid #e5ecf5; border-radius:9px; padding:12px 14px; }
+.research-help-billing>summary { cursor:pointer; font-size:12px; color:#57779e; }
+.research-help-billing>summary:focus-visible { outline:2px solid #6b9eea; outline-offset:3px; }
+.research-help-billing section:last-child { border-bottom:0; padding-bottom:0; }
 .research-help-content section { padding:16px 0; border-bottom:1px solid #edf1f7; }
 .research-help-content h3 { display:flex; align-items:center; gap:10px; margin:0 0 8px; font-size:13px; font-weight:650; }
 .research-help-content h3 span { color:#94acd0; font-size:10px; font-variant-numeric:tabular-nums; }
