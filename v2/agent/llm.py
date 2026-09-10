@@ -123,7 +123,7 @@ class OpenAICompatLLM:
         timeout: float = 90.0,
         max_retries: int = 3,
     ) -> None:
-        self.model = model or os.environ.get("AGENT_LLM_MODEL", "deepseek-chat")
+        self.model = model or os.environ.get("AGENT_LLM_MODEL", "deepseek-v4-flash")
         self.base_url = (base_url or os.environ.get("AGENT_LLM_BASE_URL")
                          or "https://api.deepseek.com/v1").rstrip("/")
         # .strip(): a key copied out of a CRLF .env carries a trailing \r, and

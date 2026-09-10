@@ -24,6 +24,15 @@ def test_requested_model_and_breakdown():
     assert sum(v['amount'] for v in event['breakdown'].values()) == event['amount']
 
 
+def test_agent_default_matches_owner_model(monkeypatch):
+    from v2.agent.llm import OpenAICompatLLM
+    monkeypatch.delenv('AGENT_LLM_MODEL', raising=False)
+    assert OpenAICompatLLM().model == 'deepseek-v4-flash'
+    monkeypatch.setenv('AGENT_LLM_MODEL', 'explicit-model')
+    assert OpenAICompatLLM().model == 'explicit-model'
+    assert OpenAICompatLLM(model='argument-model').model == 'argument-model'
+
+
 def test_alias_backfill_is_explicit_audited_idempotent():
     rate()
     ledger.record('llm', 'DeepSeek', 'deepseek-flash', {'input_tokens': 100, 'cached_tokens': 0, 'output_tokens': 10}, occurred_at='2026-09-09T00:00:00+00:00')
