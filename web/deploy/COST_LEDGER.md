@@ -75,6 +75,37 @@ FD endpoint configuration and manual Tavily package rates remain independent.
 
 ## Separate currency totals
 
+## Account-aware billing and reconciliation
+
+New LLM rows preserve both `requested_model` and the provider response `model`.
+An exact response price is preferred; if absent, an exact requested-model price
+can be used as a visibly labelled estimate. No undocumented global alias is
+assumed. Owner-confirmed model mappings have explicit validity dates and a source.
+`POST /api/costs/reconcile` only updates pending LLM rows with a valid historical
+price and complete usage; the original and recalculated row are retained in
+`billing_audit`. It is idempotent and does not reprice settled rows or guess past
+Tavily allowance. Events carry three token/cost components, including the
+applied peak/off-peak rates.
+
+`POST /api/costs/tavily/sync` reads the official account `/usage` endpoint using
+the server key. Only the user-confirmed Researcher/free 1000-credit plan is
+automatically accepted. The backend attempts sync every five minutes, with a
+one-minute cross-process throttle. Errors are sanitized and surfaced. Quotas
+use separate UTC monthly state; each new month requires a fresh snapshot, not
+an assumed new allowance. Snapshot age over 24 hours, changed key/plan, missing
+credits or pre-snapshot events leave cost pending. Calibrations are audited.
+Post-snapshot allocation is atomic across workers: first remaining free credits,
+then $0.008 per excess credit. Official sync cannot decrease locally consumed
+quota within the same month/key. This conservative estimate can differ from
+provider billing due to other applications, overlapping requests and delayed
+usage reports; account totals are never added to project spend.
+
+The owner can calibrate current account use via `/api/costs/tavily/calibrate`.
+Never reset `tavily_quota` when clearing project `usage_events`/`query_costs`.
+Raw manual Tavily prices remain backwards-compatible without an account quota;
+such estimates explicitly state that no free allowance was deducted. Once quota
+tracking is configured it takes precedence, including month-rollover safeguards.
+
 Each new event freezes `amount` and `currency` with its price snapshot. CNY and
 USD totals and provider breakdowns are independent; there is no exchange rate or
 combined monetary total. Existing USD entries remain USD; unknown-price events

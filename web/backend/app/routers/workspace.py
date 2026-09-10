@@ -169,6 +169,42 @@ async def cost_balance() -> dict:
     return await run_in_threadpool(deepseek_balance)
 
 
+@router.post('/costs/tavily/sync')
+async def sync_tavily_quota() -> dict:
+    from v2.data.billing_rules import sync_tavily
+    return await run_in_threadpool(sync_tavily)
+
+
+@router.post('/costs/tavily/calibrate')
+async def calibrate_tavily(payload: dict) -> dict:
+    from v2.data.billing_rules import save_quota
+    from v2.data.usage_ledger import now_iso
+    try:
+        if payload.get('confirmed') is not True:
+            raise ValueError('需要确认账户用量')
+        return await run_in_threadpool(save_quota, payload['used'], '用户手动校准账户本月用量', now_iso())
+    except (ValueError, KeyError, TypeError, OverflowError):
+        raise HTTPException(400, '请确认并填写本月账户实际已用 credits（非本项目记录数）')
+
+
+@router.post('/costs/model-mappings')
+async def add_model_mapping(payload: dict) -> dict:
+    from v2.data.billing_rules import configure_alias
+    from v2.data.usage_ledger import reconcile_pending
+    try:
+        mapping = await run_in_threadpool(configure_alias, payload)
+    except (ValueError, KeyError, TypeError, OverflowError):
+        raise HTTPException(400, '模型映射无效：请确认名称、目标价格、有效时间及依据')
+    result = await run_in_threadpool(reconcile_pending)
+    return {**mapping, **result}
+
+
+@router.post('/costs/reconcile')
+async def reconcile_costs() -> dict:
+    from v2.data.usage_ledger import reconcile_pending
+    return await run_in_threadpool(reconcile_pending)
+
+
 @router.get("/monitoring/universe")
 async def monitoring_universe() -> dict:
     """The production ticker pool scanned by the minute-level streamer."""

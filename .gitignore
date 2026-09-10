@@ -86,3 +86,4 @@ outputs/
 app/backend/alembic/versions/__pycache__/.claude/
 workbench-deploy.tar.gz
 !v2/data/price_sync.py
+!v2/data/billing_rules.py

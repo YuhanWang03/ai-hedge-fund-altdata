@@ -22,8 +22,9 @@ class LLMProxy:
         usage = meta.get('token_usage') or meta.get('usage') or {}
         standard = getattr(result, 'usage_metadata', None) or {}
         if standard:
-            usage = {**usage, 'prompt_tokens': standard.get('input_tokens'),
-                     'completion_tokens': standard.get('output_tokens')}
+            for incoming, outgoing in [('input_tokens', 'prompt_tokens'), ('output_tokens', 'completion_tokens')]:
+                if standard.get(incoming) is not None:
+                    usage[outgoing] = standard[incoming]
             cached = (standard.get('input_token_details') or {}).get('cache_read')
             if cached is not None:
                 usage['prompt_cache_hit_tokens'] = cached
