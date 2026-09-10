@@ -77,9 +77,10 @@ class AgentV2Config:
     debate: bool = True
     #: Classify every question's intent with the model in the background and
     #: ledger it next to the regex decision (data/agent_v2_intents.jsonl);
-    #: the run itself is not changed.  Off by default so scripted-model tests
-    #: and offline evals stay deterministic; the live runtime turns it on.
-    shadow_intent: bool = False
+    #: the run itself is not changed.  ``None`` means "when the live runtime
+    #: has a model": scripted-model tests and offline evals construct the
+    #: agent directly and stay deterministic; the runtime turns it on.
+    shadow_intent: bool | None = None
 
 
 class AgentV2:

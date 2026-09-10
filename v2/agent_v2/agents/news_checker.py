@@ -17,7 +17,7 @@ from datetime import date, timedelta
 from typing import Any, Callable
 from urllib.parse import urldefrag, urlparse
 
-from v2.agent_v2.agents.base import BoundedLoop, LoopLimits, limits_for
+from v2.agent_v2.agents.base import LoopLimits, Tool, ToolLoop, _schema, limits_for
 from v2.agent_v2.agents.filing_reader import locate_quote
 from v2.agent_v2.execution import CapabilityRegistry, ExecutionContext
 from v2.agent_v2.models import EvidenceItem, ResultStatus, ToolEnvelope
@@ -26,13 +26,15 @@ from v2.agent_v2.models import EvidenceItem, ResultStatus, ToolEnvelope
 #: published_date and, when the provider supplies it, raw_content.
 SearchFn = Callable[..., list[dict[str, Any]]]
 
-_SYSTEM = """你是新闻核查者，只输出 JSON，不回答用户问题。
-任务：围绕给定股票和问题，找出可核实、带日期的事件。你能做的动作，每轮一个：
-- 搜索：{"action":"search","query":"英文检索词，含公司名、事件关键词和月份"}
-- 读正文：{"action":"read","ids":["r1","r3"]}（每轮最多 2 篇；只读标题和摘要与问题相关的）
-- 结束：{"action":"finish","events":[{"date":"YYYY-MM-DD","text":"一句中文事件概括","source":"r3","quote":"原文片段，30 字以上，原样照抄"}],"note":"一句说明"}
-规则：每条事件必须指向你本轮真正拿到的结果 id，并附该结果正文或摘要里的原文引文；日期用报道里写明的事件日期，没有就用发布日期；
-标题党、分析师观点、长期展望不算事件；同一件事只报一次。先搜索，读到足够的正文后尽快结束，最多报 5 条。"""
+_SYSTEM = """你是新闻核查者，不回答用户问题，每一轮调用一个工具。
+任务：围绕给定股票和问题，找出可核实、带日期的事件。
+工具：search 搜索（英文检索词，含公司名、事件关键词和月份）；read 读正文（每轮最多 2 篇，给结果 id，只读标题和摘要与问题相关的）；finish 报告事件并结束。
+规则：finish 里每条事件必须指向你本轮真正拿到的结果 id，并附该结果正文或摘要里的原文引文（30 字以上，原样照抄）；日期用报道里写明的事件日期，没有就用发布日期；
+标题党、分析师观点、长期展望不算事件；同一件事只报一次。先搜索，读到足够的正文后尽快结束，最多报 5 条。
+如果无法调用工具，就只输出 JSON：{"action":"search","query":"..."}、{"action":"read","ids":["r1"]} 或 {"action":"finish","events":[...],"note":"..."}。"""
+
+_EVENT_SCHEMA = _schema({"date": {"type": "string", "description": "YYYY-MM-DD"}, "text": {"type": "string", "description": "一句中文事件概括"}, "source": {"type": "string", "description": "结果 id，如 r3"}, "quote": {"type": "string", "description": "原文片段，30 字以上，原样照抄"}}, ["date", "text", "source", "quote"])
+_FINISH_SCHEMA = _schema({"events": {"type": "array", "items": _EVENT_SCHEMA}, "note": {"type": "string"}}, ["events"])
 
 _FINISH_NOW = "轮次已用完。现在只允许 finish：只报你已经拿到结果并能引用原文的事件；没有就返回空 events 并说明。"
 
@@ -50,11 +52,11 @@ class Found:
     reads: int = 0
 
 
-class _CheckLoop(BoundedLoop):
+class _CheckLoop(ToolLoop):
     usage_source_name = "agent_v2.news_checker"
+    finish_description = "报告有出处、带日期的事件并结束：只报已经拿到结果并能引用原文的事件，没有就返回空 events 并说明。"
 
     def __init__(self, llm: Any, limits: LoopLimits, *, search: SearchFn, days: int, max_searches: int, max_reads: int, max_chars: int, min_searches: int = 1) -> None:
-        super().__init__(llm, limits)
         self.search = search
         self.days = days
         self.max_searches = max_searches
@@ -63,76 +65,71 @@ class _CheckLoop(BoundedLoop):
         self.max_chars = max_chars
         self.found = Found()
         self._refused_finish = False
+        tools = [
+            Tool("search", "搜索新闻；query 用英文检索词，含公司名、事件关键词和月份。", _schema({"query": {"type": "string"}}, ["query"]), self._search),
+            Tool("read", "读已搜到结果的正文，每轮最多 2 篇；ids 为结果 id。", _schema({"ids": {"type": "array", "items": {"type": "string"}, "maxItems": 2}}, ["ids"]), self._read),
+        ]
+        super().__init__(llm, limits, tools=tools, finish_parameters=_FINISH_SCHEMA)
 
-    def accept_finish(self, action: dict[str, Any], messages: list[dict[str, str]]) -> bool:
+    def refuse_finish(self, action: dict[str, Any]) -> str | None:
         # A broad question ("what's the news") deserves a second angle before
         # the loop declares itself done on one search; once is enough to ask.
         if self.found.searches < self.min_searches and not self._refused_finish:
             self._refused_finish = True
-            messages.append({"role": "user", "content": f"目前只搜索了 {self.found.searches} 次；请换一个角度（另一个事件关键词或时间段）再搜索一次，然后再 finish。"})
-            return False
-        return True
+            return f"目前只搜索了 {self.found.searches} 次；请换一个角度（另一个事件关键词或时间段）再搜索一次，然后再 finish。"
+        return None
 
-    def handle(self, action: dict[str, Any], messages: list[dict[str, str]]) -> bool:
-        kind = str(action.get("action") or "")
-        if kind == "search":
-            if self.found.searches >= self.max_searches:
-                messages.append({"role": "user", "content": f"搜索次数已达上限 {self.max_searches}；请读已有结果或 finish。"})
-                return False
-            query = " ".join(str(action.get("query") or "").split())[:300]
-            if not query:
-                messages.append({"role": "user", "content": "search 需要 query。"})
-                return False
-            self.found.searches += 1
-            try:
-                rows = list(self.search(query, days=self.days, max_results=6) or [])
-            except Exception as exc:  # noqa: BLE001 — the provider failing is data for the envelope
-                messages.append({"role": "user", "content": f"搜索失败：{type(exc).__name__}。"})
-                return False
-            lines = []
-            for row in rows:
-                if not isinstance(row, dict):
-                    continue
-                url, _ = urldefrag(str(row.get("url") or "").strip())
-                if urlparse(url).scheme not in {"http", "https"}:
-                    continue
-                existing = next((key for key, value in self.found.rows.items() if value["url"] == url), None)
-                if existing is None:
-                    key = f"r{len(self.found.rows) + 1}"
-                    self.found.rows[key] = {
-                        "url": url,
-                        "title": _flat(row.get("title") or urlparse(url).netloc, 200),
-                        "content": _flat(row.get("content") or row.get("snippet"), 600),
-                        "raw": _flat(row.get("raw_content"), 60_000),
-                        "published": str(row.get("published_date") or row.get("published_at") or "")[:10],
-                    }
-                    existing = key
-                value = self.found.rows[existing]
-                lines.append(f"- id={existing} | {value['published'] or '日期未知'} | {value['title']} | {value['content'][:240]}")
-            messages.append({"role": "user", "content": f"搜索“{query}”的结果：\n" + ("\n".join(lines) or "（无）")})
-            return True
-        if kind == "read":
-            ids = [str(value) for value in (action.get("ids") or []) if str(value) in self.found.rows][:2]
-            if not ids:
-                messages.append({"role": "user", "content": "read 需要已有结果的 id。"})
-                return False
-            parts = []
-            for key in ids:
-                if self.found.reads >= self.max_reads:
-                    parts.append(f"[{key}] 阅读次数已达上限 {self.max_reads}。")
-                    continue
-                row = self.found.rows[key]
-                text = row["raw"] or row["content"]
-                if not text:
-                    parts.append(f"[{key}] 没有可读正文。")
-                    continue
-                self.found.reads += 1
-                self.found.read[key] = text[: self.max_chars]
-                parts.append(f"[{key}] {row['title']}（{row['published'] or '日期未知'}）\n{self.found.read[key]}")
-            messages.append({"role": "user", "content": "\n\n".join(parts)})
-            return True
-        messages.append({"role": "user", "content": "未知动作；可用：search、read、finish。"})
-        return False
+    def _search(self, arguments: dict[str, Any]) -> str:
+        if self.found.searches >= self.max_searches:
+            raise ValueError(f"搜索次数已达上限 {self.max_searches}；请读已有结果或 finish。")
+        query = " ".join(str(arguments.get("query") or "").split())[:300]
+        if not query:
+            raise ValueError("search 需要 query。")
+        self.found.searches += 1
+        try:
+            rows = list(self.search(query, days=self.days, max_results=6) or [])
+        except Exception as exc:  # noqa: BLE001 — the provider failing is data for the envelope
+            raise ValueError(f"搜索失败：{type(exc).__name__}。") from exc
+        lines = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            url, _ = urldefrag(str(row.get("url") or "").strip())
+            if urlparse(url).scheme not in {"http", "https"}:
+                continue
+            existing = next((key for key, value in self.found.rows.items() if value["url"] == url), None)
+            if existing is None:
+                key = f"r{len(self.found.rows) + 1}"
+                self.found.rows[key] = {
+                    "url": url,
+                    "title": _flat(row.get("title") or urlparse(url).netloc, 200),
+                    "content": _flat(row.get("content") or row.get("snippet"), 600),
+                    "raw": _flat(row.get("raw_content"), 60_000),
+                    "published": str(row.get("published_date") or row.get("published_at") or "")[:10],
+                }
+                existing = key
+            value = self.found.rows[existing]
+            lines.append(f"- id={existing} | {value['published'] or '日期未知'} | {value['title']} | {value['content'][:240]}")
+        return f"搜索“{query}”的结果：\n" + ("\n".join(lines) or "（无）")
+
+    def _read(self, arguments: dict[str, Any]) -> str:
+        ids = [str(value) for value in (arguments.get("ids") or []) if str(value) in self.found.rows][:2]
+        if not ids:
+            raise ValueError("read 需要已有结果的 id。")
+        parts = []
+        for key in ids:
+            if self.found.reads >= self.max_reads:
+                parts.append(f"[{key}] 阅读次数已达上限 {self.max_reads}。")
+                continue
+            row = self.found.rows[key]
+            text = row["raw"] or row["content"]
+            if not text:
+                parts.append(f"[{key}] 没有可读正文。")
+                continue
+            self.found.reads += 1
+            self.found.read[key] = text[: self.max_chars]
+            parts.append(f"[{key}] {row['title']}（{row['published'] or '日期未知'}）\n{self.found.read[key]}")
+        return "\n\n".join(parts)
 
 
 class NewsChecker:

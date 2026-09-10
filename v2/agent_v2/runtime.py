@@ -127,9 +127,9 @@ def build_workspace_agent(
     effective_config = config or AgentV2Config()
     if enable_web and not effective_config.enable_web_fallback:
         effective_config = replace(effective_config, enable_web_fallback=True)
-    if use_llm and config is None:
+    if use_llm and effective_config.shadow_intent is None:
         # Live runs classify every question's intent in the background for
-        # the shadow report; explicit configs (evals, tests) keep their own.
+        # the shadow report; a config that says False keeps it off.
         effective_config = replace(effective_config, shadow_intent=True)
     lab = WorkspaceLabPort()
     web_search = TavilyWebSearchPort(news_provider) if enable_web else None

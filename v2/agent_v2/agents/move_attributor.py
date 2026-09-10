@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable
 
-from v2.agent_v2.agents.base import BoundedLoop, LoopLimits, limits_for, strip_fence
+from v2.agent_v2.agents.base import LoopLimits, Tool, ToolLoop, _schema, limits_for, strip_fence
 from v2.agent_v2.agents.filing_reader import EdgarFilingSource, FilingReader, FilingSource, locate_quote
 from v2.agent_v2.execution import CapabilityRegistry, ExecutionContext
 from v2.agent_v2.models import EvidenceItem, ResultStatus, ToolEnvelope
@@ -113,13 +113,16 @@ def _session_state(day: str, now: datetime | None) -> dict[str, Any]:
     return {"is_intraday": bool(observation["is_intraday"]), "observed_at_label": str(observation["observed_at_label"]) if observation["is_intraday"] else ""}
 
 
-_SYSTEM = """你是异动归因者，只输出 JSON，不回答用户问题。
-任务：解释给定股票在给定日期的涨跌原因。你能做的动作，每轮一个：
-- 搜新闻（仅在允许时）：{"action":"news","query":"英文检索词，含公司名和日期"}
-- 读当日附近的申报：{"action":"filing_events"}
-- 查盯盘记忆：{"action":"memory","query":"关键词"}
-- 结束：{"action":"finish","reasons":[{"text":"一句中文原因","confidence":"高|中|低","source":{"kind":"news","url":"..."}或{"kind":"filing","id":"证据 id"}或{"kind":"memory","date":"YYYY-MM-DD"},"quote":"从该来源原样复制的一段原文"}],"next_steps":["..."],"note":"一句话说明结论强弱或还缺什么"}
-规则：每条原因必须指向你本轮真正拿到的来源并附原文引文；只有新闻或申报原文直接、同日、幅度相称地支持时才能标"高"；仅有盯盘记忆支持的最多标"中"；市场整体波动、传闻、幅度不相称的标"低"；找不到原因就返回空 reasons 并在 note 里说明。不要编造来源。"""
+_SYSTEM = """你是异动归因者，不回答用户问题，每一轮调用一个工具。
+任务：解释给定股票在给定日期的涨跌原因。
+工具：news 搜当日新闻（仅在提供时可用，英文检索词含公司名和日期）；filing_events 读当日附近的申报；memory 查盯盘记忆；finish 报告原因并结束。
+规则：finish 里每条原因必须指向你本轮真正拿到的来源并附原文引文：source 为 {"kind":"news","url":"..."} 或 {"kind":"filing","id":"证据 id"} 或 {"kind":"memory","date":"YYYY-MM-DD"}；
+只有新闻或申报原文直接、同日、幅度相称地支持时才能标"高"；仅有盯盘记忆支持的最多标"中"；市场整体波动、传闻、幅度不相称的标"低"；找不到原因就返回空 reasons 并在 note 里说明。不要编造来源。
+如果无法调用工具，就只输出 JSON：{"action":"news","query":"..."}、{"action":"filing_events"}、{"action":"memory","query":"..."} 或 {"action":"finish","reasons":[...],"next_steps":[...],"note":"..."}。"""
+
+_SOURCE_SCHEMA = {"type": "object", "properties": {"kind": {"type": "string", "enum": ["news", "filing", "memory"]}, "url": {"type": "string"}, "id": {"type": "string"}, "date": {"type": "string"}}, "required": ["kind"]}
+_REASON_SCHEMA = _schema({"text": {"type": "string", "description": "一句中文原因"}, "confidence": {"type": "string", "enum": ["高", "中", "低"]}, "source": _SOURCE_SCHEMA, "quote": {"type": "string", "description": "从该来源原样复制的一段原文"}}, ["text", "confidence", "source", "quote"])
+_FINISH_SCHEMA = _schema({"reasons": {"type": "array", "items": _REASON_SCHEMA}, "next_steps": {"type": "array", "items": {"type": "string"}}, "note": {"type": "string", "description": "一句话说明结论强弱或还缺什么"}}, ["reasons"])
 
 _FINISH_NOW = "轮次已用完。现在只允许 finish：只报你已经拿到来源并能引用原文的原因；没有就返回空 reasons 并说明。"
 
@@ -134,87 +137,85 @@ _UNREAD_CLAIM = r"申报(?:内容)?(?:尚|均|并)?未(?:被)?读取|未读取(?
 SECTOR_EXPLAINS_SHARE = 0.7
 
 
-class _AttributionLoop(BoundedLoop):
+class _AttributionLoop(ToolLoop):
     usage_source_name = "agent_v2.move_attributor"
+    finish_description = "报告涨跌原因并结束：只报已经拿到来源并能引用原文的原因，没有就返回空 reasons 并说明。"
 
     def __init__(self, llm: Any, limits: LoopLimits, *, facts: DayFacts, news: Callable[[str], list[dict[str, Any]]] | None, filing_events: Callable[[], ToolEnvelope] | None, recall: Callable[[str], list[Any]] | None) -> None:
-        super().__init__(llm, limits)
         self.facts = facts
         self.news = news
         self.filing_events = filing_events
         self.recall = recall
         self.gathered = Gathered()
         self._refused_finish = False
+        tools: list[Tool] = []
+        unavailable: dict[str, str] = {}
+        if news is not None:
+            tools.append(Tool("news", "搜当日新闻；query 用英文检索词，含公司名和日期。", _schema({"query": {"type": "string"}}, ["query"]), self._news))
+        else:
+            unavailable["news"] = "用户未授权网页搜索，news 不可用；请用 filing_events 或 memory，或直接 finish。"
+        if filing_events is not None:
+            tools.append(Tool("filing_events", "读当日或前几天的 SEC 申报，返回有日期和原文引文的事件。", _schema({}), self._filing_events))
+        else:
+            unavailable["filing_events"] = "申报阅读不可用。"
+        if recall is not None:
+            tools.append(Tool("memory", "查盯盘记忆里这只股票的异动记录；query 为关键词。", _schema({"query": {"type": "string"}}), self._memory))
+        else:
+            unavailable["memory"] = "盯盘记忆不可用。"
+        super().__init__(llm, limits, tools=tools, finish_parameters=_FINISH_SCHEMA, unavailable=unavailable)
 
-    def accept_finish(self, action: dict[str, Any], messages: list[dict[str, str]]) -> bool:
+    def refuse_finish(self, action: dict[str, Any]) -> str | None:
         # With the user's web consent the news is looked at once before the
         # loop settles for memory alone; asked once, never twice.
         if self.news is not None and self.gathered.news_calls == 0 and not self._refused_finish:
             self._refused_finish = True
-            messages.append({"role": "user", "content": "网页已授权但还没有搜过新闻；请先 news 搜索一次当日报道，再 finish。"})
-            return False
-        return True
+            return "网页已授权但还没有搜过新闻；请先 news 搜索一次当日报道，再 finish。"
+        return None
 
-    def handle(self, action: dict[str, Any], messages: list[dict[str, str]]) -> bool:
-        kind = str(action.get("action") or "")
-        if kind == "news":
-            if self.news is None:
-                messages.append({"role": "user", "content": "用户未授权网页搜索，news 不可用；请用 filing_events 或 memory，或直接 finish。"})
-                return False
-            query = str(action.get("query") or f"{self.facts.ticker} stock {self.facts.date}")
-            self.gathered.news_calls += 1
-            try:
-                rows = list(self.news(query) or [])
-            except Exception as exc:  # noqa: BLE001 — a failed search is a message, not a crash
-                messages.append({"role": "user", "content": f"新闻搜索失败：{type(exc).__name__}。"})
-                return True
-            kept = [row for row in rows if _mentions(row, self.facts.ticker)]
-            for row in kept:
-                url = str(row.get("url") or "").strip()
-                if url:
-                    self.gathered.news[url] = row
-            listing = "\n".join(f"- {row.get('published_date') or row.get('published_at') or '日期未知'} | {row.get('title') or ''} | {row.get('url')}\n  {_WS.sub(' ', str(row.get('content') or ''))[:600]}" for row in kept[:6])
-            messages.append({"role": "user", "content": f"新闻搜索结果（已按是否提及 {self.facts.ticker} 过滤，{len(kept)}/{len(rows)} 条）：\n{listing or '（无）'}"})
-            return True
-        if kind == "filing_events":
-            if self.filing_events is None:
-                messages.append({"role": "user", "content": "申报阅读不可用。"})
-                return False
-            self.gathered.reader_calls += 1
-            envelope = self.filing_events()
-            self.gathered.reader_runs.append({"filings": envelope.metrics.get("filings"), "sections_read": envelope.metrics.get("sections_read"), "events": envelope.metrics.get("events"), "rounds": envelope.metrics.get("rounds"), "stop_reason": envelope.metrics.get("stop_reason"), "elapsed_ms": envelope.metrics.get("elapsed_ms"), "trace": list(envelope.metadata.get("trace") or [])})
-            lines = []
-            for item in envelope.evidence:
-                if item.metadata.get("evidence_scope") == "filing_event":
-                    self.gathered.filing_events[item.id] = item
-                    lines.append(f"- id={item.id} | {item.metadata.get('date')} | {item.claim}")
-                elif item.metadata.get("citation_kind") == "limitations":
-                    self.gathered.filing_notes.append(item)
-                    lines.append(f"- （说明）{item.claim}")
-            messages.append({"role": "user", "content": "申报阅读者的结果：\n" + ("\n".join(lines) or "（无）")})
-            return True
-        if kind == "memory":
-            if self.recall is None:
-                messages.append({"role": "user", "content": "盯盘记忆不可用。"})
-                return False
-            self.gathered.memory_calls += 1
-            try:
-                rows = list(self.recall(str(action.get("query") or f"{self.facts.ticker} 异动")) or [])
-            except Exception as exc:  # noqa: BLE001
-                messages.append({"role": "user", "content": f"盯盘记忆查询失败：{type(exc).__name__}。"})
-                return True
-            lines = []
-            for row in rows[:6]:
-                day = str(getattr(row, "date", "") or "")[:10]
-                meta = dict(getattr(row, "metadata", None) or {})
-                entry = {"date": day, "flags": str(getattr(row, "flags", "") or ""), "doc": _WS.sub(" ", str(getattr(row, "doc", "") or "")), "confidence": str(meta.get("confidence") or ""), "written_at": str(meta.get("written_at") or "")}
-                self.gathered.memory[day] = entry
-                stamp = f"（归因记录，{entry['confidence'] or '未知'}置信度，{entry['written_at'] or '日期未知'}写入）" if "retro_attribution" in entry["flags"] else ""
-                lines.append(f"- {day} | {entry['flags'] or '无标志'}{stamp} | {entry['doc'][:300]}")
-            messages.append({"role": "user", "content": "盯盘记忆：\n" + ("\n".join(lines) or "（无）")})
-            return True
-        messages.append({"role": "user", "content": "未知动作；可用：news、filing_events、memory、finish。"})
-        return False
+    def _news(self, arguments: dict[str, Any]) -> str:
+        query = str(arguments.get("query") or f"{self.facts.ticker} stock {self.facts.date}")
+        self.gathered.news_calls += 1
+        try:
+            rows = list(self.news(query) or [])
+        except Exception as exc:  # noqa: BLE001 — a failed search is an observation, not a crash
+            return f"新闻搜索失败：{type(exc).__name__}。"
+        kept = [row for row in rows if _mentions(row, self.facts.ticker)]
+        for row in kept:
+            url = str(row.get("url") or "").strip()
+            if url:
+                self.gathered.news[url] = row
+        listing = "\n".join(f"- {row.get('published_date') or row.get('published_at') or '日期未知'} | {row.get('title') or ''} | {row.get('url')}\n  {_WS.sub(' ', str(row.get('content') or ''))[:600]}" for row in kept[:6])
+        return f"新闻搜索结果（已按是否提及 {self.facts.ticker} 过滤，{len(kept)}/{len(rows)} 条）：\n{listing or '（无）'}"
+
+    def _filing_events(self, arguments: dict[str, Any]) -> str:
+        self.gathered.reader_calls += 1
+        envelope = self.filing_events()
+        self.gathered.reader_runs.append({"filings": envelope.metrics.get("filings"), "sections_read": envelope.metrics.get("sections_read"), "events": envelope.metrics.get("events"), "rounds": envelope.metrics.get("rounds"), "stop_reason": envelope.metrics.get("stop_reason"), "elapsed_ms": envelope.metrics.get("elapsed_ms"), "trace": list(envelope.metadata.get("trace") or [])})
+        lines = []
+        for item in envelope.evidence:
+            if item.metadata.get("evidence_scope") == "filing_event":
+                self.gathered.filing_events[item.id] = item
+                lines.append(f"- id={item.id} | {item.metadata.get('date')} | {item.claim}")
+            elif item.metadata.get("citation_kind") == "limitations":
+                self.gathered.filing_notes.append(item)
+                lines.append(f"- （说明）{item.claim}")
+        return "申报阅读者的结果：\n" + ("\n".join(lines) or "（无）")
+
+    def _memory(self, arguments: dict[str, Any]) -> str:
+        self.gathered.memory_calls += 1
+        try:
+            rows = list(self.recall(str(arguments.get("query") or f"{self.facts.ticker} 异动")) or [])
+        except Exception as exc:  # noqa: BLE001
+            return f"盯盘记忆查询失败：{type(exc).__name__}。"
+        lines = []
+        for row in rows[:6]:
+            day = str(getattr(row, "date", "") or "")[:10]
+            meta = dict(getattr(row, "metadata", None) or {})
+            entry = {"date": day, "flags": str(getattr(row, "flags", "") or ""), "doc": _WS.sub(" ", str(getattr(row, "doc", "") or "")), "confidence": str(meta.get("confidence") or ""), "written_at": str(meta.get("written_at") or "")}
+            self.gathered.memory[day] = entry
+            stamp = f"（归因记录，{entry['confidence'] or '未知'}置信度，{entry['written_at'] or '日期未知'}写入）" if "retro_attribution" in entry["flags"] else ""
+            lines.append(f"- {day} | {entry['flags'] or '无标志'}{stamp} | {entry['doc'][:300]}")
+        return "盯盘记忆：\n" + ("\n".join(lines) or "（无）")
 
 
 def _mentions(row: dict[str, Any], ticker: str) -> bool:

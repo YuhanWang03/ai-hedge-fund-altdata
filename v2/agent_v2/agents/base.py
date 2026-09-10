@@ -7,6 +7,12 @@ the coordinator's remaining wall clock as an outer bound, a forced
 finish when the rounds run out, and a diagnostic record of what
 happened.  Domain knowledge (which tools, which prompt, how to turn a
 finish into evidence) lives in the subclass.
+
+:class:`ToolLoop` is the generic form: a sub-agent declares its tools once
+(name, description, JSON schema, handler) and the loop drives the model
+through native function calling, one tool call per round, with ``finish``
+as a tool whose arguments are the sub-agent's report.  A model that answers
+with a JSON action in text instead of a tool call is still understood.
 """
 
 from __future__ import annotations
@@ -14,7 +20,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from v2.agent_v2.execution import ExecutionContext
 
@@ -198,3 +204,131 @@ class BoundedLoop:
             return None
         messages.append({"role": "assistant", "content": json.dumps(action, ensure_ascii=False)})
         return action
+
+
+# -- generic tool loop ------------------------------------------------------------
+
+
+@dataclass
+class Tool:
+    """One tool a sub-agent may call: declared once, offered to the model as a function."""
+
+    name: str
+    description: str
+    parameters: dict[str, Any]
+    #: Receives the call's arguments; returns the observation text for the model.
+    handler: Callable[[dict[str, Any]], str]
+
+    def spec(self) -> dict[str, Any]:
+        return {"type": "function", "function": {"name": self.name, "description": self.description, "parameters": self.parameters}}
+
+
+def _schema(properties: dict[str, Any], required: list[str] | None = None) -> dict[str, Any]:
+    return {"type": "object", "properties": properties, "required": list(required or []), "additionalProperties": False}
+
+
+class ToolLoop(BoundedLoop):
+    """A bounded loop whose actions are declared tools, driven by native function calling.
+
+    Subclasses give ``tools`` (the non-finish tools) and ``finish_parameters``
+    (the schema of the report the finish tool carries), and may override
+    :meth:`refuse_finish` to send the model back for more work once.  The
+    loop turns each model turn into one action: the first tool call, or a
+    JSON ``{"action": ...}`` object in text for models that do not call
+    tools.  Every tool call the model makes gets a tool message back, so the
+    transcript stays valid for the provider.
+    """
+
+    finish_description = "报告结果并结束。"
+
+    def __init__(self, llm: Any, limits: LoopLimits, *, tools: list[Tool], finish_parameters: dict[str, Any], unavailable: dict[str, str] | None = None) -> None:
+        super().__init__(llm, limits)
+        self.tools = {tool.name: tool for tool in tools}
+        self.finish_parameters = finish_parameters
+        #: Tools this run does not offer (no consent, no dependency) and what the model hears if it asks for one anyway.
+        self.unavailable = dict(unavailable or {})
+        self._pending: list[Any] = []
+
+    # -- what the model sees --------------------------------------------------
+
+    def tool_specs(self) -> list[dict[str, Any]]:
+        finish = {"type": "function", "function": {"name": "finish", "description": self.finish_description, "parameters": self.finish_parameters}}
+        return [tool.spec() for tool in self.tools.values()] + [finish]
+
+    def tool_lines(self) -> str:
+        """The tools in one line each, for a system prompt that names them."""
+
+        return "\n".join(f"- {name}：{tool.description}" for name, tool in self.tools.items()) + "\n- finish：" + self.finish_description
+
+    # -- one model turn ---------------------------------------------------------
+
+    def step(self, messages: list[dict[str, Any]]) -> dict[str, Any] | None:
+        self._pending = []
+        try:
+            response = self.llm.complete(messages, self.tool_specs())
+        except Exception as exc:  # noqa: BLE001 — a failed call is a bad turn, the loop goes on
+            messages.append({"role": "user", "content": f"上一轮模型调用失败（{type(exc).__name__}），请重试：调用一个工具或 finish。"})
+            return None
+        calls = list(getattr(response, "tool_calls", None) or [])
+        if calls:
+            messages.append({"role": "assistant", "content": response.text or "", "tool_calls": [{"id": call.id, "type": "function", "function": {"name": call.name, "arguments": call.raw_arguments or json.dumps(call.arguments, ensure_ascii=False)}} for call in calls]})
+            first, rest = calls[0], calls[1:]
+            for extra in rest:
+                # Every call needs a result or the provider rejects the next turn; only the first is executed.
+                messages.append({"role": "tool", "tool_call_id": extra.id, "content": "每轮只执行一个工具调用，这一个未执行；需要的话下一轮再调用。"})
+            if first.parse_error:
+                messages.append({"role": "tool", "tool_call_id": first.id, "content": f"参数不是合法 JSON（{first.parse_error}），请重新调用。"})
+                return None
+            self._pending = [first]
+            return {"action": first.name, **dict(first.arguments or {})}
+        # No tool call: a JSON action in text is accepted, anything else is a bad turn.
+        try:
+            action = json.loads(strip_fence(response.text))
+            if not isinstance(action, dict) or not action.get("action"):
+                raise ValueError("action must be an object with an action name")
+        except Exception:  # noqa: BLE001
+            messages.append({"role": "assistant", "content": response.text or ""})
+            messages.append({"role": "user", "content": "请调用一个工具，或调用 finish 结束；不要用普通文字回答。"})
+            return None
+        messages.append({"role": "assistant", "content": json.dumps(action, ensure_ascii=False)})
+        return action
+
+    def _observe(self, messages: list[dict[str, Any]], content: str) -> None:
+        """Return an observation to the model: as the pending call's tool result, or as a user message for a text action."""
+
+        if self._pending:
+            messages.append({"role": "tool", "tool_call_id": self._pending[0].id, "content": content})
+            self._pending = []
+        else:
+            messages.append({"role": "user", "content": content})
+
+    def handle(self, action: dict[str, Any], messages: list[dict[str, Any]]) -> bool:
+        name = str(action.get("action") or "")
+        tool = self.tools.get(name)
+        if tool is None:
+            self._observe(messages, self.unavailable.get(name) or f"没有叫 {name!r} 的工具；可用：{'、'.join(self.tools)}、finish。")
+            return False
+        arguments = {key: value for key, value in action.items() if key != "action"}
+        try:
+            observation = tool.handler(arguments)
+        except ValueError as exc:  # a handler's own complaint about the arguments, in its words
+            self._observe(messages, str(exc) or f"{name} 的参数不对。")
+            return False
+        except Exception as exc:  # noqa: BLE001 — a tool failing is an observation, not a crash
+            self._observe(messages, f"{name} 执行失败：{type(exc).__name__}。")
+            return False
+        self._observe(messages, observation)
+        return True
+
+    def accept_finish(self, action: dict[str, Any], messages: list[dict[str, Any]]) -> bool:
+        reason = self.refuse_finish(action)
+        if reason:
+            self._observe(messages, reason)
+            return False
+        self._pending = []
+        return True
+
+    def refuse_finish(self, action: dict[str, Any]) -> str | None:
+        """Why this finish may not stand yet (the model is told and continues), or None to accept."""
+
+        return None

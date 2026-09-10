@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any, Callable, Protocol
 
-from v2.agent_v2.agents.base import BoundedLoop, LoopLimits, limits_for
+from v2.agent_v2.agents.base import LoopLimits, Tool, ToolLoop, _schema, limits_for
 from v2.agent_v2.execution import CapabilityRegistry, ExecutionContext
 from v2.agent_v2.models import EvidenceItem, ResultStatus, ToolEnvelope
 
@@ -238,34 +238,43 @@ def exhibit_texts(raw: Any, *, limit: int = 3, max_chars: int = 40_000) -> list[
     return found
 
 
-_SYSTEM = """你是申报阅读者，只输出 JSON，不回答用户问题。
+_SYSTEM = """你是申报阅读者，不回答用户问题，每一轮调用一个工具。
 任务：在给定的 SEC 申报里找出与指定日期附近股价下跌可能相关的、有明确日期的事件（财报数字、指引、高管变动、诉讼、发行、重大合同、监管事项等）。
-每一轮只能做一件事：
-- 读章节（一次最多 3 节）：{"action":"read","reads":[{"filing":<申报序号>,"section":"<章节 id>"}]}
-- 结束：{"action":"finish","events":[{"date":"YYYY-MM-DD","summary":"一句中文概括","quote":"从已读章节里原样复制的一段原文（不超过 300 字符）","filing":<申报序号>,"section":"<章节 id>"}],"note":"一句话说明还缺什么或为什么结束"}
+工具：read 读章节（一次最多 3 节，给申报序号和章节 id）；finish 报告事件并结束。
 优先读 EXHIBIT 99.1、Outlook / Guidance（指引）、Item 2.02（业绩）、Item 5.02（高管变动）、Item 8.01（其他事项）这类章节；封面页和 Item 9.01 通常没有内容。股价在业绩日下跌时，指引和展望往往比业绩本身更关键。
-规则：quote 必须逐字来自你已经读过的章节文本，不能改写、不能翻译；没有相关事件就返回空的 events 并在 note 里说明；不要编造日期。轮次有限，读到足够内容就尽早结束。"""
+规则：finish 里每条事件的 quote 必须逐字来自你已经读过的章节文本，不能改写、不能翻译；没有相关事件就返回空的 events 并在 note 里说明；不要编造日期。轮次有限，读到足够内容就尽早结束。
+如果无法调用工具，就只输出 JSON：{"action":"read","reads":[{"filing":1,"section":"..."}]} 或 {"action":"finish","events":[...],"note":"..."}。"""
+
+_EVENT_SCHEMA = _schema({"date": {"type": "string", "description": "YYYY-MM-DD"}, "summary": {"type": "string", "description": "一句中文概括"}, "quote": {"type": "string", "description": "从已读章节里原样复制的一段原文，不超过 300 字符"}, "filing": {"type": "integer", "description": "申报序号"}, "section": {"type": "string", "description": "章节 id"}}, ["date", "summary", "quote", "filing", "section"])
+_FINISH_SCHEMA = _schema({"events": {"type": "array", "items": _EVENT_SCHEMA}, "note": {"type": "string", "description": "一句话说明还缺什么或为什么结束"}}, ["events"])
 
 _FINISH_NOW = "轮次已用完。现在只允许 finish：把已读章节里有明确日期、且能逐字引用的事件整理出来；没有就返回空的 events 并说明。"
 
 
-class _ReadLoop(BoundedLoop):
-    usage_source_name = "agent_v2.filing_reader"
+class _ReadLoop(ToolLoop):
+    """The filing reader's loop: one tool, ``read``, serves up to three sections a round."""
 
-    """The filing reader's loop: the one non-finish action reads up to three sections."""
+    usage_source_name = "agent_v2.filing_reader"
+    finish_description = "把已读章节里有明确日期、且能逐字引用的事件整理出来并结束；没有就返回空的 events 并在 note 里说明。"
 
     def __init__(self, llm: Any, limits: LoopLimits, source: FilingSource, chosen: list[FilingRef], max_chars: int) -> None:
-        super().__init__(llm, limits)
         self.source = source
         self.chosen = chosen
         self.max_chars = max_chars
         self.read: dict[tuple[int, str], str] = {}
+        read = Tool(
+            "read",
+            "读申报章节，一次最多 3 节；每项给申报序号 filing 和章节 id section。",
+            _schema({"reads": {"type": "array", "maxItems": 3, "items": _schema({"filing": {"type": "integer"}, "section": {"type": "string"}}, ["filing", "section"])}}, ["reads"]),
+            self._read,
+        )
+        super().__init__(llm, limits, tools=[read], finish_parameters=_FINISH_SCHEMA)
 
-    def handle(self, action: dict[str, Any], messages: list[dict[str, str]]) -> bool:
-        requests = action.get("reads")
+    def _read(self, arguments: dict[str, Any]) -> str:
+        requests = arguments.get("reads")
         if not isinstance(requests, list):
-            requests = [action]
-        served = 0
+            requests = [arguments]
+        parts: list[str] = []
         for request in requests[:3]:
             try:
                 index = int(request.get("filing"))
@@ -276,11 +285,10 @@ class _ReadLoop(BoundedLoop):
                 continue
             text = self.source.read(self.chosen[index - 1], section_id)[: self.max_chars]
             self.read[(index, section_id)] = text
-            messages.append({"role": "user", "content": f"申报 {index} 章节 {section_id} 的文本：\n{text or '（空）'}"})
-            served += 1
-        if not served:
-            messages.append({"role": "user", "content": "read 需要 reads 列表，每项含 filing 序号和 section id。"})
-        return bool(served)
+            parts.append(f"申报 {index} 章节 {section_id} 的文本：\n{text or '（空）'}")
+        if not parts:
+            raise ValueError("read 需要 reads 列表，每项含 filing 序号和 section id。")
+        return "\n\n".join(parts)
 
 
 class FilingReader:

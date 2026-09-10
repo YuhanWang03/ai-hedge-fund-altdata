@@ -3022,3 +3022,121 @@ def test_intent_classifier_validates_the_vocabulary_and_projects_the_regex_decis
     rows = read_shadow(ledger)
     assert len(rows) == before + 1 and rows[-1]["run_id"] == result.run_id and rows[-1]["model"]["wants"] == ["performance"] and rows[-1]["agree"]["kind"] and rows[-1]["capabilities"] == ["market.performance"]
     assert result.status == RunStatus.COMPLETED
+
+
+def test_workspace_agent_turns_shadow_intent_on_even_with_an_explicit_default_config(monkeypatch):
+    """The bot and the web pass ``AgentV2Config()``; the shadow must still be on for live model runs."""
+
+    from v2.agent_v2 import runtime
+
+    captured: dict = {}
+
+    def fake_llm_agent(*, config, llm, lab, web_search):
+        captured["config"] = config
+        return object()
+
+    monkeypatch.setattr(runtime, "build_llm_agent", fake_llm_agent)
+    monkeypatch.setattr(runtime, "WorkspaceLabPort", lambda: None)
+    runtime.build_workspace_agent(config=AgentV2Config(), enable_web=False, use_llm=True)
+    assert captured["config"].shadow_intent is True
+    runtime.build_workspace_agent(config=AgentV2Config(shadow_intent=False), enable_web=False, use_llm=True)
+    assert captured["config"].shadow_intent is False
+
+
+def test_tool_loop_drives_declared_tools_through_native_function_calling():
+    from v2.agent.llm import ToolCall
+    from v2.agent_v2.agents.base import LoopLimits, Tool, ToolLoop, _schema
+
+    seen: list[str] = []
+
+    class Probe(ToolLoop):
+        usage_source_name = "agent_v2.probe"
+
+        def __init__(self, llm):
+            self.refused = False
+            super().__init__(
+                llm,
+                LoopLimits(max_rounds=8, max_seconds=30),
+                tools=[Tool("look", "看一眼。", _schema({"at": {"type": "string"}}, ["at"]), self._look)],
+                finish_parameters=_schema({"answer": {"type": "string"}}, ["answer"]),
+                unavailable={"web": "本次未授权网页。"},
+            )
+
+        def _look(self, arguments):
+            if not arguments.get("at"):
+                raise ValueError("look 需要 at。")
+            seen.append(arguments["at"])
+            return f"看到了 {arguments['at']}"
+
+        def refuse_finish(self, action):
+            if not self.refused:
+                self.refused = True
+                return "再看一眼。"
+            return None
+
+    def call(name, arguments, *, id="c1", raw=None, parse_error=""):
+        return ToolCall(id=id, name=name, arguments=arguments, raw_arguments=raw if raw is not None else json.dumps(arguments), parse_error=parse_error)
+
+    llm = ScriptedLLM([
+        LLMResponse(tool_calls=[call("look", {"at": "a"}, id="c1"), call("look", {"at": "b"}, id="c2")]),  # only the first executes; the second gets a result anyway
+        LLMResponse(tool_calls=[call("look", {}, id="c3", raw="{bad", parse_error="unterminated")]),  # bad arguments
+        LLMResponse(tool_calls=[call("look", {"at": ""}, id="c4")]),  # the handler's own complaint
+        LLMResponse(tool_calls=[call("web", {"q": "x"}, id="c5")]),  # known but not offered
+        LLMResponse(text="我觉得答案是 a"),  # prose instead of a tool: sent back
+        LLMResponse(tool_calls=[call("finish", {"answer": "a"}, id="c6")]),  # refused once
+        LLMResponse(tool_calls=[call("finish", {"answer": "a!"}, id="c7")]),
+    ])
+    loop = Probe(llm)
+    outcome = loop.run("system", "task", finish_prompt="finish now")
+    assert outcome.finished and outcome.final == {"action": "finish", "answer": "a!"} and outcome.stop_reason == "finished" and seen == ["a"]
+    # Every call carried the declared tools, finish included.
+    specs = llm.calls and [tool["function"]["name"] for tool in loop.tool_specs()]
+    assert specs == ["look", "finish"] and loop.tool_specs()[1]["function"]["parameters"]["required"] == ["answer"]
+    transcript = llm.calls[-1]
+    roles = [(m["role"], m.get("tool_call_id", "")) for m in transcript]
+    assert roles[:2] == [("system", ""), ("user", "")]
+    # Round 1: assistant with two calls, a tool result for each (the second says it was not executed).
+    assert transcript[2]["role"] == "assistant" and [c["id"] for c in transcript[2]["tool_calls"]] == ["c1", "c2"]
+    assert (transcript[3]["tool_call_id"], transcript[3]["content"]) == ("c2", "每轮只执行一个工具调用，这一个未执行；需要的话下一轮再调用。")
+    assert (transcript[4]["tool_call_id"], transcript[4]["content"]) == ("c1", "看到了 a")
+    by_id = {m.get("tool_call_id"): m["content"] for m in transcript if m["role"] == "tool"}
+    assert "参数不是合法 JSON" in by_id["c3"] and by_id["c4"] == "look 需要 at。" and by_id["c5"] == "本次未授权网页。" and by_id["c6"] == "再看一眼。"
+    prose = next(i for i, m in enumerate(transcript) if m["role"] == "assistant" and m.get("content") == "我觉得答案是 a")
+    assert transcript[prose + 1] == {"role": "user", "content": "请调用一个工具，或调用 finish 结束；不要用普通文字回答。"}
+    assert [step["action"] for step in outcome.trace] == ["look", "bad_turn", "look", "web", "bad_turn", "finish_refused", "finish"]
+    assert loop.tool_lines() == "- look：看一眼。\n- finish：报告结果并结束。"
+
+
+def test_news_checker_works_through_tool_calls_and_answers_every_call():
+    from v2.agent.llm import ToolCall
+    from v2.agent_v2.agents.news_checker import NewsChecker
+
+    page = "Arm Holdings shares slid 8% on Wednesday, July 29, after the company's revenue guidance came in below Wall Street expectations."
+
+    def search(query, *, days, max_results):
+        return [{"title": "Arm falls as guidance disappoints", "url": "https://example.com/arm-guidance", "content": "Arm shares slid after guidance came in below expectations.", "published_date": "2026-07-29", "raw_content": page}]
+
+    def call(name, arguments, id):
+        return ToolCall(id=id, name=name, arguments=arguments, raw_arguments=json.dumps(arguments))
+
+    llm = ScriptedLLM([
+        LLMResponse(tool_calls=[call("search", {"query": "Arm Holdings July 29 2026"}, "s1")]),
+        LLMResponse(tool_calls=[call("read", {"ids": ["r1"]}, "r1")]),
+        LLMResponse(tool_calls=[call("finish", {"events": [{"date": "2026-07-29", "text": "营收指引低于华尔街预期", "source": "r1", "quote": "revenue guidance came in below Wall Street expectations"}], "note": ""}, "f1")]),
+    ])
+    checker = NewsChecker(llm, search)
+    result = checker.run("ARM", _context(), query="ARM 为什么在 7 月 29 日大跌", topic="company_event", recency_days=60, today=date(2026, 9, 9))
+    events = [item for item in result.evidence if item.metadata.get("evidence_type") == "news_event"]
+    assert result.ok and len(events) == 1 and events[0].metadata["read"] is True and result.metrics["searches"] == 1 and result.metrics["reads"] == 1
+    # The transcript pairs every tool call with a tool message, and the tools offered are search, read, finish.
+    transcript = llm.calls[-1]
+    assert [m.get("tool_call_id") for m in transcript if m["role"] == "tool"] == ["s1", "r1"]
+    assert [step["action"] for step in result.metadata["trace"]] == ["search", "read", "finish"]
+    assert [tool["function"]["name"] for tool in checker_loop_specs(llm)] == ["search", "read", "finish"]
+
+
+def checker_loop_specs(llm):
+    from v2.agent_v2.agents.base import LoopLimits
+    from v2.agent_v2.agents.news_checker import _CheckLoop
+
+    return _CheckLoop(llm, LoopLimits(), search=lambda *a, **k: [], days=30, max_searches=3, max_reads=3, max_chars=5000).tool_specs()
