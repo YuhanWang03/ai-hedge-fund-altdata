@@ -62,6 +62,11 @@ def build_live_registry(
     register_history_capabilities(registry)
     register_filing_reader(registry, llm)
     register_move_attributor(registry, llm)
+    if llm is not None:
+        from v2.agent_v2.agents.move_attributor import _default_recall
+        from v2.agent_v2.agents.toolbox import register_investigator
+
+        register_investigator(registry, llm, search=_search_via(web_search) if web_search is not None else None, recall=_default_recall)
     if lab is not None:
         register_lab_capabilities(registry, lab)
     if web_search is not None:
@@ -100,6 +105,7 @@ def build_llm_agent(*, config: AgentV2Config | None = None, llm=None, lab=None, 
     catalog = default_catalog()
     registry = build_live_registry(catalog, lab=lab, web_search=web_search, llm=llm)
     from v2.agent_v2.intent import IntentClassifier
+    from v2.agent_v2.memory import UserMemory
 
     return AgentV2(
         catalog=catalog,
@@ -109,6 +115,7 @@ def build_llm_agent(*, config: AgentV2Config | None = None, llm=None, lab=None, 
         session=ShortTermSession(),
         config=config,
         classifier=IntentClassifier(llm),
+        memory=UserMemory(),
     )
 
 

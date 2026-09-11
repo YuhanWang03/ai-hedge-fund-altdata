@@ -40,6 +40,8 @@ class LoopLimits:
     max_seconds: float = 60.0
     #: Overrides ``max_seconds`` when the coordinator has less time left.
     outer_seconds: float | None = None
+    #: Returns True when the user cancelled the run; checked before every round.
+    cancelled: Callable[[], bool] | None = None
 
     @property
     def seconds(self) -> float:
@@ -80,6 +82,7 @@ class LoopOutcome:
             "time": "达到时间上限",
             "no_model": "未配置模型",
             "no_budget": "协调者剩余时间不足，未启动",
+            "cancelled": "用户取消",
         }.get(self.stop_reason, "")
 
 
@@ -92,7 +95,8 @@ def limits_for(context: ExecutionContext | None, *, max_rounds: int, max_seconds
             outer = float(context.remaining_seconds())
         except Exception:  # noqa: BLE001 — a context without a clock imposes no bound
             outer = None
-    return LoopLimits(max_rounds=max(1, max_rounds), max_seconds=max(5.0, max_seconds), outer_seconds=outer)
+    cancelled = (lambda: bool(getattr(context, "cancelled", False))) if context is not None else None
+    return LoopLimits(max_rounds=max(1, max_rounds), max_seconds=max(5.0, max_seconds), outer_seconds=outer, cancelled=cancelled)
 
 
 def strip_fence(text: str) -> str:
@@ -150,6 +154,9 @@ class BoundedLoop:
             if time.monotonic() - started > self.limits.seconds:
                 stop = "time"
                 break
+            if self.limits.cancelled is not None and self.limits.cancelled():
+                stop = "cancelled"
+                break
             outcome.rounds += 1
             outcome.calls += 1
             turn_started = time.monotonic()
@@ -166,7 +173,7 @@ class BoundedLoop:
                 break
             self.handle(action, messages)
             outcome.trace.append({"round": outcome.rounds, "action": str(action.get("action") or "?"), "detail": describe_action(action), "ms": int((time.monotonic() - turn_started) * 1000)})
-        if not outcome.finished and stop == "rounds" and time.monotonic() - started <= self.limits.seconds:
+        if not outcome.finished and stop == "rounds" and time.monotonic() - started <= self.limits.seconds and not (self.limits.cancelled is not None and self.limits.cancelled()):
             # One last call that may only finish: what the loop gathered is
             # not thrown away because it kept exploring.
             messages.append({"role": "user", "content": finish_prompt})

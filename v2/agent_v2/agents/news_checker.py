@@ -34,7 +34,7 @@ _SYSTEM = """你是新闻核查者，不回答用户问题，每一轮调用一�
 如果无法调用工具，就只输出 JSON：{"action":"search","query":"..."}、{"action":"read","ids":["r1"]} 或 {"action":"finish","events":[...],"note":"..."}。"""
 
 _EVENT_SCHEMA = _schema({"date": {"type": "string", "description": "YYYY-MM-DD"}, "text": {"type": "string", "description": "一句中文事件概括"}, "source": {"type": "string", "description": "结果 id，如 r3"}, "quote": {"type": "string", "description": "原文片段，30 字以上，原样照抄"}}, ["date", "text", "source", "quote"])
-_FINISH_SCHEMA = _schema({"events": {"type": "array", "items": _EVENT_SCHEMA}, "note": {"type": "string"}}, ["events"])
+_FINISH_SCHEMA = _schema({"events": {"type": "array", "items": _EVENT_SCHEMA}, "note": {"type": "string"}, "filing_to_read": {"type": "string", "description": "如果某条报道提到公司在某一天提交了 SEC 申报（8-K、6-K、Form 4 等）而你没有读到申报原文，给出那一天 YYYY-MM-DD，申报阅读者会去读；否则留空"}}, ["events"])
 
 _FINISH_NOW = "轮次已用完。现在只允许 finish：只报你已经拿到结果并能引用原文的事件；没有就返回空 events 并说明。"
 
@@ -163,6 +163,15 @@ class NewsChecker:
             note = (note + "；" if note else "") + f"{dropped} 条事件没有日期或引文与正文不符，已丢弃"
         envelope = self._envelope(ticker, query, topic, since, current.isoformat(), events[: self.max_events], loop.found, note=note, outcome=outcome, run_id=context.run_id)
         envelope.metadata["agent"]["yield"] = {"kept": min(len(events), self.max_events), "dropped": dropped}
+        # A story that names a filing the checker did not read: ask the run
+        # board for the filing reader on that day, within the run's cap.
+        follow_up = str(outcome.final.get("filing_to_read") or "")[:10] if outcome.finished else ""
+        board = getattr(context, "board", None)
+        if follow_up and _ISO.match(follow_up) and tickers and board is not None:
+            accepted = board.request("filings.read_events", {"ticker": tickers[0], "around": follow_up}, purpose=f"read the {tickers[0]} filing of {follow_up} a news story named", requested_by="news_checker")
+            envelope.metadata["agent"]["follow_up"] = {"filings_around": follow_up, "accepted": accepted}
+            if accepted:
+                envelope.metadata["agent"].setdefault("notes", []).append(f"报道提到 {follow_up} 的申报，已请申报阅读者读取")
         return envelope
 
     def _envelope(self, ticker: str, query: str, topic: str, since: str, until: str, events: list[dict[str, Any]], found: Found, *, note: str, outcome, run_id: str) -> ToolEnvelope:

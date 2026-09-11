@@ -18,6 +18,46 @@ from v2.agent_v2.runtime import build_workspace_agent
 _AGENT = None
 _AGENT_WEB_ENABLED = None
 _AGENT_LOCK = threading.Lock()
+#: chat id -> the cancel event of the run in progress for that chat.
+_ACTIVE_RUNS: dict[int, threading.Event] = {}
+_CANCEL_WORDS = {"取消", "停", "停止", "别查了", "stop", "cancel"}
+
+
+def cancel_active_run(chat_id: int) -> bool:
+    """Set the cancel flag of the chat's run in progress; False when nothing is running."""
+
+    event = _ACTIVE_RUNS.get(chat_id)
+    if event is None:
+        return False
+    event.set()
+    return True
+
+
+def is_cancel_word(text: str) -> bool:
+    return (text or "").strip().rstrip("。！!.").lower() in _CANCEL_WORDS
+
+
+def feedback_reply(chat_id: int, text: str) -> str | None:
+    """Handle a feedback or preference command against the chat's last answer; None when the text is a question."""
+
+    from v2.agent_v2.memory import parse_feedback
+
+    parsed = parse_feedback(text)
+    if parsed is None:
+        return None
+    memory = getattr(_get_agent(), "memory", None)
+    if memory is None:
+        return "这个部署没有开启用户记忆。"
+    session_id = str(chat_id)
+    if parsed["kind"] == "preference":
+        memory.add_preference(session_id, parsed["note"])
+        return f"记下了：{parsed['note']}。之后的回答会照这个来。"
+    row = memory.record_feedback(session_id, parsed["verdict"], parsed.get("note", ""))
+    if row is None:
+        return "这个会话里还没有可以评价的回答。"
+    if parsed["verdict"] == "good":
+        return "收到，记为一次好的回答。"
+    return "收到，已记为有误" + (f"：{parsed['note']}" if parsed.get("note") else "") + "。这条会进入质量评测，下次改动时会检查是否纠正。"
 
 
 def _web_enabled() -> bool:
@@ -82,6 +122,8 @@ class TelegramBotTransport:
         self.web_requested = web_requested
         self._last_progress_at = 0.0
         self._last_status = ""
+        self._started = time.monotonic()
+        self._stages: list[str] = []
 
     async def typing(self, chat_id: int) -> None:
         try:
@@ -91,15 +133,20 @@ class TelegramBotTransport:
 
     async def progress(self, chat_id: int, event) -> None:
         now = time.monotonic()
-        status = event.status.value
-        if status == self._last_status and now - self._last_progress_at < 4:
+        line = telegram_format.progress_line(event, elapsed=now - self._started)
+        stage = line.split(" · ")[0]
+        if stage != (self._stages[-1] if self._stages else ""):
+            self._stages.append(stage)
+        # One edit every few seconds at most: Telegram rate-limits edits, and the last stage is what matters.
+        if now - self._last_progress_at < 3 and stage == self._last_status:
             return
-        self._last_status = status
+        self._last_status = stage
         self._last_progress_at = now
-        message = html.escape(event.message or status)
+        recent = self._stages[-4:]
+        body = "\n".join(("▸ " if index == len(recent) - 1 else "· ") + html.escape(item) for index, item in enumerate(recent))
         try:
             await self.placeholder.edit_text(
-                f"<b>Agent V2 · {html.escape(status)}</b>\n<i>{message}</i>",
+                f"<b>Agent V2 · 处理中 {now - self._started:.0f}s</b>\n<i>{body}</i>\n<i>回复「取消」可停止</i>",
                 parse_mode="HTML",
                 disable_web_page_preview=True,
             )
@@ -148,6 +195,8 @@ class TelegramBotTransport:
         budget = telegram_format.budget_line(result)
         if budget:
             lines.append(f"<i>⏱ {html.escape(budget)}</i>")
+        if result.stop_reason == "cancelled":
+            lines.append("<i>⏹ 已按要求停止，下面是停止前拿到的部分</i>")
         reason = telegram_format.fallback_reason(result)
         if reason:
             lines.append(f"<i>兜底原因：{html.escape(reason)}</i>")
@@ -168,18 +217,32 @@ async def handle_agent_v2(
 
     chat = update.effective_chat
     message = update.message
-    placeholder = await message.reply_html("🧭 Agent V2 正在规划...")
+    if is_cancel_word(text) and cancel_active_run(chat.id):
+        await message.reply_html("正在停止当前的处理…")
+        return None
+    reply = feedback_reply(chat.id, text)
+    if reply is not None:
+        await message.reply_html(html.escape(reply))
+        return None
+    placeholder = await message.reply_html("🧭 Agent V2 正在识别问题…\n<i>回复「取消」可停止</i>")
     transport = TelegramBotTransport(
         context,
         placeholder,
         web_requested=allow_web,
     )
-    return await TelegramFacade(_get_agent()).handle(
-        TelegramMessage(
-            chat_id=chat.id,
-            text=text,
-            message_id=getattr(message, "message_id", None),
-        ),
-        transport,
-        allow_web=allow_web,
-    )
+    cancel_event = threading.Event()
+    _ACTIVE_RUNS[chat.id] = cancel_event
+    try:
+        return await TelegramFacade(_get_agent()).handle(
+            TelegramMessage(
+                chat_id=chat.id,
+                text=text,
+                message_id=getattr(message, "message_id", None),
+            ),
+            transport,
+            allow_web=allow_web,
+            cancel_event=cancel_event,
+        )
+    finally:
+        if _ACTIVE_RUNS.get(chat.id) is cancel_event:
+            _ACTIVE_RUNS.pop(chat.id, None)

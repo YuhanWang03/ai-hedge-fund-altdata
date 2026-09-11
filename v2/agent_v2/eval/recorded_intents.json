@@ -891,6 +891,42 @@
    "route": "fast_lookup"
   }
  },
+ "AAPL今天为什么涨？": {
+  "intent": {
+   "confidence": 1.0,
+   "direction": "up",
+   "kind": "research",
+   "portfolio_scope": false,
+   "scope": "today",
+   "tickers": [
+    "AAPL"
+   ],
+   "wants": [
+    "attribution"
+   ],
+   "watchlist_scope": false
+  },
+  "legacy": null,
+  "note": "labelled by hand (the regex pipeline got it wrong)"
+ },
+ "AAPL今天为什么跌？": {
+  "intent": {
+   "confidence": 1.0,
+   "direction": "down",
+   "kind": "research",
+   "portfolio_scope": false,
+   "scope": "today",
+   "tickers": [
+    "AAPL"
+   ],
+   "wants": [
+    "attribution"
+   ],
+   "watchlist_scope": false
+  },
+  "legacy": null,
+  "note": "labelled by hand (the regex pipeline got it wrong)"
+ },
  "AMD": {
   "intent": {
    "ark_etfs": [],
@@ -3169,7 +3205,65 @@
    "route": "research"
   }
  },
+ "ARM买入以来跌了这么多，是什么原因？": {
+  "intent": {
+   "confidence": 1.0,
+   "direction": "down",
+   "kind": "research",
+   "portfolio_scope": true,
+   "scope": "since_purchase",
+   "tickers": [
+    "ARM"
+   ],
+   "wants": [
+    "attribution",
+    "drawdown"
+   ],
+   "watchlist_scope": false
+  },
+  "legacy": null,
+  "note": "labelled by hand (the regex pipeline got it wrong)"
+ },
  "ARM最近有什么新闻？": {
+  "intent": {
+   "ark_etfs": [],
+   "command": null,
+   "confidence": 1.0,
+   "direction": "none",
+   "each": false,
+   "focus": [],
+   "kind": "lookup",
+   "lab": "",
+   "lab_scale": "",
+   "managers": [],
+   "periods": [],
+   "portfolio_scope": false,
+   "rank": "",
+   "release": "",
+   "scope": "recent",
+   "strategy": "",
+   "tickers": [
+    "ARM"
+   ],
+   "wants": [
+    "news"
+   ],
+   "watchlist_scope": false,
+   "window": ""
+  },
+  "legacy": {
+   "answer_mode": "research_grounded",
+   "capabilities": [
+    "web.research",
+    "filings.recent",
+    "market.anomaly_history"
+   ],
+   "direct_answer": "",
+   "requires_confirmation": false,
+   "route": "fast_lookup"
+  }
+ },
+ "ARM最近有哪些新闻？": {
   "intent": {
    "ark_etfs": [],
    "command": null,
@@ -3247,6 +3341,30 @@
    "route": "fast_lookup"
   }
  },
+ "ARM这波是不是该跑了？": {
+  "intent": {
+   "confidence": 1.0,
+   "direction": "down",
+   "focus": [
+    "risk",
+    "valuation"
+   ],
+   "kind": "research",
+   "portfolio_scope": false,
+   "scope": "recent",
+   "tickers": [
+    "ARM"
+   ],
+   "wants": [
+    "risk",
+    "valuation",
+    "performance"
+   ],
+   "watchlist_scope": false
+  },
+  "legacy": null,
+  "note": "labelled by hand (the regex pipeline got it wrong)"
+ },
  "AVGO 的 total addressable market 有多大": {
   "intent": {
    "ark_etfs": [],
@@ -3285,6 +3403,26 @@
    "requires_confirmation": false,
    "route": "fast_lookup"
   }
+ },
+ "AVGO和MRVL比一下基本面": {
+  "intent": {
+   "confidence": 1.0,
+   "direction": "none",
+   "kind": "research",
+   "portfolio_scope": false,
+   "scope": "none",
+   "tickers": [
+    "AVGO",
+    "MRVL"
+   ],
+   "wants": [
+    "compare",
+    "overview"
+   ],
+   "watchlist_scope": false
+  },
+  "legacy": null,
+  "note": "labelled by hand (the regex pipeline got it wrong)"
  },
  "Arm 财报虽超预期，但公司指引下一季度智能手机版税收入将下滑，引发市场对核心授权业务前景的担忧，股价承压下跌": {
   "intent": {
@@ -6427,6 +6565,67 @@
    "route": "fast_lookup"
   }
  },
+ "NVDA今天成交量大不大？": {
+  "intent": {
+   "ark_etfs": [],
+   "command": null,
+   "confidence": 1.0,
+   "direction": "none",
+   "each": false,
+   "focus": [],
+   "kind": "lookup",
+   "lab": "",
+   "lab_scale": "",
+   "managers": [],
+   "periods": [],
+   "portfolio_scope": false,
+   "rank": "",
+   "release": "",
+   "scope": "today",
+   "strategy": "",
+   "tickers": [
+    "NVDA"
+   ],
+   "wants": [
+    "performance"
+   ],
+   "watchlist_scope": false,
+   "window": ""
+  },
+  "legacy": {
+   "answer_mode": "tool_grounded",
+   "capabilities": [
+    "market.performance"
+   ],
+   "direct_answer": "",
+   "requires_confirmation": false,
+   "route": "fast_lookup"
+  }
+ },
+ "NVDA涨到240时提醒我": {
+  "intent": {
+   "command": {
+    "direction": "above",
+    "operation": "alert.add",
+    "price": 240,
+    "ticker": "NVDA"
+   },
+   "confidence": 1.0,
+   "direction": "none",
+   "kind": "command",
+   "portfolio_scope": false,
+   "scope": "none",
+   "tickers": [
+    "NVDA"
+   ],
+   "wants": [
+    "alerts"
+   ],
+   "watchlist_scope": false
+  },
+  "legacy": null,
+  "note": "labelled by hand (the regex pipeline got it wrong)"
+ },
  "PLTR 为什么涨": {
   "intent": {
    "ark_etfs": [],
@@ -8781,6 +8980,37 @@
    "route": "fast_lookup"
   }
  },
+ "expectations 数据完整度 25.0%": {
+  "intent": {
+   "ark_etfs": [],
+   "command": null,
+   "confidence": 1.0,
+   "direction": "none",
+   "each": false,
+   "focus": [],
+   "kind": "lookup",
+   "lab": "",
+   "lab_scale": "",
+   "managers": [],
+   "periods": [],
+   "portfolio_scope": false,
+   "rank": "",
+   "release": "",
+   "scope": "none",
+   "strategy": "",
+   "tickers": [],
+   "wants": [],
+   "watchlist_scope": false,
+   "window": ""
+  },
+  "legacy": {
+   "answer_mode": "tool_grounded",
+   "capabilities": [],
+   "direct_answer": "",
+   "requires_confirmation": false,
+   "route": "fast_lookup"
+  }
+ },
  "in alert.summary and": {
   "intent": {
    "ark_etfs": [],
@@ -9106,6 +9336,44 @@
    "requires_confirmation": false,
    "route": "command"
   }
+ },
+ "why did AMD drop today": {
+  "intent": {
+   "confidence": 1.0,
+   "direction": "down",
+   "kind": "research",
+   "portfolio_scope": false,
+   "scope": "today",
+   "tickers": [
+    "AMD"
+   ],
+   "wants": [
+    "attribution",
+    "news"
+   ],
+   "watchlist_scope": false
+  },
+  "legacy": null,
+  "note": "labelled by hand (the regex pipeline got it wrong)"
+ },
+ "why did ORCL drop today？": {
+  "intent": {
+   "confidence": 1.0,
+   "direction": "down",
+   "kind": "research",
+   "portfolio_scope": false,
+   "scope": "today",
+   "tickers": [
+    "ORCL"
+   ],
+   "wants": [
+    "attribution",
+    "news"
+   ],
+   "watchlist_scope": false
+  },
+  "legacy": null,
+  "note": "labelled by hand (the regex pipeline got it wrong)"
  },
  "why did it rise so much": {
   "intent": {
@@ -10147,6 +10415,37 @@
    "capabilities": [
     "account.performance"
    ],
+   "direct_answer": "",
+   "requires_confirmation": false,
+   "route": "fast_lookup"
+  }
+ },
+ "今日盘中为上涨（+0.94%），与这段跌幅是不同区间": {
+  "intent": {
+   "ark_etfs": [],
+   "command": null,
+   "confidence": 1.0,
+   "direction": "none",
+   "each": false,
+   "focus": [],
+   "kind": "lookup",
+   "lab": "",
+   "lab_scale": "",
+   "managers": [],
+   "periods": [],
+   "portfolio_scope": false,
+   "rank": "",
+   "release": "",
+   "scope": "today",
+   "strategy": "",
+   "tickers": [],
+   "wants": [],
+   "watchlist_scope": false,
+   "window": ""
+  },
+  "legacy": {
+   "answer_mode": "tool_grounded",
+   "capabilities": [],
    "direct_answer": "",
    "requires_confirmation": false,
    "route": "fast_lookup"
@@ -11311,6 +11610,45 @@
    "route": "research"
   }
  },
+ "分析NVDA估值": {
+  "intent": {
+   "ark_etfs": [],
+   "command": null,
+   "confidence": 1.0,
+   "direction": "none",
+   "each": false,
+   "focus": [
+    "valuation"
+   ],
+   "kind": "research",
+   "lab": "",
+   "lab_scale": "",
+   "managers": [],
+   "periods": [],
+   "portfolio_scope": false,
+   "rank": "",
+   "release": "",
+   "scope": "none",
+   "strategy": "",
+   "tickers": [
+    "NVDA"
+   ],
+   "wants": [
+    "valuation"
+   ],
+   "watchlist_scope": false,
+   "window": ""
+  },
+  "legacy": {
+   "answer_mode": "research_grounded",
+   "capabilities": [
+    "research.stock"
+   ],
+   "direct_answer": "",
+   "requires_confirmation": false,
+   "route": "research"
+  }
+ },
  "分析英伟达的估值": {
   "intent": {
    "ark_etfs": [],
@@ -11866,6 +12204,43 @@
   "legacy": {
    "answer_mode": "tool_grounded",
    "capabilities": [],
+   "direct_answer": "",
+   "requires_confirmation": false,
+   "route": "fast_lookup"
+  }
+ },
+ "台积电最近一个月走势如何？": {
+  "intent": {
+   "ark_etfs": [],
+   "command": null,
+   "confidence": 1.0,
+   "direction": "none",
+   "each": false,
+   "focus": [],
+   "kind": "lookup",
+   "lab": "",
+   "lab_scale": "",
+   "managers": [],
+   "periods": [],
+   "portfolio_scope": false,
+   "rank": "",
+   "release": "",
+   "scope": "recent",
+   "strategy": "",
+   "tickers": [
+    "TSM"
+   ],
+   "wants": [
+    "performance"
+   ],
+   "watchlist_scope": false,
+   "window": "1m"
+  },
+  "legacy": {
+   "answer_mode": "tool_grounded",
+   "capabilities": [
+    "market.performance"
+   ],
    "direct_answer": "",
    "requires_confirmation": false,
    "route": "fast_lookup"
@@ -12979,6 +13354,22 @@
    "route": "fast_lookup"
   }
  },
+ "市盈率和市销率有什么区别？": {
+  "intent": {
+   "confidence": 1.0,
+   "direction": "none",
+   "kind": "knowledge",
+   "portfolio_scope": false,
+   "scope": "none",
+   "tickers": [],
+   "wants": [
+    "valuation"
+   ],
+   "watchlist_scope": false
+  },
+  "legacy": null,
+  "note": "labelled by hand (the regex pipeline got it wrong)"
+ },
  "帮我看看要不要减仓": {
   "intent": {
    "ark_etfs": [],
@@ -13555,6 +13946,61 @@
    "route": "fast_lookup"
   }
  },
+ "我关注的股票里有没有最近在放量的？": {
+  "intent": {
+   "confidence": 1.0,
+   "direction": "none",
+   "kind": "lookup",
+   "portfolio_scope": false,
+   "scope": "recent",
+   "tickers": [],
+   "wants": [
+    "watchlist",
+    "performance"
+   ],
+   "watchlist_scope": true
+  },
+  "legacy": null,
+  "note": "labelled by hand (the regex pipeline got it wrong)"
+ },
+ "我关注的股票里谁最近在放量": {
+  "intent": {
+   "ark_etfs": [],
+   "command": null,
+   "confidence": 1.0,
+   "direction": "none",
+   "each": false,
+   "focus": [],
+   "kind": "lookup",
+   "lab": "",
+   "lab_scale": "",
+   "managers": [],
+   "periods": [],
+   "portfolio_scope": false,
+   "rank": "",
+   "release": "",
+   "scope": "today",
+   "strategy": "",
+   "tickers": [],
+   "wants": [
+    "attribution",
+    "watchlist",
+    "ranking"
+   ],
+   "watchlist_scope": true,
+   "window": ""
+  },
+  "legacy": {
+   "answer_mode": "research_grounded",
+   "capabilities": [
+    "state.read",
+    "market.explain_move"
+   ],
+   "direct_answer": "",
+   "requires_confirmation": false,
+   "route": "fast_lookup"
+  }
+ },
  "我持仓里今天哪只跌得最多": {
   "intent": {
    "ark_etfs": [],
@@ -14044,6 +14490,42 @@
    "direct_answer": "",
    "requires_confirmation": false,
    "route": "fast_lookup"
+  }
+ },
+ "我的持仓里哪只跌的最惨？": {
+  "intent": {
+   "ark_etfs": [],
+   "command": null,
+   "confidence": 1.0,
+   "direction": "none",
+   "each": false,
+   "focus": [],
+   "kind": "research",
+   "lab": "",
+   "lab_scale": "",
+   "managers": [],
+   "periods": [],
+   "portfolio_scope": true,
+   "rank": "low",
+   "release": "",
+   "scope": "none",
+   "strategy": "",
+   "tickers": [],
+   "wants": [
+    "portfolio",
+    "ranking"
+   ],
+   "watchlist_scope": false,
+   "window": ""
+  },
+  "legacy": {
+   "answer_mode": "tool_grounded",
+   "capabilities": [
+    "account.portfolio"
+   ],
+   "direct_answer": "",
+   "requires_confirmation": false,
+   "route": "research"
   }
  },
  "我的持仓里哪只风险最高？": {
@@ -15007,6 +15489,43 @@
   "legacy": {
    "answer_mode": "tool_grounded",
    "capabilities": [],
+   "direct_answer": "",
+   "requires_confirmation": false,
+   "route": "fast_lookup"
+  }
+ },
+ "接下来两周我的持仓里谁要出财报？": {
+  "intent": {
+   "ark_etfs": [],
+   "command": null,
+   "confidence": 1.0,
+   "direction": "none",
+   "each": false,
+   "focus": [],
+   "kind": "lookup",
+   "lab": "",
+   "lab_scale": "",
+   "managers": [],
+   "periods": [],
+   "portfolio_scope": true,
+   "rank": "",
+   "release": "",
+   "scope": "none",
+   "strategy": "",
+   "tickers": [],
+   "wants": [
+    "portfolio",
+    "earnings"
+   ],
+   "watchlist_scope": false,
+   "window": ""
+  },
+  "legacy": {
+   "answer_mode": "tool_grounded",
+   "capabilities": [
+    "account.earnings_schedule",
+    "account.portfolio"
+   ],
    "direct_answer": "",
    "requires_confirmation": false,
    "route": "fast_lookup"
@@ -16493,6 +17012,44 @@
    "route": "research"
   }
  },
+ "特斯拉从高点下来跌了多少，为啥？": {
+  "intent": {
+   "confidence": 1.0,
+   "direction": "down",
+   "kind": "research",
+   "portfolio_scope": false,
+   "scope": "window",
+   "tickers": [
+    "TSLA"
+   ],
+   "wants": [
+    "drawdown",
+    "attribution"
+   ],
+   "watchlist_scope": false
+  },
+  "legacy": null,
+  "note": "labelled by hand (the regex pipeline got it wrong)"
+ },
+ "特斯拉从高点跌下来了多少？为什么？": {
+  "intent": {
+   "confidence": 1.0,
+   "direction": "down",
+   "kind": "research",
+   "portfolio_scope": false,
+   "scope": "window",
+   "tickers": [
+    "TSLA"
+   ],
+   "wants": [
+    "drawdown",
+    "attribution"
+   ],
+   "watchlist_scope": false
+  },
+  "legacy": null,
+  "note": "labelled by hand (the regex pipeline got it wrong)"
+ },
  "现在 ARM 值得入手吗": {
   "intent": {
    "ark_etfs": [],
@@ -17759,6 +18316,24 @@
    "route": "fast_lookup"
   }
  },
+ "美光这两周有啥消息？": {
+  "intent": {
+   "confidence": 1.0,
+   "direction": "none",
+   "kind": "lookup",
+   "portfolio_scope": false,
+   "scope": "recent",
+   "tickers": [
+    "MU"
+   ],
+   "wants": [
+    "news"
+   ],
+   "watchlist_scope": false
+  },
+  "legacy": null,
+  "note": "labelled by hand (the regex pipeline got it wrong)"
+ },
  "美国商务部放开对阿联酋的出口管制": {
   "intent": {
    "ark_etfs": [],
@@ -17789,6 +18364,23 @@
    "requires_confirmation": false,
    "route": "fast_lookup"
   }
+ },
+ "美股今天有啥注意的？": {
+  "intent": {
+   "confidence": 1.0,
+   "direction": "none",
+   "kind": "lookup",
+   "portfolio_scope": false,
+   "scope": "today",
+   "tickers": [],
+   "wants": [
+    "briefing",
+    "macro"
+   ],
+   "watchlist_scope": false
+  },
+  "legacy": null,
+  "note": "labelled by hand (the regex pipeline got it wrong)"
  },
  "股价跑赢行业基准": {
   "intent": {
@@ -17891,7 +18483,113 @@
    "route": "fast_lookup"
   }
  },
+ "英特尔公司最近有哪些新闻？": {
+  "intent": {
+   "ark_etfs": [],
+   "command": null,
+   "confidence": 1.0,
+   "direction": "none",
+   "each": false,
+   "focus": [],
+   "kind": "lookup",
+   "lab": "",
+   "lab_scale": "",
+   "managers": [],
+   "periods": [],
+   "portfolio_scope": false,
+   "rank": "",
+   "release": "",
+   "scope": "recent",
+   "strategy": "",
+   "tickers": [
+    "INTC"
+   ],
+   "wants": [
+    "news"
+   ],
+   "watchlist_scope": false,
+   "window": ""
+  },
+  "legacy": {
+   "answer_mode": "research_grounded",
+   "capabilities": [
+    "web.research",
+    "filings.recent",
+    "market.anomaly_history"
+   ],
+   "direct_answer": "",
+   "requires_confirmation": false,
+   "route": "fast_lookup"
+  }
+ },
+ "英特尔最近有什么动静": {
+  "intent": {
+   "confidence": 1.0,
+   "direction": "none",
+   "kind": "lookup",
+   "portfolio_scope": false,
+   "scope": "recent",
+   "tickers": [
+    "INTC"
+   ],
+   "wants": [
+    "news"
+   ],
+   "watchlist_scope": false
+  },
+  "legacy": null,
+  "note": "labelled by hand (the regex pipeline got it wrong)"
+ },
+ "英特尔最近有什么动静？": {
+  "intent": {
+   "confidence": 1.0,
+   "direction": "none",
+   "kind": "lookup",
+   "portfolio_scope": false,
+   "scope": "recent",
+   "tickers": [
+    "INTC"
+   ],
+   "wants": [
+    "news"
+   ],
+   "watchlist_scope": false
+  },
+  "legacy": null,
+  "note": "labelled by hand (the regex pipeline got it wrong)"
+ },
  "营收低于指引": {
+  "intent": {
+   "ark_etfs": [],
+   "command": null,
+   "confidence": 1.0,
+   "direction": "none",
+   "each": false,
+   "focus": [],
+   "kind": "lookup",
+   "lab": "",
+   "lab_scale": "",
+   "managers": [],
+   "periods": [],
+   "portfolio_scope": false,
+   "rank": "",
+   "release": "",
+   "scope": "none",
+   "strategy": "",
+   "tickers": [],
+   "wants": [],
+   "watchlist_scope": false,
+   "window": ""
+  },
+  "legacy": {
+   "answer_mode": "tool_grounded",
+   "capabilities": [],
+   "direct_answer": "",
+   "requires_confirmation": false,
+   "route": "fast_lookup"
+  }
+ },
+ "营收增长 55.3%": {
   "intent": {
    "ark_etfs": [],
    "command": null,
@@ -17985,6 +18683,37 @@
   }
  },
  "行情事实缺少邻近引用": {
+  "intent": {
+   "ark_etfs": [],
+   "command": null,
+   "confidence": 1.0,
+   "direction": "none",
+   "each": false,
+   "focus": [],
+   "kind": "lookup",
+   "lab": "",
+   "lab_scale": "",
+   "managers": [],
+   "periods": [],
+   "portfolio_scope": false,
+   "rank": "",
+   "release": "",
+   "scope": "none",
+   "strategy": "",
+   "tickers": [],
+   "wants": [],
+   "watchlist_scope": false,
+   "window": ""
+  },
+  "legacy": {
+   "answer_mode": "tool_grounded",
+   "capabilities": [],
+   "direct_answer": "",
+   "requires_confirmation": false,
+   "route": "fast_lookup"
+  }
+ },
+ "行情事实缺少邻近引用：“近 5 日 +12.52%，近 3 月 -18.66%。”": {
   "intent": {
    "ark_etfs": [],
    "command": null,

@@ -38,6 +38,7 @@ class TelegramFacade:
         transport: TelegramTransport,
         *,
         allow_web: bool = False,
+        cancel_event=None,
     ) -> AgentResult:
         await transport.typing(message.chat_id)
         loop = asyncio.get_running_loop()
@@ -51,13 +52,10 @@ class TelegramFacade:
                 )
             )
 
-        result = await asyncio.to_thread(
-            self.agent.run,
-            message.text,
-            session_id=str(message.chat_id),
-            allow_web=allow_web,
-            on_progress=progress,
-        )
+        run_kwargs = {"session_id": str(message.chat_id), "allow_web": allow_web, "on_progress": progress}
+        if cancel_event is not None:
+            run_kwargs["cancel_event"] = cancel_event
+        result = await asyncio.to_thread(self.agent.run, message.text, **run_kwargs)
         for future in pending_progress:
             await asyncio.wrap_future(future)
         await transport.deliver(message.chat_id, result)

@@ -129,6 +129,7 @@ class StructuredLLMPlanner:
 {"id":"t2","capability":"research.stock","arguments":{"focus":"filings"},"depends_on":["t1"],"fan_out":{"from":"t1","field":"tickers","argument":"ticker","max":8}}。
 标记 long_running 的 capability 是子智能体（读申报、异动归因、网页核查），每个要 10–60 秒和多次模型调用：一份计划最多安排 2 个，带 fan_out 的最多展开 3 次，只在问题确实问"为什么涨跌、最近发生了什么事、有什么新闻"时才用；
 两只股票"最近为什么走势分化"这类问题，对每只分别安排 market.performance 和 market.explain_move，不要用 research.compare 代替归因。
+agent.investigate 是没有固定角色的调查员：当问题需要的事实没有对口的 capability 时（某个事件的来龙去脉、某份申报里的具体条款、某个说法有没有出处），给它一句明确的 task、股票代码和需要的工具（search_news、read_page、list_filings、read_filing、recall_memory），它只报能引用原文的发现。
 量化实验必须从用户原话提取参数，不要虚构参数；未提供的参数交给工具默认值。
 输出格式：{"objective":"...","tasks":[{"id":"t1","capability":"...","arguments":{},"depends_on":[],"required":true,"purpose":"...","fan_out":null}],"assumptions":[]}。"""
         payload = {
@@ -286,7 +287,7 @@ MAX_LONG_RUNNING_TASKS = 2
 MAX_LONG_RUNNING_FAN_OUT = 3
 #: Capabilities backed by a bounded model loop (several model calls, 10–120 s each).  The
 #: research engine is long-running too, but it is governed by the task limit, not this cap.
-SUB_AGENT_CAPABILITIES = frozenset({"filings.read_events", "market.attribute_move", "market.explain_move", "web.research"})
+SUB_AGENT_CAPABILITIES = frozenset({"filings.read_events", "market.attribute_move", "market.explain_move", "web.research", "agent.investigate"})
 
 
 def _long_running(task: PlanTask, catalog: CapabilityCatalog) -> bool:
@@ -343,6 +344,22 @@ def _trim_to_budget(tasks: tuple[PlanTask, ...], limit: int) -> tuple[PlanTask, 
         if not dangling:
             return tuple(kept)
         kept = [task for task in kept if task not in dangling]
+
+
+_RESEARCH_SYSTEM = """你是证据约束的中文投研助手，表达要像一位清楚、克制、有判断力的研究同事。
+只能陈述输入证据支持的外部事实。每项关键事实后必须写对应的 [evidence_id]。
+方括号内只能原样使用 evidence 数组中真实存在的 id；严禁把 results.*、字段路径、source_id 或占位符当作引用。
+results 中的评分或限制如需引用，使用 evidence 中 citation_kind 为 metrics 或 limitations 的对应条目。
+推断必须标成“推断”；数据缺失必须明确说明。不得把一个主体的数据归给另一个主体。
+如果证据的方向与问题的前提相反（例如问为什么跌，证据显示今日上涨），先点明两者指的是不同区间或口径，再回答用户实际所指的那个区间；不要只否定前提，也不要用当日数据回答关于更长区间的问题。assumptions 中以 context_frame 开头的说明描述了用户追问所指的对象和区间，必须遵循。
+不要把历史回测写成未来收益保证。不要输出未在证据中出现的数字。
+不要向用户提内部工具、能力或角色名（归因者、申报阅读者、规划器、fan-out、capability 等）；直接说事实和来源类型（新闻、SEC 申报、盯盘记录、行情）。
+
+严格遵循输入中的 response_style：
+- brief：先用一句话直接回答用户问的那个量或对象（总额、盈亏、名单、日期、谁更强），这些被直接询问的数字和名字必须原样给出，不得因为篇幅省略；比较或排名问题必须点名每个候选并给出用来比较的数字；只展开被点名的对象，未被问到的个股不要逐一复述；覆盖不全时用一句话说明未覆盖的对象。然后用 3—5 个短段落、约 300—500 个中文字完成回答，挑选最有决策价值的 3—5 条事实，只讲一个主要风险和最重要的数据缺口，最后指出接下来值得观察什么。不要使用标题、表格、分隔线、编号清单、“正面/负面/中性”标签、“必须说明”或单独的免责声明章节；不要重复同一事实。
+- detailed：用户明确要求详细、完整、全面、表格或逐项展开时，才允许使用小标题与列表，但仍应合并重复内容并保持自然。
+
+把 BULLISH、MEDIUM、forward_pe、revision_trend 等内部英文标签翻译或解释成自然中文；必要的通用缩写可以保留。不要逐项复述所有模块，也不要把工具输出改写成机械评分单。"""
 
 
 class LLMEvidenceSynthesizer:
@@ -449,25 +466,8 @@ class LLMEvidenceSynthesizer:
 不要声称知道当前股价、最新财报、近期新闻、用户持仓或其他可能变化的事实。"""
             payload = request.text
         else:
-            system = """你是证据约束的中文投研助手，表达要像一位清楚、克制、有判断力的研究同事。
-只能陈述输入证据支持的外部事实。每项关键事实后必须写对应的 [evidence_id]。
-方括号内只能原样使用 evidence 数组中真实存在的 id；严禁把 results.*、字段路径、source_id 或占位符当作引用。
-results 中的评分或限制如需引用，使用 evidence 中 citation_kind 为 metrics 或 limitations 的对应条目。
-推断必须标成“推断”；数据缺失必须明确说明。不得把一个主体的数据归给另一个主体。
-如果证据的方向与问题的前提相反（例如问为什么跌，证据显示今日上涨），先点明两者指的是不同区间或口径，再回答用户实际所指的那个区间；不要只否定前提，也不要用当日数据回答关于更长区间的问题。assumptions 中以 context_frame 开头的说明描述了用户追问所指的对象和区间，必须遵循。
-不要把历史回测写成未来收益保证。不要输出未在证据中出现的数字。
-不要向用户提内部工具、能力或角色名（归因者、申报阅读者、规划器、fan-out、capability 等）；直接说事实和来源类型（新闻、SEC 申报、盯盘记录、行情）。
-
-严格遵循输入中的 response_style：
-- brief：先用一句话直接回答用户问的那个量或对象（总额、盈亏、名单、日期、谁更强），这些被直接询问的数字和名字必须原样给出，不得因为篇幅省略；比较或排名问题必须点名每个候选并给出用来比较的数字；只展开被点名的对象，未被问到的个股不要逐一复述；覆盖不全时用一句话说明未覆盖的对象。然后用 3—5 个短段落、约 300—500 个中文字完成回答，挑选最有决策价值的 3—5 条事实，只讲一个主要风险和最重要的数据缺口，最后指出接下来值得观察什么。不要使用标题、表格、分隔线、编号清单、“正面/负面/中性”标签、“必须说明”或单独的免责声明章节；不要重复同一事实。
-- detailed：用户明确要求详细、完整、全面、表格或逐项展开时，才允许使用小标题与列表，但仍应合并重复内容并保持自然。
-
-把 BULLISH、MEDIUM、forward_pe、revision_trend 等内部英文标签翻译或解释成自然中文；必要的通用缩写可以保留。不要逐项复述所有模块，也不要把工具输出改写成机械评分单。"""
-            guidance = self._guidance(plan, results)
-            if guidance:
-                system += "\n\n再严格遵循以下与本次所用能力对应的 response_intent 规则：\n" + guidance
-            system += "\n\n每个引用只支持它紧邻的那句话。不要用一条聚合引用同时支撑价格、成交量、新闻和期权等不同事实。"
-            payload = self._payload(request.text, plan, results, evidence)
+            system = self._research_system(plan, results)
+            payload = self._payload(request.text, plan, results, evidence, preferences=request.metadata.get("preferences"))
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": payload},
@@ -512,6 +512,50 @@ results 中的评分或限制如需引用，使用 evidence 中 citation_kind �
         self._log_fallback(request)
         return self.fallback.synthesize(request, plan, results, evidence)
 
+    def _research_system(self, plan: ExecutionPlan, results: list[ToolEnvelope]) -> str:
+        system = _RESEARCH_SYSTEM
+        guidance = self._guidance(plan, results)
+        if guidance:
+            system += "\n\n再严格遵循以下与本次所用能力对应的 response_intent 规则：\n" + guidance
+        system += "\n\n每个引用只支持它紧邻的那句话。不要用一条聚合引用同时支撑价格、成交量、新闻和期权等不同事实。"
+        system += "\n输入里的 user_preferences 是用户之前说过的偏好（口径、篇幅、关注点），按它组织回答，但不能因此违反证据和引用规则。"
+        return system
+
+    def revise(self, request, plan, results, evidence, answer: str, objections: list[dict[str, Any]]) -> str | None:
+        """One bounded rewrite that takes the debater's objections into account; None when the rewrite fails verification.
+
+        The objections cite this run's evidence, so the rewrite can only
+        move towards it: a competing candidate the answer left out, a
+        limitation it skipped.  The revised draft goes through citation
+        completion and the same verifier (judge included); a rewrite that
+        does not pass leaves the original answer standing.
+        """
+
+        if self.llm is None or not objections or not (answer or "").strip():
+            return None
+        from v2.agent_v2.verification import verify_answer
+
+        listed = "\n".join(f"- 针对“{row.get('claim') or ''}”：{row.get('objection') or ''}（证据 [{row.get('evidence_id') or ''}]）" for row in objections[:3])
+        instruction = (
+            "反方审阅了上面的回答，提出以下有证据支持的反对意见：\n" + listed +
+            "\n请只在证据确实支持反对意见时修订回答：补上被忽略的候选解释或限制、纠正被拉高的判断，其余保持原样。"
+            "保持同样的篇幅和引用格式，每句关键事实后仍然写 [evidence_id]，不要新增证据里没有的数字，不要提到反方或审阅。直接输出修订后的完整回答。"
+        )
+        messages = [
+            {"role": "system", "content": self._research_system(plan, results)},
+            {"role": "user", "content": self._payload(request.text, plan, results, evidence, preferences=request.metadata.get("preferences"))},
+            {"role": "assistant", "content": answer},
+            {"role": "user", "content": instruction},
+        ]
+        try:
+            revised = self._complete(self._draft(messages, results, evidence), evidence, results)
+            report = verify_answer(revised, evidence, answer_mode=plan.answer_mode, results=results, judge=self.judge)
+        except (LLMError, ValueError, TypeError) as exc:
+            self._record_attempt("revision_error", ok=False, warnings=(f"{type(exc).__name__}: {str(exc)[:200]}",))
+            return None
+        self._record_report("revision", report)
+        return revised if report.ok else None
+
     def _log_fallback(self, request) -> None:
         """Every rejected draft, with what the verifier said, so a fallback can be diagnosed from the server log."""
 
@@ -551,9 +595,10 @@ results 中的评分或限制如需引用，使用 evidence 中 citation_kind �
             raise ValueError("synthesizer returned an empty answer")
         return _normalize_result_citations(answer, results, evidence)
 
-    def _payload(self, query: str, plan: ExecutionPlan, results: list[ToolEnvelope], evidence) -> str:
+    def _payload(self, query: str, plan: ExecutionPlan, results: list[ToolEnvelope], evidence, preferences: list[str] | None = None) -> str:
         data = {
             "query": query[:2000],
+            **({"user_preferences": [str(value)[:120] for value in preferences][:8]} if preferences else {}),
             "objective": plan.objective[:2000],
             "response_style": "detailed" if _DETAILED_ANSWER.search(query) else "brief",
             "response_intent": _response_intent(plan, results),

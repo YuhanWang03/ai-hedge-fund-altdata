@@ -220,8 +220,45 @@ def link_for(item: EvidenceItem) -> str:
 
 
 def synthesis_label(result: AgentResult) -> str:
-    outcome = str((result.synthesis or {}).get("outcome") or "")
-    return SYNTHESIS_LABELS.get(outcome, "")
+    synthesis = result.synthesis or {}
+    outcome = str(synthesis.get("outcome") or "")
+    label = SYNTHESIS_LABELS.get(outcome, "")
+    revision = synthesis.get("debate_revision") or {}
+    if label and revision:
+        label += "，按反方修订" if revision.get("applied") else f"，反方意见未采纳（{revision.get('reason') or '修订未通过'}）"
+    return label
+
+
+#: Chinese names for the capabilities a progress line can mention.
+CAPABILITY_LABELS = {
+    "market.explain_move": "解释今日涨跌", "market.attribute_move": "归因下跌日", "market.performance": "取行情", "market.drawdown": "算回撤", "market.runup": "算涨幅", "market.anomaly_history": "查盯盘记录",
+    "filings.recent": "列申报", "filings.read_events": "读申报", "web.research": "搜新闻", "research.stock": "跑研究引擎", "research.compare": "对比研究", "research.changes": "比对研究快照",
+    "account.portfolio": "读持仓", "account.performance": "算盈亏", "account.risk": "算组合风险", "account.earnings_schedule": "查财报日历", "state.read": "读设置", "state.mutate": "执行操作",
+    "macro.overview": "读宏观面板", "macro.release": "查宏观数据", "institutional.manager_portfolio": "查 13F", "etf.ark_activity": "查 ARK", "agent.investigate": "现场调查", "debate.challenge": "反方审阅",
+}
+_STAGE_LABELS = {"received": "收到", "routed": "已识别问题", "planned": "已规划", "executing": "执行中", "synthesizing": "整理回答", "verifying": "校验引用", "completed": "完成", "partial": "部分完成", "failed": "失败", "cancelled": "已取消"}
+
+
+def progress_line(event, *, elapsed: float | None = None) -> str:
+    """One line for the placeholder message: the stage, the capability being run, the elapsed time."""
+
+    status = str(getattr(event.status, "value", event.status) or "")
+    stage = _STAGE_LABELS.get(status, status)
+    capability = str(getattr(event, "capability", "") or "")
+    message = str(getattr(event, "message", "") or "")
+    if capability:
+        detail = CAPABILITY_LABELS.get(capability, capability)
+        if message.startswith("follow-up"):
+            detail = "追加：" + detail
+    elif status == "planned":
+        digits = "".join(ch for ch in message if ch.isdigit())
+        detail = f"{digits} 个任务" if digits else ""
+    else:
+        detail = ""
+    line = stage + (f"：{detail}" if detail else "")
+    if elapsed is not None and elapsed >= 1:
+        line += f" · {elapsed:.0f}s"
+    return line
 
 
 def verification_label(result: AgentResult) -> str:
@@ -307,7 +344,7 @@ def completion_note(result: AgentResult) -> str:
     return f"引用补全 {len(completions)} 处" if completions else ""
 
 
-_STOP_LABELS = {"finished": "完成", "rounds": "轮次用尽", "time": "超时", "no_model": "无模型", "no_budget": "无预算", "no_filings": "无申报"}
+_STOP_LABELS = {"cancelled": "用户取消", "finished": "完成", "rounds": "轮次用尽", "time": "超时", "no_model": "无模型", "no_budget": "无预算", "no_filings": "无申报"}
 _CALL_LABELS = {"news": "新闻", "filing_events": "读申报", "memory": "记忆", "search": "搜索", "read": "读正文", "filings": "申报", "sections_read": "读节", "events": "事件", "objections": "反对"}
 
 

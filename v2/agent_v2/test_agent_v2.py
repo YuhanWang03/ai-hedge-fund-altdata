@@ -3254,7 +3254,7 @@ def test_recorded_intents_reproduce_every_legacy_plan():
     for text, row in rows.items():
         legacy = row.get("legacy") or {}
         if not legacy or "→" in text or "[" in text or text.endswith(("。", "：", "，")):
-            continue
+            continue  # hand-labelled rows (the regex pipeline was wrong there) carry no legacy plan
         request = normalize_request(text)
         decision = route(request)
         plan = RulePlanner().plan(request, decision)
@@ -3316,3 +3316,297 @@ def test_this_rounds_fixes_watchlist_performance_confirmed_commands_forced_finis
     macro = EvidenceItem("legacy-1", "macro", "VIX 15.74", source_id="macro.overview", source_title="Existing deterministic responder")
     calendar = EvidenceItem("legacy-2", "", "无标的发财报", source_id="account.earnings_schedule", source_title="Existing deterministic responder")
     assert [entry.label for entry in telegram_format.source_entries(("legacy-1", "legacy-2"), [macro, calendar])] == ["宏观面板", "财报日历"]
+
+
+# -- the six framework items -----------------------------------------------------------------
+
+
+def test_quality_loop_grades_answers_records_runs_and_reports(tmp_path, monkeypatch):
+    from v2.agent_v2.eval import quality
+    from v2.agent_v2.eval.quality import QualityJudge, grade, read_rows, render, run_cases, summarize
+    from v2.agent_v2.eval.quality_cases import QUALITY_CASES, QualityCase, from_feedback
+
+    assert len(QUALITY_CASES) >= 12 and len({case.id for case in QUALITY_CASES}) == len(QUALITY_CASES)
+    # The model judge answers through the grade tool; parsed per index.
+    judge_llm = ScriptedLLM([LLMResponse(text='{"criteria":[{"index":0,"met":true,"quote":"AAPL 今天上涨 3.18%"},{"index":1,"met":false}],"forbidden":[{"index":0,"asserted":false}]}')])
+    judge = QualityJudge(judge_llm)
+    verdict = judge("q", "a", ["有涨跌幅", "有基准"], ["候选说成原因"])
+    assert verdict["criteria"][0]["met"] is True and json.loads(judge_llm.calls[0][1]["content"])["criteria"][1]["text"] == "有基准"
+
+    case = QualityCase("t1", "AAPL今天为什么涨？", criteria=("有涨跌幅", "有基准"), forbidden=("候选说成原因",), must_cite=("market_data",), expected_route=RouteKind.RESEARCH, expected_agents=("move_attributor",))
+    result = _telegram_result("AAPL 今天上涨 3.18%[evidence-market-price-42f5c41951e36ef1]。", outcome="clean")
+    result.results[0].metadata["agent"] = {"name": "move_attributor", "rounds": 1, "llm_calls": 1, "elapsed_ms": 10, "stop_reason": "finished", "calls": {}, "yield": {"kept": 1, "dropped": 0}}
+    score = grade(case, result, lambda q, a, c, f: {"criteria": [{"index": 0, "met": True, "quote": "AAPL 今天上涨"}, {"index": 1, "met": False}], "forbidden": [{"index": 0, "asserted": False}]})
+    assert not score.passed and score.criteria_met == 1 and score.criteria_total == 2 and score.route_ok and score.agents_ok and score.sources_ok and score.problems == ["未满足：有基准"]
+    full = grade(case, result, lambda q, a, c, f: {"criteria": [{"index": 0, "met": True}, {"index": 1, "met": True}], "forbidden": [{"index": 0, "asserted": False}]})
+    assert full.passed
+    hit = grade(case, result, lambda q, a, c, f: {"criteria": [{"index": 0, "met": True}, {"index": 1, "met": True}], "forbidden": [{"index": 0, "asserted": True, "quote": "主要原因是"}]})
+    assert not hit.passed and hit.forbidden_hit == 1 and hit.problems == ["出现禁止断言：候选说成原因（“主要原因是”）"]
+    unjudged = grade(case, result, None)
+    assert not unjudged.passed and "未评分" in unjudged.problems
+    wrong_agent = grade(QualityCase("t2", "x", criteria=(), expected_agents=("news_checker",), must_cite=("web",)), result, None)
+    assert not wrong_agent.passed and "missing agents: news_checker" in wrong_agent.problems and "cited sources lack web" in wrong_agent.problems
+
+    # A run through an agent records one row per case; the report compares runs.
+    ledger = tmp_path / "quality.jsonl"
+    registry = CapabilityRegistry(default_catalog())
+    registry.register("market.explain_move", lambda arguments, context: ToolEnvelope("market.explain_move", ResultStatus.COMPLETED, subject="AMD", evidence=[EvidenceItem("M", "AMD", "AMD 今日 +3.18%", source_id="market_data")], metadata={"narrative": "AMD 今日 +3.18%[M]。", "agent": {"name": "move_attributor", "rounds": 1, "llm_calls": 1, "elapsed_ms": 10, "stop_reason": "finished", "calls": {}, "yield": {"kept": 1, "dropped": 0}}}))
+    agent = AgentV2(catalog=default_catalog(), registry=registry, config=AgentV2Config(record_sub_agents=False))
+    passing = lambda q, a, c, f: {"criteria": [{"index": i, "met": True} for i in range(len(c))], "forbidden": [{"index": i, "asserted": False} for i in range(len(f))]}
+    failing = lambda q, a, c, f: {"criteria": [{"index": i, "met": i == 0} for i in range(len(c))], "forbidden": [{"index": i, "asserted": False} for i in range(len(f))]}
+    cases = (QualityCase("t1", "AMD今天为什么涨？", criteria=("有涨跌幅", "有基准"), must_cite=("market_data",), expected_route=RouteKind.RESEARCH, expected_agents=("move_attributor",)),)
+    rows = run_cases(agent, cases, failing, label="before", path=ledger)
+    rows += run_cases(agent, cases, passing, label="after", path=ledger)
+    assert [row["score"]["passed"] for row in rows] == [False, True] and rows[0]["sub_agents"] == ["move_attributor"] and rows[0]["route"] == "research"
+    summary = summarize(read_rows(ledger))
+    assert [(run["label"], run["passed"], run["cases"]) for run in summary["runs"]] == [("before", 0, 1), ("after", 1, 1)] and summary["missed"] == [("t1: 有基准", 1)]
+    text = render(summary)
+    assert "| before |" in text and "| after |" in text and "| t1 | ✗ 1/2 | ✓ 2/2 |  |" in text  # the last column is the latest run's problems
+    monkeypatch.setenv("AGENT_V2_QUALITY_LEDGER", str(ledger))
+    assert quality.main(["report", "--json"]) == 0
+    # Negative feedback becomes a case.
+    fb = from_feedback([{"kind": "feedback", "verdict": "bad", "question": "ARM买入以来跌了这么多，是什么原因？", "note": "7/29 是财报日，不是无事件"}, {"kind": "feedback", "verdict": "good", "question": "x"}])
+    assert len(fb) == 1 and fb[0].origin == "feedback" and fb[0].criteria == ("回答不再出现用户指出的问题：7/29 是财报日，不是无事件",)
+
+
+def test_run_board_shares_results_and_schedules_bounded_follow_ups():
+    from v2.agent_v2.execution import RunBoard
+
+    board = RunBoard(max_requests=2)
+    assert board.request("filings.read_events", {"ticker": "ARM", "around": "2026-07-29"}, requested_by="news_checker")
+    assert not board.request("filings.read_events", {"ticker": "ARM", "around": "2026-07-29"})  # the same work twice
+    assert board.request("market.performance", {"ticker": "ARM"}) and not board.request("market.performance", {"ticker": "MU"})  # the cap
+    assert [task.capability for task in board.take_requests()] == ["filings.read_events", "market.performance"] and board.take_requests() == [] and board.refused
+
+    # The engine adopts a follow-up a task requested and refuses a mutation; tasks see earlier results on the board.
+    catalog = default_catalog()
+    registry = CapabilityRegistry(catalog)
+    seen: dict[str, Any] = {}
+
+    def news(arguments, context):
+        context.board.request("filings.read_events", {"ticker": "ARM", "around": "2026-07-29"}, purpose="read the filing the story named", requested_by="news_checker")
+        context.board.request("state.mutate", {"operation": "watchlist.add", "payload": {"ticker": "ARM"}})
+        return ToolEnvelope("web.research", ResultStatus.COMPLETED, subject="ARM", evidence=[EvidenceItem("W1", "ARM", "story")])
+
+    def reader(arguments, context):
+        seen["board_results"] = [r.capability for r in context.board.results]
+        seen["evidence"] = [item.id for item in context.board.evidence_where(entity="ARM")]
+        return ToolEnvelope("filings.read_events", ResultStatus.COMPLETED, subject="ARM", evidence=[EvidenceItem("E1", "ARM", "event", metadata={"evidence_scope": "filing_event", "date": "2026-07-29"})])
+
+    registry.register("web.research", news)
+    registry.register("filings.read_events", reader)
+    plan = ExecutionPlan("q", RouteKind.RESEARCH, tasks=(PlanTask("news", "web.research", {"query": "ARM", "topic": "company_event"}),), budget=BudgetClass.STANDARD)
+    context = ExecutionContext("run", NormalizedRequest("q", "q", allow_web=True), BudgetClass.STANDARD, allow_web=True)
+    outcome = ExecutionEngine(registry).run(plan, context)
+    assert [r.capability for r in outcome.results] == ["web.research", "filings.read_events"] and outcome.stop_reason == "completed"
+    assert seen["board_results"] == ["web.research"] and seen["evidence"] == ["W1"] and outcome.ledger.get("E1") is not None
+    assert context.board.refused == ["state.mutate"] or "state.mutate" in context.board.refused
+
+    # The news checker asks the board to read a filing a story named.
+    from v2.agent_v2.agents.news_checker import NewsChecker
+
+    page = "Arm said in an 8-K filed on July 29, 2026 that revenue guidance came in below Wall Street expectations."
+    search = lambda query, *, days, max_results: [{"title": "Arm files", "url": "https://example.com/a", "content": "Arm 8-K", "published_date": "2026-07-29", "raw_content": page}]
+    llm = ScriptedLLM([LLMResponse(text='{"action":"search","query":"Arm 8-K"}'), LLMResponse(text='{"action":"read","ids":["r1"]}'), LLMResponse(text=json.dumps({"action": "finish", "events": [{"date": "2026-07-29", "text": "指引低于预期", "source": "r1", "quote": "revenue guidance came in below Wall Street expectations"}], "note": "", "filing_to_read": "2026-07-29"}, ensure_ascii=False))])
+    context = ExecutionContext("run", NormalizedRequest("q", "q"), BudgetClass.STANDARD)
+    result = NewsChecker(llm, search).run("ARM", context, query="ARM 新闻", topic="company_event", recency_days=30, today=date(2026, 9, 9))
+    assert result.metadata["agent"]["follow_up"] == {"filings_around": "2026-07-29", "accepted": True} and [task.capability for task in context.board.take_requests()] == ["filings.read_events"]
+    assert "已请申报阅读者读取" in result.metadata["agent"]["notes"][0]
+
+
+def test_cancellation_stops_the_engine_the_loops_and_marks_the_run(monkeypatch):
+    import threading
+
+    from v2.agent_v2.agents.base import LoopLimits, Tool, ToolLoop, _schema, limits_for
+
+    # A loop stops between rounds once the run is cancelled.
+    event = threading.Event()
+    context = ExecutionContext("run", NormalizedRequest("q", "q"), BudgetClass.STANDARD, cancel_event=event)
+    assert not context.cancelled
+    limits = limits_for(context, max_rounds=5, max_seconds=30)
+    calls = {"n": 0}
+
+    def look(arguments):
+        calls["n"] += 1
+        event.set()
+        return "看到了"
+
+    loop = ToolLoop(ScriptedLLM([LLMResponse(text='{"action":"look"}'), LLMResponse(text='{"action":"look"}')]), limits, tools=[Tool("look", "看。", _schema({}), look)], finish_parameters=_schema({}))
+    outcome = loop.run("s", "t", finish_prompt="finish")
+    assert outcome.stop_reason == "cancelled" and calls["n"] == 1 and outcome.note == "用户取消"
+
+    # The engine skips what is left and the orchestrator reports the run as cancelled with the partial answer.
+    registry = CapabilityRegistry(default_catalog())
+    cancel = threading.Event()
+
+    def slow(arguments, context):
+        cancel.set()
+        return ToolEnvelope("account.portfolio", ResultStatus.COMPLETED, subject="me", evidence=[EvidenceItem("P1", "me", "持仓 12 只")])
+
+    registry.register("account.portfolio", slow)
+    registry.register("account.risk", lambda arguments, context: ToolEnvelope("account.risk", ResultStatus.COMPLETED, subject="me"))
+    plan = ExecutionPlan("q", RouteKind.FAST_LOOKUP, tasks=(PlanTask("p", "account.portfolio"), PlanTask("r", "account.risk", depends_on=("p",))), budget=BudgetClass.STANDARD)
+    context = ExecutionContext("run", NormalizedRequest("q", "q"), BudgetClass.STANDARD, cancel_event=cancel)
+    outcome = ExecutionEngine(registry).run(plan, context)
+    assert outcome.stop_reason == "cancelled" and [(r.capability, r.status) for r in outcome.results] == [("account.portfolio", ResultStatus.COMPLETED), ("account.risk", ResultStatus.SKIPPED)]
+    cancel = threading.Event()
+    registry.register("research.stock", lambda arguments, context: ToolEnvelope("research.stock", ResultStatus.COMPLETED, subject="x"))
+    result = AgentV2(catalog=default_catalog(), registry=registry).run("我的持仓里哪只风险最高？", cancel_event=cancel)  # the fan-out wave after the card is skipped
+    assert result.status == RunStatus.CANCELLED and result.stop_reason == "cancelled"
+
+    # Telegram: the cancel word, the active-run registry and the header line.
+    from v2.agent_v2.interfaces import telegram_format
+    from v2.bot import agent_v2_bridge as bridge
+
+    assert bridge.is_cancel_word("取消") and bridge.is_cancel_word("stop。") and not bridge.is_cancel_word("取消提醒 3")
+    assert not bridge.cancel_active_run(1)
+    bridge._ACTIVE_RUNS[1] = threading.Event()
+    assert bridge.cancel_active_run(1) and bridge._ACTIVE_RUNS[1].is_set()
+    bridge._ACTIVE_RUNS.pop(1)
+    from v2.agent_v2.models import ProgressEvent
+
+    assert telegram_format.progress_line(ProgressEvent("r", RunStatus.EXECUTING, "explain", capability="market.explain_move"), elapsed=12.4) == "执行中：解释今日涨跌 · 12s"
+    assert telegram_format.progress_line(ProgressEvent("r", RunStatus.PLANNED, "planned 3 task(s)")) == "已规划：3 个任务"
+    assert telegram_format.progress_line(ProgressEvent("r", RunStatus.EXECUTING, "follow-up: read", capability="filings.read_events")) == "执行中：追加：读申报"
+    assert telegram_format._STOP_LABELS["cancelled"] == "用户取消"
+
+
+def test_debate_revision_rewrites_once_and_only_keeps_a_verified_rewrite():
+    from v2.agent_v2.interfaces import telegram_format
+
+    registry = CapabilityRegistry(default_catalog())
+    evidence = [EvidenceItem("R1", "NVDA", "NVDA TTM 市盈率 28.2 倍", source_id="fd_metrics"), EvidenceItem("R2", "NVDA", "90 天内部人净卖出 2.4 亿美元", source_id="fd_insiders")]
+    registry.register("research.stock", lambda arguments, context: ToolEnvelope("research.stock", ResultStatus.COMPLETED, subject="NVDA", summary="估值不低", evidence=evidence))
+    llm = ScriptedLLM([
+        LLMResponse(text="NVDA 市盈率 28.2 倍[R1]，估值不算高。"),  # draft
+        LLMResponse(text='{"stance":"回答偏多","objections":[{"claim":"估值不算高","objection":"内部人净卖出 2.4 亿美元被忽略","evidence_id":"R2"}],"note":""}'),  # debater
+        LLMResponse(text="NVDA 市盈率 28.2 倍[R1]，估值不算高，但 90 天内部人净卖出 2.4 亿美元[R2]是需要计入的风险。"),  # revision
+    ])
+    agent = AgentV2(catalog=default_catalog(), registry=registry, synthesizer=LLMEvidenceSynthesizer(llm))
+    result = agent.run("分析 NVDA 的估值")
+    assert "[R2]" in result.answer and result.synthesis["debate_revision"] == {"applied": True, "objections": 1} and result.verification.ok
+    assert [r.capability for r in result.results][-1] == "debate.challenge"
+    assert telegram_format.synthesis_label(result) == "模型回答，按反方修订"
+    # A rewrite that fails verification is dropped and the original stands, with the reason shown.
+    llm = ScriptedLLM([
+        LLMResponse(text="NVDA 市盈率 28.2 倍[R1]，估值不算高。"),
+        LLMResponse(text='{"stance":"回答偏多","objections":[{"claim":"估值不算高","objection":"内部人净卖出被忽略","evidence_id":"R2"}],"note":""}'),
+        LLMResponse(text="NVDA 市盈率 31 倍[R1]，内部人净卖出 5 亿美元[R2]。"),  # invents numbers
+    ])
+    agent = AgentV2(catalog=default_catalog(), registry=registry, synthesizer=LLMEvidenceSynthesizer(llm))
+    result = agent.run("分析 NVDA 的估值")
+    assert result.answer == "NVDA 市盈率 28.2 倍[R1]，估值不算高。" and result.synthesis["debate_revision"] == {"applied": False, "objections": 1, "reason": "修订稿未通过校验"}
+    assert telegram_format.synthesis_label(result) == "模型回答，反方意见未采纳（修订稿未通过校验）"
+    # Off by configuration: objections stay display-only.
+    llm = ScriptedLLM([LLMResponse(text="NVDA 市盈率 28.2 倍[R1]。"), LLMResponse(text='{"stance":"回答中性","objections":[{"claim":"x","objection":"y","evidence_id":"R2"}]}')])
+    result = AgentV2(catalog=default_catalog(), registry=registry, synthesizer=LLMEvidenceSynthesizer(llm), config=AgentV2Config(debate_revision=False)).run("分析 NVDA 的估值")
+    assert "debate_revision" not in result.synthesis and len(llm.calls) == 2
+
+
+def test_toolbox_tools_are_shared_and_the_investigator_reports_only_quoted_findings():
+    from v2.agent.llm import ToolCall
+    from v2.agent_v2.agents.filing_reader import FilingRef, Section
+    from v2.agent_v2.agents.toolbox import Investigator, Toolbox, register_investigator
+
+    page = "On July 29, 2026 Arm Holdings said revenue guidance came in below Wall Street expectations, sending shares down 13%."
+    search = lambda query, *, days, max_results: [{"title": "Arm falls", "url": "https://example.com/arm", "content": "Arm guidance", "published_date": "2026-07-29", "raw_content": page}]
+
+    class Source:
+        def list_filings(self, ticker, since, until):
+            return [FilingRef(ticker=ticker, form="6-K", filing_date="2026-07-29", accession="0001", url="https://www.sec.gov/x/1/")]
+
+        def outline(self, ref):
+            return [Section("s1", "Exhibit 99.1", 120)]
+
+        def read(self, ref, section_id):
+            return "Revenue was below the guidance range, the company said in its quarterly update."
+
+    recalls = []
+    toolbox = Toolbox(search=search, filing_source=Source(), recall=lambda ticker, query, days: recalls.append(query) or [], today=date(2026, 9, 9))
+    assert toolbox.available() == ("search_news", "read_page", "list_filings", "read_filing", "recall_memory")
+    names = [tool.name for tool in toolbox.tools(("read_filing", "search_news", "bogus"))]
+    assert names == ["read_filing", "search_news"]
+    tools = {tool.name: tool for tool in toolbox.tools()}
+    assert "id=p1" in tools["search_news"].handler({"query": "Arm July 29"}) and "Exhibit 99.1" in tools["list_filings"].handler({"ticker": "ARM"})
+    assert tools["read_page"].handler({"id": "p1"}).startswith("[p1] Arm falls（2026-07-29）") and "guidance range" in tools["read_filing"].handler({"filing": 1, "section": "s1"})
+    with pytest.raises(ValueError):
+        tools["read_page"].handler({"id": "p9"})
+    assert toolbox.state.text_for("p1")[0] == page[:5000] and toolbox.state.text_for("f1:s1")[2] == "6-K 2026-07-29" and toolbox.state.text_for("zz") == ("", "", "")
+
+    def call(name, arguments, id):
+        return ToolCall(id=id, name=name, arguments=arguments, raw_arguments=json.dumps(arguments))
+
+    llm = ScriptedLLM([
+        LLMResponse(tool_calls=[call("search_news", {"query": "Arm guidance July 2026"}, "c1")]),
+        LLMResponse(tool_calls=[call("read_page", {"id": "p1"}, "c2")]),
+        LLMResponse(tool_calls=[call("list_filings", {"ticker": "ARM", "since": "2026-07-01"}, "c3")]),
+        LLMResponse(tool_calls=[call("read_filing", {"filing": 1, "section": "s1"}, "c4")]),
+        LLMResponse(tool_calls=[call("finish", {"findings": [
+            {"date": "2026-07-29", "text": "指引低于华尔街预期", "source": "p1", "quote": "revenue guidance came in below Wall Street expectations"},
+            {"date": "2026-07-29", "text": "季度更新称营收低于指引区间", "source": "f1:s1", "quote": "Revenue was below the guidance range"},
+            {"date": "2026-07-29", "text": "编造", "source": "p1", "quote": "takeover rumours swirled around the company"},
+            {"date": "2026-07-29", "text": "来源不存在", "source": "p7", "quote": "revenue guidance came in below Wall Street expectations"},
+        ], "note": "两条有出处"}, "c5")]),
+    ])
+    investigator = Investigator(llm, lambda: Toolbox(search=search, filing_source=Source(), recall=None, today=date(2026, 9, 9)))
+    result = investigator.run("查 ARM 7 月 29 日大跌的申报和报道", _context(), ticker="ARM", tools=("search_news", "read_page", "list_filings", "read_filing"))
+    assert result.capability == "agent.investigate" and result.ok and result.metrics["findings"] == 2 and result.metrics["dropped"] == 2
+    kinds = [(item.source_id, item.source_url) for item in result.evidence]
+    assert kinds == [("web:example.com", "https://example.com/arm"), ("sec_edgar", "https://www.sec.gov/x/1/")]
+    assert result.metadata["agent"]["name"] == "investigator" and result.metadata["agent"]["tools"] == ["search_news", "read_page", "list_filings", "read_filing"] and result.metadata["agent"]["calls"] == {"search_news": 1, "read_page": 1, "list_filings": 1, "read_filing": 1}
+    assert "2 条发现没有可核对的引文" in result.limitations[0] and "[evidence-investigate-" in result.metadata["narrative"]
+    assert [step["action"] for step in result.metadata["trace"]] == ["search_news", "read_page", "list_filings", "read_filing", "finish"]
+    # Registered as a capability the model planner may delegate to.
+    registry = CapabilityRegistry(default_catalog())
+    register_investigator(registry, ScriptedLLM([]), search=search, filing_source=Source(), recall=None, today_factory=lambda: date(2026, 9, 9))
+    spec = default_catalog().get("agent.investigate")
+    assert spec is not None and spec.long_running and registry.registered("agent.investigate")
+    from v2.agent_v2.llm import SUB_AGENT_CAPABILITIES
+
+    assert "agent.investigate" in SUB_AGENT_CAPABILITIES
+    none = Investigator(None, lambda: Toolbox(search=search, today=date(2026, 9, 9))).run("x", _context(), ticker="ARM")
+    assert none.status == ResultStatus.PARTIAL_DATA and none.metadata["agent"]["stop_reason"] == "no_model"
+
+
+def test_user_memory_feedback_and_preferences_reach_the_answer(tmp_path, monkeypatch):
+    from v2.agent_v2.memory import UserMemory, parse_feedback, render_feedback
+
+    assert parse_feedback("不对") == {"kind": "feedback", "verdict": "bad", "note": ""}
+    assert parse_feedback("不对，7/29 是财报日") == {"kind": "feedback", "verdict": "bad", "note": "7/29 是财报日"}
+    assert parse_feedback("反馈：口径应该用收盘价") == {"kind": "feedback", "verdict": "bad", "note": "口径应该用收盘价"}
+    assert parse_feedback("👍") == {"kind": "feedback", "verdict": "good", "note": ""} and parse_feedback("对。") == {"kind": "feedback", "verdict": "good", "note": ""}
+    assert parse_feedback("记住：回答短一点") == {"kind": "preference", "note": "回答短一点"} and parse_feedback("以后都用收盘价口径") == {"kind": "preference", "note": "以后都用收盘价口径"}
+    assert parse_feedback("ARM 对不对") is None and parse_feedback("AAPL今天为什么涨？") is None and parse_feedback("") is None
+
+    memory = UserMemory(tmp_path / "memory.jsonl")
+    assert memory.record_feedback("chat-1", "bad", "x") is None  # nothing answered yet
+    memory.remember_answer("chat-1", question="ARM买入以来跌了这么多，是什么原因？", answer="回答…", run_id="run-1")
+    row = memory.record_feedback("chat-1", "bad", "7/29 是财报日")
+    assert row["question"] == "ARM买入以来跌了这么多，是什么原因？" and row["run_id"] == "run-1" and row["verdict"] == "bad"
+    memory.add_preference("chat-1", "回答短一点")
+    memory.add_preference("chat-1", "用收盘价口径")
+    memory.add_preference("chat-1", "回答短一点")
+    assert memory.preferences("chat-1") == ["回答短一点", "用收盘价口径"] and memory.preferences("chat-2") == [] and len(memory.feedback()) == 1
+    text = render_feedback(memory.rows())
+    assert "反馈 1 条：好 0、不对 1；偏好 2 条。" in text and "| ARM买入以来跌了这么多，是什么原因？ | 7/29 是财报日 |" in text and "偏好：回答短一点；用收盘价口径" in text
+
+    # The orchestrator hands the session's preferences to the synthesizer and remembers the answer.
+    registry = CapabilityRegistry(default_catalog())
+    registry.register("market.performance", lambda arguments, context: ToolEnvelope("market.performance", ResultStatus.COMPLETED, subject="ARM", evidence=[EvidenceItem("P", "ARM", "ARM 近 30 天 +1.00%")], metadata={"narrative": "ARM 近 30 天 +1.00%[P]。"}))
+    llm = ScriptedLLM([LLMResponse(text="ARM 近 30 天 +1.00%[P]。")])
+    agent = AgentV2(catalog=default_catalog(), registry=registry, synthesizer=LLMEvidenceSynthesizer(llm), session=ShortTermSession(), memory=memory)
+    result = agent.run("ARM 最近30天表现", session_id="chat-1")
+    assert result.request.metadata["preferences"] == ["回答短一点", "用收盘价口径"]
+    assert json.loads(llm.calls[0][1]["content"])["user_preferences"] == ["回答短一点", "用收盘价口径"] and "user_preferences" in llm.calls[0][0]["content"]
+    assert memory.last_answer("chat-1") == {"question": "ARM 最近30天表现", "answer_digest": "ARM 近 30 天 +1.00%[P]。", "run_id": result.run_id}
+
+    # Telegram feedback commands answer through the bridge without running the agent.
+    from v2.bot import agent_v2_bridge as bridge
+
+    monkeypatch.setattr(bridge, "_get_agent", lambda: agent)
+    assert bridge.feedback_reply(1, "不对，口径错了") == "这个会话里还没有可以评价的回答。"
+    memory.remember_answer("1", question="ARM 最近30天表现", answer="…", run_id="run-9")
+    assert bridge.feedback_reply(1, "不对，口径错了").startswith("收到，已记为有误：口径错了")
+    assert bridge.feedback_reply(1, "记住：只看半导体") == "记下了：只看半导体。之后的回答会照这个来。"
+    assert bridge.feedback_reply(1, "AAPL今天为什么涨？") is None
+    assert memory.preferences("1") == ["只看半导体"] and memory.feedback("1")[-1]["note"] == "口径错了"

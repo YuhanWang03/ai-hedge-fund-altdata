@@ -60,6 +60,8 @@ class AgentV2Config:
     record_sub_agents: bool = True
     #: After a research answer is verified, one adversarial pass lists the objections the run's evidence supports.
     debate: bool = True
+    #: When the debater objects, one bounded rewrite that must pass the verifier again; off keeps objections display-only.
+    debate_revision: bool = True
     #: Append every routing decision (intent, its source, the plan) to
     #: data/agent_v2_intents.jsonl.  ``None`` means "when the live runtime
     #: has a model"; tests and offline evals stay silent.
@@ -77,6 +79,7 @@ class AgentV2:
         session: SessionPort | None = None,
         config: AgentV2Config | None = None,
         classifier: Any = None,
+        memory: Any = None,
     ) -> None:
         self.catalog = catalog or default_catalog()
         self.registry = registry or CapabilityRegistry(self.catalog)
@@ -84,6 +87,8 @@ class AgentV2:
         self.synthesizer = synthesizer or EvidenceSummarySynthesizer()
         #: Turns the question into an intent with one model call; None means the recorded labels (tests, evals).
         self.classifier = classifier
+        #: User memory (feedback, preferences); None means none is kept.
+        self.memory = memory
         self.session = session
         self.config = config or AgentV2Config()
         self.executor = ExecutionEngine(self.registry, max_parallel=self.config.max_parallel)
@@ -104,6 +109,7 @@ class AgentV2:
         session_id: str = "",
         allow_web: bool = False,
         on_progress: ProgressSink | None = None,
+        cancel_event: Any = None,
     ) -> AgentResult:
         started = time.time()
         run_id = f"agent-v2-{uuid.uuid4().hex[:12]}"
@@ -111,8 +117,15 @@ class AgentV2:
         # the usage ledger, so token use can be read back per question.
         from v2.usage_context import usage_run
 
+        self._cancel_event = cancel_event
         with usage_run(run_id):
-            return self._run(run_id, text, session_id=session_id, allow_web=allow_web, on_progress=on_progress, started=started)
+            result = self._run(run_id, text, session_id=session_id, allow_web=allow_web, on_progress=on_progress, started=started)
+        if self.memory is not None and session_id:
+            try:
+                self.memory.remember_answer(session_id, question=text, answer=result.answer, run_id=run_id)
+            except Exception:  # noqa: BLE001 — memory never breaks an answer
+                pass
+        return result
 
     def _run(self, run_id: str, text: str, *, session_id: str, allow_web: bool, on_progress: ProgressSink | None, started: float) -> AgentResult:
         # A pending write is resolved before anything else: "确认" executes it,
@@ -139,6 +152,13 @@ class AgentV2:
                 }
                 if resolution.frame:
                     resolution_metadata["context_frame"] = dict(resolution.frame)
+        if self.memory is not None and session_id:
+            try:
+                preferences = self.memory.preferences(session_id)
+            except Exception:  # noqa: BLE001
+                preferences = []
+            if preferences:
+                resolution_metadata = {**resolution_metadata, "preferences": list(preferences)}
         request = normalize_request(
             resolved_text,
             session_id=session_id,
@@ -163,6 +183,35 @@ class AgentV2:
 
         context = self._context(run_id, request, plan, on_progress, started)
         return self._execute(run_id, request, decision, plan, context, on_progress, started)
+
+    # -- debate revision ----------------------------------------------------------
+
+    #: Seconds the revision needs; below this the objections are shown, not applied.
+    REVISION_MIN_SECONDS = 15.0
+
+    def _revise(self, request, plan, results, evidence, answer: str, debate: ToolEnvelope, context: ExecutionContext) -> str | None:
+        """One rewrite from the debater's objections, when there are any, a model can do it and time remains."""
+
+        objections = list(debate.metadata.get("objections") or [])
+        revise = getattr(self.synthesizer, "revise", None)
+        if not objections or not callable(revise) or not self.config.debate_revision:
+            return None
+        if context.remaining_seconds() < self.REVISION_MIN_SECONDS and getattr(context, "deadline", None) is not None:
+            self._revision_note = "剩余时间不足"
+            return None
+        self._revision_note = ""
+        try:
+            revised = revise(request, plan, results, evidence, answer, objections)
+        except Exception as exc:  # noqa: BLE001 — a failed revision leaves the answer as it was
+            logger.warning("debate revision failed: %s: %s", type(exc).__name__, exc)
+            self._revision_note = f"修订出错（{type(exc).__name__}）"
+            return None
+        if revised is None:
+            self._revision_note = "修订稿未通过校验"
+        return revised
+
+    def _revision_reason(self) -> str:
+        return str(getattr(self, "_revision_note", "") or "")
 
     # -- intent ledger ----------------------------------------------------------
 
@@ -217,6 +266,7 @@ class AgentV2:
             run_id=run_id,
             request=request,
             budget=plan.budget,
+            cancel_event=getattr(self, "_cancel_event", None),
             allow_mutations=self.config.allow_mutations if allow_mutations is None else allow_mutations,
             allow_web=request.allow_web,
             on_progress=on_progress,
@@ -273,8 +323,17 @@ class AgentV2:
         debate = self._debate(request, decision, plan, answer, evidence, results, context)
         if debate is not None:
             results = [*results, debate]
+            revised = self._revise(request, plan, results, evidence, answer, debate, context) if self.config.debate_revision else None
+            if revised is not None:
+                answer = revised
+                verification = verify_answer(answer, evidence, answer_mode=answer_mode, results=results, judge=getattr(self.synthesizer, "judge", None))
+                synthesis = {**self._synthesis_diagnostics(), "debate_revision": {"applied": True, "objections": len(debate.metadata.get("objections") or [])}}
+            elif self.config.debate_revision and debate.metadata.get("objections"):
+                synthesis = {**synthesis, "debate_revision": {"applied": False, "objections": len(debate.metadata.get("objections") or []), "reason": self._revision_reason()}}
         knowledge_unavailable = not results and decision.kind == RouteKind.GENERAL_KNOWLEDGE and not bool(getattr(self.synthesizer, "supports_general_knowledge", False))
-        if failures or not verification.ok or knowledge_unavailable or outcome.stop_reason != "completed" or (not results and decision.kind != RouteKind.GENERAL_KNOWLEDGE):
+        if outcome.stop_reason == "cancelled":
+            status = RunStatus.CANCELLED
+        elif failures or not verification.ok or knowledge_unavailable or outcome.stop_reason != "completed" or (not results and decision.kind != RouteKind.GENERAL_KNOWLEDGE):
             status = RunStatus.PARTIAL
         else:
             status = RunStatus.COMPLETED

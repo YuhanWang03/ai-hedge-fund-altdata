@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import json
+import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, Future, wait
 from v2.usage_context import ContextExecutor as ThreadPoolExecutor
@@ -67,6 +69,63 @@ class PlanValidationError(ValueError):
     """The planned task graph cannot be executed safely."""
 
 
+class RunBoard:
+    """What the run knows so far, shared by every task, plus bounded follow-up requests.
+
+    Tasks read the results and evidence that finished before them (a
+    sub-agent can see what another already read) and may request a
+    follow-up task; the engine schedules requested tasks after the current
+    wave, within the deadline and a cap, and never a mutation.
+    """
+
+    def __init__(self, *, max_requests: int = 4) -> None:
+        self._lock = threading.Lock()
+        self.results: list[ToolEnvelope] = []
+        self.evidence: dict[str, EvidenceItem] = {}
+        self.requested: list[PlanTask] = []
+        self.accepted: list[str] = []
+        self.refused: list[str] = []
+        self.max_requests = max(0, max_requests)
+        self._known: set[str] = set()
+
+    def post(self, result: ToolEnvelope) -> None:
+        with self._lock:
+            self.results.append(result)
+            for item in result.evidence:
+                self.evidence.setdefault(item.id, item)
+
+    def results_for(self, capability: str) -> list[ToolEnvelope]:
+        with self._lock:
+            return [result for result in self.results if result.capability == capability]
+
+    def evidence_where(self, **fields: Any) -> list[EvidenceItem]:
+        """Evidence whose fields or metadata carry every given value (``entity="ARM"``, ``evidence_scope="filing_event"``)."""
+
+        with self._lock:
+            return [item for item in self.evidence.values() if all((getattr(item, key, None) if hasattr(item, key) else item.metadata.get(key)) == value for key, value in fields.items())]
+
+    def request(self, capability: str, arguments: dict[str, Any] | None = None, *, purpose: str = "", requested_by: str = "") -> bool:
+        """Ask for a follow-up task; False when the cap is reached or the same request was already made."""
+
+        key = f"{capability}:{json.dumps(arguments or {}, sort_keys=True, ensure_ascii=False)}"
+        with self._lock:
+            if key in self._known:
+                return False
+            if len(self.accepted) >= self.max_requests:
+                self.refused.append(key)
+                return False
+            self._known.add(key)
+            task = PlanTask(f"followup-{len(self.accepted) + 1}", capability, dict(arguments or {}), purpose=purpose or f"follow-up requested by {requested_by or 'a task'}", required=False)
+            self.requested.append(task)
+            self.accepted.append(key)
+            return True
+
+    def take_requests(self) -> list[PlanTask]:
+        with self._lock:
+            tasks, self.requested = self.requested, []
+            return tasks
+
+
 @dataclass(frozen=True)
 class ExecutionContext:
     run_id: str
@@ -77,10 +136,18 @@ class ExecutionContext:
     on_progress: ProgressSink | None = None
     #: Absolute ``time.monotonic()`` deadline; ``None`` means the budget default.
     deadline: float | None = None
+    #: Shared state of the run; every task can read it and request follow-ups.
+    board: RunBoard = field(default_factory=RunBoard)
+    #: Set by the user to stop the run; the engine and the sub-agent loops check it between steps.
+    cancel_event: threading.Event | None = None
 
     def remaining_seconds(self) -> float:
         limit = self.deadline if self.deadline is not None else time.monotonic() + time_limit(self.budget)
         return limit - time.monotonic()
+
+    @property
+    def cancelled(self) -> bool:
+        return self.cancel_event is not None and self.cancel_event.is_set()
 
     def emit(self, message: str, *, task_id: str = "", capability: str = "") -> None:
         if not self.on_progress:
@@ -286,6 +353,19 @@ class ExecutionEngine:
             outcome.results.append(result)
             pending.pop(task.id, None)
             outcome.ledger.ingest(result)
+            context.board.post(result)
+
+        def adopt_requests() -> None:
+            # Follow-ups a task asked for on the board join the plan; a
+            # mutation or an unknown capability is refused, and a request
+            # for the same work twice was refused by the board already.
+            for task in context.board.take_requests():
+                spec = self.registry.catalog.get(task.capability)
+                if spec is None or spec.mutating:
+                    context.board.refused.append(task.capability)
+                    continue
+                pending[task.id] = task
+                context.emit(f"follow-up: {task.purpose}", task_id=task.id, capability=task.capability)
 
         def satisfied(dependency: str) -> bool:
             if dependency in expanded:
@@ -298,6 +378,11 @@ class ExecutionEngine:
             return completed[dependency].ok
 
         while pending:
+            if context.cancelled:
+                for task in list(pending.values()):
+                    finish(task, ToolEnvelope(task.capability, ResultStatus.SKIPPED, errors=["cancelled by the user"]))
+                outcome.stop_reason = "cancelled"
+                break
             ready = [task for task in pending.values() if all(satisfied(dependency) for dependency in task.depends_on)]
             if not ready:
                 raise PlanValidationError("plan dependency cycle detected")
@@ -366,6 +451,7 @@ class ExecutionEngine:
                     finish(task, ToolEnvelope(task.capability, ResultStatus.SKIPPED, errors=["wall-clock budget exhausted"]))
                 outcome.stop_reason = "deadline"
                 break
+            adopt_requests()
 
         outcome.elapsed_ms = int((time.monotonic() - started) * 1000)
         return outcome
