@@ -25,9 +25,11 @@ UNIT_TESTS = ("v2/agent_v2/test_agent_v2.py", "v2/agent_v2/eval/test_benchmark.p
 
 
 def run_unit_tests() -> tuple[bool, str]:
-    proc = subprocess.run([sys.executable, "-m", "pytest", *UNIT_TESTS, "-q", "-p", "no:cacheprovider"], cwd=ROOT, capture_output=True, text=True)
-    tail = (proc.stdout.strip().splitlines() or [""])[-1]
-    return proc.returncode == 0, tail
+    proc = subprocess.run([sys.executable, "-m", "pytest", *UNIT_TESTS, "-q", "-p", "no:cacheprovider", "-rf"], cwd=ROOT, capture_output=True, text=True)
+    lines = proc.stdout.strip().splitlines() or [""]
+    failed = [line.removeprefix("FAILED ").split(" - ")[0] for line in lines if line.startswith("FAILED ")]
+    # The names of the failing tests travel with the verdict, so a CI log tail is enough to act on.
+    return proc.returncode == 0, lines[-1] + (f"; failed: {', '.join(failed[:6])}" if failed else "")
 
 
 def run_offline_eval() -> tuple[bool, str]:
