@@ -3794,3 +3794,76 @@ def test_research_with_failed_core_modules_is_partial_data():
     assert result.status == ResultStatus.PARTIAL_DATA and any(value.startswith("核心模块失败（fundamental、valuation）") for value in result.limitations)
     fine = _envelope({**hollow, "production_diagnostics": {"modules": {"valuation": {"status": "COMPLETED"}}}}, "research.stock")
     assert fine.status == ResultStatus.COMPLETED and not any("核心模块失败" in value for value in fine.limitations)
+
+
+def test_quality_repeat_majority_preceding_turns_length_bound_and_case_sets(tmp_path, monkeypatch):
+    from v2.agent_v2.eval import quality
+    from v2.agent_v2.eval.quality import _fold_attempts, read_rows, render, run_cases, summarize
+    from v2.agent_v2.eval.quality_cases import QUALITY_CASES, QualityCase
+    from v2.agent_v2.eval.quality_holdout import HOLDOUT_CASES
+    from v2.agent_v2.memory import UserMemory
+
+    # Every case plans offline without a model, ids are unique across both sets, the hold-out set is marked.
+    ids = [case.id for case in (*QUALITY_CASES, *HOLDOUT_CASES)]
+    assert len(ids) == len(set(ids)) and len(QUALITY_CASES) >= 35 and len(HOLDOUT_CASES) >= 10
+    assert all(case.set == "holdout" for case in HOLDOUT_CASES) and all(case.set == "dev" for case in QUALITY_CASES)
+    assert sum(1 for case in QUALITY_CASES if "quick" in case.tags) >= 5
+    for case in (*QUALITY_CASES, *HOLDOUT_CASES):
+        for text in (*case.preceding, case.question):
+            request = normalize_request(text)
+            RulePlanner().plan(request, route(request))
+
+    # Repeated attempts fold into a majority verdict; the preceding turns run in the same session; a preference goes to memory.
+    ledger = tmp_path / "quality.jsonl"
+    registry = CapabilityRegistry(default_catalog())
+    seen: list[tuple[str, str]] = []
+
+    def news(arguments, context):
+        seen.append((context.request.session_id if hasattr(context, "request") else "", arguments.get("ticker", "")))
+        return ToolEnvelope("research.stock", ResultStatus.COMPLETED, subject=arguments.get("ticker", ""), evidence=[EvidenceItem("W", arguments.get("ticker", ""), "news", source_id="web:x")], metadata={"narrative": "新闻 [W]。"})
+
+    registry.register("web.research", news)
+    registry.register("research.stock", news)  # offline the rewritten follow-up plans a research read; the ticker is what matters
+    registry.register("market.explain_move", lambda arguments, context: ToolEnvelope("market.explain_move", ResultStatus.COMPLETED, subject="AAPL", evidence=[EvidenceItem("M", "AAPL", "AAPL 今日 +1%", source_id="market_data")], metadata={"narrative": "AAPL 今日 +1%[M]。"}))
+    memory = UserMemory(tmp_path / "memory.jsonl")
+    agent = AgentV2(catalog=default_catalog(), registry=registry, session=ShortTermSession(), memory=memory, config=AgentV2Config(record_sub_agents=False))
+    flaky = iter([True, False, True])
+    judge = lambda q, a, c, f: {"criteria": [{"index": i, "met": next(flaky, True)} for i in range(len(c))], "forbidden": []}
+    short = QualityCase("t_pref", "AAPL今天为什么涨？", criteria=("有涨跌幅",), preceding=("记住，回答短一点",), max_chars=5, allow_web=False)
+    rows = run_cases(agent, (short,), judge, label="r", path=ledger, repeat=3)
+    assert [row["attempt"] for row in rows] == [1, 2, 3] and [row["score"]["passed"] for row in rows] == [False, False, False]  # every attempt breaks the 5-char bound
+    assert all(any(problem.startswith("answer ") and "> 5" in problem for problem in row["score"]["problems"]) for row in rows)
+    assert memory.preferences("quality-r-t_pref-1") == ["回答短一点"]
+    verdict = _fold_attempts(rows)
+    assert verdict["attempts"] == 3 and verdict["passes"] == 0 and not verdict["passed"]
+    majority = _fold_attempts([{"score": {"passed": True}}, {"score": {"passed": False, "problems": ["x"]}}, {"score": {"passed": True}}])
+    assert majority["passed"] and majority["passes"] == 2 and majority["problems"] == ["x"]
+    assert not _fold_attempts([{"score": {"passed": True}}, {"score": {"passed": False}}])["passed"]  # a tie is not a pass
+
+    follow = QualityCase("t_follow", "那它最近有什么新闻？", criteria=(), preceding=("AAPL今天为什么涨？",), allow_web=True)
+    rows = run_cases(agent, (follow,), None, label="r2", path=ledger)
+    assert rows[0]["score"]["passed"] and rows[0]["question"] == "那它最近有什么新闻？"
+    assert seen and seen[-1][1] == "AAPL"  # the pronoun resolved against the preceding turn in the same session
+
+    summary = summarize(read_rows(ledger), runs=2)
+    assert [(run["label"], run["cases"], run["attempts"], run["passed"]) for run in summary["runs"]] == [("r", 1, 3, 0), ("r2", 1, 1, 1)]
+    text = render(summary)
+    assert "| 每题次数 |" in text and "| t_pref | ✗ 0/3次 | — |" in text and "| t_follow | — | ✓ 0/0 |" in text
+
+    # The CLI picks the set and the smoke subset.
+    picked: dict[str, tuple[str, ...]] = {}
+
+    def fake_run_cases(agent_, cases, judge_, **kwargs):
+        picked["ids"] = tuple(case.id for case in cases)
+        picked["kwargs"] = kwargs
+        return []
+
+    monkeypatch.setattr(quality, "run_cases", fake_run_cases)
+    monkeypatch.setattr(quality, "_live_agent", lambda **kwargs: type("A", (), {"synthesizer": None})())
+    monkeypatch.setenv("AGENT_V2_QUALITY_LEDGER", str(ledger))
+    quality.main(["run", "--label", "x", "--set", "holdout", "--repeat", "2", "--parallel", "2"])
+    assert picked["ids"] == tuple(case.id for case in HOLDOUT_CASES) and picked["kwargs"]["repeat"] == 2 and picked["kwargs"]["parallel"] == 2
+    quality.main(["run", "--label", "x", "--quick"])
+    assert picked["ids"] == tuple(case.id for case in QUALITY_CASES if "quick" in case.tags)
+    quality.main(["run", "--label", "x", "--set", "all"])
+    assert len(picked["ids"]) == len(QUALITY_CASES) + len(HOLDOUT_CASES)
