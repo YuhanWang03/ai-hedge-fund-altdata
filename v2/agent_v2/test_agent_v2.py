@@ -4077,7 +4077,7 @@ def test_low_confidence_classification_asks_one_question_and_reads_the_next_mess
     assert asked.status == RunStatus.WAITING_CLARIFICATION and asked.answer == "是想看 TSLA 的行情、新闻还是研究？" and asked.results == [] and asked.plan.assumptions[0].startswith("clarification: confidence 0.35")
     answered = agent.run("新闻", session_id="c1")
     assert classifier.texts[-1] == "特斯拉最近（补充：新闻）" and answered.request.metadata["clarified"] is True and answered.request.metadata["clarification"] == asked.answer
-    assert answered.status in {RunStatus.COMPLETED, RunStatus.PARTIAL} and [r.capability for r in answered.results][0] == "web.research"  # partial: the web is off in this test
+    assert answered.status in {RunStatus.COMPLETED, RunStatus.PARTIAL} and {r.capability for r in answered.results} >= {"web.research", "filings.recent"}  # partial: the web is off in this test
     assert agent.session.pop_clarification("c1") is None  # consumed
 
     # A merged turn is never asked about again, even when the classifier stays unsure.
