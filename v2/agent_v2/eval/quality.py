@@ -260,6 +260,10 @@ def run_cases(agent: Any, cases: tuple[QualityCase, ...], judge: Judge | None, *
         return [run_one(agent, case, judge, label=label, path=path, session_prefix=session_prefix, attempt=attempt) for case, attempt in jobs]
     from concurrent.futures import ThreadPoolExecutor
 
+    from v2.agent_v2.warmup import warm_imports
+
+    warm_imports()  # two cases importing yfinance at once broke numpy for the whole run
+
     with ThreadPoolExecutor(max_workers=max(1, min(parallel, 4))) as pool:
         return list(pool.map(lambda job: run_one(agent, job[0], judge, label=label, path=path, session_prefix=session_prefix, attempt=job[1]), jobs))
 

@@ -4040,3 +4040,13 @@ def test_merge_gate_verdict_and_offline_steps(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "[PASS] unit tests: 1 passed" in out and "[PASS] offline eval: 39/39" in out and out.strip().endswith("gate: PASS (2 steps, 0s)")
     assert gate.main(["--live", "--skip-eval"]) == 1 and "gate: FAIL" in capsys.readouterr().out
+
+
+def test_warm_imports_runs_once_and_tolerates_missing_libraries(monkeypatch):
+    from v2.agent_v2 import warmup
+
+    warmup._done.clear()
+    missing = warmup.warm_imports(("json", "no_such_library_xyz"))
+    assert missing == ["no_such_library_xyz"] and warmup._done == {"json", "no_such_library_xyz"}
+    assert warmup.warm_imports(("json", "no_such_library_xyz")) == []  # already attempted: not retried
+    warmup._done.clear()

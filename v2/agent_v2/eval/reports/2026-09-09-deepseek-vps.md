@@ -424,6 +424,12 @@ VPS 上跑 pytest 时测试夹具写进生产账本的（"provider down"、"capa
 `--live` 再跑 6 题冒烟集，允许挂一题（`--min-quick` 可调）。`.github/workflows/agent-v2-gate.yml` 在 push 到 main 和
 PR 上跑离线部分，只装 pytest 和 python-dotenv（Agent V2 的测试和离线评测不依赖别的包）。
 
+**第一次 --live 门禁**：3/6，三题的行情全空，报错是 numpy 部分初始化（"module 'numpy' has no attribute
+'matrix'"、"cannot import name 'NDArray' from partially initialized module"）。原因是 `v2.data.price_source` 在第
+一次请求时才导入 yfinance，冒烟集两路并行，两个线程同时首次导入 yfinance、pandas、numpy 互相撞上，整轮行情
+调用全失败。健康报告正好把它抓成了 market.performance 正常率 38%。修法是 `warmup.warm_imports()`：运行时构建
+和并行评测开始前在主线程把这几个库导一遍。
+
 ## 下一步
 
 1. 换一批留出集。当前 15 条已被看过三轮，把它们并入开发集，从 Telegram 真实问句里

@@ -133,6 +133,9 @@ def build_workspace_agent(
     importable.  Passing ``enable_web=True`` is the explicit network opt-in;
     individual calls must still pass ``allow_web=True``.
     """
+    from v2.agent_v2.warmup import warm_imports
+
+    warm_imports()  # the executor's threads must not be the first to import numpy and yfinance
 
     effective_config = config or AgentV2Config()
     if enable_web and not effective_config.enable_web_fallback:
