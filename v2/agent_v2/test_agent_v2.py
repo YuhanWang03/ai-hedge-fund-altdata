@@ -3675,3 +3675,77 @@ def test_base1_follow_ups_nested_reader_bare_cancel_remember_comma_briefing_temp
     assert soft_only.ok and list(soft_only.warnings) == [SOFT_PREFIX + "将内部归因计数直接暴露给用户"]
     both = verify_answer("三个下跌日都没有确认的高置信度驱动 [A1]。", [item], answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result], judge=lambda items: {i["id"]: "" for i in items})
     assert not both.ok and sorted(both.warnings) == sorted([SOFT_PREFIX + "将内部归因计数直接暴露给用户", "候选归因被表述为已确认原因"])
+
+
+def test_telegram_queues_a_chat_and_lets_cancel_through_and_forced_finish_remembers_a_refusing_provider(monkeypatch):
+    from v2.agent.llm import ToolCall
+    from v2.agent_v2.agents.base import LoopLimits, Tool, ToolLoop, _schema
+    from v2.bot import agent_v2_bridge as bridge
+
+    # The bridge runs one question of a chat at a time; a second one is told it queued; a cancel word bypasses the queue.
+    started, release = asyncio.Event(), asyncio.Event()
+    seen: list[str] = []
+
+    class FakeFacade:
+        def __init__(self, agent):
+            pass
+
+        async def handle(self, message, transport, *, allow_web=False, cancel_event=None):
+            seen.append(message.text)
+            if message.text == "slow":
+                started.set()
+                await release.wait()
+                return "slow-done"
+            return "fast-done"
+
+    class Message:
+        def __init__(self, text):
+            self.text, self.replies, self.message_id = text, [], 1
+
+        async def reply_html(self, text, **kwargs):
+            self.replies.append(text)
+            return self
+
+        async def edit_text(self, text, **kwargs):
+            self.replies.append(text)
+
+    def update_for(text):
+        return type("Update", (), {"message": Message(text), "effective_chat": type("Chat", (), {"id": 5})()})()
+
+    monkeypatch.setattr(bridge, "TelegramFacade", FakeFacade)
+    monkeypatch.setattr(bridge, "_get_agent", lambda: object())
+    monkeypatch.setattr(bridge, "TelegramBotTransport", lambda context, placeholder, web_requested=False: None)
+    monkeypatch.setattr(bridge, "feedback_reply", lambda chat_id, text: None)
+    bridge._CHAT_LOCKS.pop(5, None)
+
+    async def scenario():
+        first, second, cancel = update_for("slow"), update_for("next"), update_for("取消")
+        task1 = asyncio.create_task(bridge.handle_agent_v2(first, None, "slow"))
+        await started.wait()
+        task2 = asyncio.create_task(bridge.handle_agent_v2(second, None, "next"))
+        await asyncio.sleep(0)
+        assert second.message.replies == [bridge.QUEUED_NOTICE] and seen == ["slow"]
+        assert await bridge.handle_agent_v2(cancel, None, "取消") is None and cancel.message.replies == ["正在停止当前的处理…"] and bridge._ACTIVE_RUNS[5].is_set()
+        release.set()
+        assert await task1 == "slow-done" and await task2 == "fast-done" and seen == ["slow", "next"] and 5 not in bridge._ACTIVE_RUNS
+
+    asyncio.run(scenario())
+
+    # A provider that rejects the named tool_choice is not asked again; a bare finish payload in text is the finish call.
+    class Lazy(ToolLoop):
+        def __init__(self, llm):
+            super().__init__(llm, LoopLimits(max_rounds=1, max_seconds=30), tools=[Tool("look", "看。", _schema({}), lambda a: "看到了")], finish_parameters=_schema({"answer": {"type": "string"}}, ["answer"]))
+
+    class Refusing(ScriptedLLM):
+        def complete(self, messages, tools=None, tool_choice=None):
+            if tool_choice is not None:
+                self.tool_choices.append(tool_choice)
+                raise RuntimeError('HTTP 400: {"error":{"message":"Thinking mode does not support this tool_choice"}}')
+            return super().complete(messages, tools, tool_choice)
+
+    look = LLMResponse(tool_calls=[ToolCall(id="c1", name="look", arguments={}, raw_arguments="{}")])
+    llm = Refusing([look, LLMResponse(text='{"answer": "x"}'), look, LLMResponse(text='{"answer": "y"}')])
+    first = Lazy(llm).run("s", "t", finish_prompt="finish now")
+    assert first.finished and first.final == {"action": "finish", "answer": "x"} and llm.tool_choice_unsupported is True and len(llm.tool_choices) == 3
+    second = Lazy(llm).run("s", "t", finish_prompt="finish now")
+    assert second.finished and second.final["answer"] == "y" and len(llm.tool_choices) == 5 and llm.tool_choices[-2:] == [None, None]

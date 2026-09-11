@@ -324,6 +324,16 @@ Telegram 上同轮暴露的问题各有一处修改：
 - 强制收尾轮 DeepSeek 对指名 `tool_choice` 返回空或报错：记录错误文本，并去掉 `tool_choice` 再试
   一次（收尾提示仍在消息里）。
 
+**base2**：13 题通过 12（92%），平均 36 秒，0 次回退。剩下的一题是关注列表放量没有点名靠前的
+几只（brief 风格现在要求筛选类问题先点名靠前者）。同轮修的两处：
+
+- Telegram 上运行中发"取消"要等上一条答完才被处理：python-telegram-bot 默认逐条处理更新，V2 的两个
+  处理器改为 `block=False`，桥接层按 chat 加锁排队（第二条问题会先收到"上一条还在处理中"提示），
+  取消词和反馈命令不排队。
+- DeepSeek 思考模式拒绝指名 `tool_choice`（HTTP 400 "Thinking mode does not support this
+  tool_choice"）：第一次遇到后记在客户端上，之后的强制收尾轮不再带它；收尾轮里模型直接回一段 finish
+  参数的 JSON（没有 action 字段）也算 finish。
+
 ## 下一步
 
 1. 换一批留出集。当前 15 条已被看过三轮，把它们并入开发集，从 Telegram 真实问句里

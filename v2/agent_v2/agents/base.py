@@ -306,6 +306,9 @@ class ToolLoop(BoundedLoop):
         # No tool call: a JSON action in text is accepted, anything else is a bad turn.
         try:
             action = json.loads(strip_fence(response.text))
+            if isinstance(action, dict) and not action.get("action") and self.finish_only:
+                # The forced-finish turn asked for finish; a bare payload of its fields is that call.
+                action = {"action": "finish", **action}
             if not isinstance(action, dict) or not action.get("action"):
                 raise ValueError("action must be an object with an action name")
         except Exception:  # noqa: BLE001
@@ -324,12 +327,20 @@ class ToolLoop(BoundedLoop):
         """
 
         forced = {"type": "function", "function": {"name": "finish"}}
+        if getattr(self.llm, "tool_choice_unsupported", False):
+            return self.llm.complete(messages, self.tool_specs())
         try:
             response = self.llm.complete(messages, self.tool_specs(), tool_choice=forced)
         except TypeError:  # a client without the parameter
             return self.llm.complete(messages, self.tool_specs())
         except Exception as exc:  # noqa: BLE001 — the named choice itself may be what the provider refuses
             logger.warning("%s: forced finish with tool_choice failed (%s: %s); retrying without it", self.usage_source_name, type(exc).__name__, str(exc)[:200])
+            if "tool_choice" in str(exc):
+                # DeepSeek's thinking mode rejects a named choice outright; not worth a failed call per loop.
+                try:
+                    self.llm.tool_choice_unsupported = True
+                except Exception:  # noqa: BLE001 — a client that cannot carry the flag
+                    pass
             return self.llm.complete(messages, self.tool_specs())
         if not (getattr(response, "tool_calls", None) or (getattr(response, "text", "") or "").strip()):
             logger.warning("%s: forced finish with tool_choice returned nothing; retrying without it", self.usage_source_name)

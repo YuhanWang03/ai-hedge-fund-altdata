@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import html
 import os
 import threading
@@ -20,6 +21,17 @@ _AGENT_WEB_ENABLED = None
 _AGENT_LOCK = threading.Lock()
 #: chat id -> the cancel event of the run in progress for that chat.
 _ACTIVE_RUNS: dict[int, threading.Event] = {}
+#: chat id -> the lock that runs one question of a chat at a time (the
+#: handlers are non-blocking so cancel words arrive while a run is in progress).
+_CHAT_LOCKS: dict[int, asyncio.Lock] = {}
+QUEUED_NOTICE = "上一条问题还在处理中，这条会在它结束后处理；回复「取消」可先停止上一条。"
+
+
+def chat_lock(chat_id: int) -> asyncio.Lock:
+    lock = _CHAT_LOCKS.get(chat_id)
+    if lock is None:
+        lock = _CHAT_LOCKS[chat_id] = asyncio.Lock()
+    return lock
 _CANCEL_WORDS = {"取消", "停", "停止", "别查了", "stop", "cancel"}
 
 
@@ -224,25 +236,31 @@ async def handle_agent_v2(
     if reply is not None:
         await message.reply_html(html.escape(reply))
         return None
-    placeholder = await message.reply_html("🧭 Agent V2 正在识别问题…\n<i>回复「取消」可停止</i>")
-    transport = TelegramBotTransport(
-        context,
-        placeholder,
-        web_requested=allow_web,
-    )
-    cancel_event = threading.Event()
-    _ACTIVE_RUNS[chat.id] = cancel_event
-    try:
-        return await TelegramFacade(_get_agent()).handle(
-            TelegramMessage(
-                chat_id=chat.id,
-                text=text,
-                message_id=getattr(message, "message_id", None),
-            ),
-            transport,
-            allow_web=allow_web,
-            cancel_event=cancel_event,
+    lock = chat_lock(chat.id)
+    if lock.locked():
+        # One answer per chat at a time, in the order asked; the user is told
+        # the earlier one is still running and can stop it.
+        await message.reply_html(QUEUED_NOTICE)
+    async with lock:
+        placeholder = await message.reply_html("🧭 Agent V2 正在识别问题…\n<i>回复「取消」可停止</i>")
+        transport = TelegramBotTransport(
+            context,
+            placeholder,
+            web_requested=allow_web,
         )
-    finally:
-        if _ACTIVE_RUNS.get(chat.id) is cancel_event:
-            _ACTIVE_RUNS.pop(chat.id, None)
+        cancel_event = threading.Event()
+        _ACTIVE_RUNS[chat.id] = cancel_event
+        try:
+            return await TelegramFacade(_get_agent()).handle(
+                TelegramMessage(
+                    chat_id=chat.id,
+                    text=text,
+                    message_id=getattr(message, "message_id", None),
+                ),
+                transport,
+                allow_web=allow_web,
+                cancel_event=cancel_event,
+            )
+        finally:
+            if _ACTIVE_RUNS.get(chat.id) is cancel_event:
+                _ACTIVE_RUNS.pop(chat.id, None)
