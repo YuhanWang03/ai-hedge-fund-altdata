@@ -371,6 +371,21 @@ QUALITY_CASES: tuple[QualityCase, ...] = (
         tags=("multi_turn", "risk"),
     ),
     QualityCase(
+        "q_followup_expand",
+        "上面第二点展开讲",
+        criteria=("围绕上一条回答里的第二点展开，而不是把整条回答重说一遍", "展开的内容有证据引用"),
+        forbidden=("把上一条回答里没有的新事实当成证据",),
+        preceding=("QCOM有什么风险？",),
+        tags=("multi_turn", "follow_up"),
+    ),
+    QualityCase(
+        "q_followup_why",
+        "为什么这么说？",
+        criteria=("解释上一条估值结论的依据，引用支持它的证据", "没有另起炉灶回答一个新问题"),
+        preceding=("分析NVDA估值",),
+        tags=("multi_turn", "follow_up"),
+    ),
+    QualityCase(
         "q_preference_short",
         "分析AMD估值",
         criteria=("给出了估值倍数并引用来源", "没有展开成多段长文，只有两三条要点、一个风险和一个观察点"),

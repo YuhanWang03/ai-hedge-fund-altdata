@@ -99,6 +99,8 @@ lab：kind=lab 时给 %s 之一；strategy：回测策略 %s 之一；lab_scale�
 periods：问账户盈亏时的口径 day/week/month 数组；each：是否要对每只持仓分别回答（"各自的财报日期"）。
 rank：ranking 时 "high"（最好、涨最多）或 "low"（最差、跌最多），否则空。
 confidence：0 到 1。
+recent_turns：同一会话里之前的问答（问题、回答摘要、涉及的股票），按它补全这句里省略的股票、时间段和对象（"那 SNDK 呢"接着上一轮的比较；"换成一年的口径"接着上一轮的问题）。
+refers_back：这句是针对上一条回答本身的追问——展开某一点（"第二点展开讲"）、追问理由（"为什么这么说"）、换个说法或口径重述、问上一条里提到的某个数字——时为 true，此时 wants 留空、tickers 填上一轮的股票；问新的事实（新的时间段、新的股票、新的数据）时为 false。
 clarification：confidence 低于 0.6、或问题缺了非问不可的信息（哪只股票、什么时间段、加关注还是设提醒、目标价多少）时，给一句简短的反问，问清那一个缺口；其它情况留空字符串。反问要具体（"是想看 TSLA 的行情、新闻还是研究？"），不要泛泛地问"能否详细说明"。
 通过 classify 工具返回；无法调用工具时只输出一个 JSON 对象，字段齐全。""" % ("、".join(WANTS), "/".join(RELEASES), "/".join(MANAGERS), "/".join(LABS), "/".join(STRATEGIES))
 
@@ -130,6 +132,8 @@ class Intent:
     note: str = ""
     #: The one question the classifier would ask before answering, when the wording leaves a gap it cannot fill.
     clarification: str = ""
+    #: The question is about the previous answer itself ("第二点展开讲", "为什么这么说"), not a new lookup.
+    refers_back: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -208,6 +212,7 @@ def parse_intent(raw: Any, *, source: str = "model") -> Intent:
         source=source,
         note=str(raw.get("note") or "")[:120],
         clarification=" ".join(str(raw.get("clarification") or "").split())[:160],
+        refers_back=bool(raw.get("refers_back")),
     )
 
 
@@ -246,6 +251,7 @@ INTENT_TOOL = {
                 "rank": {"type": "string", "enum": ["", "high", "low"]},
                 "confidence": {"type": "number"},
                 "clarification": {"type": "string"},
+                "refers_back": {"type": "boolean"},
             },
             "required": ["kind", "scope", "direction", "wants", "tickers", "portfolio_scope", "confidence"],
         },
@@ -266,6 +272,9 @@ class IntentClassifier:
         from v2.usage_context import usage_source
 
         payload = {"text": request.text, "entities_detected": list(request.entities)}
+        recent = request.metadata.get("recent_turns") if isinstance(request.metadata, dict) else None
+        if recent:
+            payload["recent_turns"] = recent
         try:
             with usage_source("agent_v2.intent"):
                 raw = structured_call(self.llm, _SYSTEM, payload, INTENT_TOOL)

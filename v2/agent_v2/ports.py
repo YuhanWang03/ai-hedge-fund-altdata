@@ -71,6 +71,9 @@ class SessionPort(Protocol):
     def pop_pending(self, session_id: str) -> ExecutionPlan | None:
         ...
 
+    # Optional (read through getattr): recent_turns(session_id, n), previous_turn(session_id),
+    # set_clarification(session_id, original_text, question), pop_clarification(session_id).
+
 
 class ChannelPort(Protocol):
     async def progress(self, event: ProgressEvent) -> None:

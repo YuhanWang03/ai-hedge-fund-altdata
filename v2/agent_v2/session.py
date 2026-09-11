@@ -74,6 +74,9 @@ class ShortTermSession:
         self._frames: dict[str, tuple[float, dict]] = {}
         #: session -> (expires_at, the original question, the clarifying question we asked)
         self._clarifications: dict[str, tuple[float, str, str]] = {}
+        #: session -> (expires_at, the previous turn: question, answer, evidence, results); a
+        #: follow-up about the answer itself ("第二点展开讲") is answered from it, no new calls.
+        self._previous: dict[str, tuple[float, dict]] = {}
         self._lock = threading.Lock()
 
     def _frame(self, session_id: str, ticker: str) -> dict:
@@ -104,9 +107,30 @@ class ShortTermSession:
             frame=self._frame(session_id, result.antecedent) if result.rewritten and result.antecedent else {},
         )
 
+    def recent_turns(self, session_id: str, n: int = 3) -> list[dict]:
+        """The last ``n`` exchanges as the classifier and the synthesizer see them: question, answer digest, tickers."""
+
+        if not session_id:
+            return []
+        return [{"question": turn.query, "answer_digest": turn.answer_digest[:240], "tickers": list(turn.tickers)} for turn in self.store.recent(session_id, n=n)]
+
+    def previous_turn(self, session_id: str) -> dict | None:
+        """The previous answer with the evidence and results it was written from, while the session lasts."""
+
+        with self._lock:
+            entry = self._previous.get(session_id)
+        if entry is None:
+            return None
+        expires_at, turn = entry
+        return dict(turn) if time.monotonic() < expires_at else None
+
     def record(self, result: AgentResult) -> None:
         if not result.request.session_id:
             return
+        if result.results or result.evidence:
+            # Bounded: one turn per session, its evidence capped, replaced on every answered turn.
+            with self._lock:
+                self._previous[result.request.session_id] = (time.monotonic() + self.ttl_seconds, {"question": result.request.original_text or result.request.text, "answer": (result.answer or "")[:4000], "evidence": list(result.evidence)[:60], "results": [item for item in result.results if not item.metadata.get("fan_out_table")][:24] + [item for item in result.results if item.metadata.get("fan_out_table")][:2], "run_id": result.run_id})
         # A question with no ticker ("哪只跌得最多") gets its focus from the
         # answer, so the next turn can refer back to the stock it named.
         tickers = result.request.entities or focus_entities(result.answer)

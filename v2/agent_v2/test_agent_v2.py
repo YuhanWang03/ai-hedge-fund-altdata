@@ -4111,3 +4111,58 @@ def test_low_confidence_classification_asks_one_question_and_reads_the_next_mess
     assert agent.run("确认", session_id="c5").status == RunStatus.COMPLETED and applied and applied[0]["payload"]["target_price"] == 150.0
     no_session = _mutation_agent([]).run("给AMD设个提醒")
     assert no_session.status == RunStatus.WAITING_CLARIFICATION and "没有会话" in no_session.answer
+
+
+def test_follow_up_about_the_previous_answer_is_written_from_its_evidence_without_new_calls():
+    from v2.agent_v2.intent import Intent, IntentClassifier, parse_intent
+
+    assert parse_intent({"kind": "lookup", "confidence": 0.9, "refers_back": True}).refers_back is True and not parse_intent({"kind": "lookup", "confidence": 0.9}).refers_back
+
+    calls: list[str] = []
+
+    def research(arguments, context):
+        calls.append(arguments["ticker"])
+        return ToolEnvelope("research.stock", ResultStatus.COMPLETED, subject="QCOM", evidence=[EvidenceItem("R1", "QCOM", "QCOM 苹果基带订单将在 2027 年前逐步流失", source_id="research_engine"), EvidenceItem("R2", "QCOM", "QCOM 手机业务占营收 60%", source_id="fd_metrics")], metadata={"narrative": "风险一：苹果基带订单流失 [R1]。风险二：手机依赖 [R2]。"})
+
+    class Scripted:
+        def __init__(self):
+            self.payloads: list[dict] = []
+
+        def classify(self, request):
+            self.payloads.append(dict(request.metadata))
+            if "展开" in request.text:
+                return Intent(kind="research", tickers=("QCOM",), confidence=0.9, source="model", refers_back=True)
+            return Intent(kind="research", wants=("risk",), tickers=("QCOM",), confidence=0.9, source="model")
+
+    registry = CapabilityRegistry(default_catalog())
+    registry.register("research.stock", research)
+    llm = ScriptedLLM([LLMResponse(text="风险一：苹果基带订单流失 [R1]。风险二：手机依赖，手机业务占营收 60% [R2]。"), LLMResponse(text="第二点是手机依赖：QCOM 手机业务占营收 60% [R2]，所以基带订单流失 [R1] 会直接影响收入。")])
+    classifier = Scripted()
+    agent = AgentV2(catalog=default_catalog(), registry=registry, classifier=classifier, session=ShortTermSession(), synthesizer=LLMEvidenceSynthesizer(llm), config=AgentV2Config(record_sub_agents=False, record_capabilities=False, debate=False))
+    first = agent.run("QCOM有什么风险？", session_id="m1")
+    assert first.status in {RunStatus.COMPLETED, RunStatus.PARTIAL} and calls == ["QCOM"]
+    previous = agent.session.previous_turn("m1")
+    assert previous["question"] == "QCOM有什么风险？" and [item.id for item in previous["evidence"]] == ["R1", "R2"] and previous["run_id"] == first.run_id
+    assert agent.session.recent_turns("m1") == [{"question": "QCOM有什么风险？", "answer_digest": first.answer[:240], "tickers": ["QCOM"]}]
+
+    second = agent.run("上面第二点展开讲", session_id="m1")
+    assert calls == ["QCOM"]  # no new capability call
+    assert second.status == RunStatus.COMPLETED and second.answer.startswith("第二点是手机依赖") and [item.id for item in second.evidence] == ["R1", "R2"]
+    assert second.synthesis["follow_up"] == {"previous_run_id": first.run_id, "evidence": 2} and second.plan.assumptions[0].startswith("follow_up:")
+    assert classifier.payloads[-1]["recent_turns"][0]["question"] == "QCOM有什么风险？"  # the classifier saw the conversation
+    sent = json.loads(llm.calls[-1][1]["content"])
+    assert sent["previous_answer"] == first.answer and sent["previous_question"] == "QCOM有什么风险？" and sent["recent_turns"][0]["question"] == "QCOM有什么风险？" and "previous_answer" in llm.calls[-1][0]["content"]
+    assert agent.session.previous_turn("m1")["run_id"] == second.run_id  # the follow-up becomes the previous turn
+
+    # Without a previous turn the flag is ignored and the planner runs as usual; the live classifier sends recent_turns.
+    fresh = AgentV2(catalog=default_catalog(), registry=registry, classifier=Scripted(), session=ShortTermSession(), config=AgentV2Config(record_sub_agents=False, record_capabilities=False))
+    assert fresh.run("上面第二点展开讲", session_id="m2").results and calls == ["QCOM", "QCOM"]
+    seen: list[dict] = []
+
+    class Recording:
+        def complete(self, messages, tools=None, tool_choice=None):
+            seen.append(json.loads(messages[1]["content"]))
+            return LLMResponse(text='{"kind":"lookup","scope":"none","direction":"none","wants":[],"tickers":[],"portfolio_scope":false,"confidence":0.9}')
+
+    IntentClassifier(Recording()).classify(normalize_request("那它呢", metadata={"recent_turns": [{"question": "AAPL今天为什么涨？", "answer_digest": "涨了", "tickers": ["AAPL"]}]}))
+    assert seen[0]["recent_turns"][0]["tickers"] == ["AAPL"]

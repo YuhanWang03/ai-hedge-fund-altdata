@@ -471,7 +471,7 @@ class LLMEvidenceSynthesizer:
             payload = request.text
         else:
             system = self._research_system(plan, results, preferences=request.metadata.get("preferences"))
-            payload = self._payload(request.text, plan, results, evidence, preferences=request.metadata.get("preferences"))
+            payload = self._payload(request.text, plan, results, evidence, preferences=request.metadata.get("preferences"), conversation=request.metadata)
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": payload},
@@ -573,6 +573,7 @@ class LLMEvidenceSynthesizer:
         system += "\n输入里的 user_preferences 是用户之前说过的偏好（口径、篇幅、关注点），按它组织回答，但不能因此违反证据和引用规则。"
         if preferences and short_answer_limit(preferences):
             system += f"\n用户要求回答短一点：全文不超过 {short_answer_limit(preferences)} 个字符，只保留两三条最有决策价值的事实、一个风险和一个观察点，保留引用。"
+        system += "\n输入里的 recent_turns 是同一会话之前的问答；previous_answer 是上一条回答的全文。用户追问上一条回答（展开某一点、问为什么、换口径）时，围绕被追问的那一点回答：先复述那一点是什么，再用证据展开或解释，不要把整条回答重说一遍；上一条里没有证据支撑的部分要明说。"
         return system
 
     def revise(self, request, plan, results, evidence, answer: str, objections: list[dict[str, Any]]) -> str | None:
@@ -649,10 +650,12 @@ class LLMEvidenceSynthesizer:
             raise ValueError("synthesizer returned an empty answer")
         return _normalize_result_citations(answer, results, evidence)
 
-    def _payload(self, query: str, plan: ExecutionPlan, results: list[ToolEnvelope], evidence, preferences: list[str] | None = None) -> str:
+    def _payload(self, query: str, plan: ExecutionPlan, results: list[ToolEnvelope], evidence, preferences: list[str] | None = None, conversation: dict | None = None) -> str:
         data = {
             "query": query[:2000],
             **({"user_preferences": [str(value)[:120] for value in preferences][:8]} if preferences else {}),
+            **({"previous_question": str(conversation.get("previous_question") or "")[:300], "previous_answer": str(conversation.get("previous_answer") or "")[:4000]} if conversation and conversation.get("previous_answer") else {}),
+            **({"recent_turns": [{"question": str(turn.get("question") or "")[:200], "answer_digest": str(turn.get("answer_digest") or "")[:240]} for turn in list(conversation.get("recent_turns") or [])[-2:]]} if conversation and conversation.get("recent_turns") else {}),
             "objective": plan.objective[:2000],
             "response_style": "detailed" if _DETAILED_ANSWER.search(query) else "brief",
             "response_intent": _response_intent(plan, results),

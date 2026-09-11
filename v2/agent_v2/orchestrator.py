@@ -165,10 +165,14 @@ class AgentV2:
                 text = f"{original_text}（补充：{text}）"
                 resolution_metadata = {"clarified": True, "clarification": question}
                 clarified = True
+            recent_turns = getattr(self.session, "recent_turns", lambda *_: [])(session_id, 3)
+            if recent_turns:
+                resolution_metadata = {**resolution_metadata, "recent_turns": recent_turns}
             resolution = self.session.resolve(session_id, text)
             resolved_text = resolution.text
             if resolution.rewritten:
                 resolution_metadata = {
+                    **resolution_metadata,
                     "rewritten": True,
                     "antecedent": resolution.antecedent,
                     "resolution_note": resolution.note,
@@ -200,6 +204,12 @@ class AgentV2:
             plan = ExecutionPlan(objective=request.text, route=decision.kind, budget=BudgetClass.DIRECT, direct_answer=intent.clarification, assumptions=(f"clarification: confidence {intent.confidence}",))
             self._record_intent(run_id, request, intent, plan, classified_ms)
             return self._ask(run_id, request, decision, plan, intent.clarification, started, asked_about=text)
+        previous = getattr(self.session, "previous_turn", lambda *_: None)(session_id) if self.session is not None and session_id else None
+        if intent.refers_back and intent.source == "model" and previous and (previous.get("evidence") or previous.get("results")):
+            # "第二点展开讲": the answer is written from the previous turn's evidence, no new calls.
+            plan = ExecutionPlan(objective=request.text, route=decision.kind, budget=BudgetClass.DIRECT, answer_mode=AnswerMode.RESEARCH_GROUNDED, assumptions=("follow_up: 针对上一条回答的追问，用上一轮的证据回答；上一条回答在 previous_answer 里。",))
+            self._record_intent(run_id, request, intent, plan, classified_ms)
+            return self._answer_from_previous(run_id, request, decision, plan, previous, on_progress, started)
         plan = self.planner.plan(request, decision)
         self._emit(on_progress, run_id, RunStatus.PLANNED, f"planned {len(plan.tasks)} task(s)")
         self._record_intent(run_id, request, intent, plan, classified_ms)
@@ -272,6 +282,21 @@ class AgentV2:
             payload=dict(task.arguments.get("payload") or {}),
             description=task.purpose or task.capability,
         )
+
+    def _answer_from_previous(self, run_id, request, decision, plan, previous: dict, on_progress, started) -> AgentResult:
+        """Answer a follow-up about the previous answer from that turn's evidence; verified like any answer."""
+
+        results = list(previous.get("results") or [])
+        evidence = list(previous.get("evidence") or [])
+        request.metadata["previous_answer"] = str(previous.get("answer") or "")[:4000]
+        request.metadata["previous_question"] = str(previous.get("question") or "")[:300]
+        self._emit(on_progress, run_id, RunStatus.SYNTHESIZING, "answering from the previous turn's evidence")
+        answer = self.synthesizer.synthesize(request, plan, results, evidence)
+        synthesis = {**self._synthesis_diagnostics(), "follow_up": {"previous_run_id": previous.get("run_id"), "evidence": len(evidence)}}
+        self._emit(on_progress, run_id, RunStatus.VERIFYING, "verifying citations")
+        verification = verify_answer(answer, evidence, answer_mode=plan.answer_mode, results=results, judge=getattr(self.synthesizer, "judge", None))
+        status = RunStatus.COMPLETED if verification.ok else RunStatus.PARTIAL
+        return self._result(run_id, request, decision, plan, status, answer, plan.answer_mode, started, results=results, evidence=evidence, verification=verification, synthesis=synthesis)
 
     def _should_clarify(self, intent) -> bool:
         """A model classification below the threshold that carries a question, on a question that could go several ways."""
