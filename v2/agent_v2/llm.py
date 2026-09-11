@@ -541,7 +541,7 @@ class LLMEvidenceSynthesizer:
         """Enforce a "回答短一点" preference: one compression round when the verified answer is over the limit; the long answer stays if the short one fails verification."""
 
         limit = short_answer_limit(preferences or [])
-        if not limit or len(answer) <= limit:
+        if not limit or visible_length(answer) <= limit:
             return answer
         from v2.agent_v2.verification import verify_answer
 
@@ -558,7 +558,7 @@ class LLMEvidenceSynthesizer:
             short = self._complete(short, evidence, results)
             report = verify_answer(short, evidence, answer_mode=plan.answer_mode, results=results, judge=self.judge)
             self._record_report("shorten", report)
-            if report.ok and len(short) <= limit * 1.2:
+            if report.ok and visible_length(short) <= limit * 1.2:
                 return short
         except (LLMError, ValueError, TypeError) as exc:
             self._record_attempt("shorten_error", ok=False, warnings=(f"{type(exc).__name__}: {str(exc)[:200]}",))
@@ -771,6 +771,14 @@ _NEARBY_UNGROUNDED = re.compile(r"^引用未支持邻近数字：([^（]+)")
 
 _SHORT_WORDS = ("短一点", "简短", "简洁", "少一点", "精简", "short", "brief", "concise", "不要太长", "别太长")
 SHORT_ANSWER_CHARS = 500
+
+
+def visible_length(answer: str) -> int:
+    """The answer's length as the user sees it: citation markers become footnote numbers on every surface."""
+
+    from v2.agent_v2.verification import _CITATION
+
+    return len(" ".join(_CITATION.sub("", answer or "").split()))
 
 
 def short_answer_limit(preferences: list[str]) -> int:

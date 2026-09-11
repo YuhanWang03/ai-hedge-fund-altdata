@@ -3906,8 +3906,9 @@ def test_p1_first_pass_rate_restated_figures_compare_rows_filings_plan_short_pre
     # 4. A filings question lists the dated filings first, then the engine's filings module.
     request = normalize_request("MU最近有什么SEC申报？")
     plan = RulePlanner().plan(request, route(request, intent=Intent(kind="lookup", scope="recent", wants=("filings",), tickers=("MU",), source="model")))
-    assert [(task.capability, task.arguments.get("focus")) for task in plan.tasks] == [("filings.recent", None), ("research.stock", "filings")] and plan.tasks[0].arguments["forms"][0] == "8-K"
-    assert [task.capability for task in RulePlanner().plan(request, route(request)).tasks] == ["filings.recent", "research.stock"]  # the recorded label
+    assert [(task.capability, task.arguments.get("focus")) for task in plan.tasks] == [("filings.recent", None), ("filings.read_events", None), ("research.stock", "filings")] and plan.tasks[0].arguments["forms"][0] == "8-K"
+    assert plan.tasks[1].depends_on == ("filings-recent-MU",) and not plan.tasks[1].required and plan.tasks[1].arguments["max_filings"] == 2
+    assert [task.capability for task in RulePlanner().plan(request, route(request)).tasks] == ["filings.recent", "filings.read_events", "research.stock"]  # the recorded label
 
     # 5. "回答短一点" becomes a character limit and a compression round; a long answer stays when the short one fails.
     assert short_answer_limit(["回答短一点"]) == 500 and short_answer_limit(["用收盘价口径"]) == 0 and short_answer_limit(["keep it brief"]) == 500
@@ -3924,3 +3925,46 @@ def test_p1_first_pass_rate_restated_figures_compare_rows_filings_plan_short_pre
 
     # 6. The risk focus no longer pulls the engine's supply-chain discovery.
     assert "supply_chain" not in _FOCUS_MODULES["risk"] and "risk" not in _FOCUS_MODULES["risk"] and "sec" in _FOCUS_MODULES["risk"]
+
+
+def test_performance_fan_out_gets_a_ranking_table_and_compare_rows_read_module_metrics():
+    from v2.agent_v2.adapters.research import _comparison_table, _envelope
+    from v2.agent_v2.execution import _fan_out_table
+    from v2.agent_v2.intent import Intent
+    from v2.agent_v2.llm import visible_length
+
+    def perf(ticker, returns, intraday=False):
+        return ToolEnvelope("market.performance", ResultStatus.COMPLETED, subject=ticker, metrics={"returns": returns, "is_intraday": intraday}, evidence=[EvidenceItem(f"r-{ticker}", ticker, "x", source_id="market_data")])
+
+    table = _fan_out_table("performance-each", [perf("AAPL", {"1d": 0.01, "5d": 0.021, "1m": 0.10}), perf("PLTR", {"1d": -0.02, "5d": -0.0815, "1m": 0.03}), perf("AMD", {"1d": 0.005, "5d": 0.1317}, intraday=True)])
+    assert table is not None and table.metadata["fan_out_table"] and [item.metadata["window"] for item in table.evidence] == ["1d", "5d", "1m"]
+    five = next(item for item in table.evidence if item.metadata["window"] == "5d")
+    assert five.claim == "近 5 日回报排序：AMD +13.17%、AAPL +2.10%、PLTR -8.15%；最高 AMD，最低 PLTR。" and five.id == "evidence-ranking-5d-performance-each"
+    assert "盘中口径" in table.evidence[0].claim and _fan_out_table("p", [perf("AAPL", {"5d": 0.1})]) is None
+
+    # The engine appends the table after the fan-out; the week's ranking fans out over every holding without the since-purchase order.
+    registry = CapabilityRegistry(default_catalog())
+    card = ToolEnvelope("account.portfolio", ResultStatus.COMPLETED, subject="me", evidence=[EvidenceItem("C", "me", "card", source_id="account.portfolio")], metadata={"tickers": ["AAPL", "PLTR", "AMD"], "positions": [{"ticker": "AAPL", "pl_pct": 0.3}, {"ticker": "PLTR", "pl_pct": -0.2}, {"ticker": "AMD", "pl_pct": 0.1}]})
+    registry.register("account.portfolio", lambda a, c: card)
+    registry.register("market.performance", lambda a, c: perf(a["ticker"], {"5d": {"AAPL": 0.02, "PLTR": -0.08, "AMD": 0.13}[a["ticker"]]}))
+    week = Intent(kind="lookup", scope="recent", wants=("portfolio", "ranking", "performance"), portfolio_scope=True, rank="high", source="model")
+    request = normalize_request("持仓里这周谁涨得最好？")
+    plan = RulePlanner().plan(request, route(request, intent=week))
+    each = next(task for task in plan.tasks if task.capability == "market.performance")
+    assert "rank" not in each.fan_out and each.fan_out["max"] == 12
+    outcome = ExecutionEngine(registry).run(plan, ExecutionContext("run", request, BudgetClass.PORTFOLIO))
+    tables = [r for r in outcome.results if r.metadata.get("fan_out_table")]
+    assert len(tables) == 1 and "最高 AMD，最低 PLTR" in tables[0].evidence[0].claim and outcome.ledger.get(tables[0].evidence[0].id) is not None
+    since = Intent(kind="lookup", scope="none", wants=("portfolio", "ranking"), portfolio_scope=True, rank="low", source="model")
+    plan = RulePlanner().plan(request, route(request, intent=since))
+    assert [task.capability for task in plan.tasks] == ["account.portfolio"]  # the card alone answers "哪只跌得最惨"
+
+    # Compare rows read the engine's own metric names and the modules' metrics dicts.
+    mu = _envelope({"ticker": "MU", "status": "COMPLETED", "run_id": "r1", "evidence_index": [{"id": "e-mu-1", "ticker": "MU", "module": "valuation", "claim": "TTM P/E is 12.3x.", "metrics": {"pe_ttm": 12.3}, "source_ids": ["fd_metrics"], "verified": True}], "sources": [{"id": "fd_metrics", "title": "m", "url": ""}], "modules": {"valuation": {"metrics": {"forward_pe": 9.8, "ev_ebitda": 6.1, "note": "x"}}, "earnings": {"metrics": {"beat_rate": 0.75}}}, "production_diagnostics": {"modules": {}}}, "research.stock")
+    sndk = _envelope({"ticker": "SNDK", "status": "COMPLETED", "run_id": "r2", "evidence_index": [{"id": "e-s-1", "ticker": "SNDK", "module": "valuation", "claim": "TTM P/E is 30.1x.", "metrics": {"pe_ttm": 30.1}, "source_ids": ["fd_metrics"], "verified": True}], "sources": [{"id": "fd_metrics", "title": "m", "url": ""}], "modules": {"valuation": {"metrics": {"forward_pe": 22.0}}}, "production_diagnostics": {"modules": {}}}, "research.stock")
+    assert mu.metadata["module_metrics"] == {"valuation": {"forward_pe": 9.8, "ev_ebitda": 6.1}, "earnings": {"beat_rate": 0.75}}
+    claims = [row.claim for row in _comparison_table([mu, sndk])]
+    assert claims == ["同口径对照 市盈率（TTM）：MU 12.3、SNDK 30.1。", "同口径对照 前瞻市盈率：MU 9.8、SNDK 22.0。"]
+
+    # The visible length ignores citation markers.
+    assert visible_length("AAPL 涨了 [evidence-market-price-42f5c41951e36ef1]。") == len("AAPL 涨了 。")

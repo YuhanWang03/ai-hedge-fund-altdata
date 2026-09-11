@@ -27,7 +27,7 @@ from v2.agent_v2.models import (
 from v2.agent_v2.ports import CapabilityHandler, ProgressSink
 
 #: Upper bound on children one fan-out task may spawn, whatever the source lists.
-FAN_OUT_MAX = 8
+FAN_OUT_MAX = 12
 
 _TASK_LIMITS = {
     BudgetClass.DIRECT: 1,
@@ -165,6 +165,52 @@ class ExecutionOutcome:
     #: ``completed`` or ``deadline``; the orchestrator surfaces it on the result.
     stop_reason: str = "completed"
     elapsed_ms: int = 0
+
+
+_WINDOW_LABELS = {"1d": "当日", "5d": "近 5 日", "1m": "近 1 月", "3m": "近 3 月", "1y": "近 1 年"}
+
+
+def _fan_out_table(parent_id: str, children: list[ToolEnvelope]) -> ToolEnvelope | None:
+    """One citeable ranking per return window across a performance fan-out.
+
+    Twelve per-holding envelopes leave "who did best this week" to the
+    synthesizer's arithmetic; the table is the sorted list under one id, so
+    the answer cites a row instead of reconstructing the order.
+    """
+
+    rows = [child for child in children if child.capability == "market.performance" and child.ok and isinstance(child.metrics.get("returns"), dict)]
+    if len(rows) < 2:
+        return None
+    intraday = any(child.metrics.get("is_intraday") for child in rows)
+    evidence: list[EvidenceItem] = []
+    for window, label in _WINDOW_LABELS.items():
+        pairs = [(child.subject, float(child.metrics["returns"][window])) for child in rows if isinstance(child.metrics["returns"].get(window), (int, float))]
+        if len(pairs) < 2:
+            continue
+        pairs.sort(key=lambda pair: pair[1], reverse=True)
+        note = "（截至查询时，盘中口径）" if intraday and window == "1d" else ""
+        claim = f"{label}回报排序{note}：" + "、".join(f"{ticker} {value:+.2%}" for ticker, value in pairs) + f"；最高 {pairs[0][0]}，最低 {pairs[-1][0]}。"
+        evidence.append(
+            EvidenceItem(
+                id=f"evidence-ranking-{window}-{parent_id}",
+                entity=",".join(ticker for ticker, _ in pairs),
+                claim=claim,
+                metric=f"return_{window}",
+                source_id="market_data",
+                source_title="行情排序",
+                metadata={"citation_kind": "metrics", "ranking": True, "window": window, "verified": True, "returns": dict(pairs)},
+            )
+        )
+    if not evidence:
+        return None
+    return ToolEnvelope(
+        "market.performance",
+        ResultStatus.COMPLETED,
+        subject=parent_id,
+        summary=evidence[0].claim,
+        evidence=evidence,
+        metadata={"fan_out_table": True, "answer_guidance": "排名问题先引用对应窗口的“回报排序”那条证据点名最高和最低，再谈个股。"},
+    )
 
 
 class CapabilityRegistry:
@@ -453,5 +499,10 @@ class ExecutionEngine:
                 break
             adopt_requests()
 
+        for parent_id, child_ids in expanded.items():
+            table = _fan_out_table(parent_id, [completed[child] for child in child_ids if child in completed])
+            if table is not None:
+                outcome.results.append(table)
+                outcome.ledger.ingest(table)
         outcome.elapsed_ms = int((time.monotonic() - started) * 1000)
         return outcome

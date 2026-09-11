@@ -8071,6 +8071,7 @@
    "answer_mode": "research_grounded",
    "capabilities": [
     "filings.recent",
+    "filings.read_events",
     "research.stock"
    ],
    "direct_answer": "",

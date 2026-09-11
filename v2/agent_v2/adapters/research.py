@@ -187,6 +187,22 @@ def _core_failures(result: dict[str, Any]) -> list[str]:
     return [name for name in _CORE_MODULES if str((diagnostics.get(name) or {}).get("status") or "").upper() == "FAILED"]
 
 
+def _module_metrics(result: dict[str, Any]) -> dict[str, dict[str, float]]:
+    """The numeric metrics of the valuation, fundamental and earnings modules, for side-by-side rows."""
+
+    modules = result.get("modules") or {}
+    out: dict[str, dict[str, float]] = {}
+    for name in _TABLE_MODULES:
+        module = modules.get(name) if isinstance(modules, dict) else None
+        metrics = module.get("metrics") if isinstance(module, dict) else None
+        if not isinstance(metrics, dict):
+            continue
+        numeric = {str(key): float(value) for key, value in metrics.items() if isinstance(value, (int, float)) and not isinstance(value, bool) and key in _COMPARABLE_METRICS}
+        if numeric:
+            out[name] = numeric
+    return out
+
+
 def _envelope(result: dict[str, Any], capability: str) -> ToolEnvelope:
     findings = list(result.get("research_findings") or [])[:12]
     limitations = _limitations(result)
@@ -211,17 +227,20 @@ def _envelope(result: dict[str, Any], capability: str) -> ToolEnvelope:
         limitations=limitations,
         run_id=str(result.get("run_id") or ""),
         cache_hit=bool(result.get("from_cache")),
-        metadata={"requested_modules": result.get("requested_modules", []), "module_status": result.get("module_status", {})},
+        metadata={"requested_modules": result.get("requested_modules", []), "module_status": result.get("module_status", {}), "module_metrics": _module_metrics(result)},
     )
 
 
 #: Metric names worth a side-by-side row, with the label the row uses.
 _COMPARABLE_METRICS = {
-    "pe_ratio": "市盈率（TTM）", "trailing_pe": "市盈率（TTM）", "forward_pe": "前瞻市盈率", "ps_ratio": "市销率", "pb_ratio": "市净率", "ev_ebitda": "EV/EBITDA", "peg_ratio": "PEG",
+    "pe_ttm": "市盈率（TTM）", "pe_ratio": "市盈率（TTM）", "trailing_pe": "市盈率（TTM）", "forward_pe": "前瞻市盈率", "peg": "PEG", "peg_ratio": "PEG",
+    "price_to_sales": "市销率", "ps_ratio": "市销率", "ev_sales": "EV/销售额", "ev_ebitda": "EV/EBITDA", "fcf_yield": "自由现金流收益率",
     "revenue_growth": "营收增速", "revenue_growth_yoy": "营收增速", "eps_growth": "每股收益增速", "earnings_growth": "盈利增速",
     "gross_margin": "毛利率", "operating_margin": "营业利润率", "net_margin": "净利率", "roic": "ROIC", "roe": "ROE", "free_cash_flow_margin": "自由现金流利润率",
-    "eps_surprise_pct": "最新每股收益超预期", "eps_surprise": "最新每股收益超预期", "debt_to_equity": "负债权益比",
+    "latest_eps_surprise": "最新每股收益超预期", "eps_surprise_pct": "最新每股收益超预期", "eps_surprise": "最新每股收益超预期", "beat_rate": "财报超预期比例", "debt_to_equity": "负债权益比",
 }
+#: Engine modules whose own metrics dict is worth reading for the rows (evidence rows carry only a few of them).
+_TABLE_MODULES = ("valuation", "fundamental", "earnings")
 
 
 def _format_metric(name: str, value: Any) -> str:
@@ -250,9 +269,18 @@ def _comparison_table(envelopes: list[ToolEnvelope]) -> list[EvidenceItem]:
             metrics = item.metadata.get("metrics") if isinstance(item.metadata, dict) else None
             for name, value in (metrics or {}).items():
                 label = _COMPARABLE_METRICS.get(str(name))
-                if label is None or value is None or not isinstance(value, (int, float)):
+                if label is None or value is None or not isinstance(value, (int, float)) or isinstance(value, bool):
                     continue
                 values.setdefault(label, {}).setdefault(envelope.subject, (_format_metric(str(name), value), item.id))
+        # The modules' own metrics (forward P/E, EV/EBITDA, beat rate) are not evidence rows; the limitations item stands for the module.
+        module_metrics = envelope.metadata.get("module_metrics") if isinstance(envelope.metadata, dict) else None
+        anchor = next((item.id for item in envelope.evidence if item.metadata.get("citation_kind") == "metrics"), envelope.evidence[0].id if envelope.evidence else "")
+        for module_name, metrics in (module_metrics or {}).items():
+            for name, value in (metrics or {}).items():
+                label = _COMPARABLE_METRICS.get(str(name))
+                if label is None or value is None or not isinstance(value, (int, float)) or isinstance(value, bool):
+                    continue
+                values.setdefault(label, {}).setdefault(envelope.subject, (_format_metric(str(name), value), anchor))
     rows: list[EvidenceItem] = []
     tickers = [envelope.subject for envelope in envelopes]
     for label, per_ticker in values.items():

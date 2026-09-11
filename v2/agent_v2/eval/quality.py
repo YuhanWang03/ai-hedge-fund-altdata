@@ -128,9 +128,12 @@ def grade(case: QualityCase, result: AgentResult, judge: Judge | None) -> Qualit
         problems.append("missing agents: " + ", ".join(sorted(set(case.expected_agents) - ran)))
     if not sources_ok:
         problems.append("cited sources lack " + "/".join(case.must_cite))
-    length_ok = not case.max_chars or len(result.answer or "") <= case.max_chars
+    from v2.agent_v2.llm import visible_length
+
+    shown = visible_length(result.answer or "")
+    length_ok = not case.max_chars or shown <= case.max_chars
     if not length_ok:
-        problems.append(f"answer {len(result.answer or '')} chars > {case.max_chars}")
+        problems.append(f"answer {shown} chars > {case.max_chars}")
     criteria_rows = [{"text": text, "met": None, "quote": ""} for text in case.criteria]
     forbidden_rows = [{"text": text, "asserted": None, "quote": ""} for text in case.forbidden]
     judged = not (case.criteria or case.forbidden)  # nothing to judge: the deterministic checks decide

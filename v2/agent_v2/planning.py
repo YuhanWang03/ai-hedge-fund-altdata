@@ -308,11 +308,11 @@ class IntentPlanner:
         tasks: list[PlanTask] = []
         ids: set[str] = set()
 
-        def add(task_id: str, capability: str, arguments: dict | None = None, *, purpose: str = "", depends_on: tuple[str, ...] = (), fan_out: dict | None = None) -> None:
+        def add(task_id: str, capability: str, arguments: dict | None = None, *, purpose: str = "", depends_on: tuple[str, ...] = (), fan_out: dict | None = None, required: bool = True) -> None:
             if task_id in ids:
                 return
             ids.add(task_id)
-            tasks.append(PlanTask(task_id, capability, dict(arguments or {}), depends_on=depends_on, purpose=purpose, fan_out=fan_out))
+            tasks.append(PlanTask(task_id, capability, dict(arguments or {}), depends_on=depends_on, purpose=purpose, fan_out=fan_out, required=required))
 
         wants = set(intent.wants)
         managers, ark_etfs = list(intent.managers[:2]), list(intent.ark_etfs[:2])
@@ -324,7 +324,8 @@ class IntentPlanner:
         account_topics: set[str] = set()
 
         # account-level topics
-        if "performance" in wants and not tickers and not watchlist_scope and not managers and "market" not in wants:
+        # A ranking over the holdings ("这周谁涨得最好") needs each holding's return, not the account's P&L.
+        if "performance" in wants and not tickers and not watchlist_scope and not managers and "market" not in wants and not ("ranking" in wants and intent.scope in {"today", "recent", "window"}):
             for period in intent.periods or ("day",):
                 add(f"account-performance-{period}", "account.performance", {"period": period}, purpose=f"account P&L for the {period}")
             account_topics.add("performance")
@@ -381,7 +382,8 @@ class IntentPlanner:
             since = (date.today() - timedelta(days=45)).isoformat()
             for ticker in tickers[:4]:
                 add(f"filings-recent-{ticker}", "filings.recent", {"ticker": ticker, "since": since, "forms": ["8-K", "6-K", "4", "10-Q", "10-K"]}, purpose=f"dated filings for {ticker} over the last 45 days")
-            # the engine's own filings module (focus=filings) still runs below for what the filings say
+                # What the filings say: the reader quotes the latest two; the engine's filings module (focus=filings) still runs below.
+                add(f"filings-read-{ticker}", "filings.read_events", {"ticker": ticker, "since": since, "max_filings": 2}, purpose=f"what {ticker}'s latest filings disclosed", depends_on=(f"filings-recent-{ticker}",), required=False)
         # per-ticker topics
         explain = "attribution" in wants
         # A want answered at the account level is not a research focus, except
@@ -418,8 +420,11 @@ class IntentPlanner:
                 add("account-portfolio", "account.portfolio", purpose="identify positions and weights")
             if per_ticker:
                 fan_out = {"from": source, "field": "tickers", "argument": "ticker", "max": 8}
-                if rank is not None:
+                if rank is not None and (explain or intent.scope in {"none", "since_purchase"}):
                     fan_out["rank"] = rank
+                elif rank is not None:
+                    # "这周谁涨得最好" ranks by the week's return, which the card does not carry: look at every holding.
+                    fan_out["max"] = 12
                 if explain:
                     add("move-each", "market.explain_move", {}, purpose="explain each holding's recent move", depends_on=(source,), fan_out=dict(fan_out))
                 elif "performance" in wants and not focuses:
