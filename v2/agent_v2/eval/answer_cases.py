@@ -189,12 +189,12 @@ ANSWER_CASES: tuple[AnswerCase, ...] = (
     ),
     AnswerCase(
         "m_count_leak",
-        "internal attribution counts must not reach the user",
+        "internal attribution counts reaching the user is a soft warning: reported, not a rejection",
         lambda: move_envelope(confirmed=False),
         lambda env: f"归因结果：0 个直接驱动。[{_role(env, 'attribution_assessment')[0].id}]",
-        False,
+        True,
         AnswerMode.RESEARCH_GROUNDED,
-        expected_warning="归因计数",
+        expected_warning="（提示）将内部归因计数",
         judge=asserting_judge("内部统计口径"),
     ),
 )

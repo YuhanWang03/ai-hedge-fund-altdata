@@ -100,6 +100,10 @@ class StructuredLLMPlanner:
         # plan built around that frame; the model would plan the bare words.
         if any(str(note).startswith("context_frame:") for note in deterministic.assumptions):
             return deterministic
+        # A briefing is a fixed template (macro, earnings, risk, watchlist);
+        # the model replaced it with one open-ended investigation.
+        if intent.wants_any("briefing"):
+            return deterministic
         # Rules own market questions and non-thin lookups; the model gets
         # research and lab routes, plus lookups the rules could not resolve
         # beyond a scope read (the holdout wording the rules never saw).

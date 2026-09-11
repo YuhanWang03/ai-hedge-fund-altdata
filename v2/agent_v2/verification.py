@@ -32,6 +32,10 @@ from typing import Any, Callable
 
 from v2.agent_v2.models import AnswerMode, EvidenceItem, ToolEnvelope, VerificationReport
 
+#: A ``forbid_claim`` rule marked ``"soft": True`` produces a warning with this
+#: prefix; it is reported but does not fail verification.
+SOFT_PREFIX = "（提示）"
+
 _CITATION = re.compile(r"\[([A-Za-z0-9_.:-]+)\]")
 _SENTENCE = re.compile(r"[^。！？!?\n]+(?:[。！？!?]+|$)(?:\s*\[[A-Za-z0-9_.:-]+\])*")
 
@@ -83,8 +87,9 @@ def verify_answer(
             warnings.extend(_sentence_warnings(answer or "", evidence, results or [], grounding, claims))
             warnings.extend(_answer_warnings(answer or "", evidence, results or [], claims))
             warnings.extend(_judged_warnings(claims, judge))
+    blocking = [warning for warning in warnings if not warning.startswith(SOFT_PREFIX)]
     return VerificationReport(
-        ok=not unknown and not warnings and not ungrounded,
+        ok=not unknown and not blocking and not ungrounded,
         unknown_citations=unknown,
         ungrounded_numbers=ungrounded,
         traced_numbers=traced,
@@ -271,7 +276,7 @@ def _sentence_warnings(answer: str, evidence: list[EvidenceItem], results: list[
                     # The judge sees the evidence the rule is about, so a sentence
                     # that also cites a confirmed driver is not read as calling
                     # this candidate confirmed.
-                    claims.append({"id": f"evidence:{item.id}:{len(claims)}", "text": f"证据：{item.claim[:300]}\n回答：{' '.join(citing)}", "claim": str(claim), "warning": warning})
+                    claims.append({"id": f"evidence:{item.id}:{len(claims)}", "text": f"证据：{item.claim[:300]}\n回答：{' '.join(citing)}", "claim": str(claim), "warning": warning, "soft": bool(rule.get("soft"))})
     return warnings
 
 
@@ -285,7 +290,8 @@ def _judged_warnings(claims: list[dict[str, str]], judge: Judge | None) -> list[
     for row in claims:
         quote = asserted.get(row["id"])
         if quote is not None:
-            warnings.append(row["warning"] + (f"（“{quote}”）" if quote else ""))
+            # A soft rule is advice for the next draft, not grounds to reject this one.
+            warnings.append((SOFT_PREFIX if row.get("soft") else "") + row["warning"] + (f"（“{quote}”）" if quote else ""))
     return warnings
 
 
@@ -304,7 +310,7 @@ def _answer_warnings(answer: str, evidence: list[EvidenceItem], results: list[To
             if rule.get("forbid") and _matches(rule["forbid"], answer):
                 warnings.append(str(rule.get("warning") or f"{result.capability} 的回答规则未满足"))
             if rule.get("forbid_claim") and claims is not None:
-                claims.append({"id": f"answer:{result.capability}:{len(claims)}", "text": plain_answer, "claim": str(rule["forbid_claim"]), "warning": str(rule.get("warning") or f"{result.capability} 的回答规则未满足")})
+                claims.append({"id": f"answer:{result.capability}:{len(claims)}", "text": plain_answer, "claim": str(rule["forbid_claim"]), "warning": str(rule.get("warning") or f"{result.capability} 的回答规则未满足"), "soft": bool(rule.get("soft"))})
             cap = rule.get("max_cited")
             if isinstance(cap, dict):
                 wanted = dict(cap.get("metadata") or {})

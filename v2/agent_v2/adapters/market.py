@@ -58,7 +58,9 @@ _REJECTED_CANDIDATE_NOTE = re.compile(r"无直接证据|未提及|关联弱|不�
 _INTRADAY_PRICE_RULE = {"forbid_claim": "把盘中价格说成收盘价或完整交易日的口径（没有说明是盘中、截至查询时的价格）", "warning": "盘中价格被表述为完整收盘口径"}
 _INTRADAY_VOLUME_RULE = {"forbid_claim": "用尚未收盘的盘中累计成交量断定放量、缩量、量能不足或走势能否持续", "warning": "未收盘成交量被用于判定放量、缩量或持续性"}
 _CANDIDATE_RULE = {"forbid_claim": "把“证据”里这条候选解释本身说成已经确认的原因、主要原因或直接驱动（没有“可能”“候选”“尚未确认”这类限定）；回答里把别的、已确认的驱动说成原因不算", "warning": "候选归因被表述为已确认原因"}
-_COUNT_LEAK_RULE = {"forbid_claim": "把归因系统的内部统计口径原样写出来，比如“0 个高置信度驱动”“确认驱动数为 1”“候选驱动 2 个”这种带计数的系统术语；用自然语言说“还有两条线索”“最相关的一条线索”不算", "warning": "将内部归因计数直接暴露给用户"}
+# Soft: the judge read "三个下跌日都没有确认的高置信度驱动" as a leak and the
+# whole answer fell back; wording advice is not grounds to discard an answer.
+_COUNT_LEAK_RULE = {"forbid_claim": "把归因系统的内部统计口径原样写出来，比如“0 个高置信度驱动”“确认驱动数为 1”“候选驱动 2 个”这种带计数的系统术语；用自然语言说“还有两条线索”“最相关的一条线索”“没有确认的直接驱动”不算", "warning": "将内部归因计数直接暴露给用户", "soft": True}
 
 
 def _pct(value: float | None) -> str:

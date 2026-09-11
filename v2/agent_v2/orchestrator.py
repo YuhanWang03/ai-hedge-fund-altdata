@@ -138,6 +138,13 @@ class AgentV2:
                 request = normalize_request(text, session_id=session_id)
                 decision = RouteDecision(RouteKind.COMMAND, ("command",), "pending mutation cancelled")
                 return self._result(run_id, request, decision, pending, RunStatus.CANCELLED, "已取消，未执行任何修改。", AnswerMode.TOOL_GROUNDED, started)
+        elif _CANCEL.match(text or ""):
+            # A bare "取消" with nothing pending is not a request to remove
+            # an alert; the surface cancels a running answer before this.
+            request = normalize_request(text, session_id=session_id)
+            decision = RouteDecision(RouteKind.COMMAND, ("command",), "nothing to cancel")
+            plan = ExecutionPlan(objective=text, route=RouteKind.COMMAND, direct_answer="当前没有待确认的操作，也没有正在处理的问题。")
+            return self._result(run_id, request, decision, plan, RunStatus.COMPLETED, plan.direct_answer, AnswerMode.TOOL_GROUNDED, started)
 
         resolved_text = text
         resolution_metadata = {}

@@ -10,7 +10,7 @@ Two kinds of rows, appended to ``data/agent_v2_user_memory.jsonl``:
   The synthesizer sees the session's preferences on every answer.
 
 The triggers are a fixed set of commands, not wording detection: ``不对`` /
-``👎`` / ``反馈：…`` / ``对`` / ``👍`` / ``记住：…`` / ``以后…``.
+``👎`` / ``反馈：…`` / ``对`` / ``👍`` / ``记住：…`` (or ``记住，…``) / ``以后…``.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ _DEFAULT_PATH = _PROJECT_ROOT / "data" / "agent_v2_user_memory.jsonl"
 _BAD = ("不对", "错了", "不准", "👎", "答错了")
 _GOOD = ("对", "👍", "不错", "正确", "很好")
 _FEEDBACK_PREFIX = ("反馈：", "反馈:", "纠正：", "纠正:")
-_PREFERENCE_PREFIX = ("记住：", "记住:", "以后", "今后", "之后都")
+_PREFERENCE_PREFIX = ("记住", "以后", "今后", "之后都")
 
 
 def parse_feedback(text: str) -> dict[str, str] | None:
@@ -49,7 +49,8 @@ def parse_feedback(text: str) -> dict[str, str] | None:
             return {"kind": "feedback", "verdict": "bad", "note": raw[len(prefix):].strip()}
     for prefix in _PREFERENCE_PREFIX:
         if raw.startswith(prefix):
-            note = raw[len(prefix):].strip() if prefix.endswith(("：", ":")) else raw
+            # "记住：…", "记住，…", "记住 …" all carry the instruction after the word.
+            note = raw[len(prefix):].lstrip("：:，, ").strip() if prefix == "记住" else raw
             return {"kind": "preference", "note": note} if note else None
     stripped = raw.rstrip("。！!，, ")
     if stripped in _BAD or any(stripped.startswith(word + "，") or stripped.startswith(word + ",") for word in _BAD if len(stripped) <= 40):

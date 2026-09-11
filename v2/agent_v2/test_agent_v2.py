@@ -3610,3 +3610,68 @@ def test_user_memory_feedback_and_preferences_reach_the_answer(tmp_path, monkeyp
     assert bridge.feedback_reply(1, "记住：只看半导体") == "记下了：只看半导体。之后的回答会照这个来。"
     assert bridge.feedback_reply(1, "AAPL今天为什么涨？") is None
     assert memory.preferences("1") == ["只看半导体"] and memory.feedback("1")[-1]["note"] == "口径错了"
+
+
+def test_base1_follow_ups_nested_reader_bare_cancel_remember_comma_briefing_template_forced_finish_retry_and_soft_rules(tmp_path):
+    from v2.agent.llm import ToolCall
+    from v2.agent_v2.adapters.market import _COUNT_LEAK_RULE
+    from v2.agent_v2.agents.base import LoopLimits, Tool, ToolLoop, _schema
+    from v2.agent_v2.eval.quality import agents_ran, grade
+    from v2.agent_v2.eval.quality_cases import QualityCase
+    from v2.agent_v2.intent import Intent
+    from v2.agent_v2.memory import parse_feedback
+    from v2.agent_v2.verification import SOFT_PREFIX
+
+    # 1. The reader the attributor called counts as having run.
+    result = _telegram_result("ARM 跌了 [evidence-market-price-42f5c41951e36ef1]。", outcome="clean")
+    result.results[0].metadata["agent"] = {"name": "move_attributor", "rounds": 2, "llm_calls": 2, "elapsed_ms": 10, "stop_reason": "finished", "calls": {}, "reader_runs": [{"rounds": 1, "elapsed_ms": 5, "stop_reason": "finished", "filings": 1, "sections_read": 2, "events": 1}]}
+    assert agents_ran(result) == {"move_attributor", "filing_reader"}
+    nested = grade(QualityCase("t3", "x", criteria=(), expected_agents=("move_attributor", "filing_reader"), must_cite=("market_data",)), result, None)
+    assert nested.agents_ok and "missing agents" not in " ".join(nested.problems)
+
+    # 2. A bare "取消" with nothing pending is answered, not turned into an alert removal.
+    applied: list = []
+    agent = _mutation_agent(applied)
+    nothing = agent.run("取消", session_id="chat-9")
+    assert nothing.status == RunStatus.COMPLETED and nothing.answer == "当前没有待确认的操作，也没有正在处理的问题。" and nothing.results == [] and nothing.route.reason == "nothing to cancel"
+    agent.run("把 NVDA 加入关注列表", session_id="chat-9")
+    assert agent.run("取消", session_id="chat-9").status == RunStatus.CANCELLED and not applied
+
+    # 3. "记住" takes a comma, a colon or a space before the instruction.
+    assert parse_feedback("记住，回答短一点") == {"kind": "preference", "note": "回答短一点"}
+    assert parse_feedback("记住, 用收盘价口径") == {"kind": "preference", "note": "用收盘价口径"} and parse_feedback("记住 只看半导体") == {"kind": "preference", "note": "只看半导体"}
+    assert parse_feedback("记住：回答短一点") == {"kind": "preference", "note": "回答短一点"} and parse_feedback("记住") is None
+
+    # 4. The model planner does not replace the briefing template.
+    llm = ScriptedLLM([LLMResponse(text='{"tasks":[{"id":"t1","capability":"agent.investigate","arguments":{"question":"美股今天有啥注意的"}}]}')])
+    request = normalize_request("美股今天有啥注意的？")
+    plan = StructuredLLMPlanner(llm, default_catalog()).plan(request, route(request, intent=Intent(kind="lookup", scope="today", wants=("briefing", "macro"), source="model")))
+    assert [task.capability for task in plan.tasks] == ["macro.overview", "account.earnings_schedule", "account.risk", "state.read"] and not llm.calls
+
+    # 5. A provider that returns nothing for the named tool_choice gets the turn again without it.
+    class Lazy(ToolLoop):
+        def __init__(self, llm):
+            super().__init__(llm, LoopLimits(max_rounds=1, max_seconds=30), tools=[Tool("look", "看。", _schema({}), lambda a: "看到了")], finish_parameters=_schema({"answer": {"type": "string"}}, ["answer"]))
+
+    llm = ScriptedLLM([LLMResponse(tool_calls=[ToolCall(id="c1", name="look", arguments={}, raw_arguments="{}")]), LLMResponse(text=""), LLMResponse(tool_calls=[ToolCall(id="c2", name="finish", arguments={"answer": "x"}, raw_arguments="{}")])])
+    outcome = Lazy(llm).run("s", "t", finish_prompt="finish now")
+    assert outcome.finished and llm.tool_choices == [None, {"type": "function", "function": {"name": "finish"}}, None]
+
+    class Refusing(ScriptedLLM):
+        def complete(self, messages, tools=None, tool_choice=None):
+            if tool_choice is not None:
+                self.tool_choices.append(tool_choice)
+                raise RuntimeError("HTTP 400: tool_choice not supported")
+            return super().complete(messages, tools, tool_choice)
+
+    llm = Refusing([LLMResponse(tool_calls=[ToolCall(id="c1", name="look", arguments={}, raw_arguments="{}")]), LLMResponse(tool_calls=[ToolCall(id="c2", name="finish", arguments={"answer": "x"}, raw_arguments="{}")])])
+    assert Lazy(llm).run("s", "t", finish_prompt="finish now").finished and len(llm.calls) == 2
+
+    # 6. The count-leak rule is soft: reported with a prefix, not grounds to reject the draft.
+    assert _COUNT_LEAK_RULE["soft"] is True
+    item = EvidenceItem("A1", "ARM", "ARM 三个下跌日的归因。")
+    result = ToolEnvelope("market.explain_move", ResultStatus.COMPLETED, subject="ARM", evidence=[item], metadata={"answer_constraints": [dict(_COUNT_LEAK_RULE), {"forbid_claim": "把候选说成原因", "warning": "候选归因被表述为已确认原因"}]})
+    soft_only = verify_answer("三个下跌日都没有确认的高置信度驱动 [A1]。", [item], answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result], judge=lambda items: {i["id"]: "" for i in items if i["claim"].startswith("把归因系统")})
+    assert soft_only.ok and list(soft_only.warnings) == [SOFT_PREFIX + "将内部归因计数直接暴露给用户"]
+    both = verify_answer("三个下跌日都没有确认的高置信度驱动 [A1]。", [item], answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result], judge=lambda items: {i["id"]: "" for i in items})
+    assert not both.ok and sorted(both.warnings) == sorted([SOFT_PREFIX + "将内部归因计数直接暴露给用户", "候选归因被表述为已确认原因"])

@@ -94,6 +94,17 @@ class QualityScore:
     problems: list[str] = field(default_factory=list)
 
 
+def agents_ran(result: AgentResult) -> set[str]:
+    """Every sub-agent the run used, the reader the attributor called nested under it included."""
+
+    ran: set[str] = set()
+    for entry in sub_agent_summaries(result.results):
+        ran.add(entry["name"])
+        if entry.get("nested"):
+            ran.add("filing_reader")
+    return ran
+
+
 def grade(case: QualityCase, result: AgentResult, judge: Judge | None) -> QualityScore:
     """Score one answer: the judge on the rubric, the deterministic checks on the run."""
 
@@ -105,7 +116,7 @@ def grade(case: QualityCase, result: AgentResult, judge: Judge | None) -> Qualit
     cited_sources = {item.source_id for item in result.evidence if item.id in cited}
     sources_ok = not case.must_cite or any(source.startswith(prefix) for source in cited_sources for prefix in case.must_cite)
     route_ok = case.expected_route is None or result.route.kind == case.expected_route
-    ran = {entry["name"] for entry in sub_agent_summaries(result.results)}
+    ran = agents_ran(result)
     agents_ok = all(name in ran for name in case.expected_agents)
     problems: list[str] = []
     if not route_ok:
@@ -162,7 +173,7 @@ def record(case: QualityCase, result: AgentResult, score: QualityScore, *, label
         "answer": result.answer,
         "route": result.route.kind.value,
         "capabilities": [item.capability for item in result.results],
-        "sub_agents": sorted({entry["name"] for entry in sub_agent_summaries(result.results)}),
+        "sub_agents": sorted(agents_ran(result)),
         "status": result.status.value,
         "synthesis": str((result.synthesis or {}).get("outcome") or ""),
         "elapsed_ms": result.elapsed_ms,

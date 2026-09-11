@@ -284,14 +284,11 @@ class ToolLoop(BoundedLoop):
         self._pending = []
         try:
             if self.finish_only:
-                # The forced-finish turn: the provider is told to call finish, not merely offered it.
-                try:
-                    response = self.llm.complete(messages, self.tool_specs(), tool_choice={"type": "function", "function": {"name": "finish"}})
-                except TypeError:  # a client without the parameter
-                    response = self.llm.complete(messages, self.tool_specs())
+                response = self._forced_finish_call(messages)
             else:
                 response = self.llm.complete(messages, self.tool_specs())
         except Exception as exc:  # noqa: BLE001 — a failed call is a bad turn, the loop goes on
+            logger.warning("%s: model call failed (%s): %s", self.usage_source_name, type(exc).__name__, str(exc)[:200])
             messages.append({"role": "user", "content": f"上一轮模型调用失败（{type(exc).__name__}），请重试：调用一个工具或 finish。"})
             return None
         calls = list(getattr(response, "tool_calls", None) or [])
@@ -317,6 +314,27 @@ class ToolLoop(BoundedLoop):
             return None
         messages.append({"role": "assistant", "content": json.dumps(action, ensure_ascii=False)})
         return action
+
+    def _forced_finish_call(self, messages: list[dict[str, Any]]) -> Any:
+        """The forced-finish turn: the provider is told to call finish, not merely offered it.
+
+        A provider that rejects the named ``tool_choice`` (an error, or an
+        empty reply with no call) gets the same turn once more with the tools
+        merely offered; the finish prompt in the messages still asks for it.
+        """
+
+        forced = {"type": "function", "function": {"name": "finish"}}
+        try:
+            response = self.llm.complete(messages, self.tool_specs(), tool_choice=forced)
+        except TypeError:  # a client without the parameter
+            return self.llm.complete(messages, self.tool_specs())
+        except Exception as exc:  # noqa: BLE001 — the named choice itself may be what the provider refuses
+            logger.warning("%s: forced finish with tool_choice failed (%s: %s); retrying without it", self.usage_source_name, type(exc).__name__, str(exc)[:200])
+            return self.llm.complete(messages, self.tool_specs())
+        if not (getattr(response, "tool_calls", None) or (getattr(response, "text", "") or "").strip()):
+            logger.warning("%s: forced finish with tool_choice returned nothing; retrying without it", self.usage_source_name)
+            return self.llm.complete(messages, self.tool_specs())
+        return response
 
     def _observe(self, messages: list[dict[str, Any]], content: str) -> None:
         """Return an observation to the model: as the pending call's tool result, or as a user message for a text action."""
