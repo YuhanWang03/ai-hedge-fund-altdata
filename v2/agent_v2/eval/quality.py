@@ -280,7 +280,20 @@ def render(summary: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _load_env() -> None:
+    """The services get the keys from ``.env`` through systemd; a shell run has to load it itself."""
+
+    try:
+        from dotenv import load_dotenv
+    except ImportError:  # pragma: no cover - python-dotenv is a runtime dependency on the server
+        return
+    load_dotenv(_PROJECT_ROOT / ".env")
+
+
 def _live_agent(*, use_web: bool):
+    _load_env()
+    if not any(os.environ.get(name) for name in ("AGENT_LLM_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY")):
+        raise SystemExit("没有模型密钥：.env 里需要 DEEPSEEK_API_KEY（或 AGENT_LLM_API_KEY）；服务通过 systemd 读 .env，命令行运行要靠这里加载。")
     from v2.agent_v2.orchestrator import AgentV2Config
     from v2.agent_v2.runtime import build_workspace_agent
 
