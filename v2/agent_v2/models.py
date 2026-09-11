@@ -21,6 +21,7 @@ class RunStatus(str, Enum):
     ROUTED = "routed"
     PLANNED = "planned"
     WAITING_CONFIRMATION = "waiting_confirmation"
+    WAITING_CLARIFICATION = "waiting_clarification"
     EXECUTING = "executing"
     SYNTHESIZING = "synthesizing"
     VERIFYING = "verifying"

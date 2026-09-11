@@ -21,6 +21,7 @@ from v2.agent_v2.execution import (
     time_limit,
 )
 from v2.agent_v2.models import (
+    BudgetClass,
     AgentResult,
     AnswerMode,
     ExecutionPlan,
@@ -68,6 +69,9 @@ class AgentV2Config:
     #: data/agent_v2_intents.jsonl.  ``None`` means "when the live runtime
     #: has a model"; tests and offline evals stay silent.
     record_intents: bool | None = None
+    #: Ask the user one question instead of planning when the model classifier's
+    #: confidence is below this and it named the gap; 0 turns clarification off.
+    clarify_below: float = 0.6
 
 
 class AgentV2:
@@ -143,14 +147,24 @@ class AgentV2:
         elif _CANCEL.match(text or ""):
             # A bare "取消" with nothing pending is not a request to remove
             # an alert; the surface cancels a running answer before this.
+            asked = self.session.pop_clarification(session_id) if self.session is not None and session_id else None
             request = normalize_request(text, session_id=session_id)
-            decision = RouteDecision(RouteKind.COMMAND, ("command",), "nothing to cancel")
-            plan = ExecutionPlan(objective=text, route=RouteKind.COMMAND, direct_answer="当前没有待确认的操作，也没有正在处理的问题。")
-            return self._result(run_id, request, decision, plan, RunStatus.COMPLETED, plan.direct_answer, AnswerMode.TOOL_GROUNDED, started)
+            decision = RouteDecision(RouteKind.COMMAND, ("command",), "clarification dropped" if asked else "nothing to cancel")
+            plan = ExecutionPlan(objective=text, route=RouteKind.COMMAND, direct_answer="已取消，那个问题不再处理。" if asked else "当前没有待确认的操作，也没有正在处理的问题。")
+            return self._result(run_id, request, decision, plan, RunStatus.CANCELLED if asked else RunStatus.COMPLETED, plan.direct_answer, AnswerMode.TOOL_GROUNDED, started)
 
         resolved_text = text
         resolution_metadata = {}
+        clarified = False
         if self.session is not None and session_id:
+            asked = self.session.pop_clarification(session_id)
+            if asked is not None and not _CANCEL.match(text or ""):
+                # The message answers the question we asked: read it together with
+                # the original question, and do not ask again on this turn.
+                original_text, question = asked
+                text = f"{original_text}（补充：{text}）"
+                resolution_metadata = {"clarified": True, "clarification": question}
+                clarified = True
             resolution = self.session.resolve(session_id, text)
             resolved_text = resolution.text
             if resolution.rewritten:
@@ -179,6 +193,13 @@ class AgentV2:
         intent, classified_ms = classify_and_time(self.classifier, request)
         decision = route(request, intent=intent)
         self._emit(on_progress, run_id, RunStatus.ROUTED, decision.reason)
+        if not clarified and self._should_clarify(intent):
+            # The classifier is unsure and named the gap: one question now beats a
+            # confident answer to the wrong reading. The next message is merged
+            # with this one and never asked about again.
+            plan = ExecutionPlan(objective=request.text, route=decision.kind, budget=BudgetClass.DIRECT, direct_answer=intent.clarification, assumptions=(f"clarification: confidence {intent.confidence}",))
+            self._record_intent(run_id, request, intent, plan, classified_ms)
+            return self._ask(run_id, request, decision, plan, intent.clarification, started, asked_about=text)
         plan = self.planner.plan(request, decision)
         self._emit(on_progress, run_id, RunStatus.PLANNED, f"planned {len(plan.tasks)} task(s)")
         self._record_intent(run_id, request, intent, plan, classified_ms)
@@ -188,6 +209,9 @@ class AgentV2:
         if plan.direct_answer and not plan.tasks:
             # A capability overview is a complete answer; a clarification request is not.
             complete = plan.answer_mode == AnswerMode.GENERAL_KNOWLEDGE
+            if not complete and not clarified and decision.kind == RouteKind.COMMAND:
+                # "设置提醒需要方向和目标价": the next message ("跌到 150") completes the command.
+                return self._ask(run_id, request, decision, plan, plan.direct_answer, started, asked_about=text)
             return self._result(run_id, request, decision, plan, RunStatus.COMPLETED if complete else RunStatus.PARTIAL, plan.direct_answer, AnswerMode.GENERAL_KNOWLEDGE if complete else AnswerMode.INSUFFICIENT_EVIDENCE, started)
 
         context = self._context(run_id, request, plan, on_progress, started)
@@ -248,6 +272,30 @@ class AgentV2:
             payload=dict(task.arguments.get("payload") or {}),
             description=task.purpose or task.capability,
         )
+
+    def _should_clarify(self, intent) -> bool:
+        """A model classification below the threshold that carries a question, on a question that could go several ways."""
+
+        threshold = float(self.config.clarify_below or 0)
+        if threshold <= 0 or not intent.clarification or intent.source != "model" or intent.confidence is None:
+            return False
+        if intent.kind in {"knowledge", "help"}:
+            return False
+        return intent.confidence < threshold
+
+    def _ask(self, run_id, request, decision, plan, question: str, started, *, asked_about: str) -> AgentResult:
+        """Return the question and remember it, so the next message on the session is read as its answer.
+
+        ``asked_about`` is the user's own wording (before the session's
+        rewrite), so the merged turn reads as they would have typed it.
+        """
+
+        if self.session is not None and request.session_id:
+            self.session.set_clarification(request.session_id, asked_about, question)
+            answer = question
+        else:
+            answer = f"{question}（该渠道没有会话，请把补充的信息和问题一起再发一次。）"
+        return self._result(run_id, request, decision, plan, RunStatus.WAITING_CLARIFICATION, answer, AnswerMode.INSUFFICIENT_EVIDENCE, started)
 
     def _await_confirmation(self, run_id, request, decision, plan, started) -> AgentResult:
         mutation = self._pending_mutation(plan)

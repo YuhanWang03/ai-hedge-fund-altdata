@@ -20029,5 +20029,51 @@
   },
   "legacy": null,
   "note": "labelled by hand (quality case)"
+ },
+ "给AMD设个提醒": {
+  "intent": {
+   "confidence": 0.9,
+   "direction": "none",
+   "kind": "command",
+   "portfolio_scope": false,
+   "scope": "none",
+   "tickers": [
+    "AMD"
+   ],
+   "wants": [
+    "alerts"
+   ],
+   "watchlist_scope": false,
+   "command": {
+    "operation": "alert.add",
+    "ticker": "AMD"
+   }
+  },
+  "legacy": null,
+  "note": "labelled by hand (clarification case: no price yet)"
+ },
+ "给AMD设个提醒（补充：跌到150的时候）": {
+  "intent": {
+   "confidence": 0.95,
+   "direction": "down",
+   "kind": "command",
+   "portfolio_scope": false,
+   "scope": "none",
+   "tickers": [
+    "AMD"
+   ],
+   "wants": [
+    "alerts"
+   ],
+   "watchlist_scope": false,
+   "command": {
+    "operation": "alert.add",
+    "ticker": "AMD",
+    "direction": "below",
+    "price": 150
+   }
+  },
+  "legacy": null,
+  "note": "labelled by hand (clarification case: the merged turn)"
  }
 }

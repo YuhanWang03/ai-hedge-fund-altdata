@@ -347,6 +347,15 @@ QUALITY_CASES: tuple[QualityCase, ...] = (
     ),
     # -- multi-turn ------------------------------------------------------------------
     QualityCase(
+        "q_clarify_alert",
+        "跌到150的时候",
+        criteria=("把这句理解为上一轮 AMD 提醒的补充：AMD 跌到 150 时提醒，说明将要执行的写操作并等待确认，没有直接执行",),
+        preceding=("给AMD设个提醒",),
+        expected_route=RouteKind.COMMAND,
+        allow_web=False,
+        tags=("multi_turn", "command", "clarification"),
+    ),
+    QualityCase(
         "q_followup_pronoun",
         "那它最近有什么新闻？",
         criteria=("把“它”理解为上一轮的 AAPL 并围绕 AAPL 回答", "按日期列出了近两周可核实的事件"),

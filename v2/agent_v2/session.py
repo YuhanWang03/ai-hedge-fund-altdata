@@ -72,6 +72,8 @@ class ShortTermSession:
         self.ttl_seconds = float(ttl_seconds)
         self._pending: dict[str, tuple[float, ExecutionPlan]] = {}
         self._frames: dict[str, tuple[float, dict]] = {}
+        #: session -> (expires_at, the original question, the clarifying question we asked)
+        self._clarifications: dict[str, tuple[float, str, str]] = {}
         self._lock = threading.Lock()
 
     def _frame(self, session_id: str, ticker: str) -> dict:
@@ -131,6 +133,24 @@ class ShortTermSession:
             return
         with self._lock:
             self._pending[session_id] = (time.monotonic() + self.ttl_seconds, plan)
+
+    def set_clarification(self, session_id: str, original_text: str, question: str) -> None:
+        """Remember that ``question`` was asked about ``original_text``; the next message answers it."""
+
+        if not session_id:
+            return
+        with self._lock:
+            self._clarifications[session_id] = (time.monotonic() + self.ttl_seconds, original_text, question)
+
+    def pop_clarification(self, session_id: str) -> tuple[str, str] | None:
+        """The (original question, clarifying question) pair waiting on this session, once."""
+
+        with self._lock:
+            entry = self._clarifications.pop(session_id, None)
+        if entry is None:
+            return None
+        expires_at, original_text, question = entry
+        return (original_text, question) if time.monotonic() < expires_at else None
 
     def pop_pending(self, session_id: str) -> ExecutionPlan | None:
         with self._lock:

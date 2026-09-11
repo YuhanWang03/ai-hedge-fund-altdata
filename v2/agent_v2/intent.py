@@ -99,6 +99,7 @@ lab：kind=lab 时给 %s 之一；strategy：回测策略 %s 之一；lab_scale�
 periods：问账户盈亏时的口径 day/week/month 数组；each：是否要对每只持仓分别回答（"各自的财报日期"）。
 rank：ranking 时 "high"（最好、涨最多）或 "low"（最差、跌最多），否则空。
 confidence：0 到 1。
+clarification：confidence 低于 0.6、或问题缺了非问不可的信息（哪只股票、什么时间段、加关注还是设提醒、目标价多少）时，给一句简短的反问，问清那一个缺口；其它情况留空字符串。反问要具体（"是想看 TSLA 的行情、新闻还是研究？"），不要泛泛地问"能否详细说明"。
 通过 classify 工具返回；无法调用工具时只输出一个 JSON 对象，字段齐全。""" % ("、".join(WANTS), "/".join(RELEASES), "/".join(MANAGERS), "/".join(LABS), "/".join(STRATEGIES))
 
 
@@ -127,6 +128,8 @@ class Intent:
     #: ``model``, ``recorded`` (the eval fixture) or ``default`` (nobody classified it).
     source: str = "model"
     note: str = ""
+    #: The one question the classifier would ask before answering, when the wording leaves a gap it cannot fill.
+    clarification: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -204,6 +207,7 @@ def parse_intent(raw: Any, *, source: str = "model") -> Intent:
         confidence=confidence,
         source=source,
         note=str(raw.get("note") or "")[:120],
+        clarification=" ".join(str(raw.get("clarification") or "").split())[:160],
     )
 
 
@@ -241,6 +245,7 @@ INTENT_TOOL = {
                 "each": {"type": "boolean"},
                 "rank": {"type": "string", "enum": ["", "high", "low"]},
                 "confidence": {"type": "number"},
+                "clarification": {"type": "string"},
             },
             "required": ["kind", "scope", "direction", "wants", "tickers", "portfolio_scope", "confidence"],
         },

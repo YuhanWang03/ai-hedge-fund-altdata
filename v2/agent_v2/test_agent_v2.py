@@ -1860,7 +1860,7 @@ def test_command_without_a_session_or_with_missing_parameters_does_not_wait_fore
     assert no_session.status == RunStatus.WAITING_CONFIRMATION
     assert "无法接收确认" in no_session.answer
     incomplete = agent.run("取消 NVDA 的提醒", session_id="chat-4")
-    assert incomplete.status == RunStatus.PARTIAL
+    assert incomplete.status == RunStatus.WAITING_CLARIFICATION  # the next message is read as the alert id
     assert "提醒编号" in incomplete.answer
     assert incomplete.pending_mutation is None
     assert not applied
@@ -2045,7 +2045,7 @@ def test_rule_planner_answers_help_directly_and_asks_for_missing_command_details
     result = AgentV2().run("你能帮我做什么")
     assert result.status == RunStatus.COMPLETED and result.answer == plan.direct_answer
     clarification = AgentV2().run("取消 NVDA 的提醒")
-    assert clarification.status == RunStatus.PARTIAL and "提醒编号" in clarification.answer
+    assert clarification.status == RunStatus.WAITING_CLARIFICATION and "提醒编号" in clarification.answer
 
 
 def test_executor_expands_fan_out_tasks_from_the_source_result():
@@ -4050,3 +4050,64 @@ def test_warm_imports_runs_once_and_tolerates_missing_libraries(monkeypatch):
     assert missing == ["no_such_library_xyz"] and warmup._done == {"json", "no_such_library_xyz"}
     assert warmup.warm_imports(("json", "no_such_library_xyz")) == []  # already attempted: not retried
     warmup._done.clear()
+
+
+def test_low_confidence_classification_asks_one_question_and_reads_the_next_message_as_the_answer():
+    from v2.agent_v2.intent import Intent, parse_intent
+
+    assert parse_intent({"kind": "lookup", "confidence": 0.4, "clarification": "  是想看 TSLA 的行情、新闻还是研究？ "}).clarification == "是想看 TSLA 的行情、新闻还是研究？"
+
+    class Unsure:
+        def __init__(self):
+            self.texts: list[str] = []
+
+        def classify(self, request):
+            self.texts.append(request.text)
+            if "补充" in request.text:
+                return Intent(kind="lookup", scope="recent", wants=("news",), tickers=("TSLA",), confidence=0.9, source="model")
+            return Intent(kind="research", wants=("overview",), tickers=("TSLA",), confidence=0.35, source="model", clarification="是想看 TSLA 的行情、新闻还是研究？")
+
+    registry = CapabilityRegistry(default_catalog())
+    registry.register("web.research", lambda a, c: ToolEnvelope("web.research", ResultStatus.COMPLETED, subject="TSLA", evidence=[EvidenceItem("W", "TSLA", "news", source_id="web:x")], metadata={"narrative": "新闻 [W]。"}))
+    registry.register("filings.recent", lambda a, c: ToolEnvelope("filings.recent", ResultStatus.COMPLETED, subject="TSLA"))
+    registry.register("market.anomaly_history", lambda a, c: ToolEnvelope("market.anomaly_history", ResultStatus.COMPLETED, subject="TSLA"))
+    classifier = Unsure()
+    agent = AgentV2(catalog=default_catalog(), registry=registry, classifier=classifier, session=ShortTermSession(), config=AgentV2Config(record_sub_agents=False, record_capabilities=False))
+    asked = agent.run("特斯拉最近", session_id="c1")
+    assert asked.status == RunStatus.WAITING_CLARIFICATION and asked.answer == "是想看 TSLA 的行情、新闻还是研究？" and asked.results == [] and asked.plan.assumptions[0].startswith("clarification: confidence 0.35")
+    answered = agent.run("新闻", session_id="c1")
+    assert classifier.texts[-1] == "特斯拉最近（补充：新闻）" and answered.request.metadata["clarified"] is True and answered.request.metadata["clarification"] == asked.answer
+    assert answered.status in {RunStatus.COMPLETED, RunStatus.PARTIAL} and [r.capability for r in answered.results][0] == "web.research"  # partial: the web is off in this test
+    assert agent.session.pop_clarification("c1") is None  # consumed
+
+    # A merged turn is never asked about again, even when the classifier stays unsure.
+    class StillUnsure(Unsure):
+        def classify(self, request):
+            self.texts.append(request.text)
+            return Intent(kind="research", wants=("overview",), tickers=("TSLA",), confidence=0.3, source="model", clarification="哪方面？")
+
+    registry.register("research.stock", lambda a, c: ToolEnvelope("research.stock", ResultStatus.COMPLETED, subject="TSLA", evidence=[EvidenceItem("R", "TSLA", "研究", source_id="research_engine")], metadata={"narrative": "研究 [R]。"}))
+    agent = AgentV2(catalog=default_catalog(), registry=registry, classifier=StillUnsure(), session=ShortTermSession(), config=AgentV2Config(record_sub_agents=False, record_capabilities=False))
+    assert agent.run("特斯拉最近", session_id="c2").status == RunStatus.WAITING_CLARIFICATION
+    second = agent.run("随便", session_id="c2")
+    assert second.status != RunStatus.WAITING_CLARIFICATION and second.results
+
+    # "取消" after a question drops it; knowledge questions and recorded labels are never asked about; the threshold can be turned off.
+    agent = AgentV2(catalog=default_catalog(), registry=registry, classifier=Unsure(), session=ShortTermSession(), config=AgentV2Config(record_sub_agents=False, record_capabilities=False))
+    agent.run("特斯拉最近", session_id="c3")
+    dropped = agent.run("取消", session_id="c3")
+    assert dropped.status == RunStatus.CANCELLED and dropped.answer == "已取消，那个问题不再处理。" and agent.session.pop_clarification("c3") is None
+    off = AgentV2(catalog=default_catalog(), registry=registry, classifier=Unsure(), session=ShortTermSession(), config=AgentV2Config(record_sub_agents=False, record_capabilities=False, clarify_below=0))
+    assert off.run("特斯拉最近", session_id="c4").status != RunStatus.WAITING_CLARIFICATION
+    assert not agent._should_clarify(Intent(kind="knowledge", confidence=0.2, clarification="?", source="model")) and not agent._should_clarify(Intent(kind="lookup", confidence=0.2, clarification="?", source="recorded"))
+
+    # A command missing its price asks, and the next message completes the command (offline through the recorded labels).
+    applied: list = []
+    agent = _mutation_agent(applied)
+    first = agent.run("给AMD设个提醒", session_id="c5")
+    assert first.status == RunStatus.WAITING_CLARIFICATION and "目标价" in first.answer
+    second = agent.run("跌到150的时候", session_id="c5")
+    assert second.status == RunStatus.WAITING_CONFIRMATION and second.pending_mutation.payload == {"ticker": "AMD", "direction": "below", "target_price": 150.0}
+    assert agent.run("确认", session_id="c5").status == RunStatus.COMPLETED and applied and applied[0]["payload"]["target_price"] == 150.0
+    no_session = _mutation_agent([]).run("给AMD设个提醒")
+    assert no_session.status == RunStatus.WAITING_CLARIFICATION and "没有会话" in no_session.answer

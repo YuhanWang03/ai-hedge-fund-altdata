@@ -9,7 +9,7 @@ from v2.agent_v2.eval.cases import CASES, EvalCase
 from v2.agent_v2.eval.fixtures import build_eval_registry, EvalSynthesizer
 from v2.agent_v2.eval.scenario_cases import SCENARIO_CASES, ScenarioCase, ScenarioScore, score_scenario
 from v2.agent_v2.eval.scoring import AnswerScore, CaseScore, score_answer_case, score_case
-from v2.agent_v2.orchestrator import AgentV2
+from v2.agent_v2.orchestrator import AgentV2, AgentV2Config
 
 
 @dataclass(frozen=True)
@@ -33,7 +33,8 @@ class SuiteReport:
 
 def run_suite(cases: tuple[EvalCase, ...] = CASES, answer_cases: tuple[AnswerCase, ...] = ANSWER_CASES, scenario_cases: tuple[ScenarioCase, ...] = SCENARIO_CASES) -> SuiteReport:
     registry = build_eval_registry()
-    agent = AgentV2(catalog=registry.catalog, registry=registry, synthesizer=EvalSynthesizer())
+    # An offline eval writes no production ledgers (the gate runs it on the server).
+    agent = AgentV2(catalog=registry.catalog, registry=registry, synthesizer=EvalSynthesizer(), config=AgentV2Config(record_sub_agents=False, record_capabilities=False))
     scores = tuple(score_case(case, agent.run(case.query)) for case in cases)
     answer_scores = tuple(score_answer_case(case) for case in answer_cases)
     scenario_scores = tuple(score_scenario(case) for case in scenario_cases)
