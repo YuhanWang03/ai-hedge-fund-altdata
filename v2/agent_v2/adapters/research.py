@@ -175,14 +175,30 @@ def _derived_evidence(result: dict[str, Any], limitations: list[str]) -> list[Ev
     return items
 
 
+#: Modules a stock's numbers come from; when they fail the engine's "completed" is a hollow run.
+_CORE_MODULES = ("fundamental", "valuation")
+
+
+def _core_failures(result: dict[str, Any]) -> list[str]:
+    diagnostics = result.get("production_diagnostics", {}).get("modules", {}) or {}
+    return [name for name in _CORE_MODULES if str((diagnostics.get(name) or {}).get("status") or "").upper() == "FAILED"]
+
+
 def _envelope(result: dict[str, Any], capability: str) -> ToolEnvelope:
     findings = list(result.get("research_findings") or [])[:12]
     limitations = _limitations(result)
+    status = _status(str(result.get("status") or ""), bool(result.get("from_cache")))
+    core_failures = _core_failures(result)
+    if core_failures and status == ResultStatus.COMPLETED:
+        # A compare with both valuation modules failed read "completed" and
+        # scored 50 on nothing; the run is partial and the answer must say so.
+        status = ResultStatus.PARTIAL_DATA
+        limitations.append("核心模块失败（" + "、".join(core_failures) + "）：估值和基本面数字缺失，数据源可能临时不可用，无法做同口径比较")
     derived = _derived_evidence(result, limitations)
     source_evidence = _evidence(result)
     return ToolEnvelope(
         capability=capability,
-        status=_status(str(result.get("status") or ""), bool(result.get("from_cache"))),
+        status=status,
         subject=str(result.get("ticker") or ""),
         as_of=str(result.get("generated_at") or ""),
         summary=str(result.get("core_thesis") or result.get("investment_thesis") or ""),

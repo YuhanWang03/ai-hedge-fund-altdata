@@ -93,7 +93,7 @@ QUALITY_CASES: tuple[QualityCase, ...] = (
     QualityCase(
         "q_news_paraphrase",
         "英特尔最近有什么动静？",
-        criteria=("把英特尔识别为 INTC 并围绕它回答", "分别交代了网页新闻、SEC 申报和盯盘记录三类来源的结果"),
+        criteria=("围绕英特尔（INTC）这家公司回答，没有和别的公司混淆；写不写代码 INTC 都算", "分别交代了网页新闻、SEC 申报和盯盘记录三类来源的结果"),
         expected_agents=("news_checker",),
         tags=("news", "paraphrase"),
     ),

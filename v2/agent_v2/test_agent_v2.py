@@ -3784,3 +3784,13 @@ def test_market_level_questions_second_repair_on_progress_and_quality_show(tmp_p
     text = render_case(read_rows(tmp_path / "q.jsonl"), "t9")
     assert text.startswith("# t9 · t-run") and "✗ 同口径比较" in text and "✓ 指出缺口（“缺口”）" in text and "## 回答" in text and "MU 比 SNDK 便宜" in text
     assert render_case([], "t9").startswith("没有 t9 的记录") and render_case(read_rows(tmp_path / "q.jsonl"), "t9", label="other").startswith("没有")
+
+
+def test_research_with_failed_core_modules_is_partial_data():
+    from v2.agent_v2.adapters.research import _envelope
+
+    hollow = {"ticker": "SNDK", "status": "COMPLETED", "run_id": "r1", "scores": {"overall": 36}, "production_diagnostics": {"modules": {"valuation": {"status": "FAILED", "completeness": 0.0}, "fundamental": {"status": "FAILED", "completeness": 0.0}, "expectations": {"status": "COMPLETED"}}}}
+    result = _envelope(hollow, "research.stock")
+    assert result.status == ResultStatus.PARTIAL_DATA and any(value.startswith("核心模块失败（fundamental、valuation）") for value in result.limitations)
+    fine = _envelope({**hollow, "production_diagnostics": {"modules": {"valuation": {"status": "COMPLETED"}}}}, "research.stock")
+    assert fine.status == ResultStatus.COMPLETED and not any("核心模块失败" in value for value in fine.limitations)
