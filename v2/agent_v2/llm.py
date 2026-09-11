@@ -470,7 +470,7 @@ class LLMEvidenceSynthesizer:
 不要声称知道当前股价、最新财报、近期新闻、用户持仓或其他可能变化的事实。"""
             payload = request.text
         else:
-            system = self._research_system(plan, results)
+            system = self._research_system(plan, results, preferences=request.metadata.get("preferences"))
             payload = self._payload(request.text, plan, results, evidence, preferences=request.metadata.get("preferences"))
         messages = [
             {"role": "system", "content": system},
@@ -491,7 +491,7 @@ class LLMEvidenceSynthesizer:
             self._record_report("draft", report)
             if report.ok:
                 self.last_outcome = "clean"
-                return answer
+                return self._shorten(answer, messages, plan, results, evidence, request.metadata.get("preferences"))
             # One repair round: the verifier names what failed and what must
             # stay; a second failure falls back to deterministic prose rather
             # than shipping flagged numbers to the user.
@@ -511,10 +511,11 @@ class LLMEvidenceSynthesizer:
             if repair_report.ok:
                 self.last_outcome = "repaired"
                 return repair
-            if _problem_count(repair_report) < _problem_count(report):
-                # The repair fixed part of it (a lead sentence's uncited figures
-                # became one wrongly-cited figure): one more round, since the
-                # deterministic fallback would drop the ranking the user asked for.
+            if _problem_count(repair_report) < _problem_count(report) or (_problem_count(repair_report) == _problem_count(report) and _problem_set(repair_report) != _problem_set(report)):
+                # The repair fixed what was named and tripped something else
+                # (a trimmed candidate list dropped a required citation): one
+                # more round, since the deterministic fallback would drop the
+                # ranking or the reasoning the user asked for.
                 second = self._draft(
                     [
                         *messages,
@@ -536,13 +537,42 @@ class LLMEvidenceSynthesizer:
         self._log_fallback(request)
         return self.fallback.synthesize(request, plan, results, evidence)
 
-    def _research_system(self, plan: ExecutionPlan, results: list[ToolEnvelope]) -> str:
+    def _shorten(self, answer: str, messages: list[dict[str, str]], plan: ExecutionPlan, results: list[ToolEnvelope], evidence: list[EvidenceItem], preferences: list[str] | None) -> str:
+        """Enforce a "回答短一点" preference: one compression round when the verified answer is over the limit; the long answer stays if the short one fails verification."""
+
+        limit = short_answer_limit(preferences or [])
+        if not limit or len(answer) <= limit:
+            return answer
+        from v2.agent_v2.verification import verify_answer
+
+        try:
+            short = self._draft(
+                [
+                    *messages,
+                    {"role": "assistant", "content": answer},
+                    {"role": "user", "content": f"用户要求回答短一点。把上面的回答压缩到 {limit} 个字符以内：只保留两三条最关键的事实、一个风险和一个观察点，每句关键事实后仍然写原来的 [evidence_id]，不要新增证据里没有的数字。直接输出压缩后的完整回答。"},
+                ],
+                results,
+                evidence,
+            )
+            short = self._complete(short, evidence, results)
+            report = verify_answer(short, evidence, answer_mode=plan.answer_mode, results=results, judge=self.judge)
+            self._record_report("shorten", report)
+            if report.ok and len(short) <= limit * 1.2:
+                return short
+        except (LLMError, ValueError, TypeError) as exc:
+            self._record_attempt("shorten_error", ok=False, warnings=(f"{type(exc).__name__}: {str(exc)[:200]}",))
+        return answer
+
+    def _research_system(self, plan: ExecutionPlan, results: list[ToolEnvelope], preferences: list[str] | None = None) -> str:
         system = _RESEARCH_SYSTEM
         guidance = self._guidance(plan, results)
         if guidance:
             system += "\n\n再严格遵循以下与本次所用能力对应的 response_intent 规则：\n" + guidance
         system += "\n\n每个引用只支持它紧邻的那句话。不要用一条聚合引用同时支撑价格、成交量、新闻和期权等不同事实。"
         system += "\n输入里的 user_preferences 是用户之前说过的偏好（口径、篇幅、关注点），按它组织回答，但不能因此违反证据和引用规则。"
+        if preferences and short_answer_limit(preferences):
+            system += f"\n用户要求回答短一点：全文不超过 {short_answer_limit(preferences)} 个字符，只保留两三条最有决策价值的事实、一个风险和一个观察点，保留引用。"
         return system
 
     def revise(self, request, plan, results, evidence, answer: str, objections: list[dict[str, Any]]) -> str | None:
@@ -739,6 +769,36 @@ def _select_evidence(results: list[ToolEnvelope], evidence: list[EvidenceItem], 
 _NEARBY_UNGROUNDED = re.compile(r"^引用未支持邻近数字：([^（]+)")
 
 
+_SHORT_WORDS = ("短一点", "简短", "简洁", "少一点", "精简", "short", "brief", "concise", "不要太长", "别太长")
+SHORT_ANSWER_CHARS = 500
+
+
+def short_answer_limit(preferences: list[str]) -> int:
+    """The character limit a "回答短一点" preference implies, or 0 when no preference asks for brevity."""
+
+    return SHORT_ANSWER_CHARS if any(word in str(value).lower() for value in preferences for word in _SHORT_WORDS) else 0
+
+
+def _problem_set(report) -> frozenset[str]:
+    """What a verification report objects to, as comparable keys (the quoted sentence stripped)."""
+
+    from v2.agent_v2.verification import SOFT_PREFIX
+
+    keys = set()
+    if report.ungrounded_numbers:
+        keys.add("number")
+    if report.unknown_citations:
+        keys.add("unknown")
+    for warning in report.warnings:
+        text = str(warning)
+        if text.startswith(SOFT_PREFIX):
+            continue
+        # The kind of objection, not the figure or sentence it names: another
+        # invented number in the same place is the same problem.
+        keys.add("warning:" + text.split("：", 1)[0].split("（", 1)[0])
+    return frozenset(keys)
+
+
 def _problem_count(report) -> int:
     """How much a verification report found wrong: every flagged number, unknown id and blocking warning."""
 
@@ -791,6 +851,7 @@ def repair_instruction(report: VerificationReport, evidence: list[EvidenceItem] 
         lines.append(f"其他问题：{warning}。")
     if report.traced_numbers:
         lines.append("以下数字已通过校验，必须原样保留：" + "、".join(report.traced_numbers)[:400] + "。")
+    lines.append("初稿里已经引用的证据 id 保留在对应的句子上，只改被指出的地方，不要在删减时把别的引用一起删掉；同一句里有几个数字来自不同证据时，每个数字后各写一个 id。")
     lines.append("请重新输出完整回答（所有段落），你的回复将完整替换初稿，是用户唯一会看到的文本。")
     return "\n".join(lines)
 

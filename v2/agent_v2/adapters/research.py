@@ -24,7 +24,10 @@ _FOCUS_MODULES = {
     "catalysts": ["catalyst"],
     "filings": ["sec"],
     "supply_chain": ["supply_chain"],
-    "risk": ["risk"],
+    # The engine's own "risk" module depends on supply_chain, whose neighbour
+    # discovery (Tavily) took a risk question to 150 s; the risk answer is
+    # written from these modules instead.
+    "risk": ["fundamental", "valuation", "sec", "macro", "catalyst"],
     "full": None,
 }
 
@@ -212,6 +215,64 @@ def _envelope(result: dict[str, Any], capability: str) -> ToolEnvelope:
     )
 
 
+#: Metric names worth a side-by-side row, with the label the row uses.
+_COMPARABLE_METRICS = {
+    "pe_ratio": "市盈率（TTM）", "trailing_pe": "市盈率（TTM）", "forward_pe": "前瞻市盈率", "ps_ratio": "市销率", "pb_ratio": "市净率", "ev_ebitda": "EV/EBITDA", "peg_ratio": "PEG",
+    "revenue_growth": "营收增速", "revenue_growth_yoy": "营收增速", "eps_growth": "每股收益增速", "earnings_growth": "盈利增速",
+    "gross_margin": "毛利率", "operating_margin": "营业利润率", "net_margin": "净利率", "roic": "ROIC", "roe": "ROE", "free_cash_flow_margin": "自由现金流利润率",
+    "eps_surprise_pct": "最新每股收益超预期", "eps_surprise": "最新每股收益超预期", "debt_to_equity": "负债权益比",
+}
+
+
+def _format_metric(name: str, value: Any) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if any(word in name for word in ("growth", "margin", "roic", "roe", "surprise")) and abs(number) <= 5:
+        return f"{number * 100:.1f}%"
+    if any(word in name for word in ("growth", "margin", "roic", "roe", "surprise")):
+        return f"{number:.1f}%"
+    return f"{number:.1f}"
+
+
+def _comparison_table(envelopes: list[ToolEnvelope]) -> list[EvidenceItem]:
+    """Side-by-side rows for the metrics two or more of the compared stocks carry, one citeable item per metric.
+
+    A compare answered from each stock's own evidence items reads as two
+    monologues; the rows give the synthesizer the same figure for every
+    ticker under one id, so "同口径比较" is a citation, not a reconstruction.
+    """
+
+    values: dict[str, dict[str, tuple[str, str]]] = {}
+    for envelope in envelopes:
+        for item in envelope.evidence:
+            metrics = item.metadata.get("metrics") if isinstance(item.metadata, dict) else None
+            for name, value in (metrics or {}).items():
+                label = _COMPARABLE_METRICS.get(str(name))
+                if label is None or value is None or not isinstance(value, (int, float)):
+                    continue
+                values.setdefault(label, {}).setdefault(envelope.subject, (_format_metric(str(name), value), item.id))
+    rows: list[EvidenceItem] = []
+    tickers = [envelope.subject for envelope in envelopes]
+    for label, per_ticker in values.items():
+        if len(per_ticker) < 2:
+            continue
+        cells = [f"{ticker} {per_ticker[ticker][0]}" if ticker in per_ticker else f"{ticker} 缺失" for ticker in tickers]
+        rows.append(
+            EvidenceItem(
+                id="compare-" + hashlib.sha256((label + "|" + "|".join(cells)).encode("utf-8")).hexdigest()[:12],
+                entity=",".join(tickers),
+                claim=f"同口径对照 {label}：" + "、".join(cells) + "。",
+                metric=label,
+                source_id="research_engine",
+                source_title="Research Engine 同口径对照",
+                metadata={"citation_kind": "metrics", "comparison": True, "verified": True, "from": [per_ticker[t][1] for t in tickers if t in per_ticker]},
+            )
+        )
+    return rows[:8]
+
+
 def register_research_capabilities(
     registry: CapabilityRegistry,
     *,
@@ -251,13 +312,14 @@ def register_research_capabilities(
         else:
             status = ResultStatus.PARTIAL_ERROR
         summaries = [f"{item.subject}: {item.summary}" for item in envelopes if item.summary]
+        table = _comparison_table(envelopes)
         return ToolEnvelope(
             "research.compare",
             status,
             subject=",".join(tickers),
             summary="\n".join(summaries),
             findings=[finding for item in envelopes for finding in item.findings],
-            evidence=[evidence for item in envelopes for evidence in item.evidence],
+            evidence=[*table, *(evidence for item in envelopes for evidence in item.evidence)],
             limitations=[value for item in envelopes for value in item.limitations] + [f"{ticker} 的研究未完成（{type(exc).__name__}），比较只覆盖其余股票" for ticker, exc in failed],
             errors=[f"{ticker}: {type(exc).__name__}: {str(exc)[:200]}" for ticker, exc in failed],
             metadata={"dimensions": list(dimensions), "research_run_ids": [item.run_id for item in envelopes], "failed_tickers": [ticker for ticker, _exc in failed]},

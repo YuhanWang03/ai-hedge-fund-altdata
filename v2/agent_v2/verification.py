@@ -225,6 +225,12 @@ def _matches(pattern: Any, text: str) -> bool:
     return bool(pattern) and re.search(str(pattern), text) is not None
 
 
+def _figure_key(value: str) -> str:
+    """A figure as written, without sign, unit or separators: "-39.10%" and "39.10" are the same restatement."""
+
+    return re.sub(r"[^\d.]", "", str(value)).rstrip(".")
+
+
 def _excerpt(sentence: str, limit: int = 30) -> str:
     """The start of a sentence, enough to find it in the draft."""
 
@@ -244,6 +250,9 @@ def _sentence_warnings(answer: str, evidence: list[EvidenceItem], results: list[
     require_cited_numbers = any(result.metadata.get("require_cited_numbers") for result in results)
     warnings: list[str] = []
     seen_claims: set[tuple[str, str]] = set()
+    # Figures an earlier sentence already tied to its evidence: a later sentence
+    # may restate them ("所以 -39.10% 说的是那段回撤") without citing again.
+    grounded_earlier: set[str] = set()
     for raw_sentence in _SENTENCE.findall(answer):
         sentence = raw_sentence.strip()
         if not sentence:
@@ -251,12 +260,15 @@ def _sentence_warnings(answer: str, evidence: list[EvidenceItem], results: list[
         cited_items = [known[value] for value in _CITATION.findall(sentence) if value in known]
         plain = _CITATION.sub("", sentence)
         if not cited_items:
-            if require_cited_numbers and grounding.check(plain, "").total:
+            bare = grounding.check(plain, "")
+            if require_cited_numbers and bare.total and any(_figure_key(value) not in grounded_earlier for value in bare.ungrounded):
                 warnings.append(f"行情事实缺少邻近引用：“{_excerpt(plain)}”")
             continue
         local = grounding.check(plain, _observations(cited_items))
-        if local.ungrounded:
-            warnings.append("引用未支持邻近数字：" + ", ".join(local.ungrounded[:4]) + f"（“{_excerpt(plain)}”）")
+        unsupported = [value for value in local.ungrounded if _figure_key(value) not in grounded_earlier]
+        grounded_earlier.update(_figure_key(value) for value in local.traced)
+        if unsupported:
+            warnings.append("引用未支持邻近数字：" + ", ".join(unsupported[:4]) + f"（“{_excerpt(plain)}”）")
         for item in cited_items:
             if not item.metadata.get("citable", True):
                 warnings.append(str(item.metadata.get("uncitable_warning") or f"引用了不可展示的证据：{item.id}"))

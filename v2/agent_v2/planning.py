@@ -374,6 +374,14 @@ class IntentPlanner:
         for symbol in ark_etfs:
             add(f"etf-{symbol}", "etf.ark_activity", {"symbol": symbol}, purpose=f"{symbol} holdings and activity")
 
+        # "MU 最近有什么申报": the dated list of filings, not the engine's filings module
+        if "filings" in wants and tickers and intent.kind != "research":
+            from datetime import date, timedelta
+
+            since = (date.today() - timedelta(days=45)).isoformat()
+            for ticker in tickers[:4]:
+                add(f"filings-recent-{ticker}", "filings.recent", {"ticker": ticker, "since": since, "forms": ["8-K", "6-K", "4", "10-Q", "10-K"]}, purpose=f"dated filings for {ticker} over the last 45 days")
+            # the engine's own filings module (focus=filings) still runs below for what the filings say
         # per-ticker topics
         explain = "attribution" in wants
         # A want answered at the account level is not a research focus, except

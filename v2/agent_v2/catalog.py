@@ -67,7 +67,10 @@ _UNIVERSE = {
 _DATA_SOURCE = {"type": "string", "enum": ["yfinance", "fd"]}
 
 
-_RESEARCH_GUIDANCE = "stock_research：围绕公司的核心投资矛盾组织答案，不逐项报分。ROIC、ROE、利润率等异常高于 100% 的比率必须提示其依赖数据与计算口径，不能当作无条件质量结论。"
+_RESEARCH_GUIDANCE = "stock_research：围绕公司的核心投资矛盾组织答案，不逐项报分。ROIC、ROE、利润率等异常高于 100% 的比率必须提示其依赖数据与计算口径，不能当作无条件质量结论。问风险时分三层写：公司自身（经营、财务、申报里的风险因素）、行业（竞争、周期、供应链）、宏观（利率、政策、汇率），每层至少一条有证据的，没有证据的那层明说。"
+_COMPARE_GUIDANCE = "stock_compare：先用“同口径对照”那几条证据（每条含所有候选的同一个指标）把增长、估值、盈利兑现摆在一起比，每只都点名、每个指标各引用对应那条对照；缺失的一方明说缺失，不能拿别的指标顶替。然后才是各自的证据。"
+_MACRO_GUIDANCE = "macro：每个数字写明它的时间点（数据日期或“截至查询时”），发布类数据写发布日期和对应月份；没有对比值（预期、前值）时明说。"
+_THIRTEEN_F_GUIDANCE = "thirteen_f：先写报告期（季度末）和披露的滞后（13F 在季度结束后 45 天内提交，持仓可能已经变化），再说主要持仓和本期增减仓；没有增减仓数据时明说。"
 
 
 def _object(properties: dict[str, Any], required: list[str] | None = None) -> dict[str, Any]:
@@ -99,7 +102,7 @@ def default_catalog() -> CapabilityCatalog:
             "Compare two to four stocks on identical research dimensions.",
             _object({"tickers": {"type": "array", "items": _TICKER, "minItems": 2, "maxItems": 4}, "dimensions": {"type": "array", "items": {"type": "string"}}}, ["tickers"]),
             long_running=True,
-            answer_guidance=_RESEARCH_GUIDANCE,
+            answer_guidance=_RESEARCH_GUIDANCE + " " + _COMPARE_GUIDANCE,
         ),
         CapabilitySpec("research.changes", "research", "Compare the latest two stored research snapshots for one stock.", _object({"ticker": _TICKER}, ["ticker"])),
         CapabilitySpec(
@@ -181,10 +184,10 @@ def default_catalog() -> CapabilityCatalog:
                 "每一句含数字的行情事实都必须紧跟对应的 [evidence_id]。"
             ),
         ),
-        CapabilitySpec("institutional.manager_portfolio", "research", "Latest 13F portfolio for a named manager.", _object({"manager": {"type": "string"}}, ["manager"])),
+        CapabilitySpec("institutional.manager_portfolio", "research", "Latest 13F portfolio for a named manager.", _object({"manager": {"type": "string"}}, ["manager"]), answer_guidance=_THIRTEEN_F_GUIDANCE),
         CapabilitySpec("etf.ark_activity", "research", "ARK ETF holdings and recent activity.", _object({"symbol": {"type": "string"}}, ["symbol"])),
-        CapabilitySpec("macro.overview", "research", "Macro dashboard: VIX, DXY, WTI, gold, treasury yields and the most recent economic releases.", _EMPTY),
-        CapabilitySpec("macro.release", "research", "Latest value and date for a named macro release.", _object({"release_type": {"type": "string", "enum": ["cpi", "pce", "nfp", "gdp", "ppi", "claims", "fomc"]}}, ["release_type"])),
+        CapabilitySpec("macro.overview", "research", "Macro dashboard: VIX, DXY, WTI, gold, treasury yields and the most recent economic releases.", _EMPTY, answer_guidance=_MACRO_GUIDANCE),
+        CapabilitySpec("macro.release", "research", "Latest value and date for a named macro release.", _object({"release_type": {"type": "string", "enum": ["cpi", "pce", "nfp", "gdp", "ppi", "claims", "fomc"]}}, ["release_type"]), answer_guidance=_MACRO_GUIDANCE),
         CapabilitySpec(
             "lab.screen",
             "lab",

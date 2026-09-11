@@ -2141,7 +2141,8 @@ def test_benchmark_fixture_makes_a_failed_card_citeable():
     registry, _ = build_benchmark_registry()
     agent = AgentV2(catalog=registry.catalog, registry=registry)
     result = agent.run("SMCI 最近有什么 8-K")
-    assert result.results[0].status == ResultStatus.PARTIAL_DATA and "timed out" in result.results[0].limitations[0]
+    research = next(item for item in result.results if item.capability == "research.stock")
+    assert research.status == ResultStatus.PARTIAL_DATA and "timed out" in research.limitations[0]
     assert any(item.metadata.get("citation_kind") == "limitations" for item in result.evidence)
     assert result.verification.ok
 
@@ -3867,3 +3868,59 @@ def test_quality_repeat_majority_preceding_turns_length_bound_and_case_sets(tmp_
     assert picked["ids"] == tuple(case.id for case in QUALITY_CASES if "quick" in case.tags)
     quality.main(["run", "--label", "x", "--set", "all"])
     assert len(picked["ids"]) == len(QUALITY_CASES) + len(HOLDOUT_CASES)
+
+
+def test_p1_first_pass_rate_restated_figures_compare_rows_filings_plan_short_preference_and_risk_modules():
+    from v2.agent_v2.adapters.research import _FOCUS_MODULES, _comparison_table
+    from v2.agent_v2.intent import Intent
+    from v2.agent_v2.llm import _problem_set, short_answer_limit
+
+    # 1. A figure grounded by an earlier cited sentence may be restated later without a citation.
+    peak = EvidenceItem("PK", "TSLA", "TSLA 从 2025-12-16 高点 489.88 美元到 2026-07-29 低点 298.32 美元回撤 -39.10%。", source_id="market_data")
+    ret = EvidenceItem("RT", "TSLA", "TSLA 近 1 月 +11.58%。", source_id="market_data")
+    result = ToolEnvelope("market.drawdown", ResultStatus.COMPLETED, subject="TSLA", evidence=[peak, ret], metadata={"require_cited_numbers": True})
+    restated = "特斯拉这轮回撤是 -39.10% [PK]。近 1 月 +11.58% [RT]。所以 -39.10% 说的是去年 12 月到今年 7 月那段，不是现在。"
+    assert verify_answer(restated, [peak, ret], answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result]).ok
+    wrong_cite = "特斯拉这轮回撤是 -39.10% [PK]。近 1 月 +11.58%，回撤 -39.10% [RT]。"
+    assert verify_answer(wrong_cite, [peak, ret], answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result]).ok  # 39.10 was grounded a sentence earlier
+    invented = "特斯拉这轮回撤是 -39.10% [PK]。所以 -42.00% 是那段的跌幅。"
+    report = verify_answer(invented, [peak, ret], answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result])
+    assert not report.ok and any("行情事实缺少邻近引用" in warning for warning in report.warnings)
+
+    # 2. The problem set compares kinds: another invented number is the same problem; a different kind is progress.
+    class R:
+        def __init__(self, numbers=(), unknown=(), warnings=()):
+            self.ungrounded_numbers, self.unknown_citations, self.warnings = tuple(numbers), tuple(unknown), tuple(warnings)
+
+    assert _problem_set(R(numbers=("20",))) == _problem_set(R(numbers=("25",)))
+    assert _problem_set(R(warnings=("未确认直接驱动时展示了过多弱候选线索（AMD：只保留 [a]）",))) != _problem_set(R(warnings=("这段涨幅的回答必须引用同期行业基准对比那条证据 [b]",)))
+    assert _problem_set(R(warnings=("（提示）将内部归因计数直接暴露给用户",))) == frozenset()
+
+    # 3. Compare rows: one citeable side-by-side item per metric two or more tickers carry.
+    mu = ToolEnvelope("research.stock", ResultStatus.COMPLETED, subject="MU", evidence=[EvidenceItem("m1", "MU", "MU 市盈率 12.3 倍", metadata={"metrics": {"pe_ratio": 12.3}}), EvidenceItem("m2", "MU", "MU 营收增速 44%", metadata={"metrics": {"revenue_growth": 0.44}})])
+    sndk = ToolEnvelope("research.stock", ResultStatus.COMPLETED, subject="SNDK", evidence=[EvidenceItem("s1", "SNDK", "SNDK 市盈率 30.1 倍", metadata={"metrics": {"pe_ratio": 30.1}}), EvidenceItem("s2", "SNDK", "SNDK 毛利率 27%", metadata={"metrics": {"gross_margin": 0.27}})])
+    rows = _comparison_table([mu, sndk])
+    assert [row.claim for row in rows] == ["同口径对照 市盈率（TTM）：MU 12.3、SNDK 30.1。"] and rows[0].metadata["citation_kind"] == "metrics" and rows[0].metadata["from"] == ["m1", "s1"]
+    assert _comparison_table([mu]) == []
+
+    # 4. A filings question lists the dated filings first, then the engine's filings module.
+    request = normalize_request("MU最近有什么SEC申报？")
+    plan = RulePlanner().plan(request, route(request, intent=Intent(kind="lookup", scope="recent", wants=("filings",), tickers=("MU",), source="model")))
+    assert [(task.capability, task.arguments.get("focus")) for task in plan.tasks] == [("filings.recent", None), ("research.stock", "filings")] and plan.tasks[0].arguments["forms"][0] == "8-K"
+    assert [task.capability for task in RulePlanner().plan(request, route(request)).tasks] == ["filings.recent", "research.stock"]  # the recorded label
+
+    # 5. "回答短一点" becomes a character limit and a compression round; a long answer stays when the short one fails.
+    assert short_answer_limit(["回答短一点"]) == 500 and short_answer_limit(["用收盘价口径"]) == 0 and short_answer_limit(["keep it brief"]) == 500
+    request, plan, results, evidence = _research_fixture()
+    long_answer = "NVDA 收入增长 10%。[E1] " + "这是一段解释。" * 80
+    llm = ScriptedLLM([LLMResponse(text=long_answer), LLMResponse(text="NVDA 收入增长 10%。[E1] 简短版。")])
+    request.metadata["preferences"] = ["回答短一点"]
+    synthesizer = LLMEvidenceSynthesizer(llm)
+    answer = synthesizer.synthesize(request, plan, results, evidence)
+    assert answer == "NVDA 收入增长 10%。[E1] 简短版。" and "不超过 500 个字符" in llm.calls[0][0]["content"] and "压缩到 500 个字符以内" in llm.calls[1][-1]["content"]
+    assert [attempt["stage"] for attempt in synthesizer.diagnostics()["attempts"]] == ["draft", "shorten"]
+    llm = ScriptedLLM([LLMResponse(text=long_answer), LLMResponse(text="NVDA 收入增长 99%。[E1]")])
+    assert LLMEvidenceSynthesizer(llm).synthesize(request, plan, results, evidence) == long_answer  # the short one invented a figure
+
+    # 6. The risk focus no longer pulls the engine's supply-chain discovery.
+    assert "supply_chain" not in _FOCUS_MODULES["risk"] and "risk" not in _FOCUS_MODULES["risk"] and "sec" in _FOCUS_MODULES["risk"]

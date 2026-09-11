@@ -8070,12 +8070,14 @@
   "legacy": {
    "answer_mode": "research_grounded",
    "capabilities": [
+    "filings.recent",
     "research.stock"
    ],
    "direct_answer": "",
    "requires_confirmation": false,
    "route": "fast_lookup"
-  }
+  },
+  "note": "legacy plan updated: a filings question lists the dated filings before the engine's filings module"
  },
  "SMCI 财报怎么样": {
   "intent": {
@@ -20008,5 +20010,23 @@
   },
   "legacy": null,
   "note": "labelled by hand (market-level question)"
+ },
+ "MU最近有什么SEC申报？": {
+  "intent": {
+   "confidence": 1.0,
+   "direction": "none",
+   "kind": "lookup",
+   "portfolio_scope": false,
+   "scope": "recent",
+   "tickers": [
+    "MU"
+   ],
+   "wants": [
+    "filings"
+   ],
+   "watchlist_scope": false
+  },
+  "legacy": null,
+  "note": "labelled by hand (quality case)"
  }
 }

@@ -220,7 +220,7 @@ QUALITY_CASES: tuple[QualityCase, ...] = (
     QualityCase(
         "q_portfolio_ranking",
         "我的持仓里哪只跌的最惨？",
-        criteria=("点名跌得最多的那只并给出浮亏百分比", "提到紧随其后的一两只", "指出组合层面的风险（如集中度）"),
+        criteria=("点名跌得最多的那只并给出浮亏百分比", "提到紧随其后的一两只", "把单只和组合放在一起看：给出它占组合的比重或组合整体的盈亏"),
         must_cite=("account.portfolio",),
         tags=("portfolio", "ranking"),
     ),
