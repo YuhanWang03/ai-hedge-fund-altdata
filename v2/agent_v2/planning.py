@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from v2.agent_v2.intent import FOCUS_OF_WANT, Intent, default_intent
+from v2.agent_v2.intent import FOCUS_OF_WANT, MARKET_TICKERS, Intent, default_intent
 from v2.agent_v2.models import (
     AnswerMode,
     BudgetClass,
@@ -324,7 +324,7 @@ class IntentPlanner:
         account_topics: set[str] = set()
 
         # account-level topics
-        if "performance" in wants and not tickers and not watchlist_scope and not managers:
+        if "performance" in wants and not tickers and not watchlist_scope and not managers and "market" not in wants:
             for period in intent.periods or ("day",):
                 add(f"account-performance-{period}", "account.performance", {"period": period}, purpose=f"account P&L for the {period}")
             account_topics.add("performance")
@@ -357,6 +357,12 @@ class IntentPlanner:
         if watchlist_scope:
             add("state-watchlist", "state.read", {"section": "watchlist"}, purpose="read the watchlist")
 
+        # the market as a whole: the macro board plus the index ETFs' price action
+        if "market" in wants and not tickers and not list_scope:
+            add("macro-overview", "macro.overview", purpose="market backdrop: VIX, yields, releases")
+            for symbol in MARKET_TICKERS:
+                add(f"performance-{symbol}", "market.performance", {"ticker": symbol}, purpose=f"{symbol} as the market's price action")
+            account_topics.add("performance")
         # macro, managers, ARK
         if "macro" in wants:
             add("macro-overview", "macro.overview", purpose="macro dashboard")

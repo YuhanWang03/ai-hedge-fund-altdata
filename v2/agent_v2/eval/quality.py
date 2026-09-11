@@ -312,6 +312,30 @@ def _live_agent(*, use_web: bool):
     return build_workspace_agent(config=AgentV2Config(record_sub_agents=False, record_intents=False), enable_web=use_web, use_llm=True)
 
 
+def render_case(rows: list[dict[str, Any]], case_id: str, *, label: str = "") -> str:
+    """One case's answer with its verdict: the run, the route and agents, each criterion met or not, the answer text."""
+
+    matching = [row for row in rows if row.get("case_id") == case_id and (not label or row.get("label") == label)]
+    if not matching:
+        return f"没有 {case_id} 的记录" + (f"（运行 {label}）" if label else "") + "。"
+    row = matching[-1]
+    score = row.get("score") or {}
+    lines = [f"# {case_id} · {row.get('label')} · {str(row.get('at') or '')[:16].replace('T', ' ')}", ""]
+    lines.append(f"问题：{row.get('question')}")
+    lines.append(f"结果：{'通过' if score.get('passed') else '未通过'} · 路径 {row.get('route')} · 状态 {row.get('status')} · 合成 {row.get('synthesis') or '—'} · {int(row.get('elapsed_ms') or 0) / 1000:.0f}s")
+    lines.append(f"能力：{'、'.join(row.get('capabilities') or []) or '—'}；子智能体：{'、'.join(row.get('sub_agents') or []) or '—'}")
+    for item in score.get("criteria") or []:
+        mark = "✓" if item.get("met") else ("✗" if item.get("met") is False else "?")
+        lines.append(f"{mark} {item.get('text')}" + (f"（“{item.get('quote')}”）" if item.get("quote") else ""))
+    for item in score.get("forbidden") or []:
+        if item.get("asserted"):
+            lines.append(f"✗ 禁止断言：{item.get('text')}" + (f"（“{item.get('quote')}”）" if item.get("quote") else ""))
+    if score.get("problems"):
+        lines.append("问题：" + "；".join(str(value) for value in score["problems"]))
+    lines.extend(["", "## 回答", "", str(row.get("answer") or "")])
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run and report the graded quality cases.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -325,11 +349,19 @@ def main(argv: list[str] | None = None) -> int:
     report.add_argument("--runs", type=int, default=2)
     report.add_argument("--path", type=Path, default=None)
     report.add_argument("--json", action="store_true")
+    show = sub.add_parser("show", help="the answer and the score of one case (default: its latest run)")
+    show.add_argument("case", help="case id, e.g. q_compare")
+    show.add_argument("--label", default="", help="run label (default: the latest run containing the case)")
+    show.add_argument("--path", type=Path, default=None)
     args = parser.parse_args(argv)
     if args.command == "report":
         summary = summarize(read_rows(args.path), runs=max(1, args.runs))
         print(json.dumps(summary, ensure_ascii=False, indent=2) if args.json else render(summary))
         return 0
+    if args.command == "show":
+        text = render_case(read_rows(args.path), args.case, label=args.label)
+        print(text)
+        return 0 if text and not text.startswith("没有") else 1
     cases = QUALITY_CASES
     if args.feedback:
         from v2.agent_v2.eval.quality_cases import from_feedback

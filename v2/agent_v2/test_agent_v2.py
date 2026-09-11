@@ -3749,3 +3749,38 @@ def test_telegram_queues_a_chat_and_lets_cancel_through_and_forced_finish_rememb
     assert first.finished and first.final == {"action": "finish", "answer": "x"} and llm.tool_choice_unsupported is True and len(llm.tool_choices) == 3
     second = Lazy(llm).run("s", "t", finish_prompt="finish now")
     assert second.finished and second.final["answer"] == "y" and len(llm.tool_choices) == 5 and llm.tool_choices[-2:] == [None, None]
+
+
+def test_market_level_questions_second_repair_on_progress_and_quality_show(tmp_path):
+    from v2.agent_v2.eval.quality import QualityJudge, grade, read_rows, record, render_case
+    from v2.agent_v2.eval.quality_cases import QualityCase
+    from v2.agent_v2.intent import MARKET_TICKERS, Intent
+
+    # "今天美股行情如何" is the market, not the account: the macro board plus the index ETFs.
+    market = Intent(kind="lookup", scope="today", wants=("market", "performance"), source="model")
+    request = normalize_request("今天美股行情如何？")
+    plan = RulePlanner().plan(request, route(request, intent=market))
+    assert [task.capability for task in plan.tasks] == ["macro.overview", "market.performance", "market.performance", "market.performance"]
+    assert [task.arguments["ticker"] for task in plan.tasks[1:]] == list(MARKET_TICKERS) and plan.route == RouteKind.FAST_LOOKUP
+    offline = RulePlanner().plan(request, route(request))  # the recorded label plans the same without a model
+    assert [task.capability for task in offline.tasks] == [task.capability for task in plan.tasks]
+
+    # A repair that fixed part of the draft earns a second round; one that did not still falls back.
+    llm = ScriptedLLM([LLMResponse(text="NVDA 收入增长 20%，利润率 30%。[E1]"), LLMResponse(text="NVDA 收入增长 10%，利润率 30%。[E1]"), LLMResponse(text="NVDA 收入增长 10%。[E1]")])
+    request, plan, results, evidence = _research_fixture()
+    synthesizer = LLMEvidenceSynthesizer(llm)
+    answer = synthesizer.synthesize(request, plan, results, evidence)
+    assert answer == "NVDA 收入增长 10%。[E1]" and len(llm.calls) == 3 and synthesizer.last_outcome == "repaired"
+    assert [attempt["stage"] for attempt in synthesizer.diagnostics()["attempts"]] == ["draft", "repair", "repair2"]
+    llm = ScriptedLLM([LLMResponse(text="NVDA 收入增长 20%。[E1]"), LLMResponse(text="NVDA 收入增长 25%。[E1]"), LLMResponse(text="NVDA 收入增长 10%。[E1]")])
+    answer = LLMEvidenceSynthesizer(llm).synthesize(request, plan, results, evidence)
+    assert "20%" not in answer and "25%" not in answer and len(llm.calls) == 2  # no progress: no second round
+
+    # quality show: the answer and the verdict of one recorded case.
+    case = QualityCase("t9", "MU和SNDK哪个更值得购买？", criteria=("同口径比较", "指出缺口"), forbidden=("无条件买入",), expected_route=RouteKind.RESEARCH)
+    result = _telegram_result("MU 比 SNDK 便宜 [evidence-market-price-42f5c41951e36ef1]。", outcome="clean")
+    score = grade(case, result, lambda q, a, c, f: {"criteria": [{"index": 0, "met": False}, {"index": 1, "met": True, "quote": "缺口"}], "forbidden": [{"index": 0, "asserted": False}]})
+    record(case, result, score, label="t-run", path=tmp_path / "q.jsonl")
+    text = render_case(read_rows(tmp_path / "q.jsonl"), "t9")
+    assert text.startswith("# t9 · t-run") and "✗ 同口径比较" in text and "✓ 指出缺口（“缺口”）" in text and "## 回答" in text and "MU 比 SNDK 便宜" in text
+    assert render_case([], "t9").startswith("没有 t9 的记录") and render_case(read_rows(tmp_path / "q.jsonl"), "t9", label="other").startswith("没有")

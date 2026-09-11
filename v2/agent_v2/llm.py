@@ -360,7 +360,7 @@ results 中的评分或限制如需引用，使用 evidence 中 citation_kind �
 不要向用户提内部工具、能力或角色名（归因者、申报阅读者、规划器、fan-out、capability 等）；直接说事实和来源类型（新闻、SEC 申报、盯盘记录、行情）。
 
 严格遵循输入中的 response_style：
-- brief：先用一句话直接回答用户问的那个量或对象（总额、盈亏、名单、日期、谁更强），这些被直接询问的数字和名字必须原样给出，不得因为篇幅省略；比较或排名问题必须点名每个候选并给出用来比较的数字；“有没有…”“哪几只…”这类筛选问题要先点名相对靠前的几只并按程度排序，再交代其余；只展开被点名的对象，未被问到的个股不要逐一复述；覆盖不全时用一句话说明未覆盖的对象。然后用 3—5 个短段落、约 300—500 个中文字完成回答，挑选最有决策价值的 3—5 条事实，只讲一个主要风险和最重要的数据缺口，最后指出接下来值得观察什么。不要使用标题、表格、分隔线、编号清单、“正面/负面/中性”标签、“必须说明”或单独的免责声明章节；不要重复同一事实。
+- brief：先用一句话直接回答用户问的那个量或对象（总额、盈亏、名单、日期、谁更强），这些被直接询问的数字和名字必须原样给出，不得因为篇幅省略；比较或排名问题必须点名每个候选并给出用来比较的数字；“有没有…”“哪几只…”这类筛选问题要先点名相对靠前的几只并按程度排序，再交代其余；开头这句里的每个数字也要紧跟它自己的 [evidence_id]，几只股票的数字来自不同证据时每个数字后各写一个 id，不能用一条引用盖住一串数字；只展开被点名的对象，未被问到的个股不要逐一复述；覆盖不全时用一句话说明未覆盖的对象。然后用 3—5 个短段落、约 300—500 个中文字完成回答，挑选最有决策价值的 3—5 条事实，只讲一个主要风险和最重要的数据缺口，最后指出接下来值得观察什么。不要使用标题、表格、分隔线、编号清单、“正面/负面/中性”标签、“必须说明”或单独的免责声明章节；不要重复同一事实。
 - detailed：用户明确要求详细、完整、全面、表格或逐项展开时，才允许使用小标题与列表，但仍应合并重复内容并保持自然。
 
 把 BULLISH、MEDIUM、forward_pe、revision_trend 等内部英文标签翻译或解释成自然中文；必要的通用缩写可以保留。不要逐项复述所有模块，也不要把工具输出改写成机械评分单。"""
@@ -511,6 +511,26 @@ class LLMEvidenceSynthesizer:
             if repair_report.ok:
                 self.last_outcome = "repaired"
                 return repair
+            if _problem_count(repair_report) < _problem_count(report):
+                # The repair fixed part of it (a lead sentence's uncited figures
+                # became one wrongly-cited figure): one more round, since the
+                # deterministic fallback would drop the ranking the user asked for.
+                second = self._draft(
+                    [
+                        *messages,
+                        {"role": "assistant", "content": repair},
+                        {"role": "user", "content": repair_instruction(repair_report, evidence)},
+                    ],
+                    results,
+                    evidence,
+                )
+                second = self._complete(second, evidence, results)
+                self._keep_draft(second)
+                second_report = verify_answer(second, evidence, answer_mode=plan.answer_mode, results=results, judge=self.judge)
+                self._record_report("repair2", second_report)
+                if second_report.ok:
+                    self.last_outcome = "repaired"
+                    return second
         except (LLMError, ValueError, TypeError) as exc:
             self._record_attempt("error", ok=False, warnings=(f"{type(exc).__name__}: {str(exc)[:200]}",))
         self._log_fallback(request)
@@ -717,6 +737,20 @@ def _select_evidence(results: list[ToolEnvelope], evidence: list[EvidenceItem], 
 
 
 _NEARBY_UNGROUNDED = re.compile(r"^引用未支持邻近数字：([^（]+)")
+
+
+def _problem_count(report) -> int:
+    """How much a verification report found wrong: every flagged number, unknown id and blocking warning."""
+
+    from v2.agent_v2.verification import SOFT_PREFIX
+
+    blocking = [warning for warning in report.warnings if not str(warning).startswith(SOFT_PREFIX)]
+    numbers = list(report.ungrounded_numbers)
+    for warning in blocking:
+        match = _NEARBY_UNGROUNDED.match(str(warning))
+        if match:
+            numbers.extend(value.strip() for value in match.group(1).split(",") if value.strip())
+    return len(set(numbers)) + len(report.unknown_citations) + sum(1 for warning in blocking if not _NEARBY_UNGROUNDED.match(str(warning)))
 
 
 def repair_instruction(report: VerificationReport, evidence: list[EvidenceItem] | None = None) -> str:

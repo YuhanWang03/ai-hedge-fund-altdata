@@ -68,9 +68,12 @@ WANTS = (
     "research_changes",  # what changed since the last research
     "briefing",  # what should I know today
     "positioning",  # add / trim exposure
+    "market",  # the market as a whole: indexes, 大盘, 美股今天怎么样
     "full",  # a complete research report
     "overview",
 )
+#: The index ETFs that stand in for "the market" in a market-level question.
+MARKET_TICKERS = ("SPY", "QQQ", "DIA")
 RELEASES = ("cpi", "pce", "nfp", "gdp", "ppi", "claims", "fomc")
 MANAGERS = ("buffett", "burry", "ackman", "einhorn", "renaissance", "citadel", "coatue", "twosigma", "deshaw", "ark")
 LABS = ("backtest", "sweep", "event_study", "screen", "committee")
@@ -85,8 +88,8 @@ kind：research（需要研究、分析、比较、判断值不值得买、解�
 scope：today（今天、盘中、昨天）| recent（最近、这周、这个月，没有明确起点）| window（明确区间：今年、一年、从高点/低点以来）| since_purchase（买入以来、建仓以来）| none
 direction：up | down | none（问题针对上涨还是下跌；"跌了这么多"是 down，"涨了多少"是 up）
 wants：从列表里选 0 到 4 个，按重要性排序：%s
-  说明：attribution=问原因；drawdown/runup=问一段时间的跌幅/涨幅（配合 scope=window/since_purchase）；performance=行情、成交量、走势；ranking=在持仓/关注列表里比出最好最差；briefing=今天/最近有什么值得注意的；positioning=该不该加仓减仓；overview=泛泛的"怎么样"。
-tickers：股票代码（大写），公司中文名或英文名转成代码；没有就空数组。
+  说明：attribution=问原因；drawdown/runup=问一段时间的跌幅/涨幅（配合 scope=window/since_purchase）；performance=行情、成交量、走势；ranking=在持仓/关注列表里比出最好最差；briefing=今天/最近有什么值得注意的；positioning=该不该加仓减仓；market=问大盘、指数、美股整体行情（"今天美股行情如何"、"大盘怎么样"，不指向个股或账户）；overview=泛泛的"怎么样"。
+tickers：股票代码（大写），公司中文名或英文名转成代码；没有就空数组。常见中文名：英特尔 INTC、英伟达 NVDA、美光 MU、超威/AMD AMD、高通 QCOM、博通 AVGO、台积电 TSM、苹果 AAPL、微软 MSFT、谷歌 GOOGL、亚马逊 AMZN、特斯拉 TSLA、甲骨文 ORCL、安谋/ARM ARM、闪迪 SNDK、Meta META、奈飞 NFLX、Palantir PLTR。
 portfolio_scope：是否指向用户自己的持仓/账户（true/false）；watchlist_scope：是否指向用户的关注列表。
 command：kind=command 时给 {"operation":"watchlist.add|watchlist.remove|alert.add|alert.remove","ticker":"...","direction":"above|below","price":数字,"alert_id":整数}，缺的字段省略；否则 null。
 release：问具体宏观数据时给 %s 之一，否则空字符串。managers：问到的基金经理，从 %s 里选；ark_etfs：问到的 ARK ETF 代码（如 ARKK）。

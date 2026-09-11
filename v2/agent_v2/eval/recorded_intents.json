@@ -19974,5 +19974,39 @@
    "requires_confirmation": false,
    "route": "fast_lookup"
   }
+ },
+ "今天美股行情如何？": {
+  "intent": {
+   "confidence": 1.0,
+   "direction": "none",
+   "kind": "lookup",
+   "portfolio_scope": false,
+   "scope": "today",
+   "tickers": [],
+   "wants": [
+    "market",
+    "performance"
+   ],
+   "watchlist_scope": false
+  },
+  "legacy": null,
+  "note": "labelled by hand (market-level question)"
+ },
+ "大盘今天怎么样？": {
+  "intent": {
+   "confidence": 1.0,
+   "direction": "none",
+   "kind": "lookup",
+   "portfolio_scope": false,
+   "scope": "today",
+   "tickers": [],
+   "wants": [
+    "market",
+    "performance"
+   ],
+   "watchlist_scope": false
+  },
+  "legacy": null,
+  "note": "labelled by hand (market-level question)"
  }
 }
