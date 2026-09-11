@@ -3199,7 +3199,10 @@ def test_claim_judge_decides_wording_rules_in_one_call_and_the_synthesizer_uses_
     judge = ClaimJudge(llm)
     items = [{"id": "a", "text": "AMD 属于缩量上涨。", "claim": "用盘中成交量断定缩量"}, {"id": "b", "text": "AMD 可能缩量。", "claim": "用盘中成交量断定缩量"}]
     assert judge(items) == {"a": "AMD 属于缩量上涨"} and len(llm.calls) == 1 and json.loads(llm.calls[0][1]["content"])["items"][0]["claim"] == "用盘中成交量断定缩量"
-    assert judge(items) == {} and ClaimJudge(None)(items) == {} and judge([]) == {}
+    # The same items again are answered from the memo (the orchestrator re-judges the synthesizer's accepted text); different items go to the model.
+    assert judge(items) == {"a": "AMD 属于缩量上涨"} and len(llm.calls) == 1
+    other = [{"id": "c", "text": "别的文本。", "claim": "别的断言"}]
+    assert judge(other) == {} and len(llm.calls) == 2 and ClaimJudge(None)(items) == {} and judge([]) == {}
 
     # The verifier collects every forbid_claim (per cited evidence and per answer) into one judge call and warns with the quote.
     volume = EvidenceItem("V1", "AMD", "AMD 截至查询时的盘中累计成交量为 1,000 股。", metadata={"constraints": [_INTRADAY_VOLUME_RULE]})
@@ -3261,3 +3264,55 @@ def test_recorded_intents_reproduce_every_legacy_plan():
         if got != want:
             mismatches.append((text, got, want))
     assert checked > 300 and not mismatches, mismatches[:5]
+
+
+
+def test_this_rounds_fixes_watchlist_performance_confirmed_commands_forced_finish_and_labels(monkeypatch):
+    from v2.agent.llm import ToolCall
+    from v2.agent_v2.agents.base import LoopLimits, Tool, ToolLoop, _schema
+    from v2.agent_v2.intent import Intent
+    from v2.agent_v2.interfaces import telegram_format
+
+    # 1. A watchlist performance question fans market.performance out over the names even without a ranking word.
+    text = "我关注的股票里有没有最近在放量的？"
+    watch = Intent(kind="lookup", scope="recent", wants=("watchlist", "performance"), watchlist_scope=True, source="model")
+    plan = RulePlanner().plan(normalize_request(text), route(normalize_request(text), intent=watch))
+    assert [(task.capability, bool(task.fan_out)) for task in plan.tasks] == [("state.read", False), ("market.performance", True)]
+    mine = Intent(kind="lookup", scope="none", wants=("performance",), portfolio_scope=True, periods=("month",), source="model")
+    plan = RulePlanner().plan(normalize_request("我这个月赚了多少？"), route(normalize_request("我这个月赚了多少？"), intent=mine))
+    assert [task.capability for task in plan.tasks] == ["account.performance"]  # the account card answers; no per-holding fan-out
+
+    # 2. A confirmed command is answered from the store's message, never by the model synthesizer.
+    applied: list[dict] = []
+    registry = CapabilityRegistry(default_catalog())
+    registry.register("state.mutate", lambda arguments, context: applied.append(dict(arguments)) or ToolEnvelope("state.mutate", ResultStatus.COMPLETED, subject="alert.add", summary="提醒 #6 已记录：NVDA 涨到 240 美元时通知。", evidence=[EvidenceItem("S1", "NVDA", "提醒 #6 已记录：NVDA 涨到 240 美元时通知。", source_id="state.mutate")]))
+    model = ScriptedLLM([LLMResponse(text="它在你确认之前不会生效。[S1]")])
+    from v2.agent_v2.intent import IntentClassifier
+
+    classifier = IntentClassifier(ScriptedLLM([LLMResponse(text='{"kind":"command","scope":"none","direction":"none","wants":["alerts"],"tickers":["NVDA"],"portfolio_scope":false,"confidence":0.95,"command":{"operation":"alert.add","ticker":"NVDA","direction":"above","price":240}}')]))
+    agent = AgentV2(catalog=default_catalog(), registry=registry, synthesizer=LLMEvidenceSynthesizer(model), session=ShortTermSession(), classifier=classifier)
+    first = agent.run("NVDA涨到240时提醒我", session_id="cmd-1")
+    assert first.status == RunStatus.WAITING_CONFIRMATION
+    done = agent.run("确认", session_id="cmd-1")
+    assert done.status == RunStatus.COMPLETED and applied and "提醒 #6 已记录" in done.answer and "确认之前" not in done.answer and model.calls == []
+
+    # 3. The forced-finish turn tells the provider to call finish.
+    class Lazy(ToolLoop):
+        def __init__(self, llm):
+            super().__init__(llm, LoopLimits(max_rounds=1, max_seconds=30), tools=[Tool("look", "看。", _schema({}), lambda a: "看到了")], finish_parameters=_schema({"answer": {"type": "string"}}, ["answer"]))
+
+    llm = ScriptedLLM([LLMResponse(tool_calls=[ToolCall(id="c1", name="look", arguments={}, raw_arguments="{}")]), LLMResponse(tool_calls=[ToolCall(id="c2", name="finish", arguments={"answer": "x"}, raw_arguments="{}")])])
+    outcome = Lazy(llm).run("s", "t", finish_prompt="finish now")
+    assert outcome.finished and llm.tool_choices == [None, {"type": "function", "function": {"name": "finish"}}]
+    assert [tool["function"]["name"] for tool in Lazy(ScriptedLLM([])).tool_specs()] == ["look", "finish"]
+
+    # 4. The max_cited warning names the candidate to keep and the ones to drop.
+    candidates = [EvidenceItem(f"C{i}", "AMD", f"候选 {i}", metadata={"claim_role": "candidate_driver"}) for i in (1, 2, 3)]
+    result = ToolEnvelope("market.attribute_move", ResultStatus.COMPLETED, subject="AMD 2026-07-02", evidence=candidates, metadata={"answer_constraints": [{"max_cited": {"metadata": {"claim_role": "candidate_driver"}, "max": 1, "warning": "未确认直接驱动时展示了过多弱候选线索"}}]})
+    report = verify_answer("一 [C1]。二 [C2]。三 [C3]。又一 [C1]。", candidates, answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result])
+    assert list(report.warnings) == ["未确认直接驱动时展示了过多弱候选线索（AMD 2026-07-02：只保留 [C1]，去掉 [C2]、[C3]）"]
+
+    # 6. Legacy cards are labelled by capability.
+    macro = EvidenceItem("legacy-1", "macro", "VIX 15.74", source_id="macro.overview", source_title="Existing deterministic responder")
+    calendar = EvidenceItem("legacy-2", "", "无标的发财报", source_id="account.earnings_schedule", source_title="Existing deterministic responder")
+    assert [entry.label for entry in telegram_format.source_entries(("legacy-1", "legacy-2"), [macro, calendar])] == ["宏观面板", "财报日历"]

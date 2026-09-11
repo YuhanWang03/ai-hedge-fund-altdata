@@ -309,9 +309,12 @@ def _answer_warnings(answer: str, evidence: list[EvidenceItem], results: list[To
             if isinstance(cap, dict):
                 wanted = dict(cap.get("metadata") or {})
                 # A cap is about this result's evidence: six tickers may each show one candidate.
-                matching = {item.id for item in cited if item.id in own and all(item.metadata.get(key) == value for key, value in wanted.items())}
-                if len(matching) > int(cap.get("max", 0)):
-                    warnings.append(str(cap.get("warning") or f"{result.capability} 引用了过多同类证据"))
+                matching = list(dict.fromkeys(item.id for item in cited if item.id in own and all(item.metadata.get(key) == value for key, value in wanted.items())))
+                limit = int(cap.get("max", 0))
+                if len(matching) > limit:
+                    # Name what to keep so one repair can comply: the first cited ones stay, the rest go.
+                    keep, drop = matching[:limit], matching[limit:]
+                    warnings.append(str(cap.get("warning") or f"{result.capability} 引用了过多同类证据") + f"（{result.subject or result.capability}：只保留 " + "、".join(f"[{value}]" for value in keep) + "，去掉 " + "、".join(f"[{value}]" for value in drop) + "）")
             need = rule.get("require_cited")
             if isinstance(need, dict):
                 # A floor: at least one of this result's items with the given

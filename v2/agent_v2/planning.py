@@ -396,7 +396,8 @@ class IntentPlanner:
             # "哪只跌得最多" is answered by the position card's own P/L column;
             # only a time frame or a "why" needs the per-holding market look.
             card_answers = rank is not None and intent.scope in {"none", "since_purchase"} and not explain
-            per_ticker = explain or bool(focuses) or intent.each or ("performance" in wants and "ranking" in wants and not card_answers)
+            # A performance question over the list ("有没有在放量的") is per name unless the account card already answered it.
+            per_ticker = explain or bool(focuses) or intent.each or ("performance" in wants and "performance" not in account_topics and not card_answers)
             if intent.each and "earnings" not in focuses:
                 focuses = [*focuses, "earnings"]
             if source == "account-portfolio" and (explicit_portfolio or per_ticker or not tasks):

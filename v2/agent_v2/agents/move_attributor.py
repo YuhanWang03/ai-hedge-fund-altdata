@@ -125,7 +125,7 @@ _FINISH_NOW = "轮次已用完。现在只允许 finish：只报你已经拿到�
 
 CHALLENGE_TOOL = {"type": "function", "function": {"name": "verdict", "description": "给出对高置信度驱动的反对意见。", "parameters": {"type": "object", "properties": {"objection": {"type": "string", "description": "一句中文，指出具体不足；没有就留空"}, "downgrade": {"type": "boolean"}}, "required": ["objection", "downgrade"]}}}
 
-_CHALLENGE = """你是异动归因的反方，通过 verdict 工具给出结果。给你一天的行情事实和归因者报出的"高置信度驱动"及其原文引文。
+_CHALLENGE = """你是异动归因的反方，通过 verdict 工具给出结果。不要输出任何文字或分析过程，直接调用工具给出结果。给你一天的行情事实和归因者报出的"高置信度驱动"及其原文引文。
 你的任务是找出这个驱动不足以解释当天涨跌的具体理由，只能用给你的事实和引文，不能编造：
 幅度是否相称（引文里的事件能否解释这么大的涨跌）、时间是否对得上（事件是否发生在当日或前一晚）、板块是否同向同幅（那就是板块行情而非公司原因）、引文是否只是分析师观点或长期展望。
 objection 一句中文指出具体不足（没有就留空），downgrade 只在理由具体且成立时为 true。如果无法调用工具，就只输出 {"objection":"...","downgrade":true|false}。"""

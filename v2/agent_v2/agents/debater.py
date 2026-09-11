@@ -22,7 +22,7 @@ from v2.agent_v2.models import EvidenceItem, ResultStatus, ToolEnvelope
 
 DEBATE_TOOL = {"type": "function", "function": {"name": "objections", "description": "给出反方意见。", "parameters": {"type": "object", "properties": {"stance": {"type": "string", "enum": ["回答偏多", "回答偏空", "回答中性"]}, "objections": {"type": "array", "maxItems": 3, "items": {"type": "object", "properties": {"claim": {"type": "string"}, "objection": {"type": "string"}, "evidence_id": {"type": "string"}}, "required": ["objection", "evidence_id"]}}, "note": {"type": "string"}}, "required": ["stance", "objections"]}}}
 
-_SYSTEM = """你是投研回答的反方辩手，通过 objections 工具给出结果，不回答用户问题。
+_SYSTEM = """你是投研回答的反方辩手，通过 objections 工具给出结果，不回答用户问题。不要输出任何文字或分析过程，直接调用工具给出结果。
 给你用户的问题、当前回答和这次运行拿到的证据（id 和内容）。任务：找出回答里最站不住的 1 到 3 个判断，
 每条给出一句具体的反对理由，并且必须指向证据列表里能支持这条反对的 id（相反的数字、被回答忽略的限制、口径不符的引用）。
 不能编造证据，不能用常识反驳；证据不支持反对就不要写。

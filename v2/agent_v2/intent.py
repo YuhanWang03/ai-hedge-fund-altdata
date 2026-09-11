@@ -79,7 +79,7 @@ OPERATIONS = ("watchlist.add", "watchlist.remove", "alert.add", "alert.remove")
 #: Research focuses a want maps to (``research.stock`` ``focus`` argument).
 FOCUS_OF_WANT = {"valuation": "valuation", "filings": "filings", "earnings": "earnings", "ownership": "ownership", "supply_chain": "supply_chain", "catalysts": "catalysts", "risk": "risk", "full": "full", "overview": "overview", "performance": "market"}
 
-_SYSTEM = """你是投研助手的意图分类器，只输出 JSON，不回答问题。
+_SYSTEM = """你是投研助手的意图分类器，只输出 JSON，不回答问题。不要输出任何文字或分析过程，直接调用工具给出结果。
 把用户的一句话归成固定字段，枚举值只能从给定列表里选，拿不准就选最接近的并降低 confidence：
 kind：research（需要研究、分析、比较、判断值不值得买、解释一段时间的涨跌）| lookup（查一个事实：行情、成交量、持仓、财报日期、列表、宏观数据、某人的持仓）| command（改用户状态：加关注、删关注、设提醒、取消提醒）| knowledge（概念解释、术语区别，不涉及具体股票或账户）| lab（回测、参数扫描、事件研究、筛选、委员会投票）| help（问助手能做什么）
 scope：today（今天、盘中、昨天）| recent（最近、这周、这个月，没有明确起点）| window（明确区间：今年、一年、从高点/低点以来）| since_purchase（买入以来、建仓以来）| none
@@ -96,7 +96,7 @@ lab：kind=lab 时给 %s 之一；strategy：回测策略 %s 之一；lab_scale�
 periods：问账户盈亏时的口径 day/week/month 数组；each：是否要对每只持仓分别回答（"各自的财报日期"）。
 rank：ranking 时 "high"（最好、涨最多）或 "low"（最差、跌最多），否则空。
 confidence：0 到 1。
-只输出一个 JSON 对象，字段齐全。""" % ("、".join(WANTS), "/".join(RELEASES), "/".join(MANAGERS), "/".join(LABS), "/".join(STRATEGIES))
+通过 classify 工具返回；无法调用工具时只输出一个 JSON 对象，字段齐全。""" % ("、".join(WANTS), "/".join(RELEASES), "/".join(MANAGERS), "/".join(LABS), "/".join(STRATEGIES))
 
 
 @dataclass

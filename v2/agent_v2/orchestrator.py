@@ -258,7 +258,11 @@ class AgentV2:
 
         self._emit(on_progress, run_id, RunStatus.SYNTHESIZING, "synthesizing evidence")
         evidence = outcome.ledger.items()
-        answer = self.synthesizer.synthesize(request, plan, results, evidence)
+        # A confirmed write has one result, the store's own message; a model
+        # draft read the plan's "not executed until confirmed" note as the
+        # present state and told the user to confirm again.
+        synthesizer = EvidenceSummarySynthesizer() if any(task.capability == "state.mutate" for task in plan.tasks) else self.synthesizer
+        answer = synthesizer.synthesize(request, plan, results, evidence)
         synthesis = self._synthesis_diagnostics()
         answer_mode = plan.answer_mode
         if not plan.tasks and decision.kind != RouteKind.GENERAL_KNOWLEDGE:

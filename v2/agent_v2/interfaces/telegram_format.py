@@ -99,6 +99,17 @@ SOURCE_LABELS = {
     "local_etf": "ARK 持仓归档",
     "macro_snapshot": "宏观快照（FRED、Yahoo Finance）",
     "supply_chain": "产业链关系（多源）",
+    # Legacy cards carry their capability as source_id.
+    "macro.overview": "宏观面板",
+    "macro.release": "宏观数据",
+    "account.portfolio": "账户卡片",
+    "account.performance": "账户盈亏",
+    "account.risk": "组合风险",
+    "account.earnings_schedule": "财报日历",
+    "state.read": "用户设置",
+    "state.mutate": "账户操作",
+    "institutional.manager_portfolio": "13F 持仓",
+    "etf.ark_activity": "ARK 持仓",
 }
 _LEGACY_TITLE = "Existing deterministic responder"
 

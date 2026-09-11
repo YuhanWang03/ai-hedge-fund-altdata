@@ -18,11 +18,14 @@ with a JSON action in text instead of a tool call is still understood.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from v2.agent_v2.execution import ExecutionContext
+
+logger = logging.getLogger(__name__)
 
 #: Seconds kept back from the coordinator's remaining budget so the
 #: envelope can still be built and ingested after the loop stops.
@@ -173,6 +176,9 @@ class BoundedLoop:
             action = self.step(messages)
             if action is not None and action.get("action") == "finish":
                 outcome.finished, outcome.final, stop = True, action, "finished"
+            else:
+                last = next((str(m.get("content") or "")[:160] for m in reversed(messages) if m.get("role") == "assistant"), "")
+                logger.warning("%s: forced finish did not finish (action=%s); last reply: %r", self.usage_source_name, (action or {}).get("action"), last)
             outcome.trace.append({"round": outcome.rounds + 1, "action": "forced_finish", "detail": self.describe_finish(action) if action else "", "ms": int((time.monotonic() - turn_started) * 1000)})
         outcome.stop_reason = stop
         outcome.elapsed_ms = int((time.monotonic() - started) * 1000)
@@ -270,7 +276,14 @@ class ToolLoop(BoundedLoop):
     def step(self, messages: list[dict[str, Any]]) -> dict[str, Any] | None:
         self._pending = []
         try:
-            response = self.llm.complete(messages, self.tool_specs())
+            if self.finish_only:
+                # The forced-finish turn: the provider is told to call finish, not merely offered it.
+                try:
+                    response = self.llm.complete(messages, self.tool_specs(), tool_choice={"type": "function", "function": {"name": "finish"}})
+                except TypeError:  # a client without the parameter
+                    response = self.llm.complete(messages, self.tool_specs())
+            else:
+                response = self.llm.complete(messages, self.tool_specs())
         except Exception as exc:  # noqa: BLE001 — a failed call is a bad turn, the loop goes on
             messages.append({"role": "user", "content": f"上一轮模型调用失败（{type(exc).__name__}），请重试：调用一个工具或 finish。"})
             return None

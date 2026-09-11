@@ -140,6 +140,7 @@ class OpenAICompatLLM:
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        tool_choice: Any = None,
     ) -> LLMResponse:
         payload: dict[str, Any] = {
             "model": self.model,
@@ -148,7 +149,8 @@ class OpenAICompatLLM:
         }
         if tools:
             payload["tools"] = tools
-            payload["tool_choice"] = "auto"
+            # ``tool_choice`` may name one function ({"type": "function", "function": {"name": ...}}) to force it.
+            payload["tool_choice"] = tool_choice or "auto"
 
         body = json.dumps(payload).encode("utf-8")
         headers = {"Content-Type": "application/json"}
@@ -247,13 +249,17 @@ class ScriptedLLM:
     def __init__(self, responses: list[LLMResponse]) -> None:
         self.responses = list(responses)
         self.calls: list[list[dict[str, Any]]] = []
+        #: The tool_choice each call carried, when any.
+        self.tool_choices: list[Any] = []
 
     def complete(
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        tool_choice: Any = None,
     ) -> LLMResponse:
         self.calls.append(list(messages))
+        self.tool_choices.append(tool_choice)
         if not self.responses:
             return LLMResponse(text="(scripted LLM exhausted)", finish_reason="stop")
         return self.responses.pop(0)
