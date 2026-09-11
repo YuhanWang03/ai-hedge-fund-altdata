@@ -413,6 +413,17 @@ dev1：37 题各跑两次，28 题通过（76%），74 次尝试平均 43.5 秒�
   日历得到 404——已知 ETF 直接跳过，日历为空的代码一天内不再问；申报清单加了 424B5（增发先是招股说明
   书，8-K 未必有）。
 
+**dev4（冒烟）**：5/6，日志里 8-K 解析报错和 IVV/NUGT 的 404 已消失。健康报告第一次的"77 次运行"里大部分是
+VPS 上跑 pytest 时测试夹具写进生产账本的（"provider down"、"capability adapter is not registered"、lab.sweep）；
+`v2/agent_v2/conftest.py` 现在把五个账本的环境变量都指到临时目录。放量题"如果是盘中"这种条件式标准评审员
+判不了，改成"说明了成交量口径（盘中进度或已收盘全日）"。
+
+## P8 合并门禁
+
+`python scripts/agent_v2_gate.py`：单测（agent_v2 和 benchmark）加离线评测（39 条全过），几秒出 PASS/FAIL；
+`--live` 再跑 6 题冒烟集，允许挂一题（`--min-quick` 可调）。`.github/workflows/agent-v2-gate.yml` 在 push 到 main 和
+PR 上跑离线部分，只装 pytest 和 python-dotenv（Agent V2 的测试和离线评测不依赖别的包）。
+
 ## 下一步
 
 1. 换一批留出集。当前 15 条已被看过三轮，把它们并入开发集，从 Telegram 真实问句里

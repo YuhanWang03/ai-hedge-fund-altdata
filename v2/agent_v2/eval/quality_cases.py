@@ -212,7 +212,7 @@ QUALITY_CASES: tuple[QualityCase, ...] = (
     QualityCase(
         "q_watchlist_volume",
         "我关注的股票里有没有最近在放量的？",
-        criteria=("对关注列表里的每只股票给出成交量相对均量的倍数", "说明盘中口径不能据此判定放量或缩量（如果是盘中）", "指出哪几只相对靠前"),
+        criteria=("对关注列表里的每只股票给出成交量相对均量的倍数", "说明了成交量的口径：是盘中累计进度（不能据此判定放量或缩量）还是已收盘的完整日成交量", "指出哪几只相对靠前"),
         forbidden=("说没有成交量数据",),
         must_cite=("market_data",),
         tags=("watchlist", "performance", "quick"),

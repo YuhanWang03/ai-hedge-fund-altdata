@@ -4022,3 +4022,21 @@ def test_capability_ledger_and_health_report_and_known_data_fixes(tmp_path, monk
     assert not earnings_calendar.is_supported_ticker("ZZZZ")  # remembered as empty
     earnings_calendar._EMPTY_CALENDAR.clear()
     assert earnings_calendar.is_supported_ticker("ZZZZ")
+
+
+def test_merge_gate_verdict_and_offline_steps(monkeypatch, capsys):
+    import importlib.util
+    from pathlib import Path
+
+    spec = importlib.util.spec_from_file_location("agent_v2_gate", Path(__file__).resolve().parents[2] / "scripts" / "agent_v2_gate.py")
+    gate = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gate)
+    assert gate.verdict([("a", True, ""), ("b", True, "")]) and not gate.verdict([("a", True, ""), ("b", False, "x")])
+    ok, detail = gate.run_offline_eval()
+    assert ok and detail == "39/39"
+    monkeypatch.setattr(gate, "run_unit_tests", lambda: (True, "1 passed"))
+    monkeypatch.setattr(gate, "run_quick_quality", lambda label, min_pass: (False, "4/6 passed, need 5", {}))
+    assert gate.main(["--json"]) == 0
+    out = capsys.readouterr().out
+    assert "[PASS] unit tests: 1 passed" in out and "[PASS] offline eval: 39/39" in out and out.strip().endswith("gate: PASS (2 steps, 0s)")
+    assert gate.main(["--live", "--skip-eval"]) == 1 and "gate: FAIL" in capsys.readouterr().out
