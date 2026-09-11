@@ -2620,7 +2620,7 @@ def test_a_news_question_plans_web_filings_and_memory_under_a_real_budget():
         assert [task.capability for task in plan.tasks] == ["web.research", "filings.recent", "market.anomaly_history"], text
         web = plan.tasks[0]
         assert web.arguments["ticker"] in {"ARM", "NVDA"} and web.arguments["topic"] == "company_event" and web.arguments["recency_days"] == 14 and web.arguments["min_searches"] == 2 and not web.required
-        assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", plan.tasks[1].arguments["since"]) and plan.tasks[1].arguments["forms"] == ["8-K", "6-K", "4"] and plan.tasks[2].arguments["lookback_days"] == 30
+        assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", plan.tasks[1].arguments["since"]) and plan.tasks[1].arguments["forms"] == ["8-K", "6-K", "4", "424B5"] and plan.tasks[2].arguments["lookback_days"] == 30
         assert plan.budget == BudgetClass.STANDARD and plan.assumptions[0].startswith("news: ") and "网页已授权并已搜索" in plan.assumptions[0]
         # The model planner leaves it to the rules.
         llm = ScriptedLLM([LLMResponse(text="{}")])
@@ -3968,3 +3968,57 @@ def test_performance_fan_out_gets_a_ranking_table_and_compare_rows_read_module_m
 
     # The visible length ignores citation markers.
     assert visible_length("AAPL 涨了 [evidence-market-price-42f5c41951e36ef1]。") == len("AAPL 涨了 。")
+
+
+def test_capability_ledger_and_health_report_and_known_data_fixes(tmp_path, monkeypatch):
+    from v2.agent_v2.eval import capability_ledger as ledger
+    from v2.sec.eight_k_parser import get_item_text
+
+    # One row per capability result; the report groups by capability, marks hollow results and names the worst first.
+    registry = CapabilityRegistry(default_catalog())
+    registry.register("market.performance", lambda a, c: ToolEnvelope("market.performance", ResultStatus.COMPLETED, subject="ARM", evidence=[EvidenceItem("P", "ARM", "ARM 近 30 天 +1.00%", source_id="market_data")], metadata={"narrative": "ARM 近 30 天 +1.00%[P]。"}))
+    registry.register("research.stock", lambda a, c: ToolEnvelope("research.stock", ResultStatus.PARTIAL_DATA, subject="ARM", limitations=["核心模块失败（valuation）：估值和基本面数字缺失"], errors=[]))
+    agent = AgentV2(catalog=default_catalog(), registry=registry, config=AgentV2Config(record_sub_agents=False, record_capabilities=True))
+    monkeypatch.setenv("AGENT_V2_CAPABILITY_LEDGER", str(tmp_path / "cap.jsonl"))
+    result = agent.run("ARM 最近30天表现", session_id="quality-x-q1-1")
+    rows = ledger.read_rows(tmp_path / "cap.jsonl")
+    assert [row["capability"] for row in rows] == ["market.performance"] and rows[0]["channel"] == "quality" and rows[0]["ok"] and not rows[0]["hollow"] and rows[0]["run_id"] == result.run_id
+    request = normalize_request("分析 ARM 估值")
+    research = agent.run("分析 ARM 估值", session_id="chat-1")
+    rows = ledger.read_rows(tmp_path / "cap.jsonl")
+    hollow = [row for row in rows if row["capability"] == "research.stock"]
+    assert hollow and hollow[0]["hollow"] and hollow[0]["status"] == "partial_data" and hollow[0]["limitation"].startswith("核心模块失败") and hollow[0]["channel"] == ""
+    summary = ledger.summarize(rows)
+    by_name = {row["capability"]: row for row in summary["capabilities"]}
+    assert by_name["research.stock"]["hollow"] == 1 and by_name["research.stock"]["ok"] == 0 and by_name["market.performance"]["ok"] == 1
+    assert summary["capabilities"][0]["capability"] == "research.stock"  # the least reliable first
+    text = ledger.render(summary, since_days=1)
+    assert "| research.stock | 1 | 0 | 1 |" in text and "| 需要看的能力 | 正常率 | 最近一次异常 |" in text and "核心模块失败" in text
+    assert ledger.render(ledger.summarize([])).startswith("# 数据源健康报告") and ledger.main(["--since", "1", "--path", str(tmp_path / "cap.jsonl")]) == 0
+    assert ledger.read_rows(tmp_path / "cap.jsonl", channel="quality") and not ledger.read_rows(tmp_path / "cap.jsonl", channel="web")
+    monkeypatch.setenv("AGENT_V2_CAPABILITY_LEDGER", str(tmp_path / "off.jsonl"))
+    AgentV2(catalog=default_catalog(), registry=registry, config=AgentV2Config(record_sub_agents=False, record_capabilities=False)).run("ARM 最近30天表现")
+    assert not (tmp_path / "off.jsonl").exists()
+
+    # edgartools exposes EightK.text() as a method now; the parser calls it instead of matching the bound method.
+    class Modern:
+        def text(self):
+            return "Item 2.02 Results of Operations\nRevenue was $1.0B.\nItem 9.01 Exhibits"
+
+    class Legacy:
+        text = "Item 2.02 Results of Operations\nRevenue was $1.0B.\nItem 9.01 Exhibits"
+
+    assert "Revenue was $1.0B." in get_item_text(Modern(), "2.02") and "Revenue was $1.0B." in get_item_text(Legacy(), "2.02") and get_item_text(Modern(), "5.02") == ""
+
+    # ETFs are not asked for an earnings calendar; a ticker whose calendar came back empty is not asked again for a day.
+    pytest.importorskip("yfinance")
+    from v2.earnings import calendar as earnings_calendar
+
+    assert not earnings_calendar.is_supported_ticker("IVV") and not earnings_calendar.is_supported_ticker("NUGT") and earnings_calendar.is_supported_ticker("AAPL")
+    earnings_calendar._EMPTY_CALENDAR.clear()
+    monkeypatch.setattr(earnings_calendar, "_fetch_one", lambda ticker: None)
+    batch = earnings_calendar.get_upcoming_batch(["ZZZZ", "IVV"])
+    assert batch.skipped_empty == ["ZZZZ"] and batch.skipped_unsupported == ["IVV"]
+    assert not earnings_calendar.is_supported_ticker("ZZZZ")  # remembered as empty
+    earnings_calendar._EMPTY_CALENDAR.clear()
+    assert earnings_calendar.is_supported_ticker("ZZZZ")

@@ -232,7 +232,7 @@ class IntentPlanner:
         since = (date.today() - timedelta(days=14)).isoformat()
         tasks = [
             PlanTask("web-news", "web.research", {"query": f"{ticker} stock news latest two weeks", "topic": "company_event", "ticker": ticker, "recency_days": 14, "min_searches": 2}, purpose="dated events from news pages, quotes located in the text", required=False),
-            PlanTask("filings-recent", "filings.recent", {"ticker": ticker, "since": since, "forms": ["8-K", "6-K", "4"]}, purpose="what the company and its insiders filed in the last two weeks", required=False),
+            PlanTask("filings-recent", "filings.recent", {"ticker": ticker, "since": since, "forms": ["8-K", "6-K", "4", "424B5"]}, purpose="what the company and its insiders filed in the last two weeks (an offering is a 424B5 prospectus)", required=False),
             PlanTask("anomaly-history", "market.anomaly_history", {"ticker": ticker, "lookback_days": 30}, purpose="what the monitor recorded in the last month", required=False),
         ]
         web_state = "网页已授权并已搜索，不得写成未授权或无法访问网页。" if request.allow_web else "网页未授权，只列申报和盯盘记录，并说明未使用网页。"
@@ -381,7 +381,7 @@ class IntentPlanner:
 
             since = (date.today() - timedelta(days=45)).isoformat()
             for ticker in tickers[:4]:
-                add(f"filings-recent-{ticker}", "filings.recent", {"ticker": ticker, "since": since, "forms": ["8-K", "6-K", "4", "10-Q", "10-K"]}, purpose=f"dated filings for {ticker} over the last 45 days")
+                add(f"filings-recent-{ticker}", "filings.recent", {"ticker": ticker, "since": since, "forms": ["8-K", "6-K", "4", "424B5", "10-Q", "10-K"]}, purpose=f"dated filings for {ticker} over the last 45 days")
                 # What the filings say: the reader quotes the latest two; the engine's filings module (focus=filings) still runs below.
                 add(f"filings-read-{ticker}", "filings.read_events", {"ticker": ticker, "since": since, "max_filings": 2}, purpose=f"what {ticker}'s latest filings disclosed", depends_on=(f"filings-recent-{ticker}",), required=False)
         # per-ticker topics

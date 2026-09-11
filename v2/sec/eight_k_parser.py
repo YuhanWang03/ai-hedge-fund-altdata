@@ -149,6 +149,12 @@ def get_item_text(eight_k_obj, code: str) -> str:
     """
     try:
         text = getattr(eight_k_obj, "text", None) or ""
+        if callable(text):
+            # Newer edgartools exposes ``EightK.text()`` as a method; the
+            # bound method used to reach the regex and fail every 8-K.
+            text = text() or ""
+        if not isinstance(text, str):
+            text = str(text)
         if not text:
             return ""
 

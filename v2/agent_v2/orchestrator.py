@@ -58,6 +58,8 @@ class AgentV2Config:
     max_seconds: float | None = None
     #: Append every sub-agent run to the run ledger (data/agent_v2_subagents.jsonl).
     record_sub_agents: bool = True
+    #: Append every capability outcome to data/agent_v2_capabilities.jsonl (the data-source health report reads it).
+    record_capabilities: bool = True
     #: After a research answer is verified, one adversarial pass lists the objections the run's evidence supports.
     debate: bool = True
     #: When the debater objects, one bounded rewrite that must pass the verifier again; off keeps objections display-only.
@@ -476,4 +478,8 @@ class AgentV2:
             from v2.agent_v2.eval.subagent_ledger import record_runs
 
             record_runs(result)
+        if result.results and self.config.record_capabilities:
+            from v2.agent_v2.eval.capability_ledger import record_capabilities
+
+            record_capabilities(result)
         return result

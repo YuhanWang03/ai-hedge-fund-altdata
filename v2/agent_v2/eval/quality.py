@@ -139,7 +139,10 @@ def grade(case: QualityCase, result: AgentResult, judge: Judge | None) -> Qualit
     judged = not (case.criteria or case.forbidden)  # nothing to judge: the deterministic checks decide
     if judge is not None and (case.criteria or case.forbidden):
         try:
-            verdict = judge(case.question, result.answer, list(case.criteria), list(case.forbidden))
+            try:
+                verdict = judge(case.question, result.answer, list(case.criteria), list(case.forbidden))
+            except (ValueError, KeyError, TypeError):
+                verdict = judge(case.question, result.answer, list(case.criteria), list(case.forbidden))  # one malformed verdict is retried
             for row in verdict.get("criteria") or []:
                 index = int(row.get("index", -1))
                 if 0 <= index < len(criteria_rows):

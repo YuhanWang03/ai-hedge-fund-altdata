@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 import yfinance as yf
@@ -63,7 +63,37 @@ def is_supported_ticker(ticker: str) -> bool:
     t = ticker.upper()
     if t in _CLASS_SHARE_WHITELIST:
         return True
+    if t in KNOWN_ETFS or _remembered_empty(t):
+        # An ETF has no earnings; yfinance answers its calendar request with
+        # a 404 (logged as an error) on every holding, every run.
+        return False
     return bool(_PLAIN_TICKER_RE.match(t))
+
+
+#: Funds that show up in portfolios and watchlists; none of them report earnings.
+KNOWN_ETFS = frozenset({
+    "SPY", "IVV", "VOO", "VTI", "QQQ", "DIA", "IWM", "SMH", "SOXX", "XLK", "XLF", "XLE", "XLV", "XLY", "XLP", "XLI", "XLU", "XLB", "XLRE", "XLC",
+    "ARKK", "ARKW", "ARKG", "ARKQ", "ARKF", "ARKX", "TQQQ", "SQQQ", "SOXL", "SOXS", "NUGT", "DUST", "GLD", "SLV", "TLT", "IEF", "SHY", "HYG", "LQD",
+    "VXX", "UVXY", "VIXY", "VIXM", "EEM", "EFA", "VEA", "VWO", "BND", "AGG", "USO", "UNG", "XBI", "IBB", "KWEB", "FXI",
+})
+_EMPTY_CALENDAR: dict[str, "datetime"] = {}
+_EMPTY_CALENDAR_TTL_HOURS = 24
+
+
+def _remembered_empty(ticker: str) -> bool:
+    seen = _EMPTY_CALENDAR.get(ticker)
+    if seen is None:
+        return False
+    if datetime.now(timezone.utc) - seen > timedelta(hours=_EMPTY_CALENDAR_TTL_HOURS):
+        _EMPTY_CALENDAR.pop(ticker, None)
+        return False
+    return True
+
+
+def remember_empty_calendar(ticker: str) -> None:
+    """A ticker whose calendar came back empty or 404 is not asked again for a day."""
+
+    _EMPTY_CALENDAR[ticker.upper()] = datetime.now(timezone.utc)
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +149,7 @@ def get_upcoming_batch(tickers: list[str]) -> CalendarBatchResult:
             continue
         if ev is None:
             skipped_empty.append(ticker)
+            remember_empty_calendar(ticker)
         else:
             events[ticker] = ev
 

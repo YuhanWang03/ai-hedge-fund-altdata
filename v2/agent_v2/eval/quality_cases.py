@@ -364,9 +364,9 @@ QUALITY_CASES: tuple[QualityCase, ...] = (
     QualityCase(
         "q_preference_short",
         "分析AMD估值",
-        criteria=("给出了估值倍数并引用来源", "篇幅明显短于常规回答，只保留最关键的两三点"),
+        criteria=("给出了估值倍数并引用来源", "没有展开成多段长文，只有两三条要点、一个风险和一个观察点"),
         preceding=("记住，回答短一点",),
-        max_chars=600,
+        max_chars=500,
         expected_route=RouteKind.RESEARCH,
         tags=("multi_turn", "preference"),
     ),
