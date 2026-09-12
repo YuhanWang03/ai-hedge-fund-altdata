@@ -20075,5 +20075,23 @@
   },
   "legacy": null,
   "note": "labelled by hand (clarification case: the merged turn)"
+ },
+ "对 NVDA 做动量策略参数扫描，持有期分别用 10、21、42 天": {
+  "intent": {
+   "confidence": 1.0,
+   "direction": "none",
+   "kind": "lab",
+   "lab": "sweep",
+   "strategy": "momentum",
+   "portfolio_scope": false,
+   "scope": "none",
+   "tickers": [
+    "NVDA"
+   ],
+   "wants": [],
+   "watchlist_scope": false
+  },
+  "legacy": null,
+  "note": "labelled by hand (lab quality case)"
  }
 }

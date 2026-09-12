@@ -108,8 +108,9 @@ the most expensive questions.
 **A quality loop instead of reading Telegram.** Forty development cases with
 rubrics (criteria a model grader checks, forbidden assertions, expected route,
 sub-agents and source kinds, length bounds, preceding turns for multi-turn
-cases) and a thirteen-case hold-out set that is run before a release and not
-read while iterating. Repeats with majority verdicts separate model jitter
+cases), a thirteen-case hold-out set that is run before a release and not
+read while iterating, and a three-case lab set (backtest, parameter sweep,
+event study; minutes each) graded on the shape of an experiment answer. Repeats with majority verdicts separate model jitter
 from regressions. A merge gate runs the unit tests and the offline evaluation
 in seconds (`scripts/agent_v2_gate.py`, also on CI) and, with `--live`, the
 smoke subset through the real model.
@@ -139,6 +140,7 @@ python scripts/agent_v2_gate.py                       # unit tests + offline eva
 python scripts/agent_v2_gate.py --live                # + the quick quality subset through the model
 python -m v2.agent_v2.eval.quality run --label NAME --repeat 2 --parallel 2
 python -m v2.agent_v2.eval.quality run --set holdout --repeat 2
+python -m v2.agent_v2.eval.quality run --set lab --label lab1   # the three experiments, minutes each
 python -m v2.agent_v2.eval.quality report --runs 3    # pass rate per run, per-case matrix, criteria missed
 python -m v2.agent_v2.eval.quality show q_compare      # one answer with its verdict
 python -m v2.agent_v2.eval.subagent_report --since 1  # sub-agent runs, token equivalents per source and per question

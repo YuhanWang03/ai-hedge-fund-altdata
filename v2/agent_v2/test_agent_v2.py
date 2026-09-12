@@ -4316,3 +4316,23 @@ def test_durable_session_state_survives_a_restart_and_the_bot_tells_interrupted_
     monkeypatch.setattr(bridge, "_get_agent", lambda: Agent())
     assert asyncio.run(bridge.notify_interrupted_runs(Bot())) == 1 and sent == [(7, bridge.INTERRUPTED_NOTICE.format(question="ARM买入以来跌了这么多，是什么原因？"))]
     assert asyncio.run(bridge.notify_interrupted_runs(Bot())) == 0  # told once
+
+
+def test_lab_cases_route_to_the_lab_and_form_their_own_set(monkeypatch):
+    from v2.agent_v2.eval import quality
+    from v2.agent_v2.eval.quality_cases import QUALITY_CASES
+    from v2.agent_v2.eval.quality_holdout import HOLDOUT_CASES
+    from v2.agent_v2.eval.quality_lab import LAB_CASES
+
+    ids = [case.id for case in (*QUALITY_CASES, *HOLDOUT_CASES, *LAB_CASES)]
+    assert len(ids) == len(set(ids)) and all(case.set == "lab" and case.expected_route == RouteKind.LAB and "quick" not in case.tags for case in LAB_CASES)
+    for case in LAB_CASES:
+        request = normalize_request(case.question)
+        decision = route(request)
+        plan = RulePlanner().plan(request, decision)
+        assert decision.kind == RouteKind.LAB and plan.tasks[0].capability.startswith("lab.") and plan.budget == BudgetClass.LAB, (case.id, decision.kind, [task.capability for task in plan.tasks])
+    picked: dict = {}
+    monkeypatch.setattr(quality, "run_cases", lambda agent_, cases, judge_, **kwargs: picked.setdefault("ids", tuple(case.id for case in cases)) and [])
+    monkeypatch.setattr(quality, "_live_agent", lambda **kwargs: type("A", (), {"synthesizer": None})())
+    quality.main(["run", "--label", "x", "--set", "lab"])
+    assert picked["ids"] == tuple(case.id for case in LAB_CASES)

@@ -451,7 +451,7 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--path", type=Path, default=None)
     run.add_argument("--repeat", type=int, default=1, help="attempts per case; a case passes when most attempts pass")
     run.add_argument("--parallel", type=int, default=1, help="cases run at once (1-4)")
-    run.add_argument("--set", choices=("dev", "holdout", "all"), default="dev", help="dev (default), the hold-out set, or both")
+    run.add_argument("--set", choices=("dev", "holdout", "all", "lab"), default="dev", help="dev (default), the hold-out set, both, or the lab experiments (minutes each)")
     run.add_argument("--quick", action="store_true", help="only the smoke subset (cases tagged quick)")
     report = sub.add_parser("report", help="pass rate per run and the per-case matrix")
     report.add_argument("--runs", type=int, default=2)
@@ -471,7 +471,11 @@ def main(argv: list[str] | None = None) -> int:
         print(text)
         return 0 if text and not text.startswith("没有") else 1
     cases = QUALITY_CASES
-    if args.set != "dev":
+    if args.set == "lab":
+        from v2.agent_v2.eval.quality_lab import LAB_CASES
+
+        cases = LAB_CASES
+    elif args.set != "dev":
         from v2.agent_v2.eval.quality_holdout import HOLDOUT_CASES
 
         cases = HOLDOUT_CASES if args.set == "holdout" else (*QUALITY_CASES, *HOLDOUT_CASES)
