@@ -79,11 +79,16 @@ class ShortTermSession:
         *,
         ttl_seconds: float = legacy_session.DEFAULT_TTL_SECONDS,
         max_turns: int = legacy_session.DEFAULT_MAX_TURNS,
+        durable=None,
     ) -> None:
         self.store = legacy_session.SessionStore(
             ttl_seconds=ttl_seconds,
             max_turns=max_turns,
         )
+        #: A ``SqliteSessionState`` (or anything with its methods): pending writes,
+        #: clarifications and turns survive a restart; the previous turn's evidence does not.
+        self.durable = durable
+        self._hydrated: set[str] = set()
         self.ttl_seconds = float(ttl_seconds)
         self._pending: dict[str, tuple[float, ExecutionPlan]] = {}
         self._frames: dict[str, tuple[float, dict]] = {}
@@ -105,6 +110,7 @@ class ShortTermSession:
         return dict(frame)
 
     def resolve(self, session_id: str, text: str) -> SessionResolution:
+        self._hydrate(session_id)
         raw = (text or "").strip()
         # A subject-less follow-up about the stock in focus: prepend it.  The
         # legacy resolver only knows pronouns and a bare "为什么".
@@ -122,11 +128,27 @@ class ShortTermSession:
             frame=self._frame(session_id, result.antecedent) if result.rewritten and result.antecedent else {},
         )
 
+    def _hydrate(self, session_id: str) -> None:
+        """After a restart the in-memory ring buffer is empty; load the session's durable turns once."""
+
+        if self.durable is None or not session_id or session_id in self._hydrated:
+            return
+        self._hydrated.add(session_id)
+        try:
+            rows = self.durable.turns(session_id)
+        except Exception:  # noqa: BLE001 — a broken store never breaks an answer
+            return
+        if self.store.recent(session_id, n=1):
+            return
+        for row in rows:
+            self.store.record(session_id, legacy_session.Turn(query=row["query"], tickers=tuple(row["tickers"]), tools_used=tuple(row["tools"]), answer_digest=row["answer_digest"], path=row["path"], ts=float(row["ts"])))
+
     def recent_turns(self, session_id: str, n: int = 3) -> list[dict]:
         """The last ``n`` exchanges as the classifier and the synthesizer see them: question, answer digest, tickers."""
 
         if not session_id:
             return []
+        self._hydrate(session_id)
         return [{"question": turn.query, "answer_digest": turn.answer_digest[:240], "tickers": list(turn.tickers)} for turn in self.store.recent(session_id, n=n)]
 
     def previous_turn(self, session_id: str) -> dict | None:
@@ -163,6 +185,7 @@ class ShortTermSession:
             elif not result.request.metadata.get("context_frame"):
                 # A turn about something else ends the frame; a framed follow-up keeps it.
                 self._frames.pop(result.request.session_id, None)
+        self._hydrated.add(result.request.session_id)
         self.store.record(
             result.request.session_id,
             legacy_session.Turn(
@@ -173,12 +196,22 @@ class ShortTermSession:
                 path=result.route.kind.value,
             ),
         )
+        if self.durable is not None:
+            try:
+                self.durable.record_turn(result.request.session_id, query=result.request.text, tickers=tuple(tickers), tools=tuple(item.capability for item in result.results), answer_digest=result.answer[:300], path=result.route.kind.value)
+            except Exception:  # noqa: BLE001
+                pass
 
     def set_pending(self, session_id: str, plan: ExecutionPlan) -> None:
         if not session_id:
             return
         with self._lock:
             self._pending[session_id] = (time.monotonic() + self.ttl_seconds, plan)
+        if self.durable is not None:
+            try:
+                self.durable.set_pending(session_id, plan)
+            except Exception:  # noqa: BLE001
+                pass
 
     def set_clarification(self, session_id: str, original_text: str, question: str) -> None:
         """Remember that ``question`` was asked about ``original_text``; the next message answers it."""
@@ -187,27 +220,49 @@ class ShortTermSession:
             return
         with self._lock:
             self._clarifications[session_id] = (time.monotonic() + self.ttl_seconds, original_text, question)
+        if self.durable is not None:
+            try:
+                self.durable.set_clarification(session_id, original_text, question)
+            except Exception:  # noqa: BLE001
+                pass
 
     def pop_clarification(self, session_id: str) -> tuple[str, str] | None:
         """The (original question, clarifying question) pair waiting on this session, once."""
 
         with self._lock:
             entry = self._clarifications.pop(session_id, None)
+        durable = None
+        if self.durable is not None:
+            try:
+                durable = self.durable.pop_clarification(session_id)  # consumed either way
+            except Exception:  # noqa: BLE001
+                durable = None
         if entry is None:
-            return None
+            return durable  # asked before a restart
         expires_at, original_text, question = entry
         return (original_text, question) if time.monotonic() < expires_at else None
 
     def pop_pending(self, session_id: str) -> ExecutionPlan | None:
         with self._lock:
             entry = self._pending.pop(session_id, None)
+        durable = None
+        if self.durable is not None:
+            try:
+                durable = self.durable.pop_pending(session_id)  # consumed either way
+            except Exception:  # noqa: BLE001
+                durable = None
         if entry is None:
-            return None
+            return durable  # held before a restart
         expires_at, plan = entry
         return plan if time.monotonic() < expires_at else None
 
     def clear(self, session_id: str) -> None:
         self.store.clear(session_id)
+        if self.durable is not None:
+            try:
+                self.durable.clear(session_id)
+            except Exception:  # noqa: BLE001
+                pass
         with self._lock:
             self._pending.pop(session_id, None)
             self._frames.pop(session_id, None)

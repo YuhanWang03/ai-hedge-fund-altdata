@@ -126,9 +126,11 @@ existing.
 provider, so the pass rate has a bias the hold-out set only partly controls.
 Data providers fail silently at times; the system marks the result partial and
 says what is missing rather than filling the gap. Pending confirmations,
-queued questions and session memory live in process memory and do not survive
-a restart. The investigator sub-agent exists but has not earned its place in
-the evaluation yet.
+clarifications and recent turns are kept in sqlite and survive a restart; the
+previous turn's full evidence is not, so a follow-up about the previous answer
+after a restart is handled as a fresh question, and a chat whose answer the
+restart cut off is told to ask again. The investigator sub-agent exists but
+has not earned its place in the evaluation yet.
 
 ## Running it
 

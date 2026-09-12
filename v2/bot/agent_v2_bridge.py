@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import logging
 import os
 import threading
 import time
@@ -33,6 +34,35 @@ def chat_lock(chat_id: int) -> asyncio.Lock:
         lock = _CHAT_LOCKS[chat_id] = asyncio.Lock()
     return lock
 _CANCEL_WORDS = {"取消", "停", "停止", "别查了", "stop", "cancel"}
+
+
+INTERRUPTED_NOTICE = "刚才处理「{question}」时服务重启了，那次没有完成；请把问题再发一次。"
+
+
+def _durable_state():
+    """The agent's durable session state, when the runtime has one."""
+
+    session = getattr(_get_agent(), "session", None)
+    return getattr(session, "durable", None)
+
+
+async def notify_interrupted_runs(bot: Any) -> int:
+    """At startup: tell every chat whose answer was in progress when the process died; returns the chats told."""
+
+    try:
+        durable = _durable_state()
+    except Exception:  # noqa: BLE001 — the runtime failing to build is reported elsewhere
+        return 0
+    if durable is None:
+        return 0
+    told = 0
+    for row in durable.take_interrupted():
+        try:
+            await bot.send_message(chat_id=int(row["chat_id"]), text=INTERRUPTED_NOTICE.format(question=str(row.get("question") or "")[:60]))
+            told += 1
+        except Exception as exc:  # noqa: BLE001 — a chat that cannot be reached is not worth a crash at startup
+            logging.getLogger(__name__).warning("interrupted-run notice not sent to %s: %s", row.get("chat_id"), exc)
+    return told
 
 
 def cancel_active_run(chat_id: int) -> bool:
@@ -250,6 +280,9 @@ async def handle_agent_v2(
         )
         cancel_event = threading.Event()
         _ACTIVE_RUNS[chat.id] = cancel_event
+        durable = _durable_state()
+        if durable is not None:
+            durable.mark_active(str(chat.id), text)
         try:
             return await TelegramFacade(_get_agent()).handle(
                 TelegramMessage(
@@ -264,3 +297,5 @@ async def handle_agent_v2(
         finally:
             if _ACTIVE_RUNS.get(chat.id) is cancel_event:
                 _ACTIVE_RUNS.pop(chat.id, None)
+            if durable is not None:
+                durable.clear_active(str(chat.id))

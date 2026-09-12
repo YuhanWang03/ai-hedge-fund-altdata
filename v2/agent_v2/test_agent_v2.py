@@ -4251,3 +4251,68 @@ def test_repair_names_the_items_that_carry_an_uncited_sentence_s_figures():
     assert "这句没有引用" in text and "167.23 见 [evidence-attribute-price-1]" in text and "其他问题：行情事实缺少邻近引用" not in text
     unknown = repair_instruction(VerificationReport(ok=False, warnings=("行情事实缺少邻近引用：“成交量只有均量的 0.38 倍…”",)), [price])
     assert "其他问题：行情事实缺少邻近引用" in unknown  # nothing carries the figure: the plain warning stands
+
+
+def test_durable_session_state_survives_a_restart_and_the_bot_tells_interrupted_chats(tmp_path, monkeypatch):
+    import asyncio
+
+    from v2.agent_v2.session_store import SqliteSessionState, plan_from_dict, plan_to_dict
+    from v2.bot import agent_v2_bridge as bridge
+
+    db = tmp_path / "session.sqlite"
+
+    def agent_over(store):
+        applied: list = []
+        catalog = default_catalog()
+        registry = CapabilityRegistry(catalog)
+        registry.register("state.mutate", lambda a, c: (applied.append(a), ToolEnvelope("state.mutate", ResultStatus.COMPLETED, subject=a["operation"], summary="已设置提醒。", evidence=[EvidenceItem("M1", "AMD", "已设置提醒。")]))[1])
+        registry.register("market.performance", lambda a, c: ToolEnvelope("market.performance", ResultStatus.COMPLETED, subject=a["ticker"], evidence=[EvidenceItem("P", a["ticker"], f"{a['ticker']} 近 30 天 +1.00%")], metadata={"narrative": f"{a['ticker']} 近 30 天 +1.00%[P]。"}))
+        return AgentV2(catalog=catalog, registry=registry, session=ShortTermSession(durable=store), config=AgentV2Config(record_sub_agents=False, record_capabilities=False)), applied
+
+    # Plans round-trip through JSON.
+    plan = ExecutionPlan("NVDA 涨到 200 提醒我", RouteKind.COMMAND, tasks=(PlanTask("mutation", "state.mutate", {"operation": "alert.add", "payload": {"ticker": "NVDA", "direction": "above", "target_price": 200.0}}, purpose="提醒"),), requires_confirmation=True, assumptions=("x",))
+    assert plan_from_dict(plan_to_dict(plan)) == plan
+
+    # Before the "restart": a pending write, a clarification on another session, a turn about ARM.
+    first, applied_before = agent_over(SqliteSessionState(db))
+    assert first.run("NVDA 涨到 200 美元提醒我", session_id="chat-a").status == RunStatus.WAITING_CONFIRMATION
+    assert first.run("给AMD设个提醒", session_id="chat-b").status == RunStatus.WAITING_CLARIFICATION
+    first.run("ARM 最近30天表现", session_id="chat-c")
+    assert not applied_before
+
+    # After: a new session object over the same file — the process memory is gone.
+    second, applied_after = agent_over(SqliteSessionState(db))
+    confirmed = second.run("确认", session_id="chat-a")
+    assert confirmed.status == RunStatus.COMPLETED and applied_after and applied_after[0]["payload"]["target_price"] == 200.0
+    completed = second.run("跌到150的时候", session_id="chat-b")
+    assert completed.status == RunStatus.WAITING_CONFIRMATION and completed.pending_mutation.payload["target_price"] == 150.0
+    assert second.session.recent_turns("chat-c")[0]["question"].startswith("ARM") and second.session.recent_turns("chat-c")[0]["tickers"] == ["ARM"]
+    followed = second.run("为什么跌这么多", session_id="chat-c")  # the subject-less follow-up still finds ARM after the restart
+    assert followed.request.text.startswith("ARM") and followed.request.metadata.get("rewritten")
+    assert second.session.pop_pending("chat-a") is None and second.session.pop_clarification("chat-b") is None  # consumed once
+
+    # Expired rows are ignored; clear removes a session's rows.
+    stale = SqliteSessionState(db, ttl_seconds=0.0)
+    stale.set_pending("chat-d", plan)
+    assert SqliteSessionState(db).pop_pending("chat-d") is None
+    store = SqliteSessionState(db)
+    store.set_clarification("chat-e", "q", "?")
+    store.clear("chat-e")
+    assert store.pop_clarification("chat-e") is None
+
+    # The bot records in-flight runs durably and, at startup, tells the chats the restart cut off.
+    store.mark_active("7", "ARM买入以来跌了这么多，是什么原因？")
+    store.mark_active("8", "分析NVDA估值")
+    store.clear_active("8")
+    sent: list[tuple[int, str]] = []
+
+    class Bot:
+        async def send_message(self, *, chat_id, text):
+            sent.append((chat_id, text))
+
+    class Agent:
+        session = ShortTermSession(durable=store)
+
+    monkeypatch.setattr(bridge, "_get_agent", lambda: Agent())
+    assert asyncio.run(bridge.notify_interrupted_runs(Bot())) == 1 and sent == [(7, bridge.INTERRUPTED_NOTICE.format(question="ARM买入以来跌了这么多，是什么原因？"))]
+    assert asyncio.run(bridge.notify_interrupted_runs(Bot())) == 0  # told once

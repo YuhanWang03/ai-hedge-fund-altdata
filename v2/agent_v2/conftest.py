@@ -16,11 +16,12 @@ _LEDGER_VARS = (
     "AGENT_V2_INTENT_LEDGER",
     "AGENT_V2_QUALITY_LEDGER",
     "AGENT_V2_USER_MEMORY",
+    "AGENT_V2_SESSION_DB",
 )
 
 
 @pytest.fixture(autouse=True)
 def _isolated_ledgers(tmp_path, monkeypatch):
     for name in _LEDGER_VARS:
-        monkeypatch.setenv(name, str(tmp_path / (name.lower() + ".jsonl")))
+        monkeypatch.setenv(name, str(tmp_path / (name.lower() + (".sqlite" if name.endswith("_DB") else ".jsonl"))))
     yield

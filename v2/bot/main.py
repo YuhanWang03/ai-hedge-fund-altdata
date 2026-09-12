@@ -18,6 +18,20 @@ from v2.bot import commands
 logger = logging.getLogger(__name__)
 
 
+async def _after_start(application) -> None:
+    """Chats whose Agent V2 answer was cut off by the restart hear about it once."""
+
+    from v2.bot.agent_v2_bridge import notify_interrupted_runs
+
+    try:
+        told = await notify_interrupted_runs(application.bot)
+    except Exception as exc:  # noqa: BLE001 — startup must not fail on a notice
+        logger.warning("interrupted-run notices failed: %s", exc)
+        return
+    if told:
+        logger.info("told %d chat(s) their answer was interrupted by the restart", told)
+
+
 async def _error_handler(update: object, context) -> None:
     """Surface unhandled bot errors to the user instead of silent fail.
 
@@ -52,7 +66,7 @@ def build_application() -> Application:
     """Wire up the bot — call build_application().run_polling() to launch."""
     token = os.environ["TELEGRAM_BOT_TOKEN"]
 
-    app = Application.builder().token(token).build()
+    app = Application.builder().token(token).post_init(_after_start).build()
 
     # Stage 1 commands (watchlist + meta)
     app.add_handler(CommandHandler("start", commands.cmd_start))

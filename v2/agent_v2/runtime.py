@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from dataclasses import replace
 
 from v2.agent_v2.adapters import (
@@ -112,11 +114,23 @@ def build_llm_agent(*, config: AgentV2Config | None = None, llm=None, lab=None, 
         registry=registry,
         planner=StructuredLLMPlanner(llm, catalog),
         synthesizer=LLMEvidenceSynthesizer(llm, catalog=catalog),
-        session=ShortTermSession(),
+        session=ShortTermSession(durable=durable_session_state()),
         config=config,
         classifier=IntentClassifier(llm),
         memory=UserMemory(),
     )
+
+
+def durable_session_state():
+    """The sqlite session state the live runtime uses; None when it cannot be opened (the session then lives in memory)."""
+
+    from v2.agent_v2.session_store import SqliteSessionState
+
+    try:
+        return SqliteSessionState()
+    except Exception as exc:  # noqa: BLE001 — a read-only disk must not stop the bot
+        logging.getLogger(__name__).warning("durable session state unavailable: %s", exc)
+        return None
 
 
 def build_workspace_agent(
