@@ -3311,7 +3311,7 @@ def test_this_rounds_fixes_watchlist_performance_confirmed_commands_forced_finis
     candidates = [EvidenceItem(f"C{i}", "AMD", f"候选 {i}", metadata={"claim_role": "candidate_driver"}) for i in (1, 2, 3)]
     result = ToolEnvelope("market.attribute_move", ResultStatus.COMPLETED, subject="AMD 2026-07-02", evidence=candidates, metadata={"answer_constraints": [{"max_cited": {"metadata": {"claim_role": "candidate_driver"}, "max": 1, "warning": "未确认直接驱动时展示了过多弱候选线索"}}]})
     report = verify_answer("一 [C1]。二 [C2]。三 [C3]。又一 [C1]。", candidates, answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[result])
-    assert list(report.warnings) == ["未确认直接驱动时展示了过多弱候选线索（AMD 2026-07-02：只保留 [C1]，去掉 [C2]、[C3]）"]
+    assert list(report.warnings) == ["（提示）未确认直接驱动时展示了过多弱候选线索（AMD 2026-07-02：只保留 [C1]，去掉 [C2]、[C3]）"] and report.ok  # soft: reported, not a rejection
 
     # 6. Legacy cards are labelled by capability.
     macro = EvidenceItem("legacy-1", "macro", "VIX 15.74", source_id="macro.overview", source_title="Existing deterministic responder")
@@ -4226,3 +4226,14 @@ def test_earnings_dates_never_fan_the_research_engine_over_the_holdings_and_slow
     second = registry.execute(PlanTask("m", "macro.overview"), context)
     assert first.status == ResultStatus.COMPLETED and not first.cache_hit and second.cache_hit and second.status == ResultStatus.CACHED and second.evidence[0].claim == first.evidence[0].claim
     legacy.clear_cache()
+
+
+def test_a_time_framed_holdings_ranking_fans_out_performance_without_the_performance_want():
+    from v2.agent_v2.intent import Intent
+
+    request = normalize_request("持仓里这周谁涨得最好？")
+    week = Intent(kind="lookup", scope="recent", wants=("portfolio", "ranking"), portfolio_scope=True, rank="high", source="model")
+    plan = RulePlanner().plan(request, route(request, intent=week))
+    assert [task.capability for task in plan.tasks] == ["account.portfolio", "market.performance"] and plan.tasks[1].fan_out["max"] == 12 and "rank" not in plan.tasks[1].fan_out
+    since = Intent(kind="lookup", scope="none", wants=("portfolio", "ranking"), portfolio_scope=True, rank="low", source="model")
+    assert [task.capability for task in RulePlanner().plan(request, route(request, intent=since)).tasks] == ["account.portfolio"]

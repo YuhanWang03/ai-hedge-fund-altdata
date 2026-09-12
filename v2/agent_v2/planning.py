@@ -415,7 +415,9 @@ class IntentPlanner:
             # only a time frame or a "why" needs the per-holding market look.
             card_answers = rank is not None and intent.scope in {"none", "since_purchase"} and not explain
             # A performance question over the list ("有没有在放量的") is per name unless the account card already answered it.
-            per_ticker = explain or bool(focuses) or (intent.each and "earnings" not in account_topics) or ("performance" in wants and "performance" not in account_topics and not card_answers)
+            # "这周谁涨得最好" ranks by a return the card does not carry, whether or not the classifier said "performance".
+            time_ranked = rank is not None and intent.scope in {"today", "recent", "window"} and not explain
+            per_ticker = explain or bool(focuses) or time_ranked or (intent.each and "earnings" not in account_topics) or ("performance" in wants and "performance" not in account_topics and not card_answers)
             if intent.each and "earnings" not in focuses and "earnings" not in account_topics:
                 focuses = [*focuses, "earnings"]
             if source == "account-portfolio" and (explicit_portfolio or per_ticker or not tasks):
@@ -429,7 +431,7 @@ class IntentPlanner:
                     fan_out["max"] = 12
                 if explain:
                     add("move-each", "market.explain_move", {}, purpose="explain each holding's recent move", depends_on=(source,), fan_out=dict(fan_out))
-                elif "performance" in wants and not focuses:
+                elif ("performance" in wants or time_ranked) and not focuses:
                     add("performance-each", "market.performance", {}, purpose="recent returns and volume for each name", depends_on=(source,), fan_out=dict(fan_out))
                 for focus in focuses[:2]:
                     add(f"research-each-{focus}", "research.stock", {"focus": focus}, purpose=f"{focus} research for each holding", depends_on=(source,), fan_out=dict(fan_out))

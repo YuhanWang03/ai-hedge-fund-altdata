@@ -332,7 +332,9 @@ def _answer_warnings(answer: str, evidence: list[EvidenceItem], results: list[To
                 if len(matching) > limit:
                     # Name what to keep so one repair can comply: the first cited ones stay, the rest go.
                     keep, drop = matching[:limit], matching[limit:]
-                    warnings.append(str(cap.get("warning") or f"{result.capability} 引用了过多同类证据") + f"（{result.subject or result.capability}：只保留 " + "、".join(f"[{value}]" for value in keep) + "，去掉 " + "、".join(f"[{value}]" for value in drop) + "）")
+                    # Soft: a second candidate for a day is wording to trim, not a fabricated
+                    # figure; the judged "candidate stated as confirmed" rule still blocks.
+                    warnings.append(SOFT_PREFIX + str(cap.get("warning") or f"{result.capability} 引用了过多同类证据") + f"（{result.subject or result.capability}：只保留 " + "、".join(f"[{value}]" for value in keep) + "，去掉 " + "、".join(f"[{value}]" for value in drop) + "）")
             need = rule.get("require_cited")
             if isinstance(need, dict):
                 # A floor: at least one of this result's items with the given
