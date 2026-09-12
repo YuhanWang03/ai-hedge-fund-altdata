@@ -8,7 +8,7 @@ import time
 
 from v2.agent import session as legacy_session
 from v2.agent_v2.entities import extract_entities
-from v2.agent_v2.models import AgentResult, ExecutionPlan, SessionResolution
+from v2.agent_v2.models import AgentResult, ExecutionPlan, SessionResolution, ToolEnvelope
 from v2.agent_v2.synthesis import choose_rankable, position_row
 
 #: A follow-up that asks something about *the* stock without naming it: it
@@ -54,6 +54,21 @@ def position_frame(result: AgentResult, ticker: str) -> dict:
         "avg_entry_price": row.get("avg_entry_price"),
         "source": source.capability,
     }
+
+
+#: Sessions whose previous turn is kept for follow-ups; the oldest are dropped beyond this.
+MAX_REMEMBERED_SESSIONS = 16
+#: Envelope metadata a follow-up still needs; everything else (traces, sub-agent summaries, raw texts) is dropped.
+_KEPT_METADATA = ("citation_kind", "fan_out_table", "answer_guidance", "narrative", "require_cited_numbers", "answer_constraints", "dimensions", "failed_tickers")
+
+
+def _slim(envelope: ToolEnvelope) -> ToolEnvelope:
+    """The envelope without what only the run that produced it needed."""
+
+    from dataclasses import replace
+
+    metadata = {key: value for key, value in (envelope.metadata or {}).items() if key in _KEPT_METADATA}
+    return replace(envelope, evidence=list(envelope.evidence)[:40], findings=list(envelope.findings)[:12], metadata=metadata)
 
 
 class ShortTermSession:
@@ -128,9 +143,16 @@ class ShortTermSession:
         if not result.request.session_id:
             return
         if result.results or result.evidence:
-            # Bounded: one turn per session, its evidence capped, replaced on every answered turn.
+            # Bounded three ways: one turn per session, slim envelopes (no traces, no
+            # sub-agent summaries, no debate), and only the most recent sessions.  A
+            # quality run opens a session per case; the full envelopes of forty
+            # research runs held in memory got the process killed.
+            kept = [_slim(item) for item in result.results if item.capability != "debate.challenge" and not item.metadata.get("fan_out_table")][:24]
+            kept += [_slim(item) for item in result.results if item.metadata.get("fan_out_table")][:2]
             with self._lock:
-                self._previous[result.request.session_id] = (time.monotonic() + self.ttl_seconds, {"question": result.request.original_text or result.request.text, "answer": (result.answer or "")[:4000], "evidence": list(result.evidence)[:60], "results": [item for item in result.results if not item.metadata.get("fan_out_table")][:24] + [item for item in result.results if item.metadata.get("fan_out_table")][:2], "run_id": result.run_id})
+                self._previous[result.request.session_id] = (time.monotonic() + self.ttl_seconds, {"question": result.request.original_text or result.request.text, "answer": (result.answer or "")[:4000], "evidence": list(result.evidence)[:60], "results": kept, "run_id": result.run_id})
+                while len(self._previous) > MAX_REMEMBERED_SESSIONS:
+                    self._previous.pop(next(iter(self._previous)))
         # A question with no ticker ("哪只跌得最多") gets its focus from the
         # answer, so the next turn can refer back to the stock it named.
         tickers = result.request.entities or focus_entities(result.answer)

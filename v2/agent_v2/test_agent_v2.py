@@ -4166,3 +4166,26 @@ def test_follow_up_about_the_previous_answer_is_written_from_its_evidence_withou
 
     IntentClassifier(Recording()).classify(normalize_request("那它呢", metadata={"recent_turns": [{"question": "AAPL今天为什么涨？", "answer_digest": "涨了", "tickers": ["AAPL"]}]}))
     assert seen[0]["recent_turns"][0]["tickers"] == ["AAPL"]
+
+
+def test_session_memory_is_bounded_and_internal_limitations_stay_internal():
+    from v2.agent_v2 import session as session_module
+    from v2.agent_v2.synthesis import user_facing_limitations
+
+    registry = CapabilityRegistry(default_catalog())
+    heavy = ToolEnvelope("research.stock", ResultStatus.COMPLETED, subject="ARM", evidence=[EvidenceItem(f"E{i}", "ARM", f"claim {i}", source_id="research_engine") for i in range(50)], metadata={"narrative": "x", "trace": [{"round": 1}] * 50, "agent": {"name": "move_attributor"}, "module_metrics": {}})
+    registry.register("research.stock", lambda a, c: heavy)
+    session = ShortTermSession()
+    agent = AgentV2(catalog=default_catalog(), registry=registry, session=session, config=AgentV2Config(record_sub_agents=False, record_capabilities=False, debate=False))
+    for index in range(session_module.MAX_REMEMBERED_SESSIONS + 4):
+        last = agent.run("分析 ARM 估值", session_id=f"s{index}")
+    assert len(session._previous) == session_module.MAX_REMEMBERED_SESSIONS and session.previous_turn("s0") is None and session.previous_turn(f"s{session_module.MAX_REMEMBERED_SESSIONS + 3}") is not None
+    last.results.append(ToolEnvelope("debate.challenge", ResultStatus.COMPLETED, subject="ARM", metadata={"objections": [{"text": "x"}]}))
+    session.record(last)  # a debate envelope is never carried into a follow-up
+    kept = session.previous_turn(f"s{session_module.MAX_REMEMBERED_SESSIONS + 3}")["results"]
+    assert all(item.capability != "debate.challenge" for item in kept) and "trace" not in kept[0].metadata and "agent" not in kept[0].metadata and kept[0].metadata.get("narrative") == "x" and len(kept[0].evidence) == 40
+
+    assert user_facing_limitations(["Legacy formatted output; structured field-level evidence is not yet available.", "核心模块失败（valuation）"]) == ["核心模块失败（valuation）"]
+    mutate = ToolEnvelope("state.mutate", ResultStatus.COMPLETED, subject="alert.add", summary="已设置提醒 #7。", evidence=[EvidenceItem("M1", "AMD", "已设置提醒 #7。")], limitations=["Legacy formatted output; structured field-level evidence is not yet available."])
+    text = EvidenceSummarySynthesizer().synthesize(normalize_request("确认"), ExecutionPlan("确认", RouteKind.COMMAND, tasks=(PlanTask("m", "state.mutate", {"operation": "alert.add", "payload": {}}),)), [mutate], mutate.evidence)
+    assert "Legacy formatted output" not in text and "已设置提醒 #7" in text

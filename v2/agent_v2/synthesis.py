@@ -254,7 +254,7 @@ def catalyst_lines(result: ToolEnvelope, since: str = "") -> str:
         lines.append(f"{result.subject} 期间未查到可核对的催化剂（财报、公告或新闻）。")
     limitation_item = next((item for item in result.evidence if item.metadata.get("citation_kind") == "limitations"), None)
     suffix = f" [{limitation_item.id}]" if limitation_item is not None else ""
-    lines.extend(f"数据限制：{item}{suffix}" for item in result.limitations[:2])
+    lines.extend(f"数据限制：{item}{suffix}" for item in user_facing_limitations(result.limitations)[:2])
     if not result.ok:
         detail = result.errors[0] if result.errors else "未知错误"
         lines.append(f"{result.capability} 未完成：{detail}")
@@ -411,6 +411,14 @@ def ranked_answer(lead: RankingLead, results: list[ToolEnvelope]) -> str:
     return "\n".join(lines)
 
 
+#: Limitations that describe the adapter, not the data; a user reading "Legacy formatted output" learns nothing.
+_INTERNAL_LIMITATIONS = ("Legacy formatted output", "structured field-level evidence")
+
+
+def user_facing_limitations(limitations) -> list[str]:
+    return [str(item) for item in limitations if not any(word in str(item) for word in _INTERNAL_LIMITATIONS)]
+
+
 class EvidenceSummarySynthesizer:
     """Small deterministic fallback that keeps the V2 core runnable offline."""
 
@@ -530,5 +538,5 @@ class EvidenceSummarySynthesizer:
         # evidence when it exists so the line stays verifiable.
         limitation_item = next((item for item in result.evidence if item.metadata.get("citation_kind") == "limitations"), None)
         suffix = f" [{limitation_item.id}]" if limitation_item is not None else ""
-        lines.extend(f"数据限制：{item}{suffix}" for item in result.limitations[:3])
+        lines.extend(f"数据限制：{item}{suffix}" for item in user_facing_limitations(result.limitations)[:3])
         return "\n".join(lines)
