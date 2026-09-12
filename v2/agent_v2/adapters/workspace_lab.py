@@ -222,6 +222,10 @@ class WorkspaceLabPort:
         binding = self.bindings.get(capability)
         if binding is None:
             return ToolEnvelope(capability, ResultStatus.FAILED, errors=["unsupported Lab capability"])
+        fields = getattr(binding.input_model, "model_fields", None) or {}
+        if arguments.get("tickers") and not arguments.get("universe") and "universe" in fields:
+            # Named tickers are the universe; the default (an index) would load hundreds of names beside them.
+            arguments = {**arguments, "universe": "custom"}
         body = binding.input_model(**arguments)
         if binding.supports_progress:
             payload = binding.runner(

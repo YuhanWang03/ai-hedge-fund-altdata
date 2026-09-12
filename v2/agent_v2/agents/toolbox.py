@@ -38,6 +38,14 @@ TOOL_NAMES = ("search_news", "read_page", "list_filings", "read_filing", "recall
 WEB_TOOLS = ("search_news", "read_page")
 
 
+def quote_rule(quote: str, *, head: int = 30) -> dict[str, str]:
+    """The verifier rule that a sentence citing a finding carries its quote: the quote's opening words, whitespace-tolerant."""
+
+    opening = " ".join(str(quote or "").split())[:head].rstrip(" ,.;:，。；：")
+    pattern = r"\s*".join(re.escape(part) for part in opening.split(" ")) if opening else ""
+    return {"require": pattern, "warning": f"引用了调查发现却没有照抄它的引文；引用这条时把原文“{str(quote or '')[:80]}”原样放进同一句"}
+
+
 def passages_around(text: str, find: str, *, limit: int, radius: int = 700) -> str:
     """The passages of ``text`` around each keyword in ``find`` (comma-separated, case-insensitive), merged and bounded to ``limit`` chars."""
 
@@ -310,7 +318,7 @@ class Investigator:
                 source_title=label,
                 source_url=url,
                 producer_run_id=context.run_id,
-                metadata={"evidence_type": "investigation", "date": finding["date"], "quote": finding["quote"], "source": finding["source"], "verified": True},
+                metadata={"evidence_type": "investigation", "date": finding["date"], "quote": finding["quote"], "source": finding["source"], "verified": True, "constraints": [quote_rule(finding["quote"])]},
             ))
         if not evidence:
             evidence.append(EvidenceItem(id=f"evidence-investigate-none-{hashlib.sha1(task.encode('utf-8')).hexdigest()[:10]}", entity=subject, claim=f"针对“{task[:60]}”的调查没有找到可核实、带引文的发现。", source_id="investigator", source_title="调查", producer_run_id=context.run_id, metadata={"citation_kind": "limitations", "verified": True}))

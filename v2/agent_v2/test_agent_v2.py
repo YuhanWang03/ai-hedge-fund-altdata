@@ -4515,3 +4515,37 @@ def test_lab_rows_read_as_labelled_lines_and_lab_answers_carry_their_guidance_an
     sweep = ToolEnvelope("lab.sweep", ResultStatus.COMPLETED, evidence=items)
     assert json.loads(synthesizer._payload("对 NVDA 做参数扫描", plan, [sweep], items))["response_style"] == "detailed"
     assert json.loads(synthesizer._payload("对 NVDA 做参数扫描", plan, [ToolEnvelope("lab.backtest", ResultStatus.COMPLETED, evidence=items)], items))["response_style"] == "brief"
+
+
+def test_an_investigation_finding_must_be_quoted_verbatim_where_it_is_cited_and_named_tickers_are_the_lab_universe():
+    from v2.agent_v2.agents.toolbox import quote_rule
+    from v2.agent_v2.eval.quality import render_case
+
+    rule = quote_rule("revenue guidance came in below Wall Street expectations, sending shares down 13%.")
+    item = EvidenceItem("evidence-investigate-abc", "ARM", "ARM 2026-07-29：指引低于预期（Arm falls：“revenue guidance came in below Wall Street expectations”）。", metadata={"evidence_type": "investigation", "constraints": [rule]})
+    paraphrased = verify_answer("2026-07-29：Arm 的指引低于华尔街预期（Arm falls）[evidence-investigate-abc]。", [item], answer_mode=AnswerMode.RESEARCH_GROUNDED)
+    assert not paraphrased.ok and any("没有照抄它的引文" in warning for warning in paraphrased.warnings)
+    quoted = verify_answer("2026-07-29：Arm 的指引低于华尔街预期（Arm falls：“revenue guidance came  in below Wall Street expectations”）[evidence-investigate-abc]。", [item], answer_mode=AnswerMode.RESEARCH_GROUNDED)
+    assert quoted.ok, quoted.warnings
+    assert quote_rule("") == {"require": "", "warning": "引用了调查发现却没有照抄它的引文；引用这条时把原文“”原样放进同一句"}
+
+    # The lab port: named tickers make a custom universe unless one was asked for.
+    from pydantic import BaseModel
+
+    class Input(BaseModel):
+        universe: str = "sp500"
+        tickers: list[str] = []
+        holding_days_list: list[int] = [21]
+
+    seen = []
+    port = WorkspaceLabPort({"lab.sweep": LabBinding(Input, lambda body: seen.append(body.model_dump()) or {"kind": "sweep", "tickers": body.tickers, "rows": []})})
+    context = ExecutionContext("lab-run", NormalizedRequest("扫描", "扫描"), BudgetClass.LAB)
+    port.run("lab.sweep", {"tickers": ["NVDA"], "holding_days_list": [10, 21, 42]}, context)
+    port.run("lab.sweep", {"tickers": ["NVDA"], "universe": "tech30"}, context)
+    port.run("lab.sweep", {}, context)
+    assert [row["universe"] for row in seen] == ["custom", "tech30", "sp500"]
+
+    # `show --attempt` picks one attempt of a repeated run.
+    rows = [{"case_id": "q_x", "label": "p6b", "attempt": 1, "question": "q", "answer": "first", "score": {"passed": False}}, {"case_id": "q_x", "label": "p6b", "attempt": 2, "question": "q", "answer": "second", "score": {"passed": True}}]
+    assert render_case(rows, "q_x").endswith("second") and render_case(rows, "q_x", attempt=1).endswith("first") and "未通过" in render_case(rows, "q_x", attempt=1)
+    assert render_case(rows, "q_x", attempt=3) == "没有 q_x 的记录（第 3 次）。"

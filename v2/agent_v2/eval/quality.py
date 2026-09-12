@@ -414,12 +414,15 @@ def _live_agent(*, use_web: bool):
     return build_workspace_agent(config=AgentV2Config(record_sub_agents=False, record_intents=False), enable_web=use_web, use_llm=True)
 
 
-def render_case(rows: list[dict[str, Any]], case_id: str, *, label: str = "") -> str:
-    """One case's answer with its verdict: the run, the route and agents, each criterion met or not, the answer text."""
+def render_case(rows: list[dict[str, Any]], case_id: str, *, label: str = "", attempt: int = 0) -> str:
+    """One case's answer with its verdict: the run, the route and agents, each criterion met or not, the answer text.
 
-    matching = [row for row in rows if row.get("case_id") == case_id and (not label or row.get("label") == label)]
+    ``attempt`` picks one attempt of a repeated run (the failed one, say); the default is the last recorded.
+    """
+
+    matching = [row for row in rows if row.get("case_id") == case_id and (not label or row.get("label") == label) and (not attempt or int(row.get("attempt") or 1) == attempt)]
     if not matching:
-        return f"没有 {case_id} 的记录" + (f"（运行 {label}）" if label else "") + "。"
+        return f"没有 {case_id} 的记录" + (f"（运行 {label}）" if label else "") + (f"（第 {attempt} 次）" if attempt else "") + "。"
     row = matching[-1]
     score = row.get("score") or {}
     lines = [f"# {case_id} · {row.get('label')} · {str(row.get('at') or '')[:16].replace('T', ' ')}", ""]
@@ -460,6 +463,7 @@ def main(argv: list[str] | None = None) -> int:
     show = sub.add_parser("show", help="the answer and the score of one case (default: its latest run)")
     show.add_argument("case", help="case id, e.g. q_compare")
     show.add_argument("--label", default="", help="run label (default: the latest run containing the case)")
+    show.add_argument("--attempt", type=int, default=0, help="which attempt of a repeated run (default: the last recorded)")
     show.add_argument("--path", type=Path, default=None)
     args = parser.parse_args(argv)
     if args.command == "report":
@@ -467,7 +471,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(summary, ensure_ascii=False, indent=2) if args.json else render(summary))
         return 0
     if args.command == "show":
-        text = render_case(read_rows(args.path), args.case, label=args.label)
+        text = render_case(read_rows(args.path), args.case, label=args.label, attempt=args.attempt)
         print(text)
         return 0 if text and not text.startswith("没有") else 1
     cases = QUALITY_CASES
