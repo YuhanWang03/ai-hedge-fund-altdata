@@ -68,6 +68,9 @@ _DATA_SOURCE = {"type": "string", "enum": ["yfinance", "fd"]}
 
 
 _RESEARCH_GUIDANCE = "stock_research：围绕公司的核心投资矛盾组织答案，不逐项报分。ROIC、ROE、利润率等异常高于 100% 的比率必须提示其依赖数据与计算口径，不能当作无条件质量结论。问风险时分三层写：公司自身（经营、财务、申报里的风险因素）、行业（竞争、周期、供应链）、宏观（利率、政策、汇率），每层至少一条有证据的，没有证据的那层明说。"
+_LAB_GUIDANCE = "lab：先交代实验区间、样本和假设（持有期、成本、每笔金额或起始资金），再给结果；结尾必须有一句：这是历史回测（或历史事件统计），不代表未来收益。"
+_SWEEP_GUIDANCE = "lab_sweep：逐个参数组合各写一行：参数、总收益、最大回撤、夏普（有就写）、交易笔数，一个都不能漏；然后点名最好的组合并说差距有多大；最后提醒参数扫描有过拟合风险。"
+_EVENT_STUDY_GUIDANCE = "lab_event_study：写明事件数量、事件窗口（财报日前后几天）、平均异常收益或超额收益，以及样本量或置信度的限制；几只股票分别交代。"
 _COMPARE_GUIDANCE = "stock_compare：先用“同口径对照”那几条证据（每条含所有候选的同一个指标）把增长、估值、盈利兑现摆在一起比，每只都点名、每个指标各引用对应那条对照；缺失的一方明说缺失，不能拿别的指标顶替。然后才是各自的证据。"
 _MACRO_GUIDANCE = "macro：每个数字写明它的时间点（数据日期或“截至查询时”），发布类数据写发布日期和对应月份；没有对比值（预期、前值）时明说。"
 _THIRTEEN_F_GUIDANCE = "thirteen_f：先写报告期（季度末）和披露的滞后（13F 在季度结束后 45 天内提交，持仓可能已经变化），再说主要持仓和本期增减仓；没有增减仓数据时明说。"
@@ -253,6 +256,7 @@ def default_catalog() -> CapabilityCatalog:
                 ["strategy"],
             ),
             long_running=True,
+            answer_guidance=_LAB_GUIDANCE,
         ),
         CapabilitySpec(
             "lab.sweep",
@@ -274,6 +278,7 @@ def default_catalog() -> CapabilityCatalog:
                 }
             ),
             long_running=True,
+            answer_guidance=_LAB_GUIDANCE + " " + _SWEEP_GUIDANCE,
         ),
         CapabilitySpec(
             "lab.event_study",
@@ -292,6 +297,7 @@ def default_catalog() -> CapabilityCatalog:
                 }
             ),
             long_running=True,
+            answer_guidance=_LAB_GUIDANCE + " " + _EVENT_STUDY_GUIDANCE,
         ),
         CapabilitySpec(
             "lab.committee",

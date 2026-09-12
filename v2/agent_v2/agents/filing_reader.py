@@ -38,7 +38,7 @@ class Section:
 
 
 class FilingSource(Protocol):
-    def list_filings(self, ticker: str, since: str, until: str) -> list[FilingRef]: ...
+    def list_filings(self, ticker: str, since: str, until: str, forms: tuple[str, ...] | None = None) -> list[FilingRef]: ...
 
     def outline(self, ref: FilingRef) -> list[Section]: ...
 
@@ -129,9 +129,12 @@ class EdgarFilingSource:
 
         return list(sec_client.get_recent_filings(ticker, form, since, until) or [])
 
-    def list_filings(self, ticker: str, since: str, until: str) -> list[FilingRef]:
+    def list_filings(self, ticker: str, since: str, until: str, forms: tuple[str, ...] | None = None) -> list[FilingRef]:
+        """The filings of the given forms (default: the current reports, 8-K or 6-K for a foreign issuer), newest first."""
+
         refs: list[FilingRef] = []
-        for form in ("8-K", "6-K"):
+        wanted = tuple(str(form).upper() for form in (forms or ()) if str(form).strip()) or ("8-K", "6-K")
+        for form in wanted:
             for raw in self._rows(ticker, form, since, until):
                 accession = str(getattr(raw, "accession_number", None) or getattr(raw, "accession_no", None) or "").strip()
                 filing_date = str(getattr(raw, "filing_date", "") or "")[:10]
@@ -142,7 +145,7 @@ class EdgarFilingSource:
                     url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession.replace('-', '')}/" if cik and accession else ""
                 if accession:
                     refs.append(FilingRef(ticker, actual_form, filing_date, accession, url, raw))
-            if refs:
+            if refs and forms is None:
                 break  # a domestic filer has 8-Ks; only a foreign issuer needs the 6-K pass
         refs.sort(key=lambda ref: ref.filing_date, reverse=True)
         return refs

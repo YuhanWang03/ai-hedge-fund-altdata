@@ -38,6 +38,43 @@ TOOL_NAMES = ("search_news", "read_page", "list_filings", "read_filing", "recall
 WEB_TOOLS = ("search_news", "read_page")
 
 
+def passages_around(text: str, find: str, *, limit: int, radius: int = 700) -> str:
+    """The passages of ``text`` around each keyword in ``find`` (comma-separated, case-insensitive), merged and bounded to ``limit`` chars."""
+
+    terms = [term.strip() for term in re.split(r"[,，、;；|]+", find) if term.strip()]
+    low = text.lower()
+    spans: list[tuple[int, int]] = []
+    for term in terms:
+        start = 0
+        while True:
+            at = low.find(term.lower(), start)
+            if at < 0:
+                break
+            spans.append((max(0, at - radius), min(len(text), at + len(term) + radius)))
+            start = at + len(term)
+    if not spans:
+        return ""
+    spans.sort()
+    merged: list[tuple[int, int]] = []
+    for begin, end in spans:
+        if merged and begin <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((begin, end))
+    pieces: list[str] = []
+    total = 0
+    for begin, end in merged:
+        piece = text[begin:end]
+        if total + len(piece) > limit:
+            piece = piece[: limit - total]
+        if piece:
+            pieces.append(piece)
+            total += len(piece)
+        if total >= limit:
+            break
+    return "\n……\n".join(pieces)
+
+
 def _flat(value: Any, limit: int) -> str:
     return _WS.sub(" ", str(value or "")).strip()[:limit]
 
@@ -101,8 +138,8 @@ class Toolbox:
         table = {
             "search_news": Tool("search_news", "搜索新闻；query 用英文检索词，含公司名、事件关键词和月份。结果带 id（p1、p2…）。", _schema({"query": {"type": "string"}}, ["query"]), self._search_news),
             "read_page": Tool("read_page", "读一条搜索结果的正文；id 为结果 id。", _schema({"id": {"type": "string"}}, ["id"]), self._read_page),
-            "list_filings": Tool("list_filings", "列出某只股票一段时间内的 SEC 申报（8-K、6-K、10-Q、Form 4 等），结果带序号 f1、f2…和章节列表。", _schema({"ticker": {"type": "string"}, "since": {"type": "string", "description": "YYYY-MM-DD，默认 90 天前"}, "until": {"type": "string", "description": "YYYY-MM-DD，默认今天"}}, ["ticker"]), self._list_filings),
-            "read_filing": Tool("read_filing", "读申报的一个章节；filing 为序号（1 起），section 为章节 id。", _schema({"filing": {"type": "integer"}, "section": {"type": "string"}}, ["filing", "section"]), self._read_filing),
+            "list_filings": Tool("list_filings", "列出某只股票一段时间内的 SEC 申报，结果带序号 f1、f2…和章节列表。forms 指定表格（如 [\"10-K\"]、[\"10-Q\",\"8-K\"]、[\"4\"]），默认只列 8-K/6-K；年报条款要传 [\"10-K\"]。", _schema({"ticker": {"type": "string"}, "since": {"type": "string", "description": "YYYY-MM-DD，默认 90 天前"}, "until": {"type": "string", "description": "YYYY-MM-DD，默认今天"}, "forms": {"type": "array", "items": {"type": "string"}, "maxItems": 4}}, ["ticker"]), self._list_filings),
+            "read_filing": Tool("read_filing", "读申报的一个章节；filing 为序号（1 起），section 为章节 id。长章节只返回开头；给 find（关键词，逗号分隔，如 \"FSD, Full Self-Driving, Autopilot\"）则返回关键词前后的段落。", _schema({"filing": {"type": "integer"}, "section": {"type": "string"}, "find": {"type": "string"}}, ["filing", "section"]), self._read_filing),
             "recall_memory": Tool("recall_memory", "查盯盘记忆里某只股票的异动记录；query 为关键词。", _schema({"ticker": {"type": "string"}, "query": {"type": "string"}}, ["ticker"]), self._recall_memory),
         }
         return [table[name] for name in wanted]
@@ -157,7 +194,11 @@ class Toolbox:
         since = str(arguments.get("since") or (self.today - timedelta(days=90)).isoformat())[:10]
         until = str(arguments.get("until") or self.today.isoformat())[:10]
         self._count("list_filings")
-        refs = list(self.filing_source.list_filings(ticker, since, until))[:6]
+        forms = tuple(str(form).upper() for form in (arguments.get("forms") or []) if str(form).strip())[:4]
+        try:
+            refs = list(self.filing_source.list_filings(ticker, since, until, forms or None))[:6]
+        except TypeError:  # a source without the forms parameter: the current reports
+            refs = list(self.filing_source.list_filings(ticker, since, until))[:6]
         self.state.filings = refs
         lines = []
         for index, ref in enumerate(refs, 1):
@@ -180,9 +221,21 @@ class Toolbox:
         if self.state.calls.get("read_filing", 0) >= self.max_reads:
             raise ValueError(f"阅读次数已达上限 {self.max_reads}。")
         self._count("read_filing")
-        text = self.filing_source.read(self.state.filings[index - 1], section)[: self.max_chars]
-        self.state.read_sections[(index, section)] = text
-        return f"申报 f{index} 章节 {section} 的文本：\n{text or '（空）'}"
+        body = self.filing_source.read(self.state.filings[index - 1], section)
+        find = str(arguments.get("find") or "").strip()
+        text, heading = body[: self.max_chars], f"申报 f{index} 章节 {section} 的文本"
+        if find:
+            windows = passages_around(body, find, limit=self.max_chars)
+            if windows:
+                text, heading = windows, f"申报 f{index} 章节 {section} 里含“{find}”的段落"
+            else:
+                heading = f"申报 f{index} 章节 {section} 里没有“{find}”；章节开头"
+        if len(body) > len(text):
+            heading += f"（章节共 {len(body)} 字，只返回 {len(text)} 字）"
+        seen = self.state.read_sections.get((index, section), "")
+        # A second read of the same section (other keywords) adds to what a quote may be checked against.
+        self.state.read_sections[(index, section)] = f"{seen}\n……\n{text}" if seen and text not in seen else (seen or text)
+        return f"{heading}：\n{text or '（空）'}"
 
     def _recall_memory(self, arguments: dict[str, Any]) -> str:
         ticker = str(arguments.get("ticker") or "").upper()

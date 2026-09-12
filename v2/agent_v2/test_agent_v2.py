@@ -4436,3 +4436,82 @@ def test_lab_cases_route_to_the_lab_and_form_their_own_set(monkeypatch):
     monkeypatch.setattr(quality, "_live_agent", lambda **kwargs: type("A", (), {"synthesizer": None})())
     quality.main(["run", "--label", "x", "--set", "lab"])
     assert picked["ids"] == tuple(case.id for case in LAB_CASES)
+
+
+def test_the_investigator_can_list_an_annual_report_and_read_the_passages_around_a_keyword():
+    from v2.agent_v2.agents.filing_reader import EdgarFilingSource, FilingRef, Section
+    from v2.agent_v2.agents.toolbox import Toolbox, passages_around
+
+    # The EDGAR source lists the forms it is asked for; without forms it stops at the current reports.
+    asked = []
+
+    def fetch(ticker, form, since, until):
+        asked.append(form)
+        return [SimpleNamespace(accession_number=f"{form}-1", filing_date="2026-01-30" if form == "10-K" else "2026-07-23", form=form, homepage_url=f"https://www.sec.gov/{form}/")]
+
+    source = EdgarFilingSource(fetch=fetch)
+    refs = source.list_filings("TSLA", "2025-01-01", "2026-09-09", ("10-K", "10-Q"))
+    assert asked == ["10-K", "10-Q"] and [(ref.form, ref.filing_date) for ref in refs] == [("10-Q", "2026-07-23"), ("10-K", "2026-01-30")]
+    asked.clear()
+    assert [ref.form for ref in source.list_filings("TSLA", "2025-01-01", "2026-09-09")] == ["8-K"] and asked == ["8-K"]
+    # Passages around keywords: merged, ordered, bounded; nothing when absent.
+    text = "A" * 2000 + " Full Self-Driving (FSD) may not be delivered on time. " + "B" * 2000 + " Autopilot claims are pending. " + "C" * 2000
+    found = passages_around(text, "FSD, Autopilot", limit=5000, radius=100)
+    assert found.count("……") == 1 and "Full Self-Driving (FSD)" in found and "Autopilot claims" in found and len(found) < 700
+    assert passages_around(text, "robotaxi", limit=5000) == "" and len(passages_around(text, "FSD", limit=120, radius=300)) == 120
+
+    class Source:
+        listed = []
+
+        def list_filings(self, ticker, since, until, forms=None):
+            Source.listed.append(forms)
+            return [FilingRef(ticker=ticker, form="10-K", filing_date="2026-01-30", accession="0001", url="https://www.sec.gov/x/1/")]
+
+        def outline(self, ref):
+            return [Section("s3", "ITEM 1A. RISK FACTORS", len(text))]
+
+        def read(self, ref, section_id):
+            return text
+
+    toolbox = Toolbox(filing_source=Source(), today=date(2026, 9, 9), max_chars=5000)
+    tools = {tool.name: tool for tool in toolbox.tools()}
+    assert "10-K | 2026-01-30" in tools["list_filings"].handler({"ticker": "TSLA", "forms": ["10-K"], "since": "2025-06-01"}) and Source.listed == [("10-K",)]
+    # A plain read returns the head and says the section is longer; a keyword read returns the passages.
+    head = tools["read_filing"].handler({"filing": 1, "section": "s3"})
+    assert head.startswith("申报 f1 章节 s3 的文本（章节共 6086 字，只返回 5000 字）") and "FSD" not in head[:100]
+    windows = tools["read_filing"].handler({"filing": 1, "section": "s3", "find": "FSD, Autopilot"})
+    assert windows.startswith("申报 f1 章节 s3 里含“FSD, Autopilot”的段落") and "Autopilot claims are pending" in windows
+    missing = tools["read_filing"].handler({"filing": 1, "section": "s3", "find": "robotaxi"})
+    assert missing.startswith("申报 f1 章节 s3 里没有“robotaxi”；章节开头")
+    # Both reads count against the cap and a quote from either read can be checked.
+    assert toolbox.state.calls["read_filing"] == 3 and "Autopilot claims are pending" in toolbox.state.text_for("f1:s3")[0] and toolbox.state.text_for("f1:s3")[0].startswith("A" * 100)
+    # A source without the forms parameter still lists.
+    class Plain:
+        def list_filings(self, ticker, since, until):
+            return [FilingRef(ticker=ticker, form="8-K", filing_date="2026-07-29", accession="0002", url="")]
+
+        def outline(self, ref):
+            return []
+
+    plain = Toolbox(filing_source=Plain(), today=date(2026, 9, 9))
+    assert "8-K | 2026-07-29" in {tool.name: tool for tool in plain.tools()}["list_filings"].handler({"ticker": "ARM", "forms": ["10-K"]})
+
+
+def test_lab_rows_read_as_labelled_lines_and_lab_answers_carry_their_guidance_and_the_detailed_style():
+    from v2.agent_v2.adapters.workspace_lab import _evidence
+    from v2.agent_v2.catalog import _LAB_GUIDANCE, _SWEEP_GUIDANCE
+
+    rows = [{"top_n": 10, "holding_days": days, "near_high_pct": None, "per_trade": 10000.0, "n_trades": 30 + days, "n_periods": 9, "total_return_pct": 12.3456, "annualized_return_pct": 4.1, "sharpe_ratio": 0.62, "max_drawdown_pct": -8.25, "win_rate": 0.55, "avg_return_pct": 1.1, "benchmark_pct": 9.0, "excess_return_pct": 3.3456, "start": "2021-09-10", "end": "2026-09-09"} for days in (10, 21, 42)] * 3
+    payload = {"kind": "sweep", "strategy": "momentum", "tickers": ["NVDA"], "rows": rows[:9]}
+    items = _evidence("lab.sweep", payload, "run-1")
+    findings = [item for item in items if "-finding-" in item.id]
+    assert len(findings) == 9 and findings[0].claim == "top_n 10；持有期 10；总收益% 12.35；年化% 4.1；最大回撤% -8.25；夏普 0.62；胜率 0.55；交易笔数 40；基准% 9.0；超额% 3.35；起 2021-09-10；止 2026-09-09"
+    assert findings[0].value["holding_days"] == 10 and [item.claim for item in items if "-metric-" in item.id] == []
+    specs = default_catalog()
+    assert specs.get("lab.backtest").answer_guidance == _LAB_GUIDANCE and specs.get("lab.sweep").answer_guidance.endswith(_SWEEP_GUIDANCE) and "事件窗口" in specs.get("lab.event_study").answer_guidance
+    # The sweep's grid and an investigation's dated findings are lists by nature: the detailed style, whatever the wording.
+    synthesizer = LLMEvidenceSynthesizer(ScriptedLLM([]))
+    plan = ExecutionPlan(objective="x", route=RouteKind.LAB)
+    sweep = ToolEnvelope("lab.sweep", ResultStatus.COMPLETED, evidence=items)
+    assert json.loads(synthesizer._payload("对 NVDA 做参数扫描", plan, [sweep], items))["response_style"] == "detailed"
+    assert json.loads(synthesizer._payload("对 NVDA 做参数扫描", plan, [ToolEnvelope("lab.backtest", ResultStatus.COMPLETED, evidence=items)], items))["response_style"] == "brief"

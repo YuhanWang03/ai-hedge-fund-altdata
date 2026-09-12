@@ -75,8 +75,26 @@ def _finding_rows(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
     for key in ("candidates", "verdicts", "groups", "rows", "events", "trades"):
         value = payload.get(key)
         if isinstance(value, list):
-            return [dict(row) for row in value[:10] if isinstance(row, Mapping)]
+            return [dict(row) for row in value[:12] if isinstance(row, Mapping)]
     return []
+
+
+_ROW_LABELS = (("top_n", "top_n"), ("holding_days", "持有期"), ("near_high_pct", "52周高点过滤"), ("total_return_pct", "总收益%"), ("annualized_return_pct", "年化%"), ("max_drawdown_pct", "最大回撤%"), ("sharpe_ratio", "夏普"), ("win_rate", "胜率"), ("n_trades", "交易笔数"), ("benchmark_pct", "基准%"), ("excess_return_pct", "超额%"), ("start", "起"), ("end", "止"))
+
+
+def _row_claim(row: Mapping[str, Any]) -> str:
+    """A result row as one readable line: the known fields labelled in order, anything else as before."""
+
+    parts = []
+    for key, label in _ROW_LABELS:
+        value = row.get(key)
+        if value is None:
+            continue
+        parts.append(f"{label} {round(value, 2) if isinstance(value, float) else value}")
+    if len(parts) < 2:
+        return _short(row, 280)
+    rest = {key: value for key, value in row.items() if key not in dict(_ROW_LABELS) and key not in ("per_trade", "n_periods", "avg_return_pct")}
+    return "；".join(parts) + (f"；{_short(rest, 120)}" if rest else "")
 
 
 def _limitations(payload: Mapping[str, Any]) -> list[str]:
@@ -115,13 +133,13 @@ def _evidence(capability: str, payload: Mapping[str, Any], run_id: str) -> list[
                 metadata={"evidence_type": "computed_result"},
             )
         )
-    for index, row in enumerate(_finding_rows(payload)[:6], 1):
+    for index, row in enumerate(_finding_rows(payload)[:12], 1):
         entity = str(row.get("ticker") or row.get("group") or row.get("name") or subject)
         items.append(
             EvidenceItem(
                 id=f"{prefix}-finding-{index}",
                 entity=entity,
-                claim=_short(row, 280),
+                claim=_row_claim(row),
                 value=dict(row),
                 source_id=capability,
                 source_title=title,

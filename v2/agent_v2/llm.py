@@ -33,6 +33,8 @@ from v2.usage_context import usage_source
 logger = logging.getLogger(__name__)
 
 _RESULT_CITATION = re.compile(r"\[results\.(metrics|limitations)([^\]]*)\]")
+#: Results that are lists by nature (a parameter grid, dated findings with quotes): the answer may use lists and tables.
+_DETAILED_CAPABILITIES = frozenset({"lab.sweep", "agent.investigate"})
 _DETAILED_ANSWER = re.compile(r"详细|完整|全面|深度|报告|逐项|表格|清单|所有|展开")
 
 
@@ -661,7 +663,7 @@ class LLMEvidenceSynthesizer:
             **({"previous_question": str(conversation.get("previous_question") or "")[:300], "previous_answer": str(conversation.get("previous_answer") or "")[:4000]} if conversation and conversation.get("previous_answer") else {}),
             **({"recent_turns": [{"question": str(turn.get("question") or "")[:200], "answer_digest": str(turn.get("answer_digest") or "")[:240]} for turn in list(conversation.get("recent_turns") or [])[-2:]]} if conversation and conversation.get("recent_turns") else {}),
             "objective": plan.objective[:2000],
-            "response_style": "detailed" if _DETAILED_ANSWER.search(query) else "brief",
+            "response_style": "detailed" if _DETAILED_ANSWER.search(query) or any(result.capability in _DETAILED_CAPABILITIES for result in results) else "brief",
             "response_intent": _response_intent(plan, results),
             "assumptions": list(plan.assumptions),
             "results": [_result_row(result) for result in results],

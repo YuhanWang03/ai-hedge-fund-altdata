@@ -42,7 +42,7 @@ INVESTIGATION_JOBS: dict[str, dict] = {
         "answer": "按时间顺序写事件的起因、经过和最新进展；",
     },
     "filing_terms": {
-        "brief": "在该公司的 SEC 申报里找到相关章节，原样引用具体条款和措辞，不要转述常识：",
+        "brief": "在该公司的 SEC 申报里找到相关章节，原样引用具体条款和措辞，不要转述常识。list_filings 用 forms 指定题目问的表格（年报 [\"10-K\"]、季报 [\"10-Q\"]、临时报告 [\"8-K\"]），read_filing 用 find 给关键词（中英文都写，如产品名、条款名）定位段落，先读 Risk Factors 一类的相关章节：",
         "tools": ("list_filings", "read_filing"),
         "days": 400,
         "purpose": "the filing's own words on the point asked, section by section",

@@ -512,6 +512,17 @@ finish），产出全靠模型规划器临时起意，没有一道评测题覆�
 - 三道开发集题（q_investigate_event / q_investigate_filing_terms / q_investigate_claim），手工标签，要求
   investigator 跑过。验收：三题两次都过且调查员产出非零则保留；否则从规划器选项移除并改 README 已知限制。
 
+**p6a / lab1 第一次**：调查题 1/3（说法出处两次都过；来龙去脉、申报条款两次都挂），实验题 1/3（事件研究过；
+回测缺"历史回测不代表未来"一句，参数扫描缺参数表）。离线能定位的根因：
+
+- 申报源 `EdgarFilingSource.list_filings` 只列 8-K/6-K，10-K 永远列不出来，"10-K 里怎么写"这类题从一开始就
+  读不到。现在 list_filings 带 forms（默认不变），read_filing 带 find：长章节默认只返回前 5000 字，给关键词
+  则返回关键词前后的段落；同一章节读两次的文本合并，引文核对在合并文本上做。filing_terms 的简报明说这两个参数。
+- 参数扫描的每行结果原来是 JSON 转字符串，最多 6 行，合成器按 brief 风格不许列表；现在每行是带中文标签的
+  一行（参数、总收益、回撤、夏普、笔数），最多 12 行，lab.sweep 和 agent.investigate 的回答用 detailed 风格。
+- lab.backtest / lab.sweep / lab.event_study 加 answer_guidance：先区间与假设，结尾一句"历史回测不代表未来"；
+  扫描逐组合一行并点名最优和过拟合风险；事件研究写事件数、窗口、平均异常收益和样本限制。
+
 ## 下一步
 
 1. 换一批留出集。当前 15 条已被看过三轮，把它们并入开发集，从 Telegram 真实问句里
