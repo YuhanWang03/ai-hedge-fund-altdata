@@ -4554,3 +4554,12 @@ def test_an_investigation_finding_must_be_quoted_verbatim_where_it_is_cited_and_
     rows = [{"case_id": "q_x", "label": "p6b", "attempt": 1, "question": "q", "answer": "first", "score": {"passed": False}}, {"case_id": "q_x", "label": "p6b", "attempt": 2, "question": "q", "answer": "second", "score": {"passed": True}}]
     assert render_case(rows, "q_x").endswith("second") and render_case(rows, "q_x", attempt=1).endswith("first") and "未通过" in render_case(rows, "q_x", attempt=1)
     assert render_case(rows, "q_x", attempt=3) == "没有 q_x 的记录（第 3 次）。"
+
+
+def test_an_empty_synthesizer_reply_is_asked_for_once_more_before_the_fallback():
+    synthesizer = LLMEvidenceSynthesizer(ScriptedLLM([LLMResponse(text=""), LLMResponse(text="NVDA 市盈率 28.2 倍[R1]。")]))
+    assert synthesizer._draft([{"role": "user", "content": "x"}], [], []) == "NVDA 市盈率 28.2 倍[R1]。" and len(synthesizer.llm.calls) == 2
+    twice = LLMEvidenceSynthesizer(ScriptedLLM([LLMResponse(text=""), LLMResponse(text="   ")]))
+    with pytest.raises(ValueError):
+        twice._draft([{"role": "user", "content": "x"}], [], [])
+    assert len(twice.llm.calls) == 2

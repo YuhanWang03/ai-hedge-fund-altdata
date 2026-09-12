@@ -133,7 +133,9 @@ after a restart is handled as a fresh question, and a chat whose answer the
 restart cut off is told to ask again. The investigator sub-agent has three
 named jobs (the story of an event, a filing's own terms, the source of a
 claim), each with a fixed brief and tool set; three development cases grade
-it, and it stays in the planner only while they pass.
+it. The filing-terms and claim-source cases pass reliably; the event-story
+case passes most runs and fails when the answer drops a finding's quote, so
+it is the least settled part of the system.
 
 ## Running it
 

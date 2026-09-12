@@ -649,9 +649,17 @@ class LLMEvidenceSynthesizer:
         return "\n".join(f"- {line}" for line in lines)
 
     def _draft(self, messages: list[dict[str, str]], results: list[ToolEnvelope], evidence: list[EvidenceItem]) -> str:
-        with usage_source("agent_v2.synthesizer"):
-            response = self.llm.complete(messages, None)
-        answer = presentation.strip_deliberation(response.text)
+        answer = ""
+        for attempt in (1, 2):
+            with usage_source("agent_v2.synthesizer"):
+                response = self.llm.complete(messages, None)
+            answer = presentation.strip_deliberation(response.text)
+            if answer:
+                break
+            # A provider now and then returns nothing (a reply that was all
+            # deliberation, a cut-off stream): one more call before the
+            # deterministic fallback, which has no quotes and no judgement.
+            logger.warning("agent_v2 synthesizer returned an empty answer (attempt %d)", attempt)
         if not answer:
             raise ValueError("synthesizer returned an empty answer")
         return _normalize_result_citations(answer, results, evidence)
