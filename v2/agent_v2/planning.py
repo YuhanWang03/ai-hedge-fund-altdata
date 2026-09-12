@@ -271,7 +271,11 @@ class IntentPlanner:
         if ticker and intent.investigation == "filing_terms":
             tasks.append(PlanTask("filings-recent", "filings.recent", {"ticker": ticker, "since": (date.today() - timedelta(days=job["days"])).isoformat()}, purpose="the dated list of filings the terms may sit in", required=False))
         web_state = "网页已授权。" if request.allow_web else "网页未授权，调查员只读申报和盯盘记录，回答里说明未查新闻。"
-        note = f"investigation: {job['answer']}每条发现写日期、出处和引文，调查员没找到的就明说，不得用常识补全故事或条款。{web_state}"
+        note = (
+            f"investigation: {job['answer']}调查员的每条发现单独成一行，格式「日期：事实（来源名：“原文引文”）[id]」——日期用证据开头的那个日期，"
+            "引文照抄证据里引号内的原文（英文原文不翻译、不改写、不省略），一条都不能合并或省掉；同一天的几条发现各占一行。"
+            f"调查员没找到的环节就明说没找到，不得用常识补全故事或条款。{web_state}"
+        )
         return ExecutionPlan(objective=text, route=route.kind, tasks=tuple(tasks), answer_mode=AnswerMode.RESEARCH_GROUNDED, budget=BudgetClass.STANDARD, web_fallback_allowed=False, assumptions=(note, *notes))
 
     @staticmethod
