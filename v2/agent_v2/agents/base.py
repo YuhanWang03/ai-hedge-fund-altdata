@@ -187,6 +187,16 @@ class BoundedLoop:
                 last = next((str(m.get("content") or "")[:160] for m in reversed(messages) if m.get("role") == "assistant"), "")
                 logger.warning("%s: forced finish did not finish (action=%s); last reply: %r", self.usage_source_name, (action or {}).get("action"), last)
             outcome.trace.append({"round": outcome.rounds + 1, "action": "forced_finish", "detail": self.describe_finish(action) if action else "", "ms": int((time.monotonic() - turn_started) * 1000)})
+            if not outcome.finished and time.monotonic() - started <= self.limits.seconds:
+                # The model answered in prose or called a tool it no longer has:
+                # one plain-JSON turn with no tools at all, so what the loop
+                # gathered (the pages read, the filings quoted) is still reported.
+                outcome.calls += 1
+                turn_started = time.monotonic()
+                action = self.finish_as_json(messages)
+                if action is not None:
+                    outcome.finished, outcome.final, stop = True, action, "finished"
+                outcome.trace.append({"round": outcome.rounds + 1, "action": "forced_finish_json", "detail": self.describe_finish(action) if action else "", "ms": int((time.monotonic() - turn_started) * 1000)})
         outcome.stop_reason = stop
         outcome.elapsed_ms = int((time.monotonic() - started) * 1000)
         return outcome
@@ -198,6 +208,28 @@ class BoundedLoop:
         """
 
         return True
+
+    def finish_as_json(self, messages: list[dict[str, str]]) -> dict[str, Any] | None:
+        """The finish payload as one JSON object with no tools offered; None when the model still does not comply."""
+
+        fields = "、".join(self.finish_fields()) or "finish 的字段"
+        messages.append({"role": "user", "content": f"不要调用工具，也不要写任何说明文字：只输出一个 JSON 对象，字段为 {fields}。"})
+        try:
+            response = self.llm.complete(messages, None)
+            payload = json.loads(strip_fence(getattr(response, "text", "") or ""))
+        except Exception as exc:  # noqa: BLE001 — the last resort failed; the loop reports it did not finish
+            logger.warning("%s: JSON finish failed (%s): %s", self.usage_source_name, type(exc).__name__, str(exc)[:200])
+            return None
+        if not isinstance(payload, dict) or payload.get("action") not in (None, "finish"):
+            return None  # still asking for a tool: the loop ends unfinished
+        messages.append({"role": "assistant", "content": json.dumps(payload, ensure_ascii=False)})
+        payload.pop("action", None)
+        return {"action": "finish", **payload}
+
+    def finish_fields(self) -> list[str]:
+        """The names of the fields a finish carries; a tool loop reads them off its finish schema."""
+
+        return []
 
     def describe_finish(self, action: dict[str, Any]) -> str:
         """What the finish carried, for the trace; subclasses know their own payload."""
@@ -272,6 +304,9 @@ class ToolLoop(BoundedLoop):
         if self.finish_only:
             return [finish]
         return [tool.spec() for tool in self.tools.values()] + [finish]
+
+    def finish_fields(self) -> list[str]:
+        return list((self.finish_parameters or {}).get("properties") or {})
 
     def tool_lines(self) -> str:
         """The tools in one line each, for a system prompt that names them."""

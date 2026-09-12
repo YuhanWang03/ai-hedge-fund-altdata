@@ -394,6 +394,47 @@ QUALITY_CASES: tuple[QualityCase, ...] = (
         expected_route=RouteKind.RESEARCH,
         tags=("multi_turn", "preference"),
     ),
+    # -- investigator: the three jobs ----------------------------------------------
+    QualityCase(
+        "q_investigate_event",
+        "英特尔被美国政府入股那件事的来龙去脉是什么？",
+        criteria=(
+            "按时间顺序交代了事件的起因、经过和最新进展，至少有两个带日期的节点",
+            "每个节点都注明出处（报道或申报）并带有原文引文",
+            "没有找到出处的环节明说没有找到，而不是用常识补全",
+        ),
+        forbidden=("把没有出处的说法写成已确认的事实",),
+        expected_route=RouteKind.RESEARCH,
+        expected_agents=("investigator",),
+        tags=("investigate", "event_story"),
+    ),
+    QualityCase(
+        "q_investigate_filing_terms",
+        "特斯拉最新的 10-K 里对 FSD 自动驾驶的风险具体是怎么写的？",
+        criteria=(
+            "说明了是哪份申报（10-K）的哪个章节",
+            "引用了申报原文的措辞，而不是转述常识",
+            "最后有一句概括，且没有超出原文的推断",
+        ),
+        forbidden=("把申报里没有的表述写成申报原文",),
+        expected_route=RouteKind.RESEARCH,
+        expected_agents=("investigator",),
+        allow_web=False,
+        tags=("investigate", "filing_terms"),
+    ),
+    QualityCase(
+        "q_investigate_claim",
+        "有说法称英伟达要把 H20 在华收入的 15% 交给美国政府，这个说法有出处吗？",
+        criteria=(
+            "先给结论：有出处、没有找到出处、或来源之间有出入",
+            "列出了出处（报道、申报或公司声明）并引用原文",
+            "区分了报道与公司或政府的正式确认",
+        ),
+        forbidden=("在没有出处的情况下把说法写成事实",),
+        expected_route=RouteKind.RESEARCH,
+        expected_agents=("investigator",),
+        tags=("investigate", "claim_source"),
+    ),
 )
 
 

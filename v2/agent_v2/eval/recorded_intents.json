@@ -20093,5 +20093,63 @@
   },
   "legacy": null,
   "note": "labelled by hand (lab quality case)"
+ },
+ "英特尔被美国政府入股那件事的来龙去脉是什么？": {
+  "intent": {
+   "confidence": 1.0,
+   "direction": "none",
+   "kind": "research",
+   "investigation": "event_story",
+   "portfolio_scope": false,
+   "scope": "recent",
+   "tickers": [
+    "INTC"
+   ],
+   "wants": [
+    "news"
+   ],
+   "watchlist_scope": false
+  },
+  "legacy": null,
+  "note": "labelled by hand (investigator quality case)"
+ },
+ "特斯拉最新的 10-K 里对 FSD 自动驾驶的风险具体是怎么写的？": {
+  "intent": {
+   "confidence": 1.0,
+   "direction": "none",
+   "kind": "research",
+   "investigation": "filing_terms",
+   "portfolio_scope": false,
+   "scope": "recent",
+   "tickers": [
+    "TSLA"
+   ],
+   "wants": [
+    "filings",
+    "risk"
+   ],
+   "watchlist_scope": false
+  },
+  "legacy": null,
+  "note": "labelled by hand (investigator quality case)"
+ },
+ "有说法称英伟达要把 H20 在华收入的 15% 交给美国政府，这个说法有出处吗？": {
+  "intent": {
+   "confidence": 1.0,
+   "direction": "none",
+   "kind": "research",
+   "investigation": "claim_source",
+   "portfolio_scope": false,
+   "scope": "recent",
+   "tickers": [
+    "NVDA"
+   ],
+   "wants": [
+    "news"
+   ],
+   "watchlist_scope": false
+  },
+  "legacy": null,
+  "note": "labelled by hand (investigator quality case)"
  }
 }

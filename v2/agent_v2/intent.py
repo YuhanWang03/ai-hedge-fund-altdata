@@ -41,6 +41,8 @@ KINDS = ("research", "lookup", "command", "knowledge", "lab", "help")
 SCOPES = ("today", "recent", "window", "since_purchase", "none")
 #: Direction of the move the question is about.
 DIRECTIONS = ("up", "down", "none")
+#: The investigator's three jobs: how an event unfolded, what a filing says in its own words, whether a claim has a source.
+INVESTIGATIONS = ("event_story", "filing_terms", "claim_source")
 #: What the answer must contain; the planner's templates key on these.
 WANTS = (
     "attribution",  # why a stock moved
@@ -101,6 +103,7 @@ rank：ranking 时 "high"（最好、涨最多）或 "low"（最差、跌最多�
 confidence：0 到 1。
 recent_turns：同一会话里之前的问答（问题、回答摘要、涉及的股票），按它补全这句里省略的股票、时间段和对象（"那 SNDK 呢"接着上一轮的比较；"换成一年的口径"接着上一轮的问题）。
 refers_back：这句是针对上一条回答本身的追问——展开某一点（"第二点展开讲"）、追问理由（"为什么这么说"）、换个说法或口径重述、问上一条里提到的某个数字——时为 true，此时 wants 留空、tickers 填上一轮的股票；问新的事实（新的时间段、新的股票、新的数据）时为 false。
+investigation：需要调查员逐条读原文才能回答的题给三类之一，否则空字符串：event_story（某件事的来龙去脉、前因后果、时间线："英特尔被政府入股那件事是怎么回事"）| filing_terms（某份申报里的具体条款、原文怎么写："特斯拉 10-K 里对 FSD 的风险具体怎么写"）| claim_source（某个说法有没有出处、是谁说的："有人说英伟达要把 H20 收入分 15%% 给政府，有出处吗"）；此时 kind=research，tickers 填涉及的股票。普通的"最近有什么新闻""为什么涨跌"不是调查题。
 clarification：confidence 低于 0.6、或问题缺了非问不可的信息（哪只股票、什么时间段、加关注还是设提醒、目标价多少）时，给一句简短的反问，问清那一个缺口；其它情况留空字符串。反问要具体（"是想看 TSLA 的行情、新闻还是研究？"），不要泛泛地问"能否详细说明"。
 通过 classify 工具返回；无法调用工具时只输出一个 JSON 对象，字段齐全。""" % ("、".join(WANTS), "/".join(RELEASES), "/".join(MANAGERS), "/".join(LABS), "/".join(STRATEGIES))
 
@@ -134,6 +137,8 @@ class Intent:
     clarification: str = ""
     #: The question is about the previous answer itself ("第二点展开讲", "为什么这么说"), not a new lookup.
     refers_back: bool = False
+    #: One of ``INVESTIGATIONS`` when the question needs the investigator (read the sources, quote them), else "".
+    investigation: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -213,6 +218,7 @@ def parse_intent(raw: Any, *, source: str = "model") -> Intent:
         note=str(raw.get("note") or "")[:120],
         clarification=" ".join(str(raw.get("clarification") or "").split())[:160],
         refers_back=bool(raw.get("refers_back")),
+        investigation=str(raw.get("investigation") or "").lower() if str(raw.get("investigation") or "").lower() in INVESTIGATIONS else "",
     )
 
 
@@ -252,6 +258,7 @@ INTENT_TOOL = {
                 "confidence": {"type": "number"},
                 "clarification": {"type": "string"},
                 "refers_back": {"type": "boolean"},
+                "investigation": {"type": "string", "enum": ["", *INVESTIGATIONS]},
             },
             "required": ["kind", "scope", "direction", "wants", "tickers", "portfolio_scope", "confidence"],
         },

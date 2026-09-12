@@ -108,7 +108,7 @@ the most expensive questions.
 **A quality loop instead of reading Telegram.** Forty development cases with
 rubrics (criteria a model grader checks, forbidden assertions, expected route,
 sub-agents and source kinds, length bounds, preceding turns for multi-turn
-cases), a thirteen-case hold-out set that is run before a release and not
+cases, three of them for the investigator), a thirteen-case hold-out set that is run before a release and not
 read while iterating, and a three-case lab set (backtest, parameter sweep,
 event study; minutes each) graded on the shape of an experiment answer. Repeats with majority verdicts separate model jitter
 from regressions. A merge gate runs the unit tests and the offline evaluation
@@ -130,8 +130,10 @@ says what is missing rather than filling the gap. Pending confirmations,
 clarifications and recent turns are kept in sqlite and survive a restart; the
 previous turn's full evidence is not, so a follow-up about the previous answer
 after a restart is handled as a fresh question, and a chat whose answer the
-restart cut off is told to ask again. The investigator sub-agent exists but
-has not earned its place in the evaluation yet.
+restart cut off is told to ask again. The investigator sub-agent has three
+named jobs (the story of an event, a filing's own terms, the source of a
+claim), each with a fixed brief and tool set; three development cases grade
+it, and it stays in the planner only while they pass.
 
 ## Running it
 

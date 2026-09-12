@@ -384,6 +384,16 @@ class MoveAttributor:
             "memory": {"written": bool(remembered), "conflict": memory_conflict, "note": memory_note},
             "challenge": {key: value for key, value in challenge.items() if key != "ms"},
         }
+        # A filing on the day whose news the attributor never looked at: ask the
+        # run board for the news checker on that day, within the run's cap, so
+        # the filing's account and the press's can be set side by side.
+        board = getattr(context, "board", None)
+        if allow_news and loop.gathered.filing_events and loop.gathered.news_calls == 0 and board is not None:
+            window = max(7, (current - date.fromisoformat(facts.date)).days + 7)
+            accepted = board.request("web.research", {"query": f"{ticker} stock news {facts.date}", "topic": "company_event", "ticker": ticker, "recency_days": min(3650, window), "min_searches": 1}, purpose=f"the news of {facts.date} beside the {ticker} filing the attributor read", requested_by="move_attributor")
+            envelope.metadata["agent"]["follow_up"] = {"news_around": facts.date, "accepted": accepted}
+            if accepted:
+                envelope.metadata["agent"].setdefault("notes", []).append(f"读到 {facts.date} 前后的申报但没搜当日新闻，已请新闻核查者补查")
         return envelope
 
     def _challenge(self, facts: DayFacts, reasons: list[dict[str, Any]], context: ExecutionContext) -> dict[str, Any]:

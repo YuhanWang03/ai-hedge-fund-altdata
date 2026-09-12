@@ -32,6 +32,30 @@ _HELP_ANSWER = (
 )
 
 #: Wants that ask for research-engine modules (as opposed to market data, account facts or state).
+#: The investigator's brief, tools and look-back per job type (``Intent.investigation``).
+INVESTIGATION_JOBS: dict[str, dict] = {
+    "event_story": {
+        "brief": "梳理这件事的来龙去脉，按日期找出起因、经过和最新进展，每个节点给出处和原文引文：",
+        "tools": ("search_news", "read_page", "list_filings", "read_filing", "recall_memory"),
+        "days": 120,
+        "purpose": "the dated story of the event from news pages, filings and the monitor's memory, each node quoted",
+        "answer": "按时间顺序写事件的起因、经过和最新进展；",
+    },
+    "filing_terms": {
+        "brief": "在该公司的 SEC 申报里找到相关章节，原样引用具体条款和措辞，不要转述常识：",
+        "tools": ("list_filings", "read_filing"),
+        "days": 400,
+        "purpose": "the filing's own words on the point asked, section by section",
+        "answer": "先说是哪份申报的哪个章节，再引用原文条款，最后一句概括；",
+    },
+    "claim_source": {
+        "brief": "核实这个说法有没有出处：找到最早或最权威的来源（报道、申报、公司声明），引用原文，并说明来源之间是否一致：",
+        "tools": ("search_news", "read_page", "list_filings", "read_filing"),
+        "days": 180,
+        "purpose": "whether the claim has a source, which, and what it says in its own words",
+        "answer": "先给结论（有出处/没有找到出处/来源之间有出入），再列出处和引文；",
+    },
+}
 _RESEARCH_WANTS = ("valuation", "earnings", "filings", "ownership", "supply_chain", "catalysts", "risk", "full", "overview")
 
 
@@ -161,6 +185,9 @@ class IntentPlanner:
         if intent.source == "default":
             notes.append(f"intent: {intent.note}")
 
+        if intent.investigation:
+            return self._investigate(text, intent, tickers, route, request, notes)
+
         if len(tickers) == 1:
             stretch = self._stretch_direction(intent, frame if isinstance(frame, dict) else None)
             if stretch:
@@ -222,6 +249,30 @@ class IntentPlanner:
         if intent.wants_any("runup") or (intent.direction == "up" and intent.scope in {"window", "since_purchase"}):
             return "up", {"kind": "runup", "ticker": intent.tickers[0] if intent.tickers else "", "label": "这段涨幅", "window": intent.window}
         return None
+
+    @staticmethod
+    def _investigate(text: str, intent: Intent, tickers: tuple[str, ...], route: RouteDecision, request: NormalizedRequest, notes: list[str]) -> ExecutionPlan:
+        """The investigator's three jobs, each with its own brief, tools and look-back.
+
+        The story of an event is read from news pages, filings and the
+        monitor's memory; a filing's terms only from the filing itself; a
+        claim's source from the news and the filings.  Every finding it
+        reports carries a located quote, so the answer is a dated list of
+        what the sources say and an honest "not found" otherwise.
+        """
+
+        from datetime import date, timedelta
+
+        ticker = tickers[0] if tickers else ""
+        job = INVESTIGATION_JOBS[intent.investigation]
+        tasks = [PlanTask("investigate", "agent.investigate", {"task": job["brief"] + text, **({"ticker": ticker} if ticker else {}), "tools": list(job["tools"]), "recency_days": job["days"]}, purpose=job["purpose"])]
+        if ticker and intent.investigation == "event_story":
+            tasks.append(PlanTask("anomaly-history", "market.anomaly_history", {"ticker": ticker, "lookback_days": job["days"]}, purpose="what the monitor recorded over the period", required=False))
+        if ticker and intent.investigation == "filing_terms":
+            tasks.append(PlanTask("filings-recent", "filings.recent", {"ticker": ticker, "since": (date.today() - timedelta(days=job["days"])).isoformat()}, purpose="the dated list of filings the terms may sit in", required=False))
+        web_state = "网页已授权。" if request.allow_web else "网页未授权，调查员只读申报和盯盘记录，回答里说明未查新闻。"
+        note = f"investigation: {job['answer']}每条发现写日期、出处和引文，调查员没找到的就明说，不得用常识补全故事或条款。{web_state}"
+        return ExecutionPlan(objective=text, route=route.kind, tasks=tuple(tasks), answer_mode=AnswerMode.RESEARCH_GROUNDED, budget=BudgetClass.STANDARD, web_fallback_allowed=False, assumptions=(note, *notes))
 
     @staticmethod
     def _news(text: str, ticker: str, route: RouteDecision, request: NormalizedRequest, notes: list[str]) -> ExecutionPlan:

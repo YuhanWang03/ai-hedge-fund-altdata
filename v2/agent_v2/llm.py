@@ -104,6 +104,10 @@ class StructuredLLMPlanner:
         # the model replaced it with one open-ended investigation.
         if intent.wants_any("briefing"):
             return deterministic
+        # An investigation is a fixed brief for the investigator (task, tools by
+        # job type); the model planner used to give it a vague task or none.
+        if getattr(intent, "investigation", ""):
+            return deterministic
         # Rules own market questions and non-thin lookups; the model gets
         # research and lab routes, plus lookups the rules could not resolve
         # beyond a scope read (the holdout wording the rules never saw).

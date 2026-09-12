@@ -972,10 +972,10 @@ def test_filing_reader_reads_the_sections_it_chooses_and_keeps_only_quoted_event
     rescued = FilingReader(forced, _FakeFilingSource(refs), max_rounds=2).run("ARM", _context(), around="2026-07-29", today=date(2026, 9, 9))
     assert rescued.status == ResultStatus.COMPLETED and {key: rescued.metrics[key] for key in ("filings", "sections_read", "events", "rounds", "llm_calls")} == {"filings": 1, "sections_read": 2, "events": 1, "rounds": 2, "llm_calls": 3}
     assert forced.calls[-1][-1]["content"].startswith("轮次已用完")
-    # If even the forced finish keeps reading, the cap holds and only a limitation comes back.
+    # If even the forced finish and the plain-JSON turn after it keep reading, the cap holds and only a limitation comes back.
     endless = FilingReader(ScriptedLLM([LLMResponse(text='{"action":"read","filing":1,"section":"s1"}')] * 6), _FakeFilingSource(refs), max_rounds=2)
     capped = endless.run("ARM", _context(), around="2026-07-29", today=date(2026, 9, 9))
-    assert capped.status == ResultStatus.PARTIAL_DATA and {key: capped.metrics[key] for key in ("filings", "sections_read", "events", "rounds", "llm_calls", "stop_reason")} == {"filings": 1, "sections_read": 1, "events": 0, "rounds": 2, "llm_calls": 3, "stop_reason": "rounds"} and "达到轮次上限" in capped.limitations[0]
+    assert capped.status == ResultStatus.PARTIAL_DATA and {key: capped.metrics[key] for key in ("filings", "sections_read", "events", "rounds", "llm_calls", "stop_reason")} == {"filings": 1, "sections_read": 1, "events": 0, "rounds": 2, "llm_calls": 4, "stop_reason": "rounds"} and "达到轮次上限" in capped.limitations[0]
     assert capped.evidence[0].metadata["citation_kind"] == "limitations" and "未读到与2026-07-29 附近下跌相关的事件" in capped.evidence[0].claim
     # Without a model the capability still lists the filings and says it did not read them.
     listed = FilingReader(None, _FakeFilingSource(refs)).run("ARM", _context(), around="2026-07-29", today=date(2026, 9, 9))
@@ -3550,7 +3550,8 @@ def test_toolbox_tools_are_shared_and_the_investigator_reports_only_quoted_findi
         ], "note": "两条有出处"}, "c5")]),
     ])
     investigator = Investigator(llm, lambda: Toolbox(search=search, filing_source=Source(), recall=None, today=date(2026, 9, 9)))
-    result = investigator.run("查 ARM 7 月 29 日大跌的申报和报道", _context(), ticker="ARM", tools=("search_news", "read_page", "list_filings", "read_filing"))
+    consenting = ExecutionContext("test-run", NormalizedRequest("q", "q"), BudgetClass.STANDARD, allow_web=True)
+    result = investigator.run("查 ARM 7 月 29 日大跌的申报和报道", consenting, ticker="ARM", tools=("search_news", "read_page", "list_filings", "read_filing"))
     assert result.capability == "agent.investigate" and result.ok and result.metrics["findings"] == 2 and result.metrics["dropped"] == 2
     kinds = [(item.source_id, item.source_url) for item in result.evidence]
     assert kinds == [("web:example.com", "https://example.com/arm"), ("sec_edgar", "https://www.sec.gov/x/1/")]
@@ -3567,6 +3568,105 @@ def test_toolbox_tools_are_shared_and_the_investigator_reports_only_quoted_findi
     assert "agent.investigate" in SUB_AGENT_CAPABILITIES
     none = Investigator(None, lambda: Toolbox(search=search, today=date(2026, 9, 9))).run("x", _context(), ticker="ARM")
     assert none.status == ResultStatus.PARTIAL_DATA and none.metadata["agent"]["stop_reason"] == "no_model"
+    # Without the user's web consent the web tools are withheld, whatever the planner asked for, and the answer is told.
+    withheld = Investigator(ScriptedLLM([LLMResponse(tool_calls=[call("finish", {"findings": [], "note": "无"}, "c9")])]), lambda: Toolbox(search=search, filing_source=Source(), today=date(2026, 9, 9)))
+    result = withheld.run("查 ARM 的申报", _context(), ticker="ARM", tools=("search_news", "read_page", "list_filings", "read_filing"))
+    assert result.metadata["agent"]["tools"] == ["list_filings", "read_filing"] and result.metadata["agent"]["withheld"] == ["search_news", "read_page"] and "网页未授权，未搜索新闻" in result.limitations[0]
+
+
+def test_investigation_intents_get_a_fixed_brief_per_job_and_the_model_planner_keeps_it():
+    from v2.agent_v2.intent import INTENT_TOOL, INVESTIGATIONS, Intent, parse_intent, resolve_intent
+    from v2.agent_v2.planning import INVESTIGATION_JOBS
+
+    assert INVESTIGATIONS == ("event_story", "filing_terms", "claim_source") and INTENT_TOOL["function"]["parameters"]["properties"]["investigation"]["enum"] == ["", *INVESTIGATIONS]
+    assert parse_intent({"kind": "research", "investigation": "filing_terms", "tickers": ["TSLA"]}, source="model").investigation == "filing_terms"
+    assert parse_intent({"kind": "research", "investigation": "gossip"}, source="model").investigation == ""
+    planner = RulePlanner()
+
+    def plan_for(text, job, tickers, *, allow_web=True):
+        request = normalize_request(text, allow_web=allow_web)
+        return planner.plan(request, route(request, intent=Intent(kind="research", scope="recent", wants=("news",), tickers=tickers, investigation=job, source="model")))
+
+    # The story of an event: every tool, the monitor's memory alongside.
+    plan = plan_for("英特尔被美国政府入股那件事的来龙去脉是什么？", "event_story", ("INTC",))
+    first = plan.tasks[0]
+    assert first.capability == "agent.investigate" and first.required and first.arguments["ticker"] == "INTC" and first.arguments["tools"] == list(INVESTIGATION_JOBS["event_story"]["tools"]) and first.arguments["recency_days"] == 120
+    assert first.arguments["task"].endswith("英特尔被美国政府入股那件事的来龙去脉是什么？") and first.arguments["task"].startswith("梳理这件事的来龙去脉")
+    assert [task.capability for task in plan.tasks] == ["agent.investigate", "market.anomaly_history"] and plan.budget == BudgetClass.STANDARD and plan.answer_mode == AnswerMode.RESEARCH_GROUNDED
+    assert plan.assumptions[0].startswith("investigation: 按时间顺序") and "网页已授权" in plan.assumptions[0] and not plan.web_fallback_allowed
+    # A filing's terms: only the filing tools, a year back, the dated list beside it.
+    plan = plan_for("特斯拉最新的 10-K 里对 FSD 的风险具体是怎么写的？", "filing_terms", ("TSLA",), allow_web=False)
+    assert plan.tasks[0].arguments["tools"] == ["list_filings", "read_filing"] and plan.tasks[0].arguments["recency_days"] == 400 and [task.capability for task in plan.tasks] == ["agent.investigate", "filings.recent"]
+    assert "网页未授权" in plan.assumptions[0]
+    # A claim's source: the news and the filings, nothing else; no ticker is fine.
+    plan = plan_for("有说法称美国要对所有进口芯片加征关税，有出处吗？", "claim_source", ())
+    assert [task.capability for task in plan.tasks] == ["agent.investigate"] and "ticker" not in plan.tasks[0].arguments and plan.tasks[0].arguments["tools"] == ["search_news", "read_page", "list_filings", "read_filing"]
+    # The plan validates against the catalog and the model planner keeps it as is.
+    ExecutionEngine(CapabilityRegistry(default_catalog())).validate(plan)
+    llm = ScriptedLLM([LLMResponse(text='{"tasks":[{"id":"t1","capability":"agent.investigate","arguments":{"task":"查一下"}}]}')])
+    request = normalize_request("英特尔被美国政府入股那件事的来龙去脉是什么？")
+    kept = StructuredLLMPlanner(llm, default_catalog()).plan(request, route(request, intent=Intent(kind="research", tickers=("INTC",), investigation="event_story", source="model")))
+    assert kept.tasks[0].arguments["tools"] == list(INVESTIGATION_JOBS["event_story"]["tools"]) and not llm.calls
+    # The three development cases are labelled by hand and expect the investigator.
+    from v2.agent_v2.eval.quality_cases import QUALITY_CASES
+
+    cases = [case for case in QUALITY_CASES if "investigate" in case.tags]
+    assert [case.expected_agents for case in cases] == [("investigator",)] * 3
+    recorded = [resolve_intent(normalize_request(case.question)) for case in cases]
+    assert [(intent.source, intent.investigation) for intent in recorded] == [("recorded", "event_story"), ("recorded", "filing_terms"), ("recorded", "claim_source")]
+
+
+def test_a_tool_loop_that_will_not_call_finish_reports_as_plain_json_before_giving_up():
+    from v2.agent.llm import ToolCall
+    from v2.agent_v2.agents.base import LoopLimits, Tool, ToolLoop, _schema
+
+    class Reader(ToolLoop):
+        def __init__(self, llm):
+            super().__init__(llm, LoopLimits(max_rounds=1, max_seconds=30), tools=[Tool("look", "看。", _schema({}), lambda a: "看到了")], finish_parameters=_schema({"findings": {"type": "array"}, "note": {"type": "string"}}, ["findings"]))
+
+    look = LLMResponse(tool_calls=[ToolCall(id="c1", name="look", arguments={}, raw_arguments="{}")])
+    # The forced finish comes back as prose; the plain-JSON turn carries the report.
+    llm = ScriptedLLM([look, LLMResponse(text="我读到了两条发现，但不想调用 finish。"), LLMResponse(text='```json\n{"findings":[{"date":"2026-07-29"}],"note":"补报"}\n```')])
+    outcome = Reader(llm).run("s", "t", finish_prompt="finish now")
+    assert outcome.finished and outcome.final == {"action": "finish", "findings": [{"date": "2026-07-29"}], "note": "补报"} and outcome.calls == 3
+    assert [step["action"] for step in outcome.trace] == ["look", "forced_finish", "forced_finish_json"] and llm.calls[-1][-1]["content"].startswith("不要调用工具") and "findings、note" in llm.calls[-1][-1]["content"]
+    assert llm.tool_choices[-1] is None
+    # Still asking for a tool on that turn: the loop ends unfinished, as before.
+    llm = ScriptedLLM([look, LLMResponse(text="再看一次"), LLMResponse(text='{"action":"look"}')])
+    outcome = Reader(llm).run("s", "t", finish_prompt="finish now")
+    assert not outcome.finished and outcome.stop_reason == "rounds" and outcome.calls == 3
+
+
+def test_the_attributor_asks_the_board_for_the_news_of_a_filing_day_it_never_searched():
+    from v2.agent_v2.agents.filing_reader import FilingRef
+    from v2.agent_v2.agents.move_attributor import MoveAttributor
+
+    class Source:
+        def list_filings(self, ticker, since, until):
+            return [FilingRef(ticker, "8-K", "2026-07-28", "0001-26-000001", "https://www.sec.gov/x/1/")]
+
+    class Reader:
+        source = Source()
+
+        def run(self, ticker, context, *, around, today):
+            return ToolEnvelope("filings.read_events", ResultStatus.COMPLETED, subject=ticker, evidence=[EvidenceItem("E-ARM-0728", "ARM", "ARM 2026-07-28：季度营收低于指引区间（8-K 2026-07-28 s1：“Revenue was below the guidance range”）。", metadata={"evidence_scope": "filing_event", "date": "2026-07-28", "quote": "Revenue was below the guidance range", "text": "Revenue was below the guidance range for the quarter."})])
+
+    finish = json.dumps({"action": "finish", "reasons": [{"text": "申报显示营收低于指引区间", "confidence": "中", "source": {"kind": "filing", "id": "E-ARM-0728"}, "quote": "Revenue was below the guidance range"}], "next_steps": [], "note": ""}, ensure_ascii=False)
+    searched = []
+    # The model finishes on the filing alone, twice (the first finish is refused because the news was never searched).
+    llm = ScriptedLLM([LLMResponse(text=finish), LLMResponse(text=finish)])
+    attributor = MoveAttributor(llm, price_source_factory=lambda: SimpleNamespace(get_prices=_attributor_prices), news=lambda query, day: searched.append((query, day)) or [], filing_reader=Reader(), memory_recall=None, memory_remember=None, sector_for=lambda ticker: "SMH")
+    context = ExecutionContext("run", NormalizedRequest("q", "q"), BudgetClass.PORTFOLIO, allow_web=True)
+    result = attributor.run("ARM", context, day="2026-07-29", today=date(2026, 9, 9))
+    assert not searched and result.metrics["news_calls"] == 0 and result.metadata["agent"]["follow_up"] == {"news_around": "2026-07-29", "accepted": True}
+    requested = context.board.take_requests()
+    assert [task.capability for task in requested] == ["web.research"] and requested[0].arguments == {"query": "ARM stock news 2026-07-29", "topic": "company_event", "ticker": "ARM", "recency_days": 49, "min_searches": 1} and not requested[0].required
+    assert "已请新闻核查者补查" in result.metadata["agent"]["notes"][0]
+    # The same request twice on one board is refused; without consent there is no request at all.
+    assert not context.board.request("web.research", requested[0].arguments)
+    quiet = ExecutionContext("run", NormalizedRequest("q", "q"), BudgetClass.PORTFOLIO)
+    result = MoveAttributor(ScriptedLLM([LLMResponse(text=finish)]), price_source_factory=lambda: SimpleNamespace(get_prices=_attributor_prices), news=lambda query, day: [], filing_reader=Reader(), memory_recall=None, memory_remember=None, sector_for=lambda ticker: "SMH").run("ARM", quiet, day="2026-07-29", today=date(2026, 9, 9))
+    assert "follow_up" not in result.metadata["agent"] and not quiet.board.take_requests()
 
 
 def test_user_memory_feedback_and_preferences_reach_the_answer(tmp_path, monkeypatch):

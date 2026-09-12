@@ -34,6 +34,8 @@ _WS = re.compile(r"\s+")
 
 #: The tools a planner may hand to the investigator.
 TOOL_NAMES = ("search_news", "read_page", "list_filings", "read_filing", "recall_memory")
+#: The ones that read the web; withheld unless the run has the user's web consent.
+WEB_TOOLS = ("search_news", "read_page")
 
 
 def _flat(value: Any, limit: int) -> str:
@@ -227,6 +229,9 @@ class Investigator:
         toolbox = self.toolbox_factory()
         toolbox.days = min(3650, max(1, int(recency_days or 30)))
         names = tuple(name for name in (tools or TOOL_NAMES) if name in toolbox.available())
+        # The web is read only with the user's consent, as for every other capability.
+        withheld = tuple(name for name in names if name in WEB_TOOLS) if not getattr(context, "allow_web", False) else ()
+        names = tuple(name for name in names if name not in withheld)
         limits = limits_for(context, max_rounds=self.max_rounds, max_seconds=self.max_seconds)
         loop = _InvestigateLoop(self.llm, limits, toolbox, names)
         brief = f"任务：{task}\n股票：{ticker or '（未指定）'}\n今天：{toolbox.today.isoformat()}\n可用工具：{'、'.join(names) or '（无）'}"
@@ -234,6 +239,8 @@ class Investigator:
         raw = [row for row in (outcome.final.get("findings") or []) if isinstance(row, dict)] if outcome.finished else []
         findings, dropped = _verify_findings(raw[: self.max_findings * 2], toolbox.state)
         note = str(outcome.final.get("note") or "") if outcome.finished else outcome.note
+        if withheld:
+            note = (note + "；" if note else "") + "网页未授权，未搜索新闻"
         if dropped:
             note = (note + "；" if note else "") + f"{dropped} 条发现没有可核对的引文，已丢弃"
         subject = ticker or task[:24]
@@ -271,7 +278,7 @@ class Investigator:
             metadata={
                 "narrative": narrative,
                 "task": task,
-                "agent": {"name": "investigator", "label": "现场调查", "subject": f"{subject} {task[:20]}", "rounds": outcome.rounds, "llm_calls": outcome.calls, "elapsed_ms": elapsed_ms, "seconds_allowed": round(outcome.seconds_allowed, 1), "stop_reason": outcome.stop_reason, "calls": dict(toolbox.state.calls), "yield": {"kept": len(findings), "dropped": dropped}, "tools": list(names)},
+                "agent": {"name": "investigator", "label": "现场调查", "subject": f"{subject} {task[:20]}", "rounds": outcome.rounds, "llm_calls": outcome.calls, "elapsed_ms": elapsed_ms, "seconds_allowed": round(outcome.seconds_allowed, 1), "stop_reason": outcome.stop_reason, "calls": dict(toolbox.state.calls), "yield": {"kept": len(findings), "dropped": dropped}, "tools": list(names), **({"withheld": list(withheld)} if withheld else {})},
                 "trace": outcome.trace,
             },
         )
