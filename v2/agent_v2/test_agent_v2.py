@@ -4535,12 +4535,15 @@ def test_an_investigation_finding_must_be_quoted_verbatim_where_it_is_cited_and_
     assert quote_rule("e1", "")["require"] == "" and quote_rule("e1", "")["quote_of"] == "e1"
 
     # The lab port: named tickers make a custom universe unless one was asked for.
-    from pydantic import BaseModel
+    # (A stand-in for the pydantic input model: the port reads model_fields and model_dump; CI has no pydantic.)
+    class Input:
+        model_fields = {"universe": None, "tickers": None, "holding_days_list": None}
 
-    class Input(BaseModel):
-        universe: str = "sp500"
-        tickers: list[str] = []
-        holding_days_list: list[int] = [21]
+        def __init__(self, universe="sp500", tickers=(), holding_days_list=(21,)):
+            self.universe, self.tickers, self.holding_days_list = universe, list(tickers), list(holding_days_list)
+
+        def model_dump(self):
+            return {"universe": self.universe, "tickers": self.tickers, "holding_days_list": self.holding_days_list}
 
     seen = []
     port = WorkspaceLabPort({"lab.sweep": LabBinding(Input, lambda body: seen.append(body.model_dump()) or {"kind": "sweep", "tickers": body.tickers, "rows": []})})
