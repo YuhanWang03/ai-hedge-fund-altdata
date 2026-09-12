@@ -335,6 +335,11 @@ def _answer_warnings(answer: str, evidence: list[EvidenceItem], results: list[To
                     # Soft: a second candidate for a day is wording to trim, not a fabricated
                     # figure; the judged "candidate stated as confirmed" rule still blocks.
                     warnings.append(SOFT_PREFIX + str(cap.get("warning") or f"{result.capability} 引用了过多同类证据") + f"（{result.subject or result.capability}：只保留 " + "、".join(f"[{value}]" for value in keep) + "，去掉 " + "、".join(f"[{value}]" for value in drop) + "）")
+            quoted = rule.get("quote_of")
+            if quoted and rule.get("require") and any(item.id == quoted for item in cited) and not _matches(rule["require"], plain_answer):
+                # A cited finding's quote must appear somewhere in the answer, not in
+                # every sentence that cites it: the summary paragraph restates it bare.
+                warnings.append(str(rule.get("warning") or f"引用了 [{quoted}] 却没有照抄它的引文"))
             need = rule.get("require_cited")
             if isinstance(need, dict):
                 # A floor: at least one of this result's items with the given

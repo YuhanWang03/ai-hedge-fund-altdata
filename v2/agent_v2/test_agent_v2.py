@@ -3557,6 +3557,7 @@ def test_toolbox_tools_are_shared_and_the_investigator_reports_only_quoted_findi
     assert kinds == [("web:example.com", "https://example.com/arm"), ("sec_edgar", "https://www.sec.gov/x/1/")]
     assert result.metadata["agent"]["name"] == "investigator" and result.metadata["agent"]["tools"] == ["search_news", "read_page", "list_filings", "read_filing"] and result.metadata["agent"]["calls"] == {"search_news": 1, "read_page": 1, "list_filings": 1, "read_filing": 1}
     assert "2 条发现没有可核对的引文" in result.limitations[0] and "[evidence-investigate-" in result.metadata["narrative"]
+    assert [rule["quote_of"] for rule in result.metadata["answer_constraints"]] == [item.id for item in result.evidence] and result.metadata["answer_constraints"][0]["require"].startswith("revenue")
     assert [step["action"] for step in result.metadata["trace"]] == ["search_news", "read_page", "list_filings", "read_filing", "finish"]
     # Registered as a capability the model planner may delegate to.
     registry = CapabilityRegistry(default_catalog())
@@ -4521,13 +4522,17 @@ def test_an_investigation_finding_must_be_quoted_verbatim_where_it_is_cited_and_
     from v2.agent_v2.agents.toolbox import quote_rule
     from v2.agent_v2.eval.quality import render_case
 
-    rule = quote_rule("revenue guidance came in below Wall Street expectations, sending shares down 13%.")
-    item = EvidenceItem("evidence-investigate-abc", "ARM", "ARM 2026-07-29：指引低于预期（Arm falls：“revenue guidance came in below Wall Street expectations”）。", metadata={"evidence_type": "investigation", "constraints": [rule]})
-    paraphrased = verify_answer("2026-07-29：Arm 的指引低于华尔街预期（Arm falls）[evidence-investigate-abc]。", [item], answer_mode=AnswerMode.RESEARCH_GROUNDED)
+    rule = quote_rule("evidence-investigate-abc", "revenue guidance came in below Wall Street expectations, sending shares down 13%.")
+    item = EvidenceItem("evidence-investigate-abc", "ARM", "ARM 2026-07-29：指引低于预期（Arm falls：“revenue guidance came in below Wall Street expectations”）。", metadata={"evidence_type": "investigation"})
+    envelope = ToolEnvelope("agent.investigate", ResultStatus.COMPLETED, evidence=[item], metadata={"answer_constraints": [rule]})
+    paraphrased = verify_answer("2026-07-29：Arm 的指引低于华尔街预期（Arm falls）[evidence-investigate-abc]。", [item], answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[envelope])
     assert not paraphrased.ok and any("没有照抄它的引文" in warning for warning in paraphrased.warnings)
-    quoted = verify_answer("2026-07-29：Arm 的指引低于华尔街预期（Arm falls：“revenue guidance came  in below Wall Street expectations”）[evidence-investigate-abc]。", [item], answer_mode=AnswerMode.RESEARCH_GROUNDED)
+    # The quote once, anywhere: a summary sentence that cites the finding again without it is fine.
+    quoted = verify_answer("2026-07-29：Arm 的指引低于华尔街预期（Arm falls：“revenue guidance came  in below Wall Street expectations”）[evidence-investigate-abc]。\n\n最值得跟踪的是指引本身[evidence-investigate-abc]。", [item], answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[envelope])
     assert quoted.ok, quoted.warnings
-    assert quote_rule("") == {"require": "", "warning": "引用了调查发现却没有照抄它的引文；引用这条时把原文“”原样放进同一句"}
+    # Not cited at all: the rule does not apply.
+    assert not any("引文" in warning for warning in verify_answer("没有相关发现。", [item], answer_mode=AnswerMode.RESEARCH_GROUNDED, results=[envelope]).warnings)
+    assert quote_rule("e1", "")["require"] == "" and quote_rule("e1", "")["quote_of"] == "e1"
 
     # The lab port: named tickers make a custom universe unless one was asked for.
     from pydantic import BaseModel

@@ -38,12 +38,12 @@ TOOL_NAMES = ("search_news", "read_page", "list_filings", "read_filing", "recall
 WEB_TOOLS = ("search_news", "read_page")
 
 
-def quote_rule(quote: str, *, head: int = 30) -> dict[str, str]:
-    """The verifier rule that a sentence citing a finding carries its quote: the quote's opening words, whitespace-tolerant."""
+def quote_rule(evidence_id: str, quote: str, *, head: int = 30) -> dict[str, str]:
+    """The answer-level rule that an answer citing a finding carries its quote somewhere: the quote's opening words, whitespace-tolerant."""
 
     opening = " ".join(str(quote or "").split())[:head].rstrip(" ,.;:，。；：")
     pattern = r"\s*".join(re.escape(part) for part in opening.split(" ")) if opening else ""
-    return {"require": pattern, "warning": f"引用了调查发现却没有照抄它的引文；引用这条时把原文“{str(quote or '')[:80]}”原样放进同一句"}
+    return {"quote_of": evidence_id, "require": pattern, "warning": f"引用了调查发现 [{evidence_id}] 却没有照抄它的引文；把原文“{str(quote or '')[:80]}”原样放进回答里引用它的那一行"}
 
 
 def passages_around(text: str, find: str, *, limit: int, radius: int = 700) -> str:
@@ -318,7 +318,7 @@ class Investigator:
                 source_title=label,
                 source_url=url,
                 producer_run_id=context.run_id,
-                metadata={"evidence_type": "investigation", "date": finding["date"], "quote": finding["quote"], "source": finding["source"], "verified": True, "constraints": [quote_rule(finding["quote"])]},
+                metadata={"evidence_type": "investigation", "date": finding["date"], "quote": finding["quote"], "source": finding["source"], "verified": True},
             ))
         if not evidence:
             evidence.append(EvidenceItem(id=f"evidence-investigate-none-{hashlib.sha1(task.encode('utf-8')).hexdigest()[:10]}", entity=subject, claim=f"针对“{task[:60]}”的调查没有找到可核实、带引文的发现。", source_id="investigator", source_title="调查", producer_run_id=context.run_id, metadata={"citation_kind": "limitations", "verified": True}))
@@ -339,6 +339,7 @@ class Investigator:
             metadata={
                 "narrative": narrative,
                 "task": task,
+                "answer_constraints": [quote_rule(item.id, item.metadata["quote"]) for item in evidence if item.metadata.get("evidence_type") == "investigation"],
                 "agent": {"name": "investigator", "label": "现场调查", "subject": f"{subject} {task[:20]}", "rounds": outcome.rounds, "llm_calls": outcome.calls, "elapsed_ms": elapsed_ms, "seconds_allowed": round(outcome.seconds_allowed, 1), "stop_reason": outcome.stop_reason, "calls": dict(toolbox.state.calls), "yield": {"kept": len(findings), "dropped": dropped}, "tools": list(names), **({"withheld": list(withheld)} if withheld else {})},
                 "trace": outcome.trace,
             },
