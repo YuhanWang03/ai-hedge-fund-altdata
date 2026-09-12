@@ -8,7 +8,9 @@ Built as a portfolio project to demonstrate end-to-end ownership of a multi-sour
 
 **Hero numbers**: 10 phases shipped · 6 scheduled pushes + on-demand bot · 24 NL intents · 5-layer defense · 490 sandbox tests · **~$22/month** total ops cost
 
-**Agent layer** ([`v2/agent/`](./v2/agent/README.md)): a model-driven tool-calling loop over the same 24 responders, plus a router that decides per query whether multi-step planning is worth its cost. Measured on an **89-case labelled evaluation set at 3 samples each**: **53% → 96%** pass rate at **57% of the full loop's tokens**; the production config (8 tool calls) holds **92–95%** across two full sweeps at **45%**. Attribution false positives 0–1 in 267 runs; a second checker error rate (a repair that loses a fact the draft had) is 0 in 267 after the fix. 215 further tests.
+**Agent V2** ([`v2/agent_v2/`](./v2/agent_v2/README.md)): the current conversational layer — a deterministic planner keyed on a model intent, bounded sub-agents on one tool loop, a synthesizer whose every figure must cite fetched evidence and pass a verifier plus a model judge, clarifying questions, evidence-shaped follow-ups, and a quality loop that scores every change. On the 40-question development set (each asked twice) the hardening loop took the pass rate from **76% to 92%**, fallbacks from 3 to 1, and the token equivalent per question down 11%; 189 unit tests and a 39-case offline evaluation gate every push.
+
+**Agent layer (V1)** ([`v2/agent/`](./v2/agent/README.md)): a model-driven tool-calling loop over the same 24 responders, plus a router that decides per query whether multi-step planning is worth its cost. Measured on an **89-case labelled evaluation set at 3 samples each**: **53% → 96%** pass rate at **57% of the full loop's tokens**; the production config (8 tool calls) holds **92–95%** across two full sweeps at **45%**. Attribution false positives 0–1 in 267 runs; a second checker error rate (a repair that loses a fact the draft had) is 0 in 267 after the fix. 215 further tests.
 
 ---
 
