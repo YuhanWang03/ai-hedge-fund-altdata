@@ -4237,3 +4237,17 @@ def test_a_time_framed_holdings_ranking_fans_out_performance_without_the_perform
     assert [task.capability for task in plan.tasks] == ["account.portfolio", "market.performance"] and plan.tasks[1].fan_out["max"] == 12 and "rank" not in plan.tasks[1].fan_out
     since = Intent(kind="lookup", scope="none", wants=("portfolio", "ranking"), portfolio_scope=True, rank="low", source="model")
     assert [task.capability for task in RulePlanner().plan(request, route(request, intent=since)).tasks] == ["account.portfolio"]
+
+
+def test_repair_names_the_items_that_carry_an_uncited_sentence_s_figures():
+    from v2.agent_v2.llm import _figures_in, repair_instruction
+    from v2.agent_v2.models import VerificationReport
+
+    price = EvidenceItem("evidence-attribute-price-1", "PLTR", "PLTR 在 2026-09-11 收于 167.23 美元，较前一交易日 +0.83%。", source_id="market_data")
+    bench = EvidenceItem("evidence-attribute-benchmark-1", "PLTR", "PLTR 2026-09-11 行业基准 XLK 单日回报为 +1.32%，PLTR 相对回报为 -0.50%。", source_id="market_data")
+    assert _figures_in("PLTR 收在 167.23 美元、较前一交易日 +0.83%，同日 XLK 涨 1.32%", [price, bench]) == [("167.23", ["evidence-attribute-price-1"]), ("+0.83%", ["evidence-attribute-price-1"]), ("1.32%", ["evidence-attribute-benchmark-1"])]
+    report = VerificationReport(ok=False, warnings=("行情事实缺少邻近引用：“PLTR 收在 167.23 美元、较前一交易日 +0.83%…”",))
+    text = repair_instruction(report, [price, bench])
+    assert "这句没有引用" in text and "167.23 见 [evidence-attribute-price-1]" in text and "其他问题：行情事实缺少邻近引用" not in text
+    unknown = repair_instruction(VerificationReport(ok=False, warnings=("行情事实缺少邻近引用：“成交量只有均量的 0.38 倍…”",)), [price])
+    assert "其他问题：行情事实缺少邻近引用" in unknown  # nothing carries the figure: the plain warning stands

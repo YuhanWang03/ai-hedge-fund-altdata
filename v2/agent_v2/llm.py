@@ -770,6 +770,22 @@ def _select_evidence(results: list[ToolEnvelope], evidence: list[EvidenceItem], 
 
 
 _NEARBY_UNGROUNDED = re.compile(r"^引用未支持邻近数字：([^（]+)")
+_MISSING_CITATION = re.compile(r"^行情事实缺少邻近引用：“(.+?)…?”")
+_FIGURE = re.compile(r"[-+]?\d[\d,]*(?:\.\d+)?%?")
+
+
+def _figures_in(excerpt: str, evidence: list[EvidenceItem]) -> list[tuple[str, list[str]]]:
+    """The figures of an uncited excerpt with the evidence ids that carry each; figures no item carries are left out."""
+
+    found: list[tuple[str, list[str]]] = []
+    for raw in dict.fromkeys(match.group(0) for match in _FIGURE.finditer(excerpt)):
+        digits = raw.replace(",", "").lstrip("+-").rstrip("%")
+        if not digits or len(digits.replace(".", "")) < 2:
+            continue
+        ids = locate_number(digits, evidence)
+        if ids:
+            found.append((raw, ids))
+    return found[:6]
 
 
 _SHORT_WORDS = ("短一点", "简短", "简洁", "少一点", "精简", "short", "brief", "concise", "不要太长", "别太长")
@@ -859,6 +875,14 @@ def repair_instruction(report: VerificationReport, evidence: list[EvidenceItem] 
     for warning in report.warnings[:6]:
         if _NEARBY_UNGROUNDED.match(str(warning)):
             continue  # handled above, with the ids that carry the figures
+        uncited = _MISSING_CITATION.match(str(warning))
+        if uncited:
+            # The draft said "these figures have no citeable item" twice on the
+            # eval; name the items that carry them so the repair is a lookup.
+            found = _figures_in(uncited.group(1), list(evidence or []))
+            if found:
+                lines.append(f"这句没有引用：“{uncited.group(1)}”。它里面的数字在这些证据里，请在对应数字后引用：" + "；".join(f"{number} 见 " + "、".join(f"[{value}]" for value in ids) for number, ids in found) + "。")
+                continue
         lines.append(f"其他问题：{warning}。")
     if report.traced_numbers:
         lines.append("以下数字已通过校验，必须原样保留：" + "、".join(report.traced_numbers)[:400] + "。")
