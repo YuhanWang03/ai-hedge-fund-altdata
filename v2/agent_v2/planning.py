@@ -332,7 +332,9 @@ class IntentPlanner:
         if "risk" in wants and (account_scope or explicit_portfolio or not tickers) and not managers:
             add("account-risk", "account.risk", purpose="collect portfolio-level risk")
             account_topics.add("risk")
-        if "earnings" in wants and not tickers and not intent.each and intent.kind != "research":
+        if "earnings" in wants and not tickers and intent.kind != "research":
+            # The calendar lists every holding's date; "各自的财报日期" (each=True) used
+            # to fan the research engine over twelve holdings and time out at 240 s.
             add("account-earnings", "account.earnings_schedule", {"days": 14}, purpose="upcoming earnings across holdings and watchlist")
             account_topics.add("earnings")
         if "briefing" in wants and not tickers:
@@ -405,7 +407,7 @@ class IntentPlanner:
             # account capabilities; per-ticker fan-out needs a per-ticker ask.
             if "risk" in focuses and "ranking" not in wants:
                 focuses = [focus for focus in focuses if focus != "risk"]
-            if "earnings" in focuses and "earnings" in account_topics and not intent.each:
+            if "earnings" in focuses and "earnings" in account_topics:
                 focuses = [focus for focus in focuses if focus != "earnings"]
             source = "state-watchlist" if watchlist_scope and not explicit_portfolio else "account-portfolio"
             rank = fan_out_rank(intent) if source == "account-portfolio" else None
@@ -413,8 +415,8 @@ class IntentPlanner:
             # only a time frame or a "why" needs the per-holding market look.
             card_answers = rank is not None and intent.scope in {"none", "since_purchase"} and not explain
             # A performance question over the list ("有没有在放量的") is per name unless the account card already answered it.
-            per_ticker = explain or bool(focuses) or intent.each or ("performance" in wants and "performance" not in account_topics and not card_answers)
-            if intent.each and "earnings" not in focuses:
+            per_ticker = explain or bool(focuses) or (intent.each and "earnings" not in account_topics) or ("performance" in wants and "performance" not in account_topics and not card_answers)
+            if intent.each and "earnings" not in focuses and "earnings" not in account_topics:
                 focuses = [*focuses, "earnings"]
             if source == "account-portfolio" and (explicit_portfolio or per_ticker or not tasks):
                 add("account-portfolio", "account.portfolio", purpose="identify positions and weights")

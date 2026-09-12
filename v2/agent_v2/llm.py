@@ -550,7 +550,7 @@ class LLMEvidenceSynthesizer:
                 [
                     *messages,
                     {"role": "assistant", "content": answer},
-                    {"role": "user", "content": f"用户要求回答短一点。把上面的回答压缩到 {limit} 个字符以内：只保留两三条最关键的事实、一个风险和一个观察点，每句关键事实后仍然写原来的 [evidence_id]，不要新增证据里没有的数字。直接输出压缩后的完整回答。"},
+                    {"role": "user", "content": f"用户要求回答短一点。把上面的回答压缩到 {limit} 个字符以内、最多两段：只保留两三条最关键的事实、一个风险和一个观察点，每句关键事实后仍然写原来的 [evidence_id]，不要新增证据里没有的数字。直接输出压缩后的完整回答。"},
                 ],
                 results,
                 evidence,
@@ -572,7 +572,7 @@ class LLMEvidenceSynthesizer:
         system += "\n\n每个引用只支持它紧邻的那句话。不要用一条聚合引用同时支撑价格、成交量、新闻和期权等不同事实。"
         system += "\n输入里的 user_preferences 是用户之前说过的偏好（口径、篇幅、关注点），按它组织回答，但不能因此违反证据和引用规则。"
         if preferences and short_answer_limit(preferences):
-            system += f"\n用户要求回答短一点：全文不超过 {short_answer_limit(preferences)} 个字符，只保留两三条最有决策价值的事实、一个风险和一个观察点，保留引用。"
+            system += f"\n用户要求回答短一点：全文不超过 {short_answer_limit(preferences)} 个字符、最多两段，只保留两三条最有决策价值的事实、一个风险和一个观察点，保留引用，不要展开成多段长文。"
         system += "\n输入里的 recent_turns 是同一会话之前的问答；previous_answer 是上一条回答的全文。用户追问上一条回答（展开某一点、问为什么、换口径）时，围绕被追问的那一点回答：先复述那一点是什么，再用证据展开或解释，不要把整条回答重说一遍；上一条里没有证据支撑的部分要明说。"
         return system
 

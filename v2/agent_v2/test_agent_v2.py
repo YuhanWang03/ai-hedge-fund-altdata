@@ -4189,3 +4189,40 @@ def test_session_memory_is_bounded_and_internal_limitations_stay_internal():
     mutate = ToolEnvelope("state.mutate", ResultStatus.COMPLETED, subject="alert.add", summary="已设置提醒 #7。", evidence=[EvidenceItem("M1", "AMD", "已设置提醒 #7。")], limitations=["Legacy formatted output; structured field-level evidence is not yet available."])
     text = EvidenceSummarySynthesizer().synthesize(normalize_request("确认"), ExecutionPlan("确认", RouteKind.COMMAND, tasks=(PlanTask("m", "state.mutate", {"operation": "alert.add", "payload": {}}),)), [mutate], mutate.evidence)
     assert "Legacy formatted output" not in text and "已设置提醒 #7" in text
+
+
+def test_earnings_dates_never_fan_the_research_engine_over_the_holdings_and_slow_responders_are_cached(monkeypatch):
+    from v2.agent_v2.adapters import legacy
+    from v2.agent_v2.intent import Intent
+
+    # "谁要出财报" with each=True is the calendar, not twelve research runs.
+    request = normalize_request("接下来两周我的持仓里谁要出财报？")
+    each = Intent(kind="lookup", scope="recent", wants=("portfolio", "earnings"), portfolio_scope=True, each=True, source="model")
+    plan = RulePlanner().plan(request, route(request, intent=each))
+    assert [task.capability for task in plan.tasks] == ["account.earnings_schedule", "account.portfolio"]  # the card for the holdings' names, no research fan-out
+    research = Intent(kind="research", wants=("earnings",), tickers=("NVDA",), source="model")
+    plan = RulePlanner().plan(normalize_request("分析 NVDA 财报"), route(normalize_request("分析 NVDA 财报"), intent=research))
+    assert any(task.capability == "research.stock" and task.arguments.get("focus") == "earnings" for task in plan.tasks)
+
+    # The macro board and the 13F responders are served from a cache within their window.
+    legacy.clear_cache()
+    calls: list[str] = []
+
+    def produce():
+        calls.append("x")
+        return "宏观面板"
+
+    clock = {"now": 100.0}
+    assert legacy.cached_value("macro.overview", "macro", produce, now=clock["now"]) == ("宏观面板", False)
+    assert legacy.cached_value("macro.overview", "macro", produce, now=clock["now"] + 30) == ("宏观面板", True) and calls == ["x"]
+    assert legacy.cached_value("macro.overview", "macro", produce, now=clock["now"] + 700) == ("宏观面板", False) and calls == ["x", "x"]
+    assert legacy.cached_value("account.portfolio", "portfolio", produce, now=clock["now"]) == ("宏观面板", False) and calls == ["x", "x", "x"]  # never cached
+    legacy.clear_cache()
+    registry = CapabilityRegistry(default_catalog())
+    monkeypatch.setattr(legacy, "_resolve", lambda path: (lambda *a, **k: "VIX 15.8，10 年期 4.83%"))
+    legacy.register_legacy_capabilities(registry)
+    context = ExecutionContext("run", request, BudgetClass.STANDARD)
+    first = registry.execute(PlanTask("m", "macro.overview"), context)
+    second = registry.execute(PlanTask("m", "macro.overview"), context)
+    assert first.status == ResultStatus.COMPLETED and not first.cache_hit and second.cache_hit and second.status == ResultStatus.CACHED and second.evidence[0].claim == first.evidence[0].claim
+    legacy.clear_cache()

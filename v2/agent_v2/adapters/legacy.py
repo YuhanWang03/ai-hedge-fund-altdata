@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import time
+import threading
 import importlib
 import json
 import re
@@ -125,10 +127,45 @@ def _wrap(capability: str, subject: str, value: Any) -> ToolEnvelope:
     )
 
 
+#: Responders whose answer does not change within the window: the macro board
+#: (FRED plus Yahoo, minutes when FRED is slow — its P90 was 218 s), 13F and ARK.
+_CACHE_TTL_SECONDS = {"macro.overview": 600.0, "macro.release": 600.0, "institutional.manager_portfolio": 3600.0, "etf.ark_activity": 1800.0}
+_cache: dict[tuple[str, str], tuple[float, Any]] = {}
+_cache_lock = threading.Lock()
+
+
+def cached_value(capability: str, subject: str, produce: Callable[[], Any], *, now: float | None = None) -> tuple[Any, bool]:
+    """The responder's text for ``(capability, subject)``, fresh or from the cache; the flag says which."""
+
+    ttl = _CACHE_TTL_SECONDS.get(capability)
+    if not ttl:
+        return produce(), False
+    moment = time.monotonic() if now is None else now
+    key = (capability, subject)
+    with _cache_lock:
+        entry = _cache.get(key)
+        if entry is not None and moment - entry[0] < ttl:
+            return entry[1], True
+    value = produce()
+    with _cache_lock:
+        _cache[key] = (moment, value)
+    return value, False
+
+
+def clear_cache() -> None:
+    with _cache_lock:
+        _cache.clear()
+
+
 def register_legacy_capabilities(registry: CapabilityRegistry) -> None:
     def call(path: str, capability: str, invoke: Callable[[Callable[..., Any], dict[str, Any]], Any], subject: Callable[[dict[str, Any]], str] = lambda _: ""):
         def handler(arguments: dict[str, Any], context: ExecutionContext) -> ToolEnvelope:
-            return _wrap(capability, subject(arguments), invoke(_resolve(path), arguments))
+            value, hit = cached_value(capability, subject(arguments), lambda: invoke(_resolve(path), arguments))
+            envelope = _wrap(capability, subject(arguments), value)
+            if hit:
+                envelope.cache_hit = True
+                envelope.status = ResultStatus.CACHED
+            return envelope
 
         registry.register(capability, handler)
 

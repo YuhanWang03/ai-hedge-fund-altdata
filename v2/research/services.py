@@ -6,6 +6,8 @@ about slash commands, chat intents, HTML cards, or the web transport layer.
 
 from __future__ import annotations
 
+import time
+
 import sqlite3
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -224,17 +226,26 @@ class InstitutionalDataService:
 class MacroDataService:
     """Expose the existing FRED/Yahoo macro pipeline as structured data."""
 
+    #: The FRED plus Yahoo snapshot is minutes when FRED is slow and does not change within ten; one per process per window.
+    _SNAPSHOT_TTL_SECONDS = 600.0
+    _snapshot_cache: dict[str, tuple[float, dict, list[str]]] = {}
+
     def collect(self, as_of: date | None = None) -> dict:
         as_of = as_of or date.today()
         warnings: list[str] = []
         snapshot = None
-        try:
-            from v2.macro import build_macro_snapshot
+        cached = self._snapshot_cache.get(as_of.isoformat())
+        if cached is not None and time.monotonic() - cached[0] < self._SNAPSHOT_TTL_SECONDS:
+            snapshot, warnings = dict(cached[1]), list(cached[2])
+        else:
+            try:
+                from v2.macro import build_macro_snapshot
 
-            snapshot = asdict(build_macro_snapshot(as_of.isoformat()))
-            warnings.extend(snapshot.pop("warnings", []) or [])
-        except Exception as exc:
-            warnings.append(f"macro snapshot: {type(exc).__name__}")
+                snapshot = asdict(build_macro_snapshot(as_of.isoformat()))
+                warnings.extend(snapshot.pop("warnings", []) or [])
+                self._snapshot_cache[as_of.isoformat()] = (time.monotonic(), dict(snapshot), list(warnings))
+            except Exception as exc:
+                warnings.append(f"macro snapshot: {type(exc).__name__}")
         events: list[dict] = []
         try:
             from v2.macro.release_calendar import get_releases_in_window
