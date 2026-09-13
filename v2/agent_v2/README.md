@@ -1,5 +1,7 @@
 # Agent V2 — evidence-grounded multi-agent research assistant
 
+English | [中文](./README_zh.md)
+
 Agent V2 is the conversational layer of this repository: a Telegram user asks a
 question in Chinese or English ("ARM买入以来跌了这么多，是什么原因？", "why did AMD
 drop today", "上面第二点展开讲") and gets an answer in which every figure is tied
