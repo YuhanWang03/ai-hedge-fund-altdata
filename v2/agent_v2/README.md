@@ -14,26 +14,33 @@ every change on a fixed question set.
 
 ## Numbers
 
-Measured on the development set (40 real questions, each asked twice, majority
-verdict) through the production runtime and model (DeepSeek), on the VPS:
+Measured through the production runtime and model (DeepSeek) on the VPS; each
+question asked twice, majority verdict:
 
-| Run | Cases | Pass | Fallbacks | Avg seconds | Token equivalent / question |
-|---|---|---|---|---|---|
-| dev1 (start of the hardening loop) | 37 | 28 · 76% | 3 | 43.5 | 29,276 |
-| dev3 | 37 | 32 · 86% | 0 | 44.1 | 28,286 |
-| dev7 (current) | 40 | 37 · 92% | 1 | 35.9 | 25,961 |
+| Run | Set | Cases | Pass | Fallbacks | Avg seconds | Token equivalent / question |
+|---|---|---|---|---|---|---|
+| dev1 (start of the hardening loop) | dev | 37 | 28 · 76% | 3 | 43.5 | 29,276 |
+| dev3 | dev | 37 | 32 · 86% | 0 | 44.1 | 28,286 |
+| dev7 | dev | 40 | 37 · 92% | 1 | 35.9 | 25,961 |
+| dev8 (final; three investigator cases added) | dev | 43 | 37 · 86% | 1 | 48.5 | 27,008 |
+| holdout2 (final; never read while iterating) | hold-out | 13 | 10 · 77% | 0 | 36.4 | 29,816 |
+| lab2 (final; one attempt each, minutes per case) | lab | 3 | 3 · 100% | 0 | 88.9 | 30,297 |
 
 * A *fallback* is an answer the verifier rejected twice, replaced by a
   deterministic evidence summary — the answer is safe but flat.
 * *Token equivalent* weights uncached input 1, cached input 1/30, output 3, so
   runs at different hours are comparable regardless of provider price tiers.
-* 189 offline unit tests and a 39-case offline evaluation (routing, answer
+* 211 offline unit tests and a 39-case offline evaluation (routing, answer
   discipline, two-turn scenarios) run in seconds with a scripted model; the
   CI gate runs them on every push.
 
-Three of the remaining failures are single-attempt judge disagreements on
-wording; the fourth is a fan-out whose per-holding returns the classifier
-occasionally does not request.
+On the final development run every one of the six failures passed once and
+failed once (the judge disagreeing on a wording criterion, or a question
+the model answered differently the second time); none failed twice. The
+hold-out set is 15 points below the development set, which is the honest
+gap between questions the loop has seen and questions it has not: two of
+its three failures were 1/2, one (the colloquial "why is my position down
+so much") failed both times and stays open.
 
 ## How a question is answered
 
